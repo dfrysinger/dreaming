@@ -22,6 +22,7 @@ ACTIVE_PREPARE_FILE="$STATE_DIR/dreaming/active-migration-backup"
 GENERATION_FILE="$STATE_DIR/dreaming/activation-generation"
 SELFTEST_GENERATION_FILE="$STATE_DIR/dreaming/selftest-passed-generation"
 SELFTEST_LABEL_FILE="$STATE_DIR/dreaming/active-selftest-label"
+LIFECYCLE_LOCK_FILE="$STATE_DIR/dreaming/lifecycle.lock"
 NEW_KINDS=(dreaming selftest watchdog)
 LEGACY_KINDS=(sweep curator memory selftest watchdog dreaming)
 
@@ -351,6 +352,32 @@ cmd_rollback() {
   rm -f "$SELFTEST_GENERATION_FILE"
   echo "rollback loaded behind halt from $backup; run restored selftest, then enable explicitly"
 }
+
+run_with_lifecycle_lock() {
+  mkdir -p "$(dirname "$LIFECYCLE_LOCK_FILE")"
+  exec /usr/bin/python3 - "$LIFECYCLE_LOCK_FILE" "$0" "$@" <<'PY'
+import fcntl
+import os
+import subprocess
+import sys
+
+lock_path, script, *args = sys.argv[1:]
+with open(lock_path, "a+") as lock:
+    os.chmod(lock_path, 0o600)
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    env = os.environ.copy()
+    env["DREAMING_LIFECYCLE_LOCK_HELD"] = "1"
+    raise SystemExit(subprocess.run([script, *args], env=env).returncode)
+PY
+}
+
+if [[ "${DREAMING_LIFECYCLE_LOCK_HELD:-0}" != "1" ]]; then
+  case "${1:-}" in
+    prepare|install|selftest|enable|uninstall|rollback)
+      run_with_lifecycle_lock "$@"
+      ;;
+  esac
+fi
 
 case "${1:-}" in
   prepare) cmd_prepare ;;

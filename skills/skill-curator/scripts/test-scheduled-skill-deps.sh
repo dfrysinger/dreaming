@@ -34,6 +34,10 @@ done
 mkdir -p "$SHARED_ROOT/skills/writing-great-skills/references"
 printf '# Fixture glossary\n' \
   > "$SHARED_ROOT/skills/writing-great-skills/references/GLOSSARY.md"
+mkdir -p "$SHARED_ROOT/skills/authenticated-browse/scripts"
+printf '#!/usr/bin/env bash\n:\n' \
+  > "$SHARED_ROOT/skills/authenticated-browse/scripts/pw-session.sh"
+chmod +x "$SHARED_ROOT/skills/authenticated-browse/scripts/pw-session.sh"
 for name in public-target duplicate-target; do
   mkdir -p "$PUBLIC/skills/$name"
   printf -- '---\nname: %s\ndescription: Public fixture skill for dependency tests.\n---\n' "$name" \
@@ -204,6 +208,8 @@ import json,sys
 payload=json.load(open(sys.argv[1]))
 assert payload["complete"] is True
 assert any(path.endswith("/scripts/daemon-selftest.sh") for path in payload["scanned_files"])
+deps={row["skill"] for row in payload["dependencies"]}
+assert {"authenticated-browse","dual-review","writing-great-skills"} <= deps
 PY
 echo "PASS  shipped Dreaming layout scans to completion"
 

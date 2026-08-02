@@ -255,6 +255,19 @@ def reject_non_authoritative_reserved_path(
             )
 
 
+def enqueue_directory_files(target: Path, queue: deque[Path]) -> None:
+    for child in sorted(target.rglob("*")):
+        relative = child.relative_to(target)
+        if "__pycache__" in relative.parts or any(
+            part.startswith(".") for part in relative.parts
+        ):
+            continue
+        if child.is_symlink():
+            raise DependencyError(f"managed directory contains symlink: {child}")
+        if child.is_file():
+            queue.append(child)
+
+
 def add_path_reference(
     raw: str,
     source: str,
@@ -275,6 +288,8 @@ def add_path_reference(
         add_dependency(dependencies, name, source, skills)
     if target.is_file():
         queue.append(target)
+    elif target != owner:
+        enqueue_directory_files(target, queue)
     return True
 
 

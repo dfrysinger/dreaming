@@ -44,6 +44,12 @@ FAKE="$TMP/launchctl"
 cat > "$FAKE" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
+if [[ -n "${DREAMING_TEST_BLOCK_DIR:-}" && "${1:-}" == "bootout" &&
+      ! -e "$DREAMING_TEST_BLOCK_DIR/entered" ]]; then
+  mkdir -p "$DREAMING_TEST_BLOCK_DIR"
+  touch "$DREAMING_TEST_BLOCK_DIR/entered"
+  while [[ ! -e "$DREAMING_TEST_BLOCK_DIR/release" ]]; do sleep 0.05; done
+fi
 if [[ "${1:-}" == "kickstart" ]]; then
   printf '== result: 0 failure(s) ==\n' > "$DREAMING_SELFTEST_RESULT_FILE"
   if [[ -n "${DREAMING_TEST_REPLACE_GENERATION:-}" ]]; then
@@ -135,6 +141,35 @@ run_install selftest >/dev/null
 run_install enable >/dev/null
 [[ ! -e "$STATE/skill-review/disable-daemon" ]] ||
   { echo "enable did not remove halt after selftest" >&2; exit 1; }
+
+BLOCK="$TMP/lifecycle-block"
+DREAMING_TEST_BLOCK_DIR="$BLOCK" run_install install >"$TMP/raced-install.out" 2>&1 &
+install_pid=$!
+for _ in $(seq 1 100); do
+  [[ -e "$BLOCK/entered" ]] && break
+  sleep 0.05
+done
+[[ -e "$BLOCK/entered" ]] ||
+  { echo "concurrent install did not reach the lifecycle hold point" >&2; exit 1; }
+(
+  set +e
+  run_install enable >"$TMP/concurrent-enable.out" 2>"$TMP/concurrent-enable.err"
+  printf '%s\n' "$?" > "$TMP/concurrent-enable.status"
+) &
+enable_pid=$!
+sleep 0.2
+[[ ! -e "$TMP/concurrent-enable.status" ]] ||
+  { echo "enable bypassed the active lifecycle lock" >&2; exit 1; }
+[[ -e "$STATE/skill-review/disable-daemon" ]] ||
+  { echo "concurrent install did not preserve the halt" >&2; exit 1; }
+touch "$BLOCK/release"
+wait "$install_pid"
+wait "$enable_pid"
+[[ "$(<"$TMP/concurrent-enable.status")" != "0" ]] ||
+  { echo "enable accepted the concurrently installed generation" >&2; exit 1; }
+[[ -e "$STATE/skill-review/disable-daemon" ]] ||
+  { echo "raced lifecycle commands cleared the halt" >&2; exit 1; }
+echo "PASS  lifecycle lock serializes install, selftest, enable, and rollback"
 echo "PASS  install ordering, rendered roots, generation-bound selftest, and exact backup pointer"
 
 touch "$STATE/skill-review/disable-daemon"
