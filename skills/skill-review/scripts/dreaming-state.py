@@ -63,22 +63,6 @@ def read_json_tolerant(path: Path, default: dict) -> dict:
         return default
 
 
-def parse_legacy_timestamp(path: Path, keys: tuple[str, ...]) -> int | None:
-    try:
-        data = read_json(path)
-    except (OSError, json.JSONDecodeError):
-        return None
-    for key in keys:
-        value = data.get(key)
-        if not value:
-            continue
-        try:
-            return int(datetime.fromisoformat(str(value).replace("Z", "+00:00")).timestamp())
-        except ValueError:
-            continue
-    return None
-
-
 def cadence_path() -> Path:
     return state_root() / "cadence.json"
 
@@ -99,11 +83,7 @@ def ensure_seed(args: argparse.Namespace) -> None:
             raise ValueError("cadence state must be a JSON object")
         print(json.dumps(value))
         return
-    candidates = [
-        parse_legacy_timestamp(Path(args.curator), ("last_run_at",)),
-        parse_legacy_timestamp(Path(args.memory), ("last_run_at",)),
-    ]
-    latest = max((value for value in candidates if value is not None), default=now_epoch())
+    latest = now_epoch()
     value = {
         "last_success_bucket": bucket(latest),
         "last_success_at": iso(latest),
@@ -248,8 +228,6 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     ensure = sub.add_parser("ensure-seed")
-    ensure.add_argument("--curator", required=True)
-    ensure.add_argument("--memory", required=True)
     ensure.set_defaults(func=ensure_seed)
 
     seed_parser = sub.add_parser("seed")

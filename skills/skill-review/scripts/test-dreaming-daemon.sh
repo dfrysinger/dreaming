@@ -63,8 +63,7 @@ new_case() {
   export SKILLS_REPO_ROOT="$CASE/catalog"
   mkdir -p "$SKILLS_REPO_ROOT/skills"
   export DREAMING_PASS_RUNNER="$FAKE_PASS"
-  export DREAMING_LEGACY_CURATOR_STATE="$CASE/no-curator.json"
-  export DREAMING_LEGACY_MEMORY_STATE="$CASE/no-memory.json"
+  export DREAMING_MEMORY_STATE="$CASE/no-memory.json"
   export DREAMING_NOW_EPOCH="$NOW"
   export SKILLS_NOW_EPOCH="$NOW"
   export ORDER_FILE="$CASE/order"
@@ -165,7 +164,7 @@ export DREAMING_FORCE_DUE=1
 "$SCRIPT_DIR/dreaming-run.sh"
 assert_eq "$(paste -sd, "$ORDER_FILE")" "skills-consolidate,skills-roll,skills-prune" "successful order"
 assert_eq "$(wc -l < "$DREAMING_STATE_DIR/ledger.jsonl" | tr -d ' ')" "1" "success ledger count"
-[[ -f "$DREAMING_LEGACY_MEMORY_STATE" ]] || fail "fresh memory state was not initialized"
+[[ -f "$DREAMING_MEMORY_STATE" ]] || fail "fresh memory state was not initialized"
 pass "successful pipeline is ordered and ledgered once"
 
 new_case daily-consolidate

@@ -9,8 +9,7 @@ HALT_SWITCH="$STATE_BASE/skill-review/disable-daemon"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PASS_RUNNER="${DREAMING_PASS_RUNNER:-$SCRIPT_DIR/daemon-pass.sh}"
 STATE_TOOL="${DREAMING_STATE_TOOL:-$SCRIPT_DIR/dreaming-state.py}"
-CURATOR_STATE="${DREAMING_LEGACY_CURATOR_STATE:-$STATE_BASE/curator.json}"
-MEMORY_STATE="${DREAMING_LEGACY_MEMORY_STATE:-$STATE_BASE/memory-curator/state.json}"
+MEMORY_STATE="${DREAMING_MEMORY_STATE:-$STATE_BASE/memory-curator/state.json}"
 # shellcheck source=lib-daemon.sh
 source "$SCRIPT_DIR/lib-daemon.sh"
 dreaming_require_roots || exit 1
@@ -94,7 +93,7 @@ else
   exit 1
 fi
 
-if ! "$STATE_TOOL" ensure-seed --curator "$CURATOR_STATE" --memory "$MEMORY_STATE" >/dev/null; then
+if ! "$STATE_TOOL" ensure-seed >/dev/null; then
   abort_with_record "state-init-failed" "cadence state initialization failed"
 fi
 if ! "$STATE_TOOL" repair; then
