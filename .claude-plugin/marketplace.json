@@ -2,7 +2,7 @@
   "name": "dfrysinger-dreaming",
   "metadata": {
     "description": "Autonomous, evidence-backed skill learning and maintenance for coding agents.",
-    "version": "1.0.0"
+    "version": "1.0.1"
   },
   "owner": {
     "name": "Daniel Frysinger"
@@ -11,7 +11,7 @@
     {
       "name": "dfrysinger-dreaming",
       "description": "Autonomous, evidence-backed skill learning and maintenance for coding agents.",
-      "version": "1.0.0",
+      "version": "1.0.1",
       "source": "./"
     }
   ]

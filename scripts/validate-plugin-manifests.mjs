@@ -5,7 +5,7 @@ import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const expectedName = "dfrysinger-dreaming";
-const expectedVersion = "1.0.0";
+const expectedVersion = "1.0.1";
 const expectedSkills = [
   "skill-review",
   "skill-curator",
