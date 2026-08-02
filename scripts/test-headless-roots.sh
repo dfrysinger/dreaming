@@ -39,7 +39,8 @@ SH
 chmod +x "$FAKE"
 export FAKE_ARGS="$TMP/args"
 
-DREAMING_CONFIG_FILE="$CONFIG" COPILOT_BIN="$FAKE" \
+DREAMING_REPO_ROOT= DREAMING_SHARED_SKILLS_ROOT= SKILLS_REPO_ROOT= \
+  DREAMING_CONFIG_FILE="$CONFIG" COPILOT_BIN="$FAKE" \
   "$ROOT/skills/skill-review/scripts/daemon-pass.sh" \
   --prompt "$PROMPT" --name fixture --log "$TMP/pass.log" >/dev/null
 python3 - "$FAKE_ARGS" "$ROOT" "$SHARED" <<'PY'
@@ -51,7 +52,8 @@ PY
 echo "PASS  headless Copilot receives dreaming and shared plugin roots"
 
 PATH_RESULT="$(
-  DREAMING_CONFIG_FILE="$CONFIG" bash -c \
+  DREAMING_REPO_ROOT= DREAMING_SHARED_SKILLS_ROOT= SKILLS_REPO_ROOT= \
+    DREAMING_CONFIG_FILE="$CONFIG" bash -c \
     'source "$1/skills/memory-curator/scripts/mem-lib.sh"; mem_locate_pw' _ "$ROOT"
 )"
 [[ "$PATH_RESULT" == "$PW" ]] || {
@@ -65,7 +67,8 @@ cat > "$BAD" <<EOF
 DREAMING_REPO_ROOT='$ROOT'
 DREAMING_SHARED_SKILLS_ROOT='$TMP/missing'
 EOF
-if DREAMING_CONFIG_FILE="$BAD" COPILOT_BIN="$FAKE" \
+if DREAMING_REPO_ROOT= DREAMING_SHARED_SKILLS_ROOT= SKILLS_REPO_ROOT= \
+  DREAMING_CONFIG_FILE="$BAD" COPILOT_BIN="$FAKE" \
   "$ROOT/skills/skill-review/scripts/daemon-pass.sh" \
   --prompt "$PROMPT" --name fixture --log "$TMP/bad.log" >"$TMP/out" 2>"$TMP/err"; then
   echo "incomplete shared root was accepted" >&2
