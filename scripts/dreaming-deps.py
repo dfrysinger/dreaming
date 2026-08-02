@@ -287,10 +287,16 @@ def resolve_source(
         rejected.append(rejection)
 
     try:
-        return "sparse", sparse_source(receipt, deps_dir), True, rejected
+        source = sparse_source(receipt, deps_dir)
     except DependencyError as exc:
         details = "; ".join([*rejected, str(exc)])
         raise DependencyError(f"no compatible shared dependency source: {details}") from exc
+    rejection = candidate_rejection(source, receipt, "sparse source")
+    if rejection is not None:
+        shutil.rmtree(source, ignore_errors=True)
+        details = "; ".join([*rejected, rejection])
+        raise DependencyError(f"no compatible shared dependency source: {details}")
+    return "sparse", source, True, rejected
 
 
 def bundle_identity(receipt: dict[str, Any]) -> str:

@@ -150,6 +150,29 @@ grep -q "no compatible shared dependency source" "$CASE/err"
 grep -q "sparse dependency checkout failed" "$CASE/err"
 pass "unavailable source fails closed"
 
+new_case sparse_skew
+export DREAMING_CANONICAL_SKILLS_ROOT="$SOURCE"
+export DREAMING_SPARSE_REPO_URL="$SOURCE"
+cp "$RECEIPT" "$CASE/skew.json"
+python3 - "$CASE/skew.json" <<'PY'
+import json,sys
+p=sys.argv[1]
+d=json.load(open(p))
+d["files"][sorted(d["files"])[0]]="0"*64
+json.dump(d,open(p,"w"))
+PY
+export DREAMING_RECEIPT_FILE="$CASE/skew.json"
+if "$TOOL" materialize >"$CASE/out" 2>"$CASE/err"; then
+  fail "receipt-skewed sparse source was accepted"
+fi
+grep -q "no compatible shared dependency source" "$CASE/err"
+grep -q "canonical source does not match" "$CASE/err"
+grep -q "sparse source does not match" "$CASE/err"
+if find "$CASE/deps" -maxdepth 1 -type d -name '.sparse-source-*' | grep -q .; then
+  fail "rejected sparse source was not cleaned up"
+fi
+pass "sparse verification failure preserves prior rejection context"
+
 new_case protocol
 python3 - "$RECEIPT" "$CASE/skew.json" <<'PY'
 import json,sys
