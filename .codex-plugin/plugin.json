@@ -1,0 +1,13 @@
+{
+  "name": "dfrysinger-dreaming",
+  "version": "1.0.0",
+  "description": "Autonomous, evidence-backed skill learning and maintenance for coding agents.",
+  "author": {
+    "name": "Daniel Frysinger",
+    "url": "https://github.com/dfrysinger"
+  },
+  "homepage": "https://github.com/dfrysinger/dreaming",
+  "repository": "https://github.com/dfrysinger/dreaming",
+  "license": "MIT",
+  "skills": "./skills/"
+}

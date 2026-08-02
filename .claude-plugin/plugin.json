@@ -1,0 +1,15 @@
+{
+  "name": "dfrysinger-dreaming",
+  "version": "1.0.0",
+  "description": "Autonomous, evidence-backed skill learning and maintenance for coding agents.",
+  "author": {
+    "name": "Daniel Frysinger"
+  },
+  "skills": [
+    "./skills/skill-review",
+    "./skills/skill-curator",
+    "./skills/memory-curator",
+    "./skills/skill-create",
+    "./skills/skill-manage"
+  ]
+}

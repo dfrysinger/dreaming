@@ -1,0 +1,20 @@
+{
+  "name": "dfrysinger-dreaming",
+  "interface": {
+    "displayName": "dfrysinger dreaming"
+  },
+  "plugins": [
+    {
+      "name": "dfrysinger-dreaming",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}
