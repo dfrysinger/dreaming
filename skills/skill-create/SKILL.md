@@ -44,10 +44,11 @@ A user can later promote local→public with `skill-manage/scripts/promote-skill
 ## Authoring standards
 
 `writing-great-skills` in `$DREAMING_SHARED_SKILLS_ROOT` is the rubric: read
-its `SKILL.md` and
-`references/GLOSSARY.md` before drafting, so the draft arrives shaped by invocation
-choice, the information hierarchy, completion criteria, and the failure modes
-rather than being repaired into shape afterwards.
+`$DREAMING_SHARED_SKILLS_ROOT/skills/writing-great-skills/SKILL.md` and
+`$DREAMING_SHARED_SKILLS_ROOT/skills/writing-great-skills/references/GLOSSARY.md`
+before drafting, so the draft arrives shaped by invocation choice, the
+information hierarchy, completion criteria, and the failure modes rather than
+being repaired into shape afterwards.
 
 Then run `dual-review` from `$DREAMING_SHARED_SKILLS_ROOT` on the draft before
 committing, and apply what the

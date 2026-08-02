@@ -183,7 +183,7 @@ cmd_install() {
 }
 
 cmd_selftest() {
-  local label result wait_secs waited generation
+  local label result wait_secs waited generation expected_generation
   [[ -f "$SELFTEST_LABEL_FILE" ]] || {
     echo "no active selftest label; run install or rollback first" >&2
     return 1
@@ -195,6 +195,7 @@ cmd_selftest() {
     echo "no activation generation; run install or rollback first" >&2
     return 1
   }
+  expected_generation="$(<"$GENERATION_FILE")"
   rm -f "$result"
   "$LAUNCHCTL" kickstart -k "$DOMAIN/$label" >/dev/null 2>&1 || {
     echo "selftest agent not loaded; run install first" >&2
@@ -215,8 +216,12 @@ cmd_selftest() {
     return 1
   }
   generation="$(<"$GENERATION_FILE")"
-  atomic_pointer "$generation" "$SELFTEST_GENERATION_FILE"
-  echo "selftest passed for activation generation $generation"
+  [[ "$generation" == "$expected_generation" ]] || {
+    echo "activation generation changed while selftest was running" >&2
+    return 1
+  }
+  atomic_pointer "$expected_generation" "$SELFTEST_GENERATION_FILE"
+  echo "selftest passed for activation generation $expected_generation"
 }
 
 cmd_enable() {

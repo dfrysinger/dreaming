@@ -46,6 +46,10 @@ cat > "$FAKE" <<'SH'
 printf '%s\n' "$*" >> "$LAUNCHCTL_LOG"
 if [[ "${1:-}" == "kickstart" ]]; then
   printf '== result: 0 failure(s) ==\n' > "$DREAMING_SELFTEST_RESULT_FILE"
+  if [[ -n "${DREAMING_TEST_REPLACE_GENERATION:-}" ]]; then
+    printf '%s\n' "$DREAMING_TEST_REPLACE_GENERATION" \
+      > "$SKILLS_STATE_DIR/dreaming/activation-generation"
+  fi
 fi
 exit 0
 SH
@@ -116,11 +120,22 @@ if run_install enable >"$TMP/enable.out" 2>"$TMP/enable.err"; then
   echo "enable succeeded before selftest" >&2
   exit 1
 fi
+generation="$(<"$STATE/dreaming/activation-generation")"
+if DREAMING_TEST_REPLACE_GENERATION=concurrent-install \
+    run_install selftest >"$TMP/raced-selftest.out" 2>"$TMP/raced-selftest.err"; then
+  echo "selftest accepted a result from a replaced activation generation" >&2
+  exit 1
+fi
+grep -q "activation generation changed while selftest was running" \
+  "$TMP/raced-selftest.err"
+[[ ! -e "$STATE/dreaming/selftest-passed-generation" ]] ||
+  { echo "raced selftest recorded a passing generation" >&2; exit 1; }
+printf '%s\n' "$generation" > "$STATE/dreaming/activation-generation"
 run_install selftest >/dev/null
 run_install enable >/dev/null
 [[ ! -e "$STATE/skill-review/disable-daemon" ]] ||
   { echo "enable did not remove halt after selftest" >&2; exit 1; }
-echo "PASS  install ordering, rendered roots, selftest gate, and exact backup pointer"
+echo "PASS  install ordering, rendered roots, generation-bound selftest, and exact backup pointer"
 
 touch "$STATE/skill-review/disable-daemon"
 rm "$OLD"

@@ -68,9 +68,11 @@ recommendation, a skill/support-file change, or discard. Record the route in the
 ledger even when it creates no artifact.
 
 Draft and judge every SKILL.md against `writing-great-skills` from the verified
-`$DREAMING_SHARED_SKILLS_ROOT` bundle —
-its `SKILL.md` and `references/GLOSSARY.md` are the library's rubric. Read it before
-writing, not after, so the draft arrives shaped rather than needing repair.
+`$DREAMING_SHARED_SKILLS_ROOT` bundle. Its rubric is
+`$DREAMING_SHARED_SKILLS_ROOT/skills/writing-great-skills/SKILL.md` and
+`$DREAMING_SHARED_SKILLS_ROOT/skills/writing-great-skills/references/GLOSSARY.md`.
+Read it before writing, not after, so the draft arrives shaped rather than
+needing repair.
 
 Then run `dual-review` from `$DREAMING_SHARED_SKILLS_ROOT` on the draft before
 committing. It is the library's

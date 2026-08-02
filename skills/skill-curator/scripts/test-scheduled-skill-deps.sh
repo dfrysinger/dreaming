@@ -20,6 +20,7 @@ PREFIX="com.fixture.dreaming"
 LEGACY_PREFIX="com.fixture.skills"
 
 mkdir -p "$PUBLIC/skills" "$LOCAL" "$DREAMING/skills" "$SHARED_ROOT/skills" "$PLISTS"
+mkdir -p "$DREAMING/scripts"
 for name in "${OWNED[@]}"; do
   mkdir -p "$DREAMING/skills/$name"
   printf -- '---\nname: %s\ndescription: Dreaming fixture skill for dependency tests.\n---\n' "$name" \
@@ -30,6 +31,9 @@ for name in "${SHARED[@]}"; do
   printf -- '---\nname: %s\ndescription: Shared fixture skill for dependency tests.\n---\n' "$name" \
     > "$SHARED_ROOT/skills/$name/SKILL.md"
 done
+mkdir -p "$SHARED_ROOT/skills/writing-great-skills/references"
+printf '# Fixture glossary\n' \
+  > "$SHARED_ROOT/skills/writing-great-skills/references/GLOSSARY.md"
 for name in public-target duplicate-target; do
   mkdir -p "$PUBLIC/skills/$name"
   printf -- '---\nname: %s\ndescription: Public fixture skill for dependency tests.\n---\n' "$name" \
@@ -46,6 +50,7 @@ NESTED="$DREAMING/skills/skill-review/references/nested.md"
 mkdir -p "$(dirname "$RUN")" "$(dirname "$PROMPT")"
 cat > "$RUN" <<EOF
 #!/usr/bin/env bash
+ROOT_SCRIPT_DIR="\$DREAMING_REPO_ROOT/scripts"
 cat "$PROMPT"
 EOF
 chmod +x "$RUN"
@@ -103,6 +108,27 @@ fi
 grep -q "implicit pin" "$TMP/check.err"
 echo "PASS  separate dreaming/shared/public namespaces"
 
+LEGACY_RUN="$PUBLIC/skills/skill-review/legacy-run.sh"
+printf '#!/usr/bin/env bash\n:\n' > "$LEGACY_RUN"
+chmod +x "$LEGACY_RUN"
+LEGACY_PLIST="$PLISTS/$LEGACY_PREFIX.sweep.plist"
+python3 - "$LEGACY_PLIST" "$LEGACY_RUN" <<'PY'
+import plistlib,sys
+path,run=sys.argv[1:]
+plistlib.dump(
+    {"Label":"com.fixture.skills.sweep","ProgramArguments":["/bin/bash",run]},
+    open(path,"wb"),
+)
+PY
+if run_scanner >"$TMP/legacy.out" 2>"$TMP/legacy.err"; then
+  echo "FAIL: legacy public path for an owned skill was accepted" >&2
+  exit 1
+fi
+grep -q "non-authoritative public path for reserved skill skill-review" \
+  "$TMP/legacy.err"
+rm "$LEGACY_PLIST"
+echo "PASS  retired owned-skill paths fail closed"
+
 cp "$NESTED" "$TMP/nested.saved"
 echo "Read $DREAMING/skills/skill-review/references/missing.md." >> "$NESTED"
 if run_scanner >"$TMP/missing.out" 2>"$TMP/missing.err"; then
@@ -146,5 +172,39 @@ if run_scanner >"$TMP/program.out" 2>"$TMP/program.err"; then
 fi
 grep -q "referenced path is missing" "$TMP/program.err"
 echo "PASS  LaunchAgent program paths are traversed fail closed"
+
+python3 - "$PLIST" "$RUN" <<'PY'
+import plistlib,sys
+path,run=sys.argv[1:]
+plistlib.dump(
+    {"Label":"com.fixture.dreaming.daily","ProgramArguments":["/bin/bash",run]},
+    open(path,"wb"),
+)
+PY
+REAL_PLIST="$PLISTS/$PREFIX.real.plist"
+python3 - "$REAL_PLIST" \
+  "$REPO_ROOT/skills/skill-review/scripts/daemon-selftest.sh" <<'PY'
+import plistlib,sys
+path,run=sys.argv[1:]
+plistlib.dump(
+    {"Label":"com.fixture.dreaming.real","ProgramArguments":["/bin/bash",run]},
+    open(path,"wb"),
+)
+PY
+DREAMING_REPO_ROOT="$REPO_ROOT" \
+DREAMING_SHARED_SKILLS_ROOT="$SHARED_ROOT" \
+SKILLS_REPO_ROOT="$PUBLIC" \
+SKILLS_LOCAL_ROOT="$LOCAL" \
+SKILLS_LAUNCH_AGENTS_DIR="$PLISTS" \
+DREAMING_LAUNCHD_PREFIX="$PREFIX" \
+SKILLS_LAUNCHD_PREFIX="$LEGACY_PREFIX" \
+  "$SCANNER" --inventory > "$TMP/real-inventory.json"
+python3 - "$TMP/real-inventory.json" <<'PY'
+import json,sys
+payload=json.load(open(sys.argv[1]))
+assert payload["complete"] is True
+assert any(path.endswith("/scripts/daemon-selftest.sh") for path in payload["scanned_files"])
+PY
+echo "PASS  shipped Dreaming layout scans to completion"
 
 echo "scheduled dependency tests: PASS"

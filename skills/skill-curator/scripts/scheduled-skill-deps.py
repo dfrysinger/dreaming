@@ -235,6 +235,26 @@ def managed_roots(root_set: Roots) -> list[Path]:
     return result
 
 
+def reject_non_authoritative_reserved_path(
+    target: Path, source: str, root_set: Roots
+) -> None:
+    candidates = [(root_set.local, "local")]
+    if root_set.public_skills:
+        candidates.append((root_set.public_skills, "public"))
+    for root, namespace in candidates:
+        if not within(target, root):
+            continue
+        relative = target.relative_to(root)
+        if not relative.parts:
+            return
+        name = relative.parts[0]
+        if name in OWNED or (namespace == "local" and name in SHARED):
+            raise DependencyError(
+                f"{source}: non-authoritative {namespace} path for reserved skill "
+                f"{name}: {target}"
+            )
+
+
 def add_path_reference(
     raw: str,
     source: str,
@@ -249,13 +269,12 @@ def add_path_reference(
         return False
     if not target.exists():
         raise DependencyError(f"{source}: referenced path is missing: {target}")
+    reject_non_authoritative_reserved_path(target, source, root_set)
     name = skill_for_path(target, skills)
     if name:
         add_dependency(dependencies, name, source, skills)
     if target.is_file():
         queue.append(target)
-    elif target != owner:
-        raise DependencyError(f"{source}: durable reference is not a file: {target}")
     return True
 
 

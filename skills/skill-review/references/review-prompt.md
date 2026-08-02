@@ -188,9 +188,10 @@ revert its own changes.**
    over creating a near-duplicate sibling (preference order above already
    encodes this).
 
-6. **Rubric and `dual-review` on every CREATE or PATCH:** read the rubric at
-   `$DREAMING_SHARED_SKILLS_ROOT/skills/writing-great-skills/` (`SKILL.md` +
-   `references/GLOSSARY.md`) BEFORE drafting — read-only — so the draft
+6. **Rubric and `dual-review` on every CREATE or PATCH:** read
+   `$DREAMING_SHARED_SKILLS_ROOT/skills/writing-great-skills/SKILL.md` and
+   `$DREAMING_SHARED_SKILLS_ROOT/skills/writing-great-skills/references/GLOSSARY.md`
+   BEFORE drafting — read-only — so the draft
    arrives shaped rather than repaired. Then run the `dual-review` skill on the
    draft before committing. No human reads this diff, so the two reviewers are
    the only check between a bad skill and the library. Apply what they agree

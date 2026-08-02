@@ -98,8 +98,9 @@ keepers remain, max 5 loops per run):
 
 5. REVIEW before committing. Rolling grows skills, and no human reads this
    diff. Hold each edited skill to the rubric at
-   $DREAMING_SHARED_SKILLS_ROOT/skills/writing-great-skills/ (`SKILL.md` plus
-   `references/GLOSSARY.md`), then run the `dual-review` skill from the verified
+   `$DREAMING_SHARED_SKILLS_ROOT/skills/writing-great-skills/SKILL.md` plus
+   `$DREAMING_SHARED_SKILLS_ROOT/skills/writing-great-skills/references/GLOSSARY.md`,
+   then run the `dual-review` skill from the verified
    shared bundle on the diff of the skills you touched. Apply
    what both reviewers agree on; where they conflict, take the reading that
    removes duplication. If `dual-review` is unavailable, roll nothing this run
