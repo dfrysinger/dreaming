@@ -243,30 +243,54 @@ def sparse_source(receipt: dict[str, Any], deps_dir: Path) -> Path:
     return work
 
 
-def resolve_source(receipt: dict[str, Any], deps_dir: Path) -> tuple[str, Path, bool]:
+def candidate_rejection(
+    root: Path, receipt: dict[str, Any], label: str
+) -> str | None:
+    try:
+        verify_root(root, receipt, label)
+        return None
+    except DependencyError as exc:
+        return str(exc)
+
+
+def resolve_source(
+    receipt: dict[str, Any], deps_dir: Path
+) -> tuple[str, Path, bool, list[str]]:
     explicit = os.environ.get("DREAMING_DEPS_SOURCE")
     if explicit:
         root = canonical(Path(explicit))
         if not complete(root):
             raise DependencyError(f"explicit shared dependency source is incomplete: {root}")
-        return "explicit", root, False
+        verify_root(root, receipt, "explicit source")
+        return "explicit", root, False, []
 
+    rejected: list[str] = []
     canonical_value = os.environ.get(
         "DREAMING_CANONICAL_SKILLS_ROOT", str(Path.home() / "code/skills")
     )
     if canonical_value:
         root = canonical(Path(canonical_value))
         if complete(root):
-            return "canonical", root, False
+            rejection = candidate_rejection(root, receipt, "canonical source")
+            if rejection is None:
+                return "canonical", root, False, rejected
+            rejected.append(rejection)
 
     installed_value = os.environ.get(
         "DREAMING_INSTALLED_PLUGINS_ROOT", str(Path.home() / ".copilot/installed-plugins")
     )
     candidates = installed_sources(canonical(Path(installed_value)))
     if candidates:
-        return "installed", candidates[0], False
+        rejection = candidate_rejection(candidates[0], receipt, "installed source")
+        if rejection is None:
+            return "installed", candidates[0], False, rejected
+        rejected.append(rejection)
 
-    return "sparse", sparse_source(receipt, deps_dir), True
+    try:
+        return "sparse", sparse_source(receipt, deps_dir), True, rejected
+    except DependencyError as exc:
+        details = "; ".join([*rejected, str(exc)])
+        raise DependencyError(f"no compatible shared dependency source: {details}") from exc
 
 
 def bundle_identity(receipt: dict[str, Any]) -> str:
@@ -323,7 +347,9 @@ def materialize() -> dict[str, Any]:
         )
     )
     deps_dir.mkdir(parents=True, exist_ok=True)
-    source_kind, source, temporary_source = resolve_source(receipt, deps_dir)
+    source_kind, source, temporary_source, rejected_sources = resolve_source(
+        receipt, deps_dir
+    )
     try:
         ensure_distinct(source, root, "shared source and dreaming repository")
         verify_root(source, receipt, f"{source_kind} source")
@@ -387,6 +413,7 @@ def materialize() -> dict[str, Any]:
         return {
             "source_kind": source_kind,
             "source": str(source),
+            "rejected_sources": rejected_sources,
             "bundle": str(selected),
             "bundle_id": identity,
             "config": str(config),

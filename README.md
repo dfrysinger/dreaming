@@ -51,7 +51,10 @@ copy Dreaming installed. Ownership is recorded under
 Shared dependencies are exactly `writing-great-skills`, `dual-review`, and
 `authenticated-browse`. Installation verifies a pinned file-hash receipt,
 copies only those directories, verifies the copy, and atomically selects the
-bundle. Source checkouts and installed plugin caches are never executed.
+bundle. Compatible local checkouts or installed plugins avoid a network fetch;
+incompatible automatic candidates fall through to the pinned sparse checkout.
+An explicit source override remains strict. Source checkouts and installed
+plugin caches are never executed.
 
 ## Safety and rollback
 

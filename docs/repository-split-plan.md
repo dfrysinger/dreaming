@@ -78,10 +78,16 @@ implicitly pinned while a dreaming job depends on it.
 
 The installer selects a shared-skills source in this order:
 
-1. an explicit source override, when complete;
-2. the canonical `~/code/skills` checkout, when complete;
-3. an installed `dfrysinger-skills` plugin, discovered from its manifest;
+1. an explicit source override, which must be complete and receipt-compatible;
+2. the canonical `~/code/skills` checkout, when complete and receipt-compatible;
+3. an installed `dfrysinger-skills` plugin, when complete and
+   receipt-compatible;
 4. a temporary sparse checkout of the pinned `dfrysinger/skills` revision.
+
+An incompatible automatic candidate is recorded and skipped. An explicit
+override remains strict and fails immediately because the operator selected
+that exact source. If every automatic candidate is incompatible or
+unavailable, resolution fails without changing the selected bundle.
 
 The source contributes exactly:
 
@@ -187,8 +193,9 @@ retired path. The new repository contains the live copy.
 ## Deterministic checks
 
 - dependency resolver fixtures cover explicit, canonical, installed-plugin,
-  sparse-clone, incomplete-root, unavailable-source, protocol skew,
-  helper-hash skew, root aliasing, and atomic bundle selection;
+  incompatible-candidate fallback, sparse-clone, incomplete-root,
+  unavailable-source, protocol skew, helper-hash skew, root aliasing, and
+  atomic bundle selection;
 - a real headless canary with no installed `dfrysinger-skills` plugin loads the
   sparse shared bundle, reaches the required skills, and executes the
   authenticated-browse helper path;

@@ -24,6 +24,14 @@ make_source() {
   done
 }
 
+make_installed_plugin() {
+  local root="$1" source="$2"
+  mkdir -p "$root/.claude-plugin"
+  cp -R "$source/skills" "$root/skills"
+  printf '{"name":"dfrysinger-skills","skills":"./skills/"}\n' \
+    > "$root/.claude-plugin/plugin.json"
+}
+
 SOURCE="$TMP/source"
 make_source "$SOURCE" common
 mkdir -p "$SOURCE/skills/unrelated-skill"
@@ -71,14 +79,47 @@ pass "canonical checkout fallback"
 
 new_case installed
 PLUGIN="$CASE/installed/cache/dfrysinger-skills"
-mkdir -p "$PLUGIN/.claude-plugin"
-cp -R "$SOURCE/skills" "$PLUGIN/skills"
-printf '{"name":"dfrysinger-skills","skills":"./skills/"}\n' \
-  > "$PLUGIN/.claude-plugin/plugin.json"
+make_installed_plugin "$PLUGIN" "$SOURCE"
 "$TOOL" materialize > "$CASE/out.json"
 grep -q '"source_kind": "installed"' "$CASE/out.json" ||
   fail "installed plugin source was not selected"
 pass "installed manifest discovery"
+
+new_case canonical_skew
+BAD_CANONICAL="$CASE/canonical"
+mkdir -p "$BAD_CANONICAL"
+cp -R "$SOURCE/skills" "$BAD_CANONICAL/skills"
+echo "newer local content" >> \
+  "$BAD_CANONICAL/skills/writing-great-skills/SKILL.md"
+export DREAMING_CANONICAL_SKILLS_ROOT="$BAD_CANONICAL"
+PLUGIN="$CASE/installed/cache/dfrysinger-skills"
+make_installed_plugin "$PLUGIN" "$SOURCE"
+"$TOOL" materialize > "$CASE/out.json"
+python3 - "$CASE/out.json" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["source_kind"] == "installed", d
+assert any("canonical source does not match" in item for item in d["rejected_sources"])
+PY
+pass "incompatible canonical checkout falls through to compatible installed plugin"
+
+new_case installed_skew
+BAD_PLUGIN_SOURCE="$CASE/bad-plugin-source"
+mkdir -p "$BAD_PLUGIN_SOURCE"
+cp -R "$SOURCE/skills" "$BAD_PLUGIN_SOURCE/skills"
+echo "newer installed content" >> \
+  "$BAD_PLUGIN_SOURCE/skills/dual-review/SKILL.md"
+PLUGIN="$CASE/installed/cache/dfrysinger-skills"
+make_installed_plugin "$PLUGIN" "$BAD_PLUGIN_SOURCE"
+export DREAMING_SPARSE_REPO_URL="$SOURCE"
+"$TOOL" materialize > "$CASE/out.json"
+python3 - "$CASE/out.json" <<'PY'
+import json,sys
+d=json.load(open(sys.argv[1]))
+assert d["source_kind"] == "sparse", d
+assert any("installed source does not match" in item for item in d["rejected_sources"])
+PY
+pass "incompatible installed plugin falls through to pinned sparse source"
 
 new_case sparse
 export DREAMING_SPARSE_REPO_URL="$SOURCE"
@@ -105,6 +146,7 @@ export DREAMING_SPARSE_REPO_URL="$CASE/missing-repository"
 if "$TOOL" materialize >"$CASE/out" 2>"$CASE/err"; then
   fail "unavailable sparse source was accepted"
 fi
+grep -q "no compatible shared dependency source" "$CASE/err"
 grep -q "sparse dependency checkout failed" "$CASE/err"
 pass "unavailable source fails closed"
 
