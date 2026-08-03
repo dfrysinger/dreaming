@@ -7,8 +7,6 @@ COPILOT="${COPILOT_BIN:-$HOME/.local/bin/copilot}"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-daemon.sh
 source "$SCRIPT_DIR/lib-daemon.sh"
-dreaming_build_plugin_args || exit 1
-REPO="$DREAMING_REPO_ROOT"
 
 PROMPT_FILE=""
 SESSION_NAME=""
@@ -30,6 +28,27 @@ done
   echo "daemon-pass.sh: --name and --log are required" >&2
   exit 2
 }
+
+if [[ -n "${DREAMING_ADAPTER_CONFIG:-}" ]]; then
+  mkdir -p "$(dirname "$LOG")"
+  : > "$LOG"
+  if [[ "$SESSION_NAME" == "skills-consolidate" ]]; then
+    if "$SCRIPT_DIR/dreaming-core.py" run | tee -a "$LOG" |
+        grep -q '"ok": true'; then
+      echo "DREAM_PASS_RESULT: ok standalone=$SESSION_NAME" | tee -a "$LOG"
+      exit 0
+    fi
+  elif "$SCRIPT_DIR/dreaming-core.py" selftest | tee -a "$LOG" |
+      grep -q '"ok": true'; then
+    echo "DREAM_PASS_RESULT: ok standalone-noop=$SESSION_NAME" | tee -a "$LOG"
+    exit 0
+  fi
+  echo "daemon-pass.sh: standalone core failed for $SESSION_NAME" >&2
+  exit 1
+fi
+
+dreaming_build_plugin_args || exit 1
+REPO="$DREAMING_REPO_ROOT"
 [[ -x "$COPILOT" ]] || {
   echo "daemon-pass.sh: copilot binary not executable at $COPILOT" >&2
   exit 1

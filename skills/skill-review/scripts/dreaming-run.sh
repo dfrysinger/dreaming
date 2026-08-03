@@ -4,6 +4,7 @@
 set -euo pipefail
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 STATE_BASE="${SKILLS_STATE_DIR:-$HOME/.copilot/skill-state}"
+ORCHESTRATOR_STATE_DIR="${DREAMING_ORCHESTRATOR_STATE_DIR:-$STATE_BASE/dreaming}"
 LOG_DIR="$STATE_BASE/daemon-logs"
 HALT_SWITCH="$STATE_BASE/skill-review/disable-daemon"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,12 +16,12 @@ source "$SCRIPT_DIR/lib-daemon.sh"
 dreaming_require_roots || exit 1
 REPO="$DREAMING_REPO_ROOT"
 
-mkdir -p "$LOG_DIR" "$STATE_BASE/dreaming"
+mkdir -p "$LOG_DIR" "$ORCHESTRATOR_STATE_DIR"
 START_EPOCH="${DREAMING_NOW_EPOCH:-$(date +%s)}"
 START_ISO="$(date -u -r "$START_EPOCH" +%Y-%m-%dT%H:%M:%S+00:00)"
 RUN_ID="$(date -u -r "$START_EPOCH" +%Y%m%dT%H%M%SZ)-$$"
 RUN_LOG="$LOG_DIR/${RUN_ID}-dreaming.log"
-PASSES_FILE="$STATE_BASE/dreaming/.passes-${RUN_ID}.tsv"
+PASSES_FILE="$ORCHESTRATOR_STATE_DIR/.passes-${RUN_ID}.tsv"
 : > "$PASSES_FILE"
 exec > >(/usr/bin/tee -a "$RUN_LOG") 2>&1
 

@@ -4,13 +4,21 @@
 set -u
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 COPILOT="${COPILOT_BIN:-$HOME/.local/bin/copilot}"
-STATE_DIR="${SKILLS_STATE_DIR:-$HOME/.copilot/skill-state}"
-LOCAL_ROOT="${SKILLS_LOCAL_ROOT:-$HOME/.copilot/skills}"
+COPILOT_COMPAT="${DREAMING_ENABLE_COPILOT_COMPAT:-1}"
+if [[ "$COPILOT_COMPAT" == "1" ]]; then
+  STATE_DIR="${SKILLS_STATE_DIR:-$HOME/.copilot/skill-state}"
+  LOCAL_ROOT="${SKILLS_LOCAL_ROOT:-$HOME/.copilot/skills}"
+else
+  STATE_DIR="${DREAMING_STATE_DIR:-${SKILLS_STATE_DIR:-$HOME/.local/state/dreaming}}"
+  LOCAL_ROOT="${DREAMING_SKILLS_ROOT:-${SKILLS_LOCAL_ROOT:-$HOME/.local/share/dreaming/skills}}"
+fi
 HALT_SWITCH="$STATE_DIR/skill-review/disable-daemon"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # shellcheck source=lib-daemon.sh
 source "$SCRIPT_DIR/lib-daemon.sh"
-dreaming_build_plugin_args || exit 1
+if [[ "$COPILOT_COMPAT" == "1" ]]; then
+  dreaming_build_plugin_args || exit 1
+fi
 REPO="$DREAMING_REPO_ROOT"
 SHARED_ROOT="$DREAMING_SHARED_SKILLS_ROOT"
 
@@ -21,9 +29,31 @@ fails=0
 ok() { echo "PASS  $*" | tee -a "$RESULT"; }
 bad() { echo "FAIL  $*" | tee -a "$RESULT"; fails=$((fails + 1)); }
 warn() { echo "WARN  $*" | tee -a "$RESULT"; }
+run_isolated_test() {
+  env -u DREAMING_ADAPTER_CONFIG \
+    -u DREAMING_CONFIG_FILE \
+    -u DREAMING_DEPS_DIR \
+    -u DREAMING_ORCHESTRATOR_STATE_DIR \
+    -u DREAMING_DATA_DIR \
+    -u DREAMING_STATE_DIR \
+    -u DREAMING_SKILLS_ROOT \
+    -u DREAMING_ENABLE_COPILOT_COMPAT \
+    -u DREAMING_LIFECYCLE_LOCK_HELD \
+    -u DREAMING_RECEIPT_FILE \
+    -u SKILLS_STATE_DIR \
+    -u SKILLS_LOCAL_ROOT \
+    -u COPILOT_HOME \
+    "$@"
+}
 
 echo "== dreaming self-test $(date '+%Y-%m-%dT%H:%M:%S%z') ==" | tee -a "$RESULT"
-[[ -x "$COPILOT" ]] && ok "copilot executable" || bad "copilot not executable at $COPILOT"
+if [[ "$COPILOT_COMPAT" == "1" ]]; then
+  [[ -x "$COPILOT" ]] && ok "copilot executable" || bad "copilot not executable at $COPILOT"
+else
+  [[ -n "${DREAMING_ADAPTER_CONFIG:-}" && -f "$DREAMING_ADAPTER_CONFIG" ]] &&
+    ok "standalone adapter configuration" ||
+    bad "standalone adapter configuration missing"
+fi
 "$REPO/scripts/dreaming-deps.py" verify "$SHARED_ROOT" >/dev/null 2>&1 &&
   ok "verified shared dependency bundle" || bad "shared dependency bundle verification"
 
@@ -65,6 +95,7 @@ fi
 
 for script in daemon-pass.sh daemon-run.sh daemon-lock.sh daemon-lock.py \
   dreaming-run.sh dreaming-state.py test-dreaming-daemon.sh \
+  dreaming-core.py test-dreaming-core.sh \
   evidence-envelope.py append-skill-evidence.sh mark-agent-created.sh \
   test-evidence-envelope.sh skill-evaluation.py run-skill-evaluation.sh \
   test-skill-evaluation.sh; do
@@ -78,10 +109,14 @@ for script in install.sh dreaming-deps.py test-shared-deps.sh \
   [[ -x "$ROOT_SCRIPT_DIR/$script" ]] && ok "executable: scripts/$script" ||
     bad "not executable: scripts/$script"
 done
-if "$ROOT_SCRIPT_DIR/manage-instructions.sh" verify >>"$RESULT" 2>&1; then
-  ok "managed Copilot instructions"
+if [[ "$COPILOT_COMPAT" == "1" ]]; then
+  if "$ROOT_SCRIPT_DIR/manage-instructions.sh" verify >>"$RESULT" 2>&1; then
+    ok "managed Copilot instructions"
+  else
+    bad "managed Copilot instructions"
+  fi
 else
-  bad "managed Copilot instructions"
+  ok "Copilot instruction management disabled"
 fi
 
 MANAGE_SCRIPT_DIR="$REPO/skills/skill-manage/scripts"
@@ -97,57 +132,62 @@ for script in scheduled-skill-deps.py curator-run.py \
     bad "not executable: skill-curator/$script"
 done
 
-if "$SCRIPT_DIR/test-dreaming-daemon.sh" --quick >>"$RESULT" 2>&1; then
+if run_isolated_test "$SCRIPT_DIR/test-dreaming-daemon.sh" --quick >>"$RESULT" 2>&1; then
   ok "deterministic dreaming checks"
 else
   bad "deterministic dreaming checks"
 fi
-if "$SCRIPT_DIR/test-evidence-envelope.sh" >>"$RESULT" 2>&1; then
+if run_isolated_test "$SCRIPT_DIR/test-dreaming-core.sh" >>"$RESULT" 2>&1; then
+  ok "deterministic standalone core checks"
+else
+  bad "deterministic standalone core checks"
+fi
+if run_isolated_test "$SCRIPT_DIR/test-evidence-envelope.sh" >>"$RESULT" 2>&1; then
   ok "deterministic evidence-envelope checks"
 else
   bad "deterministic evidence-envelope checks"
 fi
-if "$SCRIPT_DIR/test-skill-evaluation.sh" >>"$RESULT" 2>&1; then
+if run_isolated_test "$SCRIPT_DIR/test-skill-evaluation.sh" >>"$RESULT" 2>&1; then
   ok "deterministic skill-evaluation checks"
 else
   bad "deterministic skill-evaluation checks"
 fi
-if "$MANAGE_SCRIPT_DIR/test-promotion-review.sh" >>"$RESULT" 2>&1; then
+if run_isolated_test "$MANAGE_SCRIPT_DIR/test-promotion-review.sh" >>"$RESULT" 2>&1; then
   ok "deterministic promotion checks"
 else
   bad "deterministic promotion checks"
 fi
-if "$CURATOR_SCRIPT_DIR/test-scheduled-skill-deps.sh" >>"$RESULT" 2>&1; then
+if run_isolated_test "$CURATOR_SCRIPT_DIR/test-scheduled-skill-deps.sh" >>"$RESULT" 2>&1; then
   ok "deterministic scheduled dependency checks"
 else
   bad "deterministic scheduled dependency checks"
 fi
-if "$CURATOR_SCRIPT_DIR/test-curator-run.sh" >>"$RESULT" 2>&1; then
+if run_isolated_test "$CURATOR_SCRIPT_DIR/test-curator-run.sh" >>"$RESULT" 2>&1; then
   ok "deterministic curator transaction checks"
 else
   bad "deterministic curator transaction checks"
 fi
-if "$ROOT_SCRIPT_DIR/test-shared-deps.sh" >>"$RESULT" 2>&1; then
+if run_isolated_test "$ROOT_SCRIPT_DIR/test-shared-deps.sh" >>"$RESULT" 2>&1; then
   ok "deterministic shared dependency checks"
 else
   bad "deterministic shared dependency checks"
 fi
-if "$ROOT_SCRIPT_DIR/test-headless-roots.sh" >>"$RESULT" 2>&1; then
+if run_isolated_test "$ROOT_SCRIPT_DIR/test-headless-roots.sh" >>"$RESULT" 2>&1; then
   ok "deterministic headless root checks"
 else
   bad "deterministic headless root checks"
 fi
-if "$ROOT_SCRIPT_DIR/test-installer.sh" >>"$RESULT" 2>&1; then
+if run_isolated_test "$ROOT_SCRIPT_DIR/test-installer.sh" >>"$RESULT" 2>&1; then
   ok "deterministic installer checks"
 else
   bad "deterministic installer checks"
 fi
-if "$ROOT_SCRIPT_DIR/test-repository-boundary.sh" >>"$RESULT" 2>&1; then
+if run_isolated_test "$ROOT_SCRIPT_DIR/test-repository-boundary.sh" >>"$RESULT" 2>&1; then
   ok "repository boundary checks"
 else
   bad "repository boundary checks"
 fi
-if node "$ROOT_SCRIPT_DIR/validate-plugin-manifests.mjs" >>"$RESULT" 2>&1; then
+if run_isolated_test node "$ROOT_SCRIPT_DIR/validate-plugin-manifests.mjs" >>"$RESULT" 2>&1; then
   ok "plugin manifest consistency"
 else
   bad "plugin manifest consistency"
@@ -159,18 +199,24 @@ else
   bad "local skills root must be a git repo with no remote"
 fi
 
-AUTHLOG="$STATE_DIR/.selftest-copilot.$$"
-: > "$AUTHLOG"
-if skills_run_copilot_bounded "$AUTHLOG" "SELFTEST_OK" 150 5 -- \
-  "$COPILOT" -p "Reply with exactly: SELFTEST_OK" \
-  --allow-all-tools --no-custom-instructions --no-color --no-remote \
-  "${DREAMING_PLUGIN_ARGS[@]}" \
-  --disable-builtin-mcps --log-level error; then
-  ok "copilot headless auth"
+if [[ "$COPILOT_COMPAT" == "1" ]]; then
+  AUTHLOG="$STATE_DIR/.selftest-copilot.$$"
+  : > "$AUTHLOG"
+  if skills_run_copilot_bounded "$AUTHLOG" "SELFTEST_OK" 150 5 -- \
+    "$COPILOT" -p "Reply with exactly: SELFTEST_OK" \
+    --allow-all-tools --no-custom-instructions --no-color --no-remote \
+    "${DREAMING_PLUGIN_ARGS[@]}" \
+    --disable-builtin-mcps --log-level error; then
+    ok "copilot headless auth"
+  else
+    bad "copilot headless auth"
+  fi
+  rm -f "$AUTHLOG"
+elif "$SCRIPT_DIR/dreaming-core.py" doctor >/dev/null 2>&1; then
+  ok "standalone adapter health"
 else
-  bad "copilot headless auth"
+  bad "standalone adapter health"
 fi
-rm -f "$AUTHLOG"
 
 [[ -e "$HALT_SWITCH" ]] && warn "halt switch is present" || ok "halt switch absent"
 echo "== result: $fails failure(s) ==" | tee -a "$RESULT"

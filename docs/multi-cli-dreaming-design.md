@@ -977,6 +977,28 @@ failed.
 - Prove the installer and scheduler without any real vendor CLI by using fake
   adapters.
 
+#### Milestone 1 Definition of Done
+
+- Dreaming's configurable data, state, queue, ledger, snapshot, and learned
+  skill roots are vendor-neutral, while the existing Copilot runtime remains
+  compatible until its adapter migration in Milestone 2.
+- Versioned session-source, review-executor, and skill-publisher interfaces
+  exist with deterministic fake adapters and structured failure behavior.
+- Source-qualified identity, completion admission, durable scan generations,
+  the unsettled-session index, immutable bounded snapshots, stale-result
+  rejection, explicit transfer routes, and ordered pre-mutation executor
+  fallback are implemented in shared code.
+- Existing ledger records have a tested lazy-migration path that cannot silently
+  re-review or suppress an ambiguous legacy session.
+- Installation, self-test, scheduled discovery, review routing, disable,
+  re-enable, rollback, and uninstall complete with fake adapters while all real
+  Copilot, Claude, and Codex binaries and vendor homes are absent.
+- Deterministic checks cover the Milestone 1 portions of the design's adapter,
+  discovery, queue, ledger, transfer-policy, standalone-installation, and
+  failure contracts.
+- A launchd live-proof run demonstrates the fake-adapter standalone path on the
+  reviewed tree, and paired implementation review has no material finding.
+
 ### Milestone 2: Copilot standalone adapter
 
 - Place existing Copilot discovery behind the source interface.

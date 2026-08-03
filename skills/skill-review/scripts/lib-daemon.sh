@@ -101,10 +101,14 @@ skills_lock_release() {
 # stale footer can't cause a false-early completion.
 
 dreaming_load_roots() {
-  local script_dir default_repo config requested_repo requested_shared requested_public
+  local script_dir default_repo config legacy_config requested_repo requested_shared requested_public
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   default_repo="$(cd "$script_dir/../../.." && pwd -P)"
-  config="${DREAMING_CONFIG_FILE:-$HOME/.copilot/dreaming/config.env}"
+  config="${DREAMING_CONFIG_FILE:-${DREAMING_DATA_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/dreaming}/config.env}"
+  legacy_config="$HOME/.copilot/dreaming/config.env"
+  if [[ -z "${DREAMING_CONFIG_FILE:-}" && ! -f "$config" && -f "$legacy_config" ]]; then
+    config="$legacy_config"
+  fi
   requested_repo="${DREAMING_REPO_ROOT:-}"
   requested_shared="${DREAMING_SHARED_SKILLS_ROOT:-}"
   requested_public="${SKILLS_REPO_ROOT:-}"
@@ -117,6 +121,8 @@ dreaming_load_roots() {
   DREAMING_SHARED_SKILLS_ROOT="${requested_shared:-${DREAMING_SHARED_SKILLS_ROOT:-}}"
   SKILLS_REPO_ROOT="${requested_public:-${SKILLS_REPO_ROOT:-}}"
   export DREAMING_REPO_ROOT DREAMING_SHARED_SKILLS_ROOT SKILLS_REPO_ROOT
+  export DREAMING_DATA_DIR DREAMING_STATE_DIR DREAMING_SKILLS_ROOT
+  export DREAMING_ADAPTER_CONFIG DREAMING_ENABLE_COPILOT_COMPAT
 }
 
 dreaming_require_roots() {

@@ -66,6 +66,10 @@ export DREAMING_SELFTEST_RESULT_FILE="$TMP/selftest.out"
 run_install() {
   COPILOT_HOME="$TMP/copilot-home" \
   DREAMING_REPO_ROOT="$ROOT" \
+  DREAMING_CONFIG_POINTER="$TMP/config-pointer" \
+  DREAMING_DATA_DIR="$TMP/data" \
+  DREAMING_STATE_DIR="$TMP/dreaming-state" \
+  DREAMING_SKILLS_ROOT="$TMP/dreaming-skills" \
   DREAMING_CONFIG_FILE="$TMP/config.env" \
   DREAMING_DEPS_DIR="$TMP/deps" \
   DREAMING_RECEIPT_FILE="$RECEIPT" \
@@ -114,8 +118,16 @@ for kind in dreaming selftest watchdog; do
   grep -q "$ROOT/skills/skill-review/scripts/" "$plist"
   grep -q "<key>DREAMING_REPO_ROOT</key><string>$ROOT</string>" "$plist"
   grep -q "<key>DREAMING_SHARED_SKILLS_ROOT</key>" "$plist"
+  grep -q "<key>DREAMING_DATA_DIR</key><string>$TMP/data</string>" "$plist"
+  grep -q "<key>DREAMING_STATE_DIR</key><string>$TMP/dreaming-state</string>" "$plist"
+  grep -q "<key>DREAMING_SKILLS_ROOT</key><string>$TMP/dreaming-skills</string>" "$plist"
+  grep -q "<key>DREAMING_ORCHESTRATOR_STATE_DIR</key><string>$STATE/dreaming</string>" "$plist"
   grep -q "<key>COPILOT_HOME</key><string>$TMP/copilot-home</string>" "$plist"
 done
+[[ -d "$TMP/dreaming-skills/.git" ]] ||
+  { echo "install did not initialize the neutral learned-skills root" >&2; exit 1; }
+[[ -z "$(git -C "$TMP/dreaming-skills" remote)" ]] ||
+  { echo "neutral learned-skills root unexpectedly has a remote" >&2; exit 1; }
 first_bootstrap="$(grep -n '^bootstrap ' "$LAUNCHCTL_LOG" | head -1 | cut -d: -f1)"
 last_bootout="$(grep -n '^bootout ' "$LAUNCHCTL_LOG" | tail -1 | cut -d: -f1)"
 (( first_bootstrap > last_bootout )) ||

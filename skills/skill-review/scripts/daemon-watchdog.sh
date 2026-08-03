@@ -3,7 +3,7 @@
 
 set -u
 STATE_DIR="${SKILLS_STATE_DIR:-$HOME/.copilot/skill-state}"
-DREAM_DIR="${DREAMING_STATE_DIR:-$STATE_DIR/dreaming}"
+DREAM_DIR="${DREAMING_ORCHESTRATOR_STATE_DIR:-${DREAMING_STATE_DIR:-$STATE_DIR/dreaming}}"
 LOG_DIR="$STATE_DIR/daemon-logs"
 HALT="$STATE_DIR/skill-review/disable-daemon"
 ALERT_FILE="$STATE_DIR/skill-review/last-watchdog-alert.json"

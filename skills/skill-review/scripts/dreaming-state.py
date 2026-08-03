@@ -18,7 +18,12 @@ WEEK_SECONDS = 7 * 24 * 60 * 60
 
 def state_root() -> Path:
     base = Path(os.environ.get("SKILLS_STATE_DIR", Path.home() / ".copilot/skill-state"))
-    return Path(os.environ.get("DREAMING_STATE_DIR", base / "dreaming"))
+    return Path(
+        os.environ.get(
+            "DREAMING_ORCHESTRATOR_STATE_DIR",
+            os.environ.get("DREAMING_STATE_DIR", base / "dreaming"),
+        )
+    )
 
 
 def now_epoch() -> int:
