@@ -747,6 +747,12 @@ Disabling the feature removes managed hooks and target registrations, but
 retains review ledgers, evidence envelopes, local skill history, and source
 configuration for rollback and audit.
 
+LaunchAgent rollback and migration-data rollback are separate operations.
+Normal rollback restores backed-up jobs and removes managed hooks without
+deleting migrated audit data. Explicit migration rollback runs behind the halt
+and deletes only unchanged targets that the ownership journal proves Dreaming
+created; verification of every target completes before any deletion.
+
 ## Deterministic check contract
 
 ### Adapter conformance
@@ -1009,6 +1015,20 @@ failed.
 This milestone is first because it reuses the shipped implementation, not
 because Copilot owns the architecture.
 
+#### Milestone 2 Definition of Done
+
+- Native Copilot sessions pass strict source discovery, inspection, bounded
+  rendering, revision, scoring-feature, and completion admission checks.
+- Copilot review runs headlessly without source tools, custom instructions, or
+  native session paths in the review packet.
+- A clean Copilot-scoped skills repository and supported Dreaming state move
+  through a verified, ownership-journaled, reversible neutral-root migration.
+- One immutable learned-skill bundle registers through `copilot skill`, verifies
+  exact inventory, and removes only its owned directory registration.
+- The Copilot-only desired-set configuration completes install, self-test,
+  discovery, review, publication, disable, re-enable, rollback, and uninstall
+  without Claude or Codex paths.
+
 ### Milestone 3: Claude standalone adapter
 
 - Add strict Claude session reading and scoring.
@@ -1016,6 +1036,19 @@ because Copilot owns the architecture.
 - Add Claude publication and optional enqueue hook.
 - Prove the complete Claude-only installation matrix, including trust and
   authentication setup behavior.
+
+#### Milestone 3 Definition of Done
+
+- Native Claude project sessions pass strict source and normalized-event
+  conformance, including quiet completion and scheduled recovery.
+- Claude review uses noninteractive safe mode with skills, hooks, user
+  instructions, project instructions, and tools disabled.
+- An optional Claude lifecycle hook can append one idempotent session hint;
+  scheduled discovery remains complete without it.
+- Claude publication verifies the exact immutable local marketplace plugin and
+  removes only Dreaming-owned plugin and marketplace entries.
+- The Claude-only desired-set path reports expired or missing authentication as
+  setup required rather than a successful review.
 
 ### Milestone 4: Codex standalone adapter
 
@@ -1025,6 +1058,20 @@ because Copilot owns the architecture.
 - Prove the complete Codex-only installation matrix, including authentication
   setup behavior.
 
+#### Milestone 4 Definition of Done
+
+- Codex reads the versioned thread catalog and rollout path through a read-only
+  database connection, rejects escaped paths, and normalizes supported rollout
+  events.
+- Codex review is ephemeral, ignores user configuration and project rules, uses
+  a read-only sandbox, and emits a schema-validated result.
+- A Codex lifecycle hook is configured only where a supported end event can
+  provide a native session ID; scheduled discovery remains complete otherwise.
+- Codex publication verifies the exact immutable local marketplace plugin and
+  removes only Dreaming-owned plugin and marketplace entries.
+- The Codex-only desired-set path reports missing authentication as setup
+  required rather than a successful review.
+
 ### Milestone 5: combined operation
 
 - Add explicit cross-vendor routes and ordered executor fallback.
@@ -1033,6 +1080,18 @@ because Copilot owns the architecture.
   target.
 - Run the two-CLI and three-CLI deterministic and live behavior matrices.
 - Keep scheduled discovery as the complete backstop for every source.
+
+#### Milestone 5 Definition of Done
+
+- Complete desired-set configuration supports every nonempty single-, two-, and
+  three-CLI selection without naming an absent CLI.
+- Explicit cross-vendor routes, ordered pre-mutation fallback, route removal,
+  and source-local failure preserve healthy source progress.
+- One content-addressed bundle reconciles independently to every selected
+  publication target while retaining residual ownership for unavailable
+  targets.
+- Combined scheduled discovery, queue deduplication, source-qualified ledgers,
+  halt behavior, rollback, and uninstall pass on the same reviewed tree.
 
 ## Definition of Done
 
