@@ -55,6 +55,10 @@ Public references:
 - https://code.claude.com/docs/en/memory
 - https://hermes-agent.nousresearch.com/docs/user-guide/features/curator
 - https://github.blog/ai-and-ml/github-copilot/building-an-agentic-memory-system-for-github-copilot/
+- https://claude.com/blog/improving-skill-creator-test-measure-and-refine-agent-skills
+- https://docs.benchflow.ai/running-benchmarks
+- https://www.anthropic.com/engineering/demystifying-evals-for-ai-agents
+- https://www.swebench.com/SWE-bench/guides/evaluation/
 
 ## Existing system to extend
 
@@ -225,21 +229,27 @@ Evaluation is required when:
 - a curator consolidation materially changes how an existing skill executes;
 - a skill is implicated in a repeated regression.
 
-The minimum evaluation has two cases:
+The initial evaluation contract has two cases:
 
 1. **Source case:** a representative task the skill is intended to improve.
 2. **Sibling case:** a related task where an overfitted rule could cause harm.
 
-Run each case with and without the candidate skill when practical. Record:
+Run each case with and without the candidate skill. Record:
 
 - terminal success or failure;
 - observable acceptance checkpoints;
 - unnecessary or harmful actions;
 - model, candidate identity, and evidence paths.
 
-The gate passes when the candidate improves the source case or preserves an
-already successful result while reducing meaningful friction, and it causes no
-material sibling regression.
+For the initial single-executor evaluator, the gate passes when the candidate
+improves the source case and causes no material sibling regression. An
+inconclusive comparison never becomes a pass.
+
+Section 8 extends this contract to repeated trials, capability and
+encoded-preference skill classes, activation controls, per-CLI certificates,
+and an exact aggregate policy. When cross-CLI certification is enabled,
+section 8 replaces this single-executor pass condition and waiver authority
+rather than applying only the rules that happen to be stricter.
 
 An evaluation may be explicitly waived only for a documentation-only,
 reference-only, or deterministic helper change whose effect is already fully
@@ -250,6 +260,14 @@ valid enumerated waiver class, non-empty reason, and a content-addressed
 passing evaluation anchor, may proceed.
 `not_evaluated` triggers a fresh evaluation; `pending`, `regression`, and
 `inconclusive` remain local.
+
+Under cross-CLI certification, a waiver is valid only for an enumerated
+documentation, reference, or deterministic-helper change whose base candidate
+has a current gate-profile aggregate certificate. The waiver binds the new
+candidate, base aggregate receipt, policy, suite, required executor set,
+restricted changed-file inventory, test command, and test-result digest in the
+version-2 receipt store. It cannot anchor to a legacy single-executor receipt
+or remove an executor requirement.
 
 ### 6. Protect scheduled dependencies
 
@@ -281,6 +299,323 @@ ledger effects through existing restore semantics, refuses unrelated or
 ambiguous state, and writes a second manifest for the rollback itself.
 
 No hard reset, broad checkout, or deletion is allowed.
+
+### 8. Certify skill effects across selected CLIs
+
+#### Objective
+
+Let one Dreaming evaluation policy certify the exact same skill candidate
+through any explicitly selected set of Copilot CLI, Claude Code, and Codex
+executors, while preserving intended-task improvement, related-task safety,
+activation accuracy, and exact evidence provenance.
+
+#### Lane
+
+Critical.
+
+This extension changes the promotion gate, durable evaluation schema,
+cross-provider transfer boundary, and fail-closed evidence contract. A false
+pass can publish a harmful skill. A false transfer can send a private
+evaluation prompt or artifact to an executor the owner did not authorize.
+
+#### Non-goals
+
+- Support operating systems beyond Dreaming's existing macOS runtime.
+  "Cross-platform" in this milestone means Copilot CLI, Claude Code, and Codex.
+- Build a hosted benchmark service, dashboard, leaderboard, dataset registry,
+  container service, or multi-user approval system.
+- Import or depend on private evaluation infrastructure.
+- Make scores from different CLI, model, or harness combinations directly
+  interchangeable.
+- Evaluate every local draft or small wording change.
+- Let the trial harness decide promotion, consolidation, waiver, or rollback
+  policy.
+- Replace `writing-great-skills`, content review, or public-safety review with
+  behavioral evaluation.
+- Send repository content, private transcripts, credentials, or unrelated
+  home-directory state to an evaluation executor.
+
+#### Reuse contract
+
+Dreaming continues to own:
+
+- candidate inventory and content identity in `skill-evaluation.py`;
+- local case manifests and evidence-envelope linkage;
+- promotion and consolidation gates in `skill-manage`;
+- selected CLI configuration and exact route authorization;
+- content-addressed receipts and stale-result rejection;
+- the shared writer lease, halt switch, Git history, and rollback controls.
+
+The separate trial harness described in
+`skill-evaluation-trial-harness-design.md` owns clean trial execution,
+executor-specific skill projection, trace capture, deterministic graders,
+blind comparison, repetition, and result aggregation. It returns sealed
+evidence. It does not write Dreaming state or decide whether evidence is
+sufficient.
+
+The existing `review-executor` role is not reused for trials. Review execution
+is source-blind and intentionally has no skill-under-test or task tool surface.
+Evaluation needs a different boundary with controlled tools, a candidate
+treatment, final-state artifacts, and proof that the skill loaded. A new
+`skill-evaluation-executor` adapter role carries that contract without
+weakening review isolation.
+
+#### Skill classes
+
+Each evaluation suite declares one class:
+
+- `capability_uplift`: the skill should make a task succeed that the base
+  executor cannot complete reliably.
+- `encoded_preference`: the base executor may already complete the task, but
+  the skill must follow a specified workflow, policy, or output contract more
+  faithfully.
+
+Capability uplift requires a paired improvement over the control arm. Encoded
+preference requires candidate conformance and a blind preference advantage;
+it does not fail merely because the control also completes the task. These are
+the complete intended-case pass semantics when cross-CLI certification is
+enabled; the initial source-case improvement rule applies only to
+`capability_uplift`.
+
+#### Case classes
+
+One local `.skill-evaluation-cases.json` file defines a versioned suite with:
+
+1. one or more `intended` cases;
+2. one or more `related` cases that must not regress;
+3. `activation_positive` prompts that should load the skill;
+4. `activation_negative` prompts that must not load the skill.
+
+Version 1 source and sibling manifests remain readable. A source case compiles
+to one `capability_uplift` intended case. A sibling case compiles to one
+related case. Legacy manifests do not imply activation coverage or
+cross-executor certification.
+
+Assertions may use:
+
+- deterministic final-state checks;
+- structured result or JSON-schema checks;
+- exact, regular-expression, or bounded numeric checks;
+- declared trajectory checks such as required skill load or forbidden tool;
+- blind model comparison for semantic quality.
+
+Assertions are not appended to the task prompt. Deterministic outcome checks
+are authoritative when final state is objectively inspectable. Model graders
+may judge semantic quality but cannot override a failed deterministic safety or
+outcome check.
+
+#### Treatments and pairing
+
+Every behavioral case runs as a paired experiment:
+
+- `control`: no candidate skill and no user-installed non-built-in skills;
+- `candidate`: the exact candidate snapshot is the only non-built-in skill.
+
+Both arms use the same CLI, exact model, task input, working-state snapshot,
+tool policy, timeout, token budget, grader set, and trial number. Each arm
+starts with a fresh CLI home and working directory. Arm order alternates by
+pair to reduce systematic ordering effects.
+
+The gate profile runs three trials per arm. A one-trial `iterate` profile may
+be used while authoring, but it cannot produce a promotion or consolidation
+certificate.
+
+#### Executor selection and certification
+
+`DREAMING_EVALUATION_EXECUTORS` is an explicit ordered set containing
+`copilot`, `claude`, and/or `codex`. No absent or merely installed CLI becomes
+required implicitly. Each selected executor must have a healthy
+`skill-evaluation-executor` adapter and an explicitly configured model.
+
+Each CLI produces its own certificate. Results are never pooled into one
+cross-provider score. The aggregate gate passes only when every required
+executor has a current passing certificate for the same candidate, suite,
+policy, and gate profile.
+
+An unavailable required executor yields `inconclusive`, not pass. The owner may
+change the required executor set and run a new certification policy. Removing
+an executor changes the policy identity and cannot reuse the prior aggregate
+receipt.
+
+#### Default gate policy
+
+For each required executor:
+
+- every intended candidate arm must pass at least two of three trials;
+- a `capability_uplift` intended case must improve by at least one successful
+  trial over control and cannot pass when control succeeds in all trials;
+- an `encoded_preference` intended case must pass at least two of three trials
+  and win at least two of three blind comparisons against control;
+- every related candidate case must preserve every deterministic invariant,
+  pass at least as many trials as control, and add no forbidden action;
+- each activation-positive prompt must load the candidate in at least two of
+  three trials;
+- each activation-negative prompt must load the candidate in zero of three
+  trials;
+- an infrastructure error, missing trace, model mismatch, budget mismatch,
+  unproved skill load, invalid grader, invalid required comparator output, or
+  incomplete pair makes the executor certificate `inconclusive`.
+
+All three required encoded-preference comparisons must be schema-valid and
+bound to matched pairs. One or two valid comparisons cannot authorize a
+certificate, even if every valid comparison favors the candidate.
+
+The suite may declare stricter thresholds. It may not weaken deterministic
+safety assertions, admit an unpaired treatment, or treat an infrastructure
+failure as a candidate result.
+
+#### Provenance schema
+
+Cross-CLI authority is stored in a schema-v3 document under the version-2
+evaluation state directory:
+
+```text
+evaluations/v2/authority/<skill-key>/<candidate-id>.json
+```
+
+It is not a skill-root file, is excluded from candidate inventory and trial
+projection by location, and never reaches public promotion. `.agent-created.json`
+remains schema v2 and retains its existing single-executor evaluation object
+for compatibility, but that object is non-authoritative while cross-CLI
+certification is enabled. A schema-v2 scalar is never synthesized by
+collapsing multiple executor certificates. The schema-v2 envelope may carry an
+opaque top-level `evaluation_v3_sha256` pointer; existing readers preserve but
+do not authorize that unknown field.
+
+```json
+{
+  "schema_version": 3,
+  "evaluation": {
+    "status": "pass",
+    "evaluated_at": "2026-08-04T00:00:00Z",
+    "policy_id": "sha256:...",
+    "suite_id": "sha256:...",
+    "candidate_id": "sha256:...",
+    "profile": "gate",
+    "required_executors": ["copilot", "claude", "codex"],
+    "certifications": {
+      "copilot": {
+        "status": "pass",
+        "model": "exact-model-id",
+        "receipt_sha256": "sha256:..."
+      }
+    },
+    "aggregate_receipt_sha256": "sha256:..."
+  }
+}
+```
+
+The cross-CLI gate resolves the authority document from the configured
+version-2 evaluation state, requires the envelope pointer to match its digest,
+and ignores schema-v2 evaluation authority. The authority document is written
+atomically before the pointer is updated, and only after the schema-v3 reader
+and promotion gate are active. Older envelope writers cannot open or relabel
+the version-2 authority document, and an older promotion gate cannot interpret
+the opaque pointer as a schema-v2 pass.
+
+The aggregate receipt binds:
+
+- candidate inventory and ID;
+- complete case manifest and suite ID;
+- required executor set and policy ID;
+- profile and trial count;
+- every executor, model, CLI version, adapter version, harness version, tool
+  policy, budget, grader version, comparator route, comparator model,
+  comparator version, and trial result digest;
+- every raw-log and normalized-trace digest;
+- blind-comparison assignments without revealing them to the comparator;
+- final per-executor and aggregate decisions.
+
+Any bound input change makes the certificate stale. Receipt paths remain
+content-addressed. The envelope contains only receipt identities and
+non-sensitive summaries; prompts, raw traces, and artifacts remain local
+evaluation state and are removed according to an explicit retention policy.
+
+Content hashes prove identity and later tampering, not honest production.
+Dreaming's trust anchor is the reviewed, allowlisted harness and adapter
+executables that it launches by exact digest. A Dreaming-owned verifier checks
+the run nonce, producer digests, native event structure, prepared and effective
+execution records, file inventory, and result hashes, then reruns required
+deterministic graders over the sealed artifacts before issuing a certificate.
+Evidence from an unknown producer, an unapproved executable digest, or a bundle
+whose deterministic results cannot be reproduced is untrusted and
+`inconclusive`.
+
+#### Promotion and consolidation policy
+
+Promotion or a material consolidation requires:
+
+1. public-safety inventory and content review;
+2. a gate-profile aggregate certificate for the exact candidate;
+3. passing certificates for every executor required by the active policy;
+4. no stale, inconclusive, or regressing case;
+5. a current schema-v3 authority document linked to the evidence envelope.
+
+A cross-CLI waiver substitutes for items 2 and 3 only under the restricted
+waiver contract in section 5. It inherits the base aggregate's policy, suite,
+and required executor set and must be current for the exact changed candidate.
+
+Evaluation proves behavior under named executors and cases. It does not prove
+universal correctness. Public documentation may state only the executors,
+models, suite version, and guarantees actually certified.
+
+#### Privacy and transfer policy
+
+Evaluation cases and artifacts are local inputs. Each executor route is
+explicitly enabled before a prompt or artifact is sent to that CLI. The
+compiled trial packet contains only the declared case input, candidate
+snapshot, tool policy, grader inputs, and any separately authorized comparator
+route. It contains no native session path, review ledger, unrelated skill,
+repository credential, or inherited user instruction.
+
+The executor receives credentials through its existing narrow native
+authentication boundary. Trial outputs are untrusted and cannot choose receipt
+paths, grader commands, retention policy, or Dreaming mutations.
+
+#### Migration and rollback
+
+The schema-v3 authority reader ships before any authority writer. Existing
+receipts remain immutable under the version-1 receipt directory. Cross-CLI
+authority documents, receipts, and latest pointers use a version-2 directory,
+so rollback cannot overwrite or reinterpret earlier evidence.
+
+When cross-CLI certification is enabled, a legacy passing or waived receipt is
+insufficient for promotion and triggers a fresh gate-profile evaluation. No
+bulk backfill runs. A new cross-CLI waiver may anchor only to a current
+version-2 aggregate certificate.
+
+Rollback:
+
+1. activate the halt switch;
+2. stop evaluation workers and wait for trial leases to expire;
+3. restore the previous evaluator, adapter configuration, and promotion gate;
+4. retain schema-v3 authority documents and version-2 receipts as inert audit
+   data;
+5. run the previous self-test and keep promotion disabled until it passes.
+
+The restored schema-v2 writer has no path to the version-2 authority directory.
+The restored promotion gate has no path from a schema-v3 authority document or
+version-2 receipt to a schema-v2 pass. Rollback never deletes candidate skills,
+cases, traces, or receipts automatically.
+
+#### Fail-closed evidence
+
+The critical boundary is proved when deliberate tests show that:
+
+- an unauthorized executor receives no process invocation or trial packet;
+- an inherited instruction, unrelated skill, or native session root is absent
+  from each trial;
+- a changed candidate, case, model, CLI, adapter, harness, grader, budget, or
+  required-executor set invalidates the gate;
+- a missing arm, trial, trace, collected artifact record, skill-load event, or
+  deterministic grader result produces `inconclusive`; an artifact proved
+  absent from a valid completed workspace remains a deterministic task result;
+- an unknown or changed harness, adapter, comparator, or producer identity
+  produces `inconclusive`;
+- a related-task or activation-negative regression blocks promotion;
+- a forged, moved, or hash-mismatched receipt is rejected;
+- rollback leaves new evidence inert and cannot silently downgrade it into a
+  passing legacy record.
 
 ## Data flow
 
@@ -321,7 +656,8 @@ No hard reset, broad checkout, or deletion is allowed.
    must be explicitly classified public-safe. Known private sentinels,
    transcript markers, credentials, private URLs, and unresolved task-specific
    reproductions fail closed.
-3. Evidence gate checks the required source and sibling cases.
+3. Evidence gate checks the required intended, related, and activation cases
+   through every executor named by the active certification policy.
 4. Promotion strips local provenance files.
 5. Public validation, review, versioning, commit, push, and plugin refresh run
    through existing paths.
@@ -339,6 +675,13 @@ No hard reset, broad checkout, or deletion is allowed.
 | Factual claim cannot be verified | Do not use the claim; correct or narrow the skill |
 | Evaluation is inconclusive | Keep local draft; do not promote or broaden authority |
 | Sibling regression | Reject the candidate change and retain the prior skill |
+| Required evaluation executor is unavailable | Record `inconclusive`; do not reuse another executor's certificate |
+| Trial pair is incomplete or budgets differ | Reject the pair as invalid evidence |
+| Skill load cannot be proved | Reject the candidate trial as invalid evidence |
+| Activation-negative prompt loads the skill | Reject the candidate and keep it local |
+| Evaluation route is not authorized | Do not invoke the executor or materialize its packet |
+| Cross-CLI receipt input changes | Mark the aggregate certificate stale |
+| Evaluation rollback encounters schema-v3 authority | Keep promotion halted; never reinterpret it as a legacy pass |
 | Scheduled dependency discovery fails | Do not archive or consolidate the candidate |
 | Curator run partially commits | Manifest remains incomplete; rollback or resume explicitly |
 | Rollback encounters unrelated changes | Refuse and report exact blocking paths |
@@ -479,6 +822,90 @@ disclosure, modular instructions, memory curation, `/instructions`, and
 that can reject or warn before personal instruction or memory context is
 loaded.
 
+### M5: Cross-CLI skill certification
+
+Implementation proceeds in this order. Each phase leaves a testable boundary
+for the next phase and must satisfy its deterministic checks before the next
+phase becomes authoritative.
+
+#### M5.1: Policy and schemas
+
+Define suite schema v2, candidate and policy identities, required-executor
+selection, per-executor certificate and aggregate-receipt schemas, version-2
+authority state, cross-CLI waiver rules, stale detection, migration, retention,
+and rollback behavior. The existing evaluator remains authoritative.
+
+#### M5.2: Trial harness core
+
+Build the replaceable harness from
+`skill-evaluation-trial-harness-design.md`: sealed input and result bundles,
+fresh workspaces, matched scheduling, deterministic graders, blind comparison,
+artifact handling, process cleanup, producer identity, and deterministic fake
+executors. The harness emits evidence but no Dreaming decision.
+
+#### M5.3: Native CLI adapters
+
+Add the versioned `skill-evaluation-executor` role and implement the same
+prepare, run, normalize, collect, version, isolation, and native skill-load
+proof semantics for Copilot CLI, Claude Code, and Codex. Each adapter must pass
+the harness contract before it can be selected.
+
+#### M5.4: Dreaming certification integration
+
+Compile Dreaming suites into sealed runs, authorize selected executor and
+comparator routes, verify result bundles and producer identity, recompute
+deterministic graders, issue independent executor certificates, write the
+aggregate receipt and schema-v3 authority document, and enforce promotion,
+consolidation, waiver, and stale-evidence policy.
+
+#### M5.5: Rollout and live proof
+
+Install readers before writers, exercise migration and halt behavior, prove
+rollback leaves version-2 authority inert, run the real public synthetic suite
+through all three CLIs, complete implementation review, update operating
+documentation, and enable the new gate only after the final self-test passes.
+
+Deliver:
+
+- schema-v2 evaluation suites with intended, related, activation-positive, and
+  activation-negative cases;
+- capability-uplift and encoded-preference policies;
+- an explicit `DREAMING_EVALUATION_EXECUTORS` desired set;
+- a versioned `skill-evaluation-executor` adapter contract for Copilot, Claude,
+  and Codex;
+- a separate trial harness conforming to
+  `skill-evaluation-trial-harness-design.md`;
+- three-trial paired gate runs and one-trial non-authoritative iteration runs;
+- deterministic outcome graders, trajectory checks, and blind comparison;
+- per-executor certificates and one content-addressed aggregate receipt;
+- schema-v3 cross-CLI authority documents in version-2 evaluation state,
+  linked from unchanged schema-v2 evidence envelopes;
+- promotion and consolidation enforcement;
+- versioned state migration, retention, halt, and rollback behavior.
+
+Acceptance:
+
+- the same candidate and suite run through Copilot, Claude, and Codex without
+  inherited user instructions or unrelated skills;
+- every candidate trial proves whether the named skill loaded;
+- a helpful capability skill improves at least one successful trial over its
+  control on every required executor;
+- an encoded-preference skill wins at least two of three blind comparisons,
+  satisfies its deterministic policy checks, and has no invalid comparison;
+- a related-task regression blocks only the candidate certificate and cannot
+  mutate the prior skill;
+- positive trigger cases load the skill at the required rate and every
+  negative trigger case remains unloaded;
+- changing any candidate, case, executor, model, CLI, adapter, harness, grader,
+  budget, profile, or required-executor input invalidates the certificate;
+- an unavailable executor, partial pair, missing trace, artifact collection or
+  sealing failure, or other infrastructure failure is `inconclusive`; an
+  artifact genuinely absent from a valid completed workspace is a deterministic
+  task failure;
+- promotion refuses stale, partial, regressing, or unauthorized evidence;
+- rollback leaves version-2 receipts inert and cannot turn them into legacy
+  passing authority.
+
 ## Deterministic check contract
 
 ### Routing
@@ -522,6 +949,62 @@ loaded.
   `waived` record.
 - `not_evaluated` triggers evaluation; `pending`, `regression`, and
   `inconclusive` are rejected.
+
+### Cross-CLI certification
+
+- **Suite schema:** Create one schema-v2 suite containing every case class.
+  Reject duplicate IDs, missing deterministic safety assertions, invalid
+  grader references, and shared task IDs where independence is required. This
+  proves invalid policy cannot reach a trial.
+- **Legacy compile:** Compile a schema-v1 source/sibling manifest into one
+  capability intended case and one related case. Confirm it lacks activation
+  and cross-executor authority. This proves backward compatibility does not
+  invent evidence.
+- **Treatment isolation:** Seed unrelated instructions and skills in the real
+  user homes, then run both arms in isolated homes. Candidate sees only the
+  candidate snapshot; control sees no non-built-in skill. Any seeded content in
+  a packet or trace fails the check.
+- **Paired budgets:** Deliberately change timeout, model, tools, or token budget
+  in one arm. The pair must be invalid before scoring. This proves the reported
+  delta compares matched trials.
+- **Skill-load proof:** Return a successful answer without a normalized skill
+  load event. Candidate trial must be invalid. Return a load event in a
+  negative activation trial. Certificate must regress.
+- **Outcome authority:** Make the final answer claim success while the
+  deterministic artifact check fails. The trial must fail. This proves
+  self-report cannot override final state.
+- **Blind comparison:** Swap A/B assignment while preserving outputs. Include
+  asymmetric outputs containing a declared candidate identity marker.
+  Comparator input must either remove non-semantic transport metadata without
+  changing judged content or refuse the comparison as identity-leaking; the
+  unblinding record must recover the correct winner afterward. Make two of
+  three comparator responses invalid and confirm the executor certificate is
+  `inconclusive`, not pass.
+- **Repetition:** Provide three deterministic fixture trials for control and
+  candidate. Confirm capability, encoded-preference, related, and activation
+  thresholds produce pass, regression, and inconclusive states exactly.
+- **Per-executor isolation:** Give one executor a regression and two passes.
+  Only that executor certificate regresses, while the aggregate gate fails.
+  This proves scores are not pooled.
+- **Authorization:** Configure an executor without an allow entry. Assert no
+  process starts and no packet exists.
+- **Receipt binding:** Change each bound input independently and confirm the
+  latest gate becomes stale. Move or alter a receipt and confirm hash
+  verification fails.
+- **Producer trust:** Change the harness, adapter, prepared execution, effective
+  execution, or comparator executable digest. Reject the bundle. Change a
+  deterministic grader result without changing its sealed artifacts and
+  confirm Dreaming's recomputation rejects it.
+- **Waiver migration:** Attempt to anchor a deterministic-helper waiver to a
+  legacy passing receipt and reject it. Anchor the same restricted change to a
+  current version-2 aggregate, bind its tests and required executors, and
+  confirm it becomes stale when any bound input changes.
+- **Schema migration:** Read schema-v2 envelopes unchanged, write the schema-v3
+  authority document under version-2 evaluation state only after its reader is
+  active, and confirm old envelope writers cannot open, relabel, or authorize
+  it.
+- **Rollback:** Halt during active fixture trials, restore the old evaluator,
+  retain version-2 receipts, and prove the old gate cannot accept them.
 
 ### Scheduled dependencies
 
@@ -568,6 +1051,29 @@ Create a disposable local skill referenced by a test LaunchAgent, prove the
 curator protects it, remove the reference, execute a reversible two-root test
 run, and roll it back without touching unrelated fixtures.
 
+### M5
+
+Run a public, synthetic suite with no private repository or session content:
+
+1. one capability skill whose deterministic outcome fails in control and
+   succeeds in candidate;
+2. one encoded-preference skill whose control completes the task but violates
+   a required workflow;
+3. one related task that an intentionally overfitted candidate damages;
+4. positive and negative activation prompts.
+
+Run the gate profile through real Copilot, Claude, and Codex executors on the
+exact reviewed tree. Inspect each native raw log, normalized trace,
+deterministic artifact, blinded comparison, per-executor certificate,
+aggregate receipt, and schema-v3 authority document. Confirm the helpful
+candidates pass, the overfitted candidate cannot promote, no negative prompt
+loads the skill, and no unrelated home or skill content appears.
+
+Then alter one bound input, prove the gate becomes stale, replace one
+authorized producer or comparator digest and prove the bundle is refused,
+activate the halt switch during a disposable run, and execute the documented
+rollback without deleting evaluation evidence or enabling promotion.
+
 ## Rollout and compatibility
 
 - Schema v1 provenance remains valid throughout M1.
@@ -581,6 +1087,12 @@ run, and roll it back without touching unrelated fixtures.
   backfill.
 - Curator mutation remains dry-run plus explicit approval.
 - Every milestone is separately releasable and reversible.
+- M5 writes version-2 receipts and schema-v3 authority documents only after
+  their readers, validators, gates, and rollback checks are installed.
+- Existing M2 receipts remain immutable historical evidence but do not satisfy
+  an M5 cross-CLI policy.
+- M5 is enabled only after the real three-executor acceptance suite passes.
+  Until then, the existing M2 gate remains authoritative.
 
 ## Definition of Done
 
@@ -610,6 +1122,34 @@ run, and roll it back without touching unrelated fixtures.
 - [x] M3 scheduled dependency protection and run rollback are implemented.
 - [x] M4 is either implemented against a real platform boundary or explicitly
       closed as unnecessary.
+- [ ] M5 cross-CLI certification is implemented and enforces the selected
+      executor policy.
+
+### Cross-CLI skill certification Definition of Done
+
+- [ ] Dreaming owns suite policy, candidate identity, certification decisions,
+      receipts, authority documents, promotion gates, and rollback authority.
+- [ ] The trial harness is replaceable and cannot write Dreaming state or
+      decide policy.
+- [ ] Copilot, Claude, and Codex implement the same versioned
+      `skill-evaluation-executor` contract.
+- [ ] Gate-profile evidence uses three matched trials per arm and records exact
+      executor, model, CLI, adapter, harness, grader, comparator, tool, and
+      budget identity.
+- [ ] Capability, encoded-preference, related-task, and activation policies
+      have deterministic pass, regression, and inconclusive fixtures.
+- [ ] Every required executor has an independent certificate; results are not
+      pooled across providers.
+- [ ] Promotion and consolidation reject partial, stale, regressing,
+      unauthorized, or legacy-only evidence.
+- [ ] Schema-v2 cases and envelopes remain readable; schema-v3 authority in
+      version-2 evaluation state cannot be read, relabeled, or authorized by an
+      older gate.
+- [ ] Unauthorized routes, inherited instructions, unrelated skills, and
+      native session roots are absent from trial packets and traces.
+- [ ] The real three-CLI acceptance suite passes on the reviewed tree.
+- [ ] Rollback preserves evidence, restores the prior gate, and keeps promotion
+      halted until self-test passes.
 
 ### All phases Definition of Done
 
@@ -636,3 +1176,6 @@ run, and roll it back without touching unrelated fixtures.
 - Automatically publish agent-created skills.
 - Make curator mutation unattended.
 - Introduce a second writer lock, ledger, or provenance authority.
+- Treat all models or CLI harnesses as statistically interchangeable.
+- Require a hosted service or private benchmark system for local promotion.
+- Add Linux or Windows lifecycle support as part of cross-CLI certification.

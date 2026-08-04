@@ -97,6 +97,8 @@ EOF
   }
 }
 JSON
+  printf '{"schema_version":2,"fixture":"local-only-policy"}\n' \
+    > "$root/$name/.skill-evaluation-policy.json"
 }
 
 approve_evaluation() {
@@ -192,6 +194,8 @@ if find "$PUBLIC/skills/safe-skill" -name '.agent-created*' -print -quit | grep 
 fi
 [[ ! -f "$PUBLIC/skills/safe-skill/.promotion-reviewed.json" ]] ||
   fail "public skill retained private review manifest"
+[[ ! -f "$PUBLIC/skills/safe-skill/.skill-evaluation-policy.json" ]] ||
+  fail "public skill retained private evaluation policy"
 grep -q '"./skills/safe-skill"' "$PUBLIC/.claude-plugin/plugin.json" ||
   fail "promoted skill was not registered"
 versions="$(python3 - "$PUBLIC" <<'PY'
@@ -279,6 +283,8 @@ fi
   fail "failed promotion lost review manifest"
 [[ -f "$LOCAL/rollback-skill/.skill-evaluation-cases.json" ]] ||
   fail "failed promotion lost evaluation cases"
+[[ -f "$LOCAL/rollback-skill/.skill-evaluation-policy.json" ]] ||
+  fail "failed promotion lost evaluation policy"
 [[ ! -e "$PUBLIC/skills/rollback-skill" ]] ||
   fail "failed promotion left the skill in the public tree"
 cached_after="$(git -C "$PUBLIC" diff --cached --binary -- \

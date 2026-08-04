@@ -37,7 +37,7 @@ cleanup() {
     mv "$DEST" "$SRC" || true
     if [[ -n "$PROVENANCE_BACKUP" && -d "$PROVENANCE_BACKUP" ]]; then
       for sidecar in .agent-created .agent-created.json .promotion-reviewed.json \
-        .skill-evaluation-cases.json; do
+        .skill-evaluation-cases.json .skill-evaluation-policy.json; do
         [[ -f "$PROVENANCE_BACKUP/$sidecar" ]] &&
           cp -p "$PROVENANCE_BACKUP/$sidecar" "$SRC/$sidecar"
       done
@@ -114,7 +114,7 @@ MOVED=1
 # promotion can restore the exact local authority state.
 PROVENANCE_BACKUP="$(mktemp -d "$SCRATCH_ROOT/skill-promotion.XXXXXX")"
 for sidecar in .agent-created .agent-created.json .promotion-reviewed.json \
-  .skill-evaluation-cases.json; do
+  .skill-evaluation-cases.json .skill-evaluation-policy.json; do
   [[ -f "$DEST/$sidecar" ]] && cp -p "$DEST/$sidecar" "$PROVENANCE_BACKUP/$sidecar"
 done
 
@@ -124,7 +124,8 @@ if find "$DEST" -name '.agent-created*' -print -quit | grep -q .; then
   echo "REFUSED: provenance remained after promotion" >&2
   exit 1
 fi
-rm -f "$DEST/.promotion-reviewed.json" "$DEST/.skill-evaluation-cases.json"
+rm -f "$DEST/.promotion-reviewed.json" "$DEST/.skill-evaluation-cases.json" \
+  "$DEST/.skill-evaluation-policy.json"
 
 # Register in plugin.json (public root only).
 MANIFEST_BACKUP="$(mktemp -d "$SCRATCH_ROOT/skill-promotion-manifests.XXXXXX")"

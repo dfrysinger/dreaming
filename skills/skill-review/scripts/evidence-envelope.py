@@ -36,6 +36,7 @@ EVALUATION_STATES = {
 WAIVER_CLASSES = {"documentation-only", "reference-only", "deterministic-helper"}
 VERIFICATIONS = {"current-source", "deterministic-check", "session-evidence", "owner-policy"}
 TASK_KEY_RE = re.compile(r"^(?:task|platform):[A-Za-z0-9._:-]{8,}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class EnvelopeError(ValueError):
@@ -174,6 +175,11 @@ def validate_envelope(data: Any) -> dict[str, Any]:
         if evaluation.get("waiver_class") not in WAIVER_CLASSES:
             raise EnvelopeError("evaluation.waiver_class is invalid")
         require_text(evaluation.get("waiver_reason"), "evaluation.waiver_reason")
+    if "evaluation_v3_sha256" in data and (
+        not isinstance(data["evaluation_v3_sha256"], str)
+        or not SHA256_RE.fullmatch(data["evaluation_v3_sha256"])
+    ):
+        raise EnvelopeError("evaluation_v3_sha256 must be an opaque SHA-256 digest")
     return data
 
 
@@ -384,6 +390,23 @@ def set_evaluation(args: argparse.Namespace) -> dict[str, Any]:
         os.close(directory_fd)
 
 
+def set_evaluation_v3(args: argparse.Namespace) -> dict[str, Any]:
+    """Store only an opaque pointer; cross-CLI authority stays outside the skill root."""
+    if not SHA256_RE.fullmatch(args.authority_sha256):
+        raise EnvelopeError("authority SHA-256 digest is invalid")
+    path = Path(args.file)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        fcntl.flock(directory_fd, fcntl.LOCK_EX)
+        data = legacy_to_v2(load_json(path))
+        data["evaluation_v3_sha256"] = args.authority_sha256
+        validate_envelope(data)
+        atomic_write(path, data, directory_fd)
+        return data
+    finally:
+        os.close(directory_fd)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -413,6 +436,9 @@ def build_parser() -> argparse.ArgumentParser:
     evaluation_parser = subparsers.add_parser("set-evaluation")
     evaluation_parser.add_argument("file")
     evaluation_parser.add_argument("receipt")
+    evaluation_v3_parser = subparsers.add_parser("set-evaluation-v3")
+    evaluation_v3_parser.add_argument("file")
+    evaluation_v3_parser.add_argument("authority_sha256")
     return parser
 
 
@@ -423,8 +449,10 @@ def main() -> int:
             data = validate_envelope(legacy_to_v2(load_json(Path(args.file))))
         elif args.command == "upsert":
             data = upsert(args)
-        else:
+        elif args.command == "set-evaluation":
             data = set_evaluation(args)
+        else:
+            data = set_evaluation_v3(args)
         verified = {
             entry["task_key"]
             for entry in data["evidence"]

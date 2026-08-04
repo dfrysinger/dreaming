@@ -119,7 +119,7 @@ for script in daemon-pass.sh daemon-run.sh daemon-lock.sh daemon-lock.py \
   test-vendor-adapters.sh \
   evidence-envelope.py append-skill-evidence.sh mark-agent-created.sh \
   test-evidence-envelope.sh skill-evaluation.py run-skill-evaluation.sh \
-  test-skill-evaluation.sh; do
+  test-skill-evaluation.sh test-cross-cli-evaluation.sh; do
   [[ -x "$SCRIPT_DIR/$script" ]] && ok "executable: $script" || bad "not executable: $script"
 done
 
@@ -179,6 +179,11 @@ if run_isolated_test "$SCRIPT_DIR/test-skill-evaluation.sh" >>"$RESULT" 2>&1; th
   ok "deterministic skill-evaluation checks"
 else
   bad "deterministic skill-evaluation checks"
+fi
+if run_isolated_test "$SCRIPT_DIR/test-cross-cli-evaluation.sh" >>"$RESULT" 2>&1; then
+  ok "deterministic cross-CLI evaluation checks"
+else
+  bad "deterministic cross-CLI evaluation checks"
 fi
 if run_isolated_test "$MANAGE_SCRIPT_DIR/test-promotion-review.sh" >>"$RESULT" 2>&1; then
   ok "deterministic promotion checks"

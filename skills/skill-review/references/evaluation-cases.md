@@ -54,3 +54,98 @@ Receipts are content-addressed under
 `~/.copilot/skill-state/skill-review/evaluations/`. They bind the candidate
 inventory, case manifest, exact model, Copilot CLI version, runner, prompt,
 comparator, and flags. Any candidate or case edit makes the gate stale.
+
+## Cross-CLI schema v2 (not yet the active gate)
+
+M5.1 adds a separately validated, non-authoritative cross-CLI contract. Keep
+the suite in the same local `.skill-evaluation-cases.json` file and put its
+executor/comparator policy in local `.skill-evaluation-policy.json`; neither
+file is candidate runtime input.
+
+```json
+{
+  "schema_version": 2,
+  "graders": [
+    {
+      "id": "safe-outcome",
+      "type": "regex",
+      "safety": true,
+      "identity": "sha256:<sealed-deterministic-grader>"
+    }
+  ],
+  "cases": [
+    {
+      "id": "intended-case",
+      "class": "intended",
+      "task_id": "intended:unique-task-id",
+      "prompt": "A capability the skill should improve.",
+      "deterministic_graders": ["safe-outcome"]
+    },
+    {
+      "id": "related-case",
+      "class": "related",
+      "task_id": "related:other-unique-task-id",
+      "prompt": "A related capability that must not regress.",
+      "deterministic_graders": ["safe-outcome"]
+    },
+    {
+      "id": "activation-positive",
+      "class": "activation_positive",
+      "task_id": "activation:positive-unique-task-id",
+      "prompt": "A prompt that should activate the skill.",
+      "deterministic_graders": ["safe-outcome"],
+      "activation": {"expected_load": true}
+    },
+    {
+      "id": "activation-negative",
+      "class": "activation_negative",
+      "task_id": "activation:negative-unique-task-id",
+      "prompt": "A prompt that must not activate the skill.",
+      "deterministic_graders": ["safe-outcome"],
+      "activation": {"expected_load": false}
+    }
+  ]
+}
+```
+
+Each case ID and task ID is unique. Every case references at least one
+declared deterministic safety grader. Unknown fields, duplicate IDs, shared
+task IDs, unsupported grader types, and activation expectations that disagree
+with the case class are refused.
+
+The policy has `schema_version: 2`, `profile` (`gate` or `iterate`),
+`policy_kind` (`capability_uplift` or `encoded_preference`), a non-empty ordered
+`required_executors` selection, and an exact comparator configuration. Selected
+executors follow `copilot`, `claude`, then `codex` order, but a policy may
+require any explicit subset. Each executor binds its exact model, adapter
+identity/version/executable digest, and CLI executable digest. The comparator
+binds its route, exact model, adapter identity/version/executable digest,
+timeout, token budget, and rubric digest. Gate profiles have three trials per
+arm; iteration profiles have one.
+
+Validate or prepare identities without starting a CLI or writing authority:
+
+```bash
+skill-review/scripts/skill-evaluation.py v2-suite-validate <suite.json>
+skill-review/scripts/skill-evaluation.py v2-policy-validate <policy.json>
+skill-review/scripts/skill-evaluation.py v2-prepare <skill-dir>
+```
+
+Schema-v1 source/sibling manifests remain readable. They compile only to one
+legacy intended and one related case, with `cross_executor_authority: false`;
+they do not create activation cases or M5 authority.
+
+Future M5 phases supply sealed executor certificates and aggregates. The
+schema helpers store content-addressed aggregate receipts and schema-v3
+authority only under
+`~/.copilot/skill-state/skill-review/evaluations/v2/`. Authority paths are
+`authority/<skill-path-key>/<candidate-id>.json`; the optional schema-v2
+`.agent-created.json` field `evaluation_v3_sha256` is only an opaque digest.
+The current `gate` command reads only legacy M2 state and cannot accept that
+authority.
+
+`v2-waive` and `v2-waiver-validate` are likewise non-authoritative helpers.
+They require a passing version-2 aggregate, exact current candidate, suite,
+policy, required executor list, restricted changed `scripts/` paths, an
+unchanged test script identity, and a bound JSON test-result digest. Legacy M2
+receipts cannot anchor these waivers.
