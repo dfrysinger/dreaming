@@ -155,6 +155,19 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
         emit({"ok": True, "executor_version": state.get("executor_version", "fake-1")})
     if args.command == "run":
         snapshot = load(Path(args.snapshot), {})
+        if snapshot.get("packet_kind") == "draft_review":
+            result = {
+                "status": "ok",
+                "mutation_started": False,
+                "completion_sentinel": "DREAMING_DRAFT_REVIEW_COMPLETE",
+                "decision": state.get("draft_review_decision", "approve"),
+                "summary": state.get(
+                    "draft_review_summary", "The proposal satisfies the fixture rubric"
+                ),
+                "model": state.get("draft_review_model", "fake-default"),
+            }
+            save(Path(args.result), result)
+            emit({"ok": True, **result})
         if "events" not in snapshot:
             fail("snapshot-invalid", args.snapshot)
         mutate_fixture = state.get("mutate_source_fixture")
@@ -192,6 +205,11 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                 "DREAMING_REVIEW_COMPLETE" if mode == "success" else None
             ),
             "terminal_route": state.get("terminal_route", "discard"),
+            "summary": state.get("summary", "No durable procedure"),
+            "routing_reason": state.get(
+                "routing_reason", "The bounded session contains no reusable lesson"
+            ),
+            "artifact": state.get("artifact"),
         }
         save(Path(args.result), result)
         emit({"ok": True, **result})

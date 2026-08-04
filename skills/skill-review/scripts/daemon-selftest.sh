@@ -31,12 +31,32 @@ bad() { echo "FAIL  $*" | tee -a "$RESULT"; fails=$((fails + 1)); }
 warn() { echo "WARN  $*" | tee -a "$RESULT"; }
 run_isolated_test() {
   env -u DREAMING_ADAPTER_CONFIG \
+    -u DREAMING_ADAPTER_ALLOWED_ROOT \
     -u DREAMING_CONFIG_FILE \
+    -u DREAMING_CONFIG_POINTER \
+    -u DREAMING_CONFIGURE_NATIVE_ADAPTERS \
     -u DREAMING_DEPS_DIR \
+    -u DREAMING_EXECUTOR_TEST_ALLOW_ROOT \
+    -u DREAMING_EXECUTOR_TEST_ALLOW_ROOTS \
     -u DREAMING_ORCHESTRATOR_STATE_DIR \
     -u DREAMING_DATA_DIR \
     -u DREAMING_STATE_DIR \
     -u DREAMING_SKILLS_ROOT \
+    -u DREAMING_SHARED_SKILLS_ROOT \
+    -u DREAMING_SHARED_BUNDLE_ID \
+    -u DREAMING_SHARED_SOURCE_KIND \
+    -u DREAMING_SHARED_PROTOCOL \
+    -u DREAMING_SHARED_REVISION \
+    -u DREAMING_SESSION_SOURCES \
+    -u DREAMING_REVIEW_EXECUTORS \
+    -u DREAMING_SKILL_TARGETS \
+    -u DREAMING_SOURCE_EXECUTOR_ALLOW \
+    -u DREAMING_COPILOT_BIN \
+    -u DREAMING_CLAUDE_BIN \
+    -u DREAMING_CODEX_BIN \
+    -u DREAMING_COPILOT_SESSION_ROOT \
+    -u DREAMING_CLAUDE_PROJECTS_ROOT \
+    -u DREAMING_CODEX_ROLLOUT_ROOT \
     -u DREAMING_ENABLE_COPILOT_COMPAT \
     -u DREAMING_LIFECYCLE_LOCK_HELD \
     -u DREAMING_RECEIPT_FILE \
@@ -95,7 +115,8 @@ fi
 
 for script in daemon-pass.sh daemon-run.sh daemon-lock.sh daemon-lock.py \
   dreaming-run.sh dreaming-state.py test-dreaming-daemon.sh \
-  dreaming-core.py test-dreaming-core.sh \
+  dreaming-core.py test-dreaming-core.sh dreaming-vendor-adapter.py \
+  test-vendor-adapters.sh \
   evidence-envelope.py append-skill-evidence.sh mark-agent-created.sh \
   test-evidence-envelope.sh skill-evaluation.py run-skill-evaluation.sh \
   test-skill-evaluation.sh; do
@@ -105,7 +126,9 @@ done
 ROOT_SCRIPT_DIR="$REPO/scripts"
 for script in install.sh dreaming-deps.py test-shared-deps.sh \
   test-headless-roots.sh test-installer.sh test-repository-boundary.sh \
-  manage-instructions.sh validate-plugin-manifests.mjs; do
+  manage-instructions.sh configure-adapters.py migrate-copilot-state.py \
+  dreaming-enqueue.sh test-copilot-migration.sh \
+  validate-plugin-manifests.mjs; do
   [[ -x "$ROOT_SCRIPT_DIR/$script" ]] && ok "executable: scripts/$script" ||
     bad "not executable: scripts/$script"
 done
@@ -141,6 +164,11 @@ if run_isolated_test "$SCRIPT_DIR/test-dreaming-core.sh" >>"$RESULT" 2>&1; then
   ok "deterministic standalone core checks"
 else
   bad "deterministic standalone core checks"
+fi
+if run_isolated_test "$SCRIPT_DIR/test-vendor-adapters.sh" >>"$RESULT" 2>&1; then
+  ok "deterministic native adapter and CLI matrix checks"
+else
+  bad "deterministic native adapter and CLI matrix checks"
 fi
 if run_isolated_test "$SCRIPT_DIR/test-evidence-envelope.sh" >>"$RESULT" 2>&1; then
   ok "deterministic evidence-envelope checks"
@@ -182,6 +210,11 @@ if run_isolated_test "$ROOT_SCRIPT_DIR/test-installer.sh" >>"$RESULT" 2>&1; then
 else
   bad "deterministic installer checks"
 fi
+if run_isolated_test "$ROOT_SCRIPT_DIR/test-copilot-migration.sh" >>"$RESULT" 2>&1; then
+  ok "deterministic Copilot migration checks"
+else
+  bad "deterministic Copilot migration checks"
+fi
 if run_isolated_test "$ROOT_SCRIPT_DIR/test-repository-boundary.sh" >>"$RESULT" 2>&1; then
   ok "repository boundary checks"
 else
@@ -212,7 +245,9 @@ if [[ "$COPILOT_COMPAT" == "1" ]]; then
     bad "copilot headless auth"
   fi
   rm -f "$AUTHLOG"
-elif "$SCRIPT_DIR/dreaming-core.py" doctor >/dev/null 2>&1; then
+elif env -u DREAMING_EXECUTOR_TEST_ALLOW_ROOT \
+    -u DREAMING_EXECUTOR_TEST_ALLOW_ROOTS \
+    "$SCRIPT_DIR/dreaming-core.py" doctor >/dev/null 2>&1; then
   ok "standalone adapter health"
 else
   bad "standalone adapter health"

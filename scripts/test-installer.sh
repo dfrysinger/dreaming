@@ -89,6 +89,107 @@ run_install() {
     "$INSTALLER" "$@"
 }
 
+run_persisted() {
+  COPILOT_HOME="$TMP/copilot-home" \
+  DREAMING_CONFIG_POINTER="$TMP/config-pointer" \
+  DREAMING_SKIP_PLUGIN_SYNC=1 \
+  DREAMING_LAUNCHD_PREFIX="com.fixture.dreaming" \
+  SKILLS_LAUNCHD_PREFIX="com.fixture.skills" \
+  SKILLS_LAUNCH_AGENTS_DIR="$DEST" \
+  SKILLS_LAUNCHD_DOMAIN="gui/fixture" \
+  SKILLS_STATE_DIR="$STATE" \
+  SKILLS_LOCAL_ROOT="$LOCAL" \
+  LAUNCHCTL_BIN="$FAKE" \
+  DREAMING_SELFTEST_WAIT_SECS=2 \
+    "$INSTALLER" "$@"
+}
+
+FAKE_PUBLISHER="$TMP/fake-publisher.py"
+cat > "$FAKE_PUBLISHER" <<'PY'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+command = sys.argv[1]
+if os.environ.get("ADAPTER_ENV_LOG"):
+    keys = (
+        "DREAMING_REPO_ROOT",
+        "DREAMING_DATA_DIR",
+        "DREAMING_STATE_DIR",
+        "DREAMING_SKILLS_ROOT",
+        "DREAMING_DEPS_DIR",
+        "DREAMING_ADAPTER_CONFIG",
+        "DREAMING_ENABLE_COPILOT_COMPAT",
+        "DREAMING_CONFIG_FILE",
+        "DREAMING_RECEIPT_FILE",
+        "DREAMING_SHARED_SKILLS_ROOT",
+    )
+    with open(os.environ["ADAPTER_ENV_LOG"], "a", encoding="utf-8") as handle:
+        handle.write(json.dumps({key: os.environ.get(key) for key in keys}) + "\n")
+if command == "contract":
+    role = sys.argv[sys.argv.index("--role") + 1]
+    contracts = {
+        "session-source": (
+            "dreaming.session-source",
+            [
+                "stable-pagination",
+                "qualified-identity",
+                "bounded-render",
+                "revision-inspect",
+            ],
+        ),
+        "review-executor": (
+            "dreaming.review-executor",
+            ["source-blind", "mutation-fence", "completion-sentinel"],
+        ),
+        "skill-publisher": (
+            "dreaming.skill-publisher",
+            [
+                "content-addressed-bundle",
+                "ownership-safe-remove",
+                "exact-inventory",
+            ],
+        ),
+    }
+    protocol, capabilities = contracts[role]
+    result = {
+        "ok": True,
+        "protocol": protocol,
+        "version": 1,
+        "adapter_id": "fixture",
+        "capabilities": capabilities,
+    }
+elif command == "doctor":
+    result = {"ok": True, "healthy": True, "boundary_ready": True}
+elif command == "verify":
+    bundle_id = sys.argv[sys.argv.index("--bundle-id") + 1]
+    result = {"ok": True, "verified": True, "bundle_id": bundle_id}
+else:
+    result = {"ok": True, "status": command}
+print(json.dumps(result))
+PY
+chmod +x "$FAKE_PUBLISHER"
+SUCCESS_CONFIG="$TMP/success-adapters.json"
+python3 - "$SUCCESS_CONFIG" "$FAKE_PUBLISHER" <<'PY'
+import json
+import sys
+
+path, publisher = sys.argv[1:]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(
+        {
+            "contract_version": 1,
+            "sources": {"fixture": {"argv": [publisher]}},
+            "executors": {"fixture": {"argv": [publisher]}},
+            "publishers": {"fixture": {"argv": [publisher]}},
+            "routes": ["fixture>fixture"],
+            "executor_order": ["fixture"],
+        },
+        handle,
+    )
+PY
+
 : > "$LAUNCHCTL_LOG"
 run_install prepare >/dev/null
 BACKUP="$(<"$STATE/dreaming/latest-migration-backup")"
@@ -184,6 +285,177 @@ wait "$enable_pid"
 echo "PASS  lifecycle lock serializes install, selftest, enable, and rollback"
 echo "PASS  install ordering, rendered roots, generation-bound selftest, and exact backup pointer"
 
+NATIVE="$TMP/native"
+NATIVE_DEST="$NATIVE/LaunchAgents"
+NATIVE_STATE="$NATIVE/compat-state"
+NATIVE_LOCAL="$NATIVE/local"
+NATIVE_PUBLIC="$NATIVE/public"
+mkdir -p "$NATIVE_DEST" "$NATIVE_STATE" "$NATIVE_LOCAL" "$NATIVE_PUBLIC/skills"
+git -C "$NATIVE_LOCAL" init -q
+FAKE_COPILOT="$NATIVE/copilot"
+FAKE_CODEX="$NATIVE/codex"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_COPILOT"
+printf '#!/usr/bin/env bash\nexit 0\n' > "$FAKE_CODEX"
+chmod +x "$FAKE_COPILOT" "$FAKE_CODEX"
+run_native() {
+  COPILOT_HOME="$NATIVE/copilot-home" \
+  DREAMING_REPO_ROOT="$ROOT" \
+  DREAMING_CONFIG_POINTER="$NATIVE/config-pointer" \
+  DREAMING_DATA_DIR="$NATIVE/data" \
+  DREAMING_STATE_DIR="$NATIVE/dreaming-state" \
+  DREAMING_SKILLS_ROOT="$NATIVE/dreaming-skills" \
+  DREAMING_CONFIG_FILE="$NATIVE/config.env" \
+  DREAMING_DEPS_DIR="$NATIVE/deps" \
+  DREAMING_RECEIPT_FILE="$RECEIPT" \
+  DREAMING_DEPS_SOURCE="$SOURCE" \
+  DREAMING_CANONICAL_SKILLS_ROOT="" \
+  DREAMING_INSTALLED_PLUGINS_ROOT="$NATIVE/no-installed" \
+  DREAMING_SKIP_PLUGIN_SYNC=1 \
+  DREAMING_LAUNCHD_PREFIX="com.fixture.native" \
+  SKILLS_LAUNCHD_PREFIX="com.fixture.native-legacy" \
+  SKILLS_LAUNCH_AGENTS_DIR="$NATIVE_DEST" \
+  SKILLS_LAUNCHD_DOMAIN="gui/native" \
+  SKILLS_STATE_DIR="$NATIVE_STATE" \
+  SKILLS_LOCAL_ROOT="$NATIVE_LOCAL" \
+  SKILLS_REPO_ROOT="$NATIVE_PUBLIC" \
+  LAUNCHCTL_BIN="$FAKE" \
+    "$INSTALLER" "$@"
+}
+run_native_persisted() {
+  COPILOT_HOME="$NATIVE/copilot-home" \
+  DREAMING_CONFIG_POINTER="$NATIVE/config-pointer" \
+  DREAMING_RECEIPT_FILE="$RECEIPT" \
+  DREAMING_DEPS_SOURCE="$SOURCE" \
+  DREAMING_CANONICAL_SKILLS_ROOT="" \
+  DREAMING_INSTALLED_PLUGINS_ROOT="$NATIVE/no-installed" \
+  DREAMING_SKIP_PLUGIN_SYNC=1 \
+  DREAMING_LAUNCHD_PREFIX="com.fixture.native" \
+  SKILLS_LAUNCHD_PREFIX="com.fixture.native-legacy" \
+  SKILLS_LAUNCH_AGENTS_DIR="$NATIVE_DEST" \
+  SKILLS_LAUNCHD_DOMAIN="gui/native" \
+  SKILLS_STATE_DIR="$NATIVE_STATE" \
+  SKILLS_LOCAL_ROOT="$NATIVE_LOCAL" \
+  LAUNCHCTL_BIN="$FAKE" \
+    "$INSTALLER" "$@"
+}
+
+(
+  export DREAMING_ENABLE_COPILOT_COMPAT=0
+  export DREAMING_CONFIGURE_NATIVE_ADAPTERS=1
+  export DREAMING_SESSION_SOURCES=copilot
+  export DREAMING_REVIEW_EXECUTORS=copilot
+  export DREAMING_SKILL_TARGETS=copilot
+  export DREAMING_SOURCE_EXECUTOR_ALLOW='copilot>copilot'
+  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  run_native install >/dev/null
+)
+NATIVE_ADAPTERS="$NATIVE/dreaming-state/adapters.json"
+grep -q '"copilot"' "$NATIVE_ADAPTERS"
+native_hash="$(shasum -a 256 "$NATIVE_ADAPTERS" | awk '{print $1}')"
+(
+  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  run_native_persisted install >/dev/null
+)
+[[ "$(shasum -a 256 "$NATIVE_ADAPTERS" | awk '{print $1}')" == "$native_hash" ]] ||
+  { echo "ordinary reinstall rewrote persisted adapter config" >&2; exit 1; }
+(
+  export DREAMING_SESSION_SOURCES=codex
+  export DREAMING_REVIEW_EXECUTORS=codex
+  export DREAMING_SKILL_TARGETS=codex
+  export DREAMING_SOURCE_EXECUTOR_ALLOW='codex>codex'
+  export DREAMING_CODEX_BIN="$FAKE_CODEX"
+  run_native_persisted install >/dev/null
+)
+grep -q '"codex"' "$NATIVE_ADAPTERS" || {
+  echo "selection change did not generate Codex adapter config:" >&2
+  cat "$NATIVE_ADAPTERS" >&2
+  exit 1
+}
+python3 - "$NATIVE_ADAPTERS" <<'PY'
+import json
+import sys
+
+config = json.load(open(sys.argv[1], encoding="utf-8"))
+for key in ("sources", "executors", "publishers"):
+    if set(config[key]) != {"codex"}:
+        raise SystemExit(f"selection change retained stale active adapters: {config!r}")
+if config["routes"] != ["codex>codex"] or config["executor_order"] != ["codex"]:
+    raise SystemExit(f"selection change retained stale routing: {config!r}")
+PY
+EXTERNAL_CONFIG="$NATIVE/external-adapters.json"
+printf '{"externally_managed":true}\n' > "$EXTERNAL_CONFIG"
+external_hash="$(shasum -a 256 "$EXTERNAL_CONFIG" | awk '{print $1}')"
+(
+  export DREAMING_ADAPTER_CONFIG="$EXTERNAL_CONFIG"
+  export DREAMING_CONFIGURE_NATIVE_ADAPTERS=1
+  export DREAMING_SESSION_SOURCES=codex
+  export DREAMING_REVIEW_EXECUTORS=codex
+  export DREAMING_SKILL_TARGETS=codex
+  export DREAMING_SOURCE_EXECUTOR_ALLOW='codex>codex'
+  export DREAMING_CODEX_BIN="$FAKE_CODEX"
+  run_native install >/dev/null
+)
+[[ "$(shasum -a 256 "$EXTERNAL_CONFIG" | awk '{print $1}')" == "$external_hash" ]] ||
+  { echo "installer overwrote externally managed adapter config" >&2; exit 1; }
+echo "PASS  desired adapter state regenerates only when explicitly requested"
+
+(
+  export DREAMING_ADAPTER_CONFIG="$SUCCESS_CONFIG"
+  run_install install >/dev/null
+)
+RELOCATED_CONFIG="$TMP/relocated-config.env"
+STALE_CONFIG="$TMP/stale-config.env"
+cp "$TMP/config.env" "$RELOCATED_CONFIG"
+printf 'DREAMING_CONFIG_FILE=%q\n' "$STALE_CONFIG" >> "$RELOCATED_CONFIG"
+(
+  export DREAMING_CONFIG_FILE="$RELOCATED_CONFIG"
+  export ADAPTER_ENV_LOG="$TMP/adapter-env.log"
+  run_persisted selftest >/dev/null
+)
+(
+  export DREAMING_CONFIG_FILE="$RELOCATED_CONFIG"
+  export ADAPTER_ENV_LOG="$TMP/adapter-env.log"
+  if ! run_persisted enable >"$TMP/persisted-enable.out" \
+      2>"$TMP/persisted-enable.err"; then
+    cat "$TMP/persisted-enable.out" "$TMP/persisted-enable.err" >&2
+    exit 1
+  fi
+)
+grep -q '"ok": true' "$TMP/persisted-enable.out"
+EXPECTED_SHARED="$(
+  set +u
+  # shellcheck disable=SC1090
+  source "$TMP/config.env"
+  printf '%s\n' "$DREAMING_SHARED_SKILLS_ROOT"
+)"
+python3 - "$TMP/adapter-env.log" "$ROOT" "$TMP/data" \
+  "$TMP/dreaming-state" "$TMP/dreaming-skills" "$TMP/deps" \
+  "$SUCCESS_CONFIG" "$RELOCATED_CONFIG" "$RECEIPT" "$EXPECTED_SHARED" <<'PY'
+import json
+import sys
+
+log, repo, data, state, skills, deps, adapters, config, receipt, shared = sys.argv[1:]
+records = [json.loads(line) for line in open(log, encoding="utf-8")]
+expected = {
+    "DREAMING_REPO_ROOT": repo,
+    "DREAMING_DATA_DIR": data,
+    "DREAMING_STATE_DIR": state,
+    "DREAMING_SKILLS_ROOT": skills,
+    "DREAMING_DEPS_DIR": deps,
+    "DREAMING_ADAPTER_CONFIG": adapters,
+    "DREAMING_ENABLE_COPILOT_COMPAT": "1",
+    "DREAMING_CONFIG_FILE": config,
+    "DREAMING_RECEIPT_FILE": receipt,
+    "DREAMING_SHARED_SKILLS_ROOT": shared,
+}
+if not records or any(record != expected for record in records):
+    raise SystemExit(f"persisted runtime environment mismatch: {records!r}")
+PY
+[[ ! -e "$STALE_CONFIG" ]] ||
+  { echo "installer used stale self-referenced config path" >&2; exit 1; }
+echo "PASS  explicit config path overrides persisted self-reference"
+echo "PASS  persisted config pointer exports complete runtime environment"
+
 touch "$STATE/skill-review/disable-daemon"
 rm "$OLD"
 : > "$LAUNCHCTL_LOG"
@@ -211,17 +483,90 @@ if run_install enable >"$TMP/enable.out" 2>"$TMP/enable.err"; then
 fi
 run_install selftest >/dev/null
 run_install enable >/dev/null
+[[ ! -e "$INSTRUCTIONS" ]] ||
+  { echo "rollback retained the managed Copilot instruction" >&2; exit 1; }
 echo "PASS  rollback refuses missing executables and requires restored selftest"
 
+run_install install >/dev/null
+MIGRATION_LEGACY_SKILLS="$TMP/migration-legacy-skills"
+MIGRATION_LEGACY_STATE="$TMP/migration-legacy-state"
+mkdir -p "$MIGRATION_LEGACY_SKILLS/learned" "$MIGRATION_LEGACY_STATE"
+printf '%s\n' '---' 'name: learned' 'description: installer migration fixture' '---' \
+  > "$MIGRATION_LEGACY_SKILLS/learned/SKILL.md"
+git -C "$MIGRATION_LEGACY_SKILLS" init -q
+git -C "$MIGRATION_LEGACY_SKILLS" add learned/SKILL.md
+git -C "$MIGRATION_LEGACY_SKILLS" \
+  -c user.name=fixture -c user.email=fixture@example.invalid \
+  commit -qm fixture
+printf '[{"session_id":"legacy"}]\n' \
+  > "$MIGRATION_LEGACY_STATE/review-ledger.json"
+printf '[{"session_id":"queued"}]\n' > "$MIGRATION_LEGACY_STATE/queue.json"
+"$ROOT/scripts/migrate-copilot-state.py" apply \
+  --legacy-skills "$MIGRATION_LEGACY_SKILLS" \
+  --legacy-state "$MIGRATION_LEGACY_STATE" \
+  --target-skills "$TMP/dreaming-skills" \
+  --target-state "$TMP/dreaming-state" \
+  --journal "$TMP/dreaming-state/copilot-migration.json" >/dev/null
+printf '[{"session_id":"changed-after-migration"}]\n' \
+  > "$TMP/dreaming-state/queue.json"
+(
+  export DREAMING_LEGACY_COPILOT_SKILLS="$MIGRATION_LEGACY_SKILLS"
+  export DREAMING_LEGACY_COPILOT_STATE="$MIGRATION_LEGACY_STATE"
+  run_install rollback "$BACKUP" >/dev/null
+)
+grep -q '"status": "active"' "$TMP/dreaming-state/copilot-migration.json"
+grep -q 'changed-after-migration' "$TMP/dreaming-state/queue.json"
+[[ -f "$TMP/dreaming-skills/learned/SKILL.md" ]]
+[[ -f "$TMP/dreaming-state/review-ledger.json" ]]
+echo "PASS  agent rollback leaves changed migrated audit data intact"
+
+if (
+  export DREAMING_LEGACY_COPILOT_SKILLS="$MIGRATION_LEGACY_SKILLS"
+  export DREAMING_LEGACY_COPILOT_STATE="$MIGRATION_LEGACY_STATE"
+  run_install rollback-migration >"$TMP/rollback-migration.out" \
+    2>"$TMP/rollback-migration.err"
+); then
+  echo "rollback-migration accepted changed migrated state" >&2
+  exit 1
+fi
+grep -q "neutral state changed after migration" "$TMP/rollback-migration.err"
+grep -q '"status": "active"' "$TMP/dreaming-state/copilot-migration.json"
+grep -q 'changed-after-migration' "$TMP/dreaming-state/queue.json"
+[[ -f "$TMP/dreaming-skills/learned/SKILL.md" ]]
+[[ -f "$TMP/dreaming-state/review-ledger.json" ]]
+[[ -f "$STATE/skill-review/disable-daemon" ]]
+echo "PASS  explicit migration rollback fails closed without partial deletion"
+
+run_install install >/dev/null
 echo "post-install user edit" >> "$INSTRUCTIONS"
-run_install uninstall >/dev/null 2>&1
+FAIL_CONFIG="$TMP/failing-adapters.json"
+cat > "$FAIL_CONFIG" <<JSON
+{
+  "contract_version": 1,
+  "sources": {},
+  "executors": {},
+  "publishers": {
+    "missing": {"argv": ["$TMP/missing-publisher"]}
+  },
+  "routes": [],
+  "executor_order": []
+}
+JSON
+(
+  export DREAMING_ADAPTER_CONFIG="$FAIL_CONFIG"
+  run_install uninstall >"$TMP/uninstall.out" 2>"$TMP/uninstall.err"
+)
+grep -q "publication cleanup incomplete; residual registrations may remain" \
+  "$TMP/uninstall.err"
+grep -q '"ok": false' "$TMP/uninstall.err"
+grep -q "publication residuals remain" "$TMP/uninstall.out"
 grep -q "post-install user edit" "$INSTRUCTIONS" ||
   { echo "full uninstall removed a modified managed instruction" >&2; exit 1; }
 for kind in dreaming selftest watchdog; do
   [[ ! -e "$DEST/com.fixture.dreaming.$kind.plist" ]] ||
     { echo "full uninstall retained LaunchAgent $kind" >&2; exit 1; }
 done
-echo "PASS  full uninstall retains edited instructions while removing jobs"
+echo "PASS  uninstall reports publication residuals and still removes managed jobs"
 
 OWNERSHIP="$TMP/instruction-ownership"
 mkdir -p "$OWNERSHIP"

@@ -248,10 +248,11 @@ class RuntimeTest(unittest.TestCase):
         )
         report = json.loads(result.stdout)
         self.assertTrue(report["ok"])
-        self.assertEqual(
-            report["reviews"],
-            [{"executor": "fake-executor", "session_id": "fake:one", "status": "accepted"}],
-        )
+        self.assertEqual(len(report["reviews"]), 1)
+        self.assertEqual(report["reviews"][0]["session_id"], "fake:one")
+        self.assertEqual(report["reviews"][0]["executor"], "fake-executor")
+        self.assertEqual(report["reviews"][0]["status"], "accepted")
+        self.assertEqual(report["reviews"][0]["terminal_route"], "discard")
         ledger = Path(environment["DREAMING_STATE_DIR"]) / "review-ledger.json"
         self.assertEqual(json.loads(ledger.read_text())[0]["session_id"], "fake:one")
 
@@ -265,6 +266,117 @@ class RuntimeTest(unittest.TestCase):
             check=True,
         )
         self.assertEqual(json.loads(result.stdout)["adapters"], [])
+
+    def test_support_file_paths_are_canonical_nonconflicting_files(self) -> None:
+        core = self.core(set())
+        result = {
+            "ok": True,
+            "status": "ok",
+            "mutation_started": False,
+            "completion_sentinel": "DREAMING_REVIEW_COMPLETE",
+            "terminal_route": "support_file",
+            "summary": "Add reusable support material.",
+            "routing_reason": "The procedure needs a durable support file.",
+            "artifact": {
+                "operation": "support_file",
+                "skill_name": "fixture-skill",
+                "skill_markdown": (
+                    "---\nname: fixture-skill\n"
+                    "description: Reusable fixture procedure\n---\n"
+                    "# Fixture skill\n"
+                ),
+                "support_files": [{"path": ".", "content": "invalid"}],
+            },
+        }
+        with self.assertRaisesRegex(RuntimeFailure, "support file is invalid"):
+            core._validated_review_result(result)
+        result["artifact"]["support_files"] = [
+            {"path": "skill.md", "content": "reserved alias"}
+        ]
+        with self.assertRaisesRegex(RuntimeFailure, "support file is invalid"):
+            core._validated_review_result(result)
+        result["artifact"]["support_files"] = [
+            {"path": "notes", "content": "file"},
+            {"path": "notes/example.txt", "content": "nested"},
+        ]
+        with self.assertRaisesRegex(RuntimeFailure, "support file paths conflict"):
+            core._validated_review_result(result)
+        result["artifact"]["support_files"] = [
+            {"path": "Notes", "content": "file"},
+            {"path": "notes/example.txt", "content": "nested"},
+        ]
+        with self.assertRaisesRegex(RuntimeFailure, "support file paths conflict"):
+            core._validated_review_result(result)
+        self.assertFalse((self.paths.skills / "fixture-skill").exists())
+
+    def test_support_file_ancestors_are_validated_before_mutation(self) -> None:
+        self.paths.skills.mkdir(parents=True)
+        subprocess.run(
+            ["git", "-C", str(self.paths.skills), "init", "-q"],
+            check=True,
+        )
+        target = self.paths.skills / "fixture-skill"
+        target.mkdir()
+        skill_markdown = (
+            "---\nname: fixture-skill\n"
+            "description: Reusable fixture procedure\n---\n"
+            "# Original fixture skill\n"
+        )
+        (target / "SKILL.md").write_text(skill_markdown)
+        (target / "notes").write_text("existing file\n")
+        subprocess.run(
+            ["git", "-C", str(self.paths.skills), "add", "--", "fixture-skill"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.paths.skills),
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@localhost",
+                "commit",
+                "-q",
+                "-m",
+                "Fixture skill",
+            ],
+            check=True,
+        )
+        result = {
+            "terminal_route": "support_file",
+            "summary": "Add reusable support material.",
+            "routing_reason": "The procedure needs a durable support file.",
+            "artifact": {
+                "operation": "support_file",
+                "skill_name": "fixture-skill",
+                "skill_markdown": skill_markdown.replace("Original", "Updated"),
+                "support_files": [
+                    {"path": "notes/example.txt", "content": "nested"}
+                ],
+            },
+        }
+        with self.assertRaisesRegex(RuntimeFailure, "artifact-path-invalid"):
+            self.core(set())._apply_review_artifact(
+                "fake",
+                {
+                    "qualified_session_id": "fake:fixture",
+                    "source_revision": "sha256:fixture",
+                },
+                "fake-executor",
+                result,
+            )
+        self.assertEqual((target / "SKILL.md").read_text(), skill_markdown)
+        self.assertEqual(
+            subprocess.run(
+                ["git", "-C", str(self.paths.skills), "status", "--porcelain"],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout,
+            "",
+        )
 
     def test_doctor_rejects_source_without_usable_route(self) -> None:
         source_fixture = self.source_fixture([self.session("one", 10)])
@@ -402,10 +514,10 @@ class RuntimeTest(unittest.TestCase):
         )
         report = json.loads(result.stdout)
         self.assertNotEqual(result.returncode, 0)
-        self.assertEqual(
-            report["reviews"],
-            [{"executor": "fake-executor", "session_id": "fake:one", "status": "accepted"}],
-        )
+        self.assertEqual(len(report["reviews"]), 1)
+        self.assertEqual(report["reviews"][0]["session_id"], "fake:one")
+        self.assertEqual(report["reviews"][0]["executor"], "fake-executor")
+        self.assertEqual(report["reviews"][0]["status"], "accepted")
         self.assertEqual(report["errors"][0]["adapter"], "offline")
         self.assertEqual(
             json.loads(self.paths.ledger.read_text())[0]["session_id"], "fake:one"
@@ -569,7 +681,10 @@ class RuntimeTest(unittest.TestCase):
         result = core.review(
             "fake", source, "fake:one", [("first", first), ("second", second)]
         )
-        self.assertEqual(result, {"status": "accepted", "executor": "second"})
+        self.assertEqual(result["status"], "accepted")
+        self.assertEqual(result["executor"], "second")
+        self.assertEqual(result["terminal_route"], "discard")
+        self.assertFalse(result["artifact_mutated"])
         self.assertEqual(
             core.review(
                 "fake", source, "fake:one", [("first", first), ("second", second)]
@@ -578,7 +693,25 @@ class RuntimeTest(unittest.TestCase):
         )
 
         self.paths.ledger.unlink()
-        after_fixture = self.write("after.json", {"mode": "fail-after-mutation"})
+        after_fixture = self.write(
+            "after.json",
+            {
+                "mode": "success",
+                "terminal_route": "skill",
+                "summary": "Reusable fixture procedure",
+                "routing_reason": "The procedure has ordered reusable steps",
+                "artifact": {
+                    "operation": "create",
+                    "skill_name": "fixture-skill",
+                    "skill_markdown": (
+                        "---\nname: fixture-skill\n"
+                        "description: Reusable fixture procedure\n---\n"
+                        "# Fixture skill\n"
+                    ),
+                    "support_files": [],
+                },
+            },
+        )
         after = self.adapter("review-executor", "after", after_fixture)
         core = self.core({("fake", "after"), ("fake", "second")})
         with self.assertRaisesRegex(RuntimeFailure, "mutation-recovery-required"):
@@ -620,7 +753,8 @@ elif sys.argv[1] == "doctor":
 elif sys.argv[1] == "run":
     print(json.dumps({"ok": True, "status": "ok", "mutation_started": False,
         "completion_sentinel": "DREAMING_REVIEW_COMPLETE",
-        "terminal_route": "discard"}))
+        "terminal_route": "discard", "summary": "nothing durable",
+        "routing_reason": "fixture discard", "artifact": None}))
 """
         )
         os.chmod(missing_script, 0o755)
@@ -630,16 +764,147 @@ elif sys.argv[1] == "run":
         success_fixture = self.write("success.json", {"mode": "success"})
         success = self.adapter("review-executor", "success", success_fixture)
         core = self.core({("fake", "missing"), ("fake", "success")})
-        self.assertEqual(
-            core.review(
-                "fake",
-                source,
-                "fake:one",
-                [("missing", missing), ("success", success)],
-            ),
-            {"status": "accepted", "executor": "success"},
+        accepted = core.review(
+            "fake",
+            source,
+            "fake:one",
+            [("missing", missing), ("success", success)],
         )
+        self.assertEqual(accepted["status"], "accepted")
+        self.assertEqual(accepted["executor"], "success")
         self.assertEqual(json.loads(self.paths.transactions.read_text()), {})
+
+    def test_skill_result_commits_artifact_and_source_routing_evidence(self) -> None:
+        fixture = self.source_fixture([self.session("one", 10)])
+        source = self.adapter("session-source", "fake", fixture)
+        self.paths.skills.mkdir(parents=True)
+        subprocess.run(
+            ["git", "-C", str(self.paths.skills), "init", "-q"],
+            check=True,
+        )
+        executor_fixture = self.write(
+            "skill-result.json",
+            {
+                "mode": "success",
+                "terminal_route": "skill",
+                "summary": "A reusable fixture procedure was demonstrated",
+                "routing_reason": "The steps are ordered and likely to recur",
+                "artifact": {
+                    "operation": "create",
+                    "skill_name": "fixture-procedure",
+                    "skill_markdown": (
+                        "---\nname: fixture-procedure\n"
+                        "description: Run the reusable fixture procedure\n---\n"
+                        "# Fixture procedure\n\n1. Run the fixture.\n"
+                    ),
+                    "support_files": [],
+                },
+            },
+        )
+        executor = self.adapter("review-executor", "exec", executor_fixture)
+        result = self.core({("fake", "exec")}).review(
+            "fake", source, "fake:one", [("exec", executor)]
+        )
+        self.assertTrue(result["artifact_mutated"])
+        self.assertTrue(result["artifact_commit"])
+        skill = self.paths.skills / "fixture-procedure"
+        self.assertTrue((skill / "SKILL.md").is_file())
+        self.assertTrue((skill / ".agent-created").is_file())
+        envelope = json.loads((skill / ".agent-created.json").read_text())
+        evidence = envelope["evidence"][0]
+        self.assertEqual(evidence["source"], "fake")
+        self.assertEqual(evidence["review_executor"], "exec")
+        self.assertEqual(evidence["transfer_route"], "fake>exec")
+        self.assertEqual(evidence["destination"], "skill")
+        self.assertEqual(len(evidence["draft_reviews"]), 2)
+        self.assertEqual(
+            [review["decision"] for review in evidence["draft_reviews"]],
+            ["approve", "approve"],
+        )
+        ledger = json.loads(self.paths.ledger.read_text())[0]
+        self.assertEqual(ledger["artifact_commit"], result["artifact_commit"])
+        self.assertEqual(ledger["transfer_route"], "fake>exec")
+        self.assertEqual(len(ledger["draft_reviews"]), 2)
+        durable = json.loads(self.paths.review_evidence.read_text())[0]
+        self.assertEqual(durable["source_revision"], ledger["source_revision"])
+        self.assertEqual(
+            subprocess.run(
+                ["git", "-C", str(self.paths.skills), "status", "--porcelain"],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout,
+            "",
+        )
+
+    def test_rejected_draft_never_mutates_or_records_review(self) -> None:
+        fixture = self.source_fixture([self.session("one", 10)])
+        source = self.adapter("session-source", "fake", fixture)
+        self.paths.skills.mkdir(parents=True)
+        subprocess.run(["git", "-C", str(self.paths.skills), "init", "-q"], check=True)
+        executor_fixture = self.write(
+            "rejected-skill.json",
+            {
+                "mode": "success",
+                "terminal_route": "skill",
+                "draft_review_decision": "reject",
+                "artifact": {
+                    "operation": "create",
+                    "skill_name": "rejected-procedure",
+                    "skill_markdown": (
+                        "---\nname: rejected-procedure\n"
+                        "description: Rejected fixture procedure\n---\n"
+                        "# Rejected\n"
+                    ),
+                    "support_files": [],
+                },
+            },
+        )
+        executor = self.adapter("review-executor", "exec", executor_fixture)
+        with self.assertRaisesRegex(RuntimeFailure, "draft-review-rejected"):
+            self.core({("fake", "exec")}).review(
+                "fake", source, "fake:one", [("exec", executor)]
+            )
+        self.assertFalse((self.paths.skills / "rejected-procedure").exists())
+        self.assertFalse(self.paths.ledger.exists())
+        self.assertFalse(self.paths.review_evidence.exists())
+        self.assertEqual(json.loads(self.paths.transactions.read_text()), {})
+
+    def test_executor_run_uses_configured_long_timeout(self) -> None:
+        script = self.case / "slow-executor.py"
+        script.write_text(
+            """#!/usr/bin/env python3
+import json, pathlib, sys, time
+command = sys.argv[1]
+if command == "contract":
+    print(json.dumps({"ok": True, "protocol": "dreaming.review-executor",
+        "version": 1, "adapter_id": "slow", "capabilities":
+        ["source-blind", "mutation-fence", "completion-sentinel"]}))
+elif command == "doctor":
+    print(json.dumps({"ok": True, "healthy": True, "boundary_ready": True}))
+elif command == "run":
+    time.sleep(1.2)
+    result = {"status":"ok","mutation_started":False,
+        "completion_sentinel":"DREAMING_REVIEW_COMPLETE",
+        "terminal_route":"discard","summary":"slow fixture",
+        "routing_reason":"timeout regression","artifact":None}
+    pathlib.Path(sys.argv[sys.argv.index("--result") + 1]).write_text(json.dumps(result))
+    print(json.dumps({"ok": True, **result}))
+"""
+        )
+        adapter = ExecutableAdapter(
+            [sys.executable, str(script)],
+            "review-executor",
+            timeout=1,
+            run_timeout=2,
+        )
+        result_path = self.case / "slow-result.json"
+        response = adapter.call(
+            "run",
+            snapshot=self.write("slow-snapshot.json", {"events": []}),
+            result=result_path,
+        )
+        self.assertEqual(response["terminal_route"], "discard")
 
     def test_completed_transaction_self_heals_before_session_fence(self) -> None:
         fixture = self.source_fixture([self.session("one", 10)])
@@ -647,10 +912,9 @@ elif sys.argv[1] == "run":
         executor_fixture = self.write("success.json", {"mode": "success"})
         executor = self.adapter("review-executor", "exec", executor_fixture)
         core = self.core({("fake", "exec")})
-        self.assertEqual(
-            core.review("fake", source, "fake:one", [("exec", executor)]),
-            {"status": "accepted", "executor": "exec"},
-        )
+        accepted = core.review("fake", source, "fake:one", [("exec", executor)])
+        self.assertEqual(accepted["status"], "accepted")
+        self.assertEqual(accepted["executor"], "exec")
         reviewed = json.loads(self.paths.ledger.read_text())[0]
         transaction = {
             "status": "mutation-started",
@@ -679,7 +943,7 @@ elif sys.argv[1] == "run":
         self.assertEqual(json.loads(self.paths.queue.read_text())[-1]["status"], "queued")
         self.assertEqual(json.loads(self.paths.transactions.read_text()), {})
 
-    def test_nonzero_executor_cannot_hide_mutation_start(self) -> None:
+    def test_executor_cannot_claim_core_owned_mutation(self) -> None:
         fixture = self.source_fixture([self.session("one", 10)])
         source = self.adapter("session-source", "fake", fixture)
         executor_script = self.case / "nonzero-executor.py"
@@ -707,13 +971,14 @@ elif sys.argv[1] == "run":
         success_fixture = self.write("success.json", {"mode": "success"})
         success = self.adapter("review-executor", "success", success_fixture)
         core = self.core({("fake", "nonzero"), ("fake", "success")})
-        with self.assertRaisesRegex(RuntimeFailure, "mutation-recovery-required"):
-            core.review(
-                "fake",
-                source,
-                "fake:one",
-                [("nonzero", nonzero), ("success", success)],
-            )
+        result = core.review(
+            "fake",
+            source,
+            "fake:one",
+            [("nonzero", nonzero), ("success", success)],
+        )
+        self.assertEqual(result["status"], "accepted")
+        self.assertEqual(result["executor"], "success")
 
     def test_stale_result_rejected_and_latest_revision_requeued(self) -> None:
         fixture = self.source_fixture([self.session("one", 10)])
@@ -742,12 +1007,9 @@ elif sys.argv[1] == "run":
         )
         mutating = self.adapter("review-executor", "mutating", mutating_fixture)
         core = self.core({("fake", "mutating")})
-        with self.assertRaisesRegex(RuntimeFailure, "mutation-recovery-required"):
-            core.review("fake", source, "fake:one", [("mutating", mutating)])
-        transactions = json.loads(self.paths.transactions.read_text())
-        self.assertEqual(
-            next(iter(transactions.values()))["status"], "mutation-started"
-        )
+        stale = core.review("fake", source, "fake:one", [("mutating", mutating)])
+        self.assertEqual(stale["status"], "stale")
+        self.assertEqual(json.loads(self.paths.transactions.read_text()), {})
 
     def test_queued_revision_is_revalidated_before_executor_start(self) -> None:
         fixture = self.source_fixture([self.session("one", 10)])
@@ -926,7 +1188,13 @@ elif sys.argv[1] == "run":
         )
         self.assertEqual(
             [item["path"] for item in manifest["files"]],
-            ["learned-skill/SKILL.md"],
+            [
+                "learned-skill/SKILL.md",
+                ".agents/plugins/marketplace.json",
+                ".claude-plugin/marketplace.json",
+                ".claude-plugin/plugin.json",
+                ".codex-plugin/plugin.json",
+            ],
         )
         state = json.loads(publisher_fixture.read_text())
         self.assertEqual(state["owned_bundle_ids"], [first["bundle_id"]])

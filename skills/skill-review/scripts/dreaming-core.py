@@ -12,10 +12,13 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import signal
 import shutil
 import stat
 import subprocess
 import sys
+import unicodedata
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -68,6 +71,16 @@ ROLE_CONFIG_KEYS = {
     "executors": "review-executor",
     "publishers": "skill-publisher",
 }
+REVIEW_DESTINATIONS = {
+    "instruction",
+    "factual_memory",
+    "skill",
+    "support_file",
+    "discard",
+}
+ARTIFACT_OPERATIONS = {"create", "patch", "support_file"}
+SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+RESERVED_SKILL_FILES = {"skill.md", ".agent-created", ".agent-created.json"}
 
 
 class RuntimeFailure(RuntimeError):
@@ -89,12 +102,34 @@ def digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical(value)).hexdigest()
 
 
+def path_collision_key(path: Path) -> tuple[str, ...]:
+    return tuple(
+        unicodedata.normalize("NFC", part).casefold() for part in path.parts
+    )
+
+
 def atomic_json(path: Path, value: Any, mode: int = 0o600) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}"
     try:
         with temporary.open("wb") as handle:
             handle.write(canonical(value) + b"\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def atomic_text(path: Path, value: str, mode: int = 0o644) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}"
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            handle.write(value)
+            if not value.endswith("\n"):
+                handle.write("\n")
             handle.flush()
             os.fsync(handle.fileno())
         os.chmod(temporary, mode)
@@ -150,28 +185,50 @@ def overlap_floor(watermark: Any, seconds: int) -> Any:
 class ExecutableAdapter:
     """Strict JSON-lines client for an external adapter executable."""
 
-    def __init__(self, argv: Iterable[str], role: str, timeout: int = 30):
+    def __init__(
+        self,
+        argv: Iterable[str],
+        role: str,
+        timeout: int = 30,
+        run_timeout: int | None = None,
+    ):
         if role not in ROLES:
             raise RuntimeFailure("unknown-role", role)
         self.argv = [str(item) for item in argv]
         self.role = role
         self.timeout = timeout
+        self.run_timeout = run_timeout or timeout
         self.identity = self._verify_contract()
 
-    def _invoke(self, *args: Any) -> dict[str, Any]:
+    def _invoke(self, *args: Any, timeout: int | None = None) -> dict[str, Any]:
         command = self.argv + [str(arg) for arg in args]
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 command,
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
                 text=True,
-                timeout=self.timeout,
-                check=False,
+                start_new_session=True,
             )
-        except (OSError, subprocess.TimeoutExpired) as error:
+        except OSError as error:
             raise RuntimeFailure("adapter-unavailable", str(error)) from error
+        try:
+            stdout, stderr = process.communicate(timeout=timeout or self.timeout)
+        except subprocess.TimeoutExpired as error:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=5)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+            raise RuntimeFailure("adapter-timeout", str(error)) from error
+        result = subprocess.CompletedProcess(
+            command, process.returncode, stdout, stderr
+        )
         objects: list[dict[str, Any]] = []
         try:
             for raw in result.stdout.splitlines():
@@ -219,7 +276,10 @@ class ExecutableAdapter:
             if value is None:
                 continue
             argv.extend([f"--{name.replace('_', '-')}", str(value)])
-        return self._invoke(*argv)
+        return self._invoke(
+            *argv,
+            timeout=self.run_timeout if command == "run" else self.timeout,
+        )
 
 
 def validate_identity(session: dict[str, Any], expected_source: str | None = None) -> None:
@@ -297,6 +357,10 @@ class RuntimePaths:
     @property
     def snapshots(self) -> Path:
         return self.data / "snapshots"
+
+    @property
+    def review_evidence(self) -> Path:
+        return self.state / "review-evidence.json"
 
     @property
     def bundles(self) -> Path:
@@ -646,6 +710,467 @@ class DreamingRuntime:
             atomic_json(path, snapshot, mode=0o400)
         return path, inspected
 
+    def _validated_review_result(self, result: dict[str, Any]) -> dict[str, Any]:
+        if result.get("status") != "ok":
+            raise RuntimeFailure("executor-failed", "review result status is not ok")
+        if result.get("completion_sentinel") != "DREAMING_REVIEW_COMPLETE":
+            raise RuntimeFailure("executor-failed", "completion sentinel missing")
+        destination = result.get("terminal_route")
+        if destination not in REVIEW_DESTINATIONS:
+            raise RuntimeFailure(
+                "malformed-executor-result", "terminal route is invalid"
+            )
+        for field in ("summary", "routing_reason"):
+            value = result.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise RuntimeFailure(
+                    "malformed-executor-result", f"{field} is required"
+                )
+            if len(value.encode("utf-8")) > 4_000:
+                raise RuntimeFailure(
+                    "malformed-executor-result", f"{field} is too large"
+                )
+        artifact = result.get("artifact")
+        if destination in {"discard", "instruction", "factual_memory"}:
+            if artifact is not None:
+                raise RuntimeFailure(
+                    "malformed-executor-result",
+                    f"{destination} must not include an artifact",
+                )
+            return result
+        if not isinstance(artifact, dict):
+            raise RuntimeFailure(
+                "malformed-executor-result", "artifact is required"
+            )
+        operation = artifact.get("operation")
+        if operation not in ARTIFACT_OPERATIONS:
+            raise RuntimeFailure(
+                "malformed-executor-result", "artifact operation is invalid"
+            )
+        if destination == "skill" and operation not in {"create", "patch"}:
+            raise RuntimeFailure(
+                "malformed-executor-result", "skill route operation is invalid"
+            )
+        if destination == "support_file" and operation != "support_file":
+            raise RuntimeFailure(
+                "malformed-executor-result",
+                "support_file route requires support_file operation",
+            )
+        skill_name = artifact.get("skill_name")
+        if (
+            not isinstance(skill_name, str)
+            or not SKILL_NAME_RE.fullmatch(skill_name)
+            or skill_name in ORCHESTRATION_SKILLS
+        ):
+            raise RuntimeFailure(
+                "malformed-executor-result", "artifact skill name is invalid"
+            )
+        skill_markdown = artifact.get("skill_markdown")
+        if not isinstance(skill_markdown, str) or not skill_markdown.strip():
+            raise RuntimeFailure(
+                "malformed-executor-result", "skill_markdown is required"
+            )
+        if len(skill_markdown.encode("utf-8")) > 256_000:
+            raise RuntimeFailure(
+                "malformed-executor-result", "skill_markdown is too large"
+            )
+        frontmatter = re.match(r"^---\n(.*?)\n---\n", skill_markdown, re.S)
+        if frontmatter is None:
+            raise RuntimeFailure(
+                "malformed-executor-result", "SKILL.md frontmatter is required"
+            )
+        name_match = re.search(
+            r"(?m)^name:\s*([a-z0-9]+(?:-[a-z0-9]+)*)\s*$",
+            frontmatter.group(1),
+        )
+        description_match = re.search(
+            r"(?m)^description:\s*(\S.*)$", frontmatter.group(1)
+        )
+        if (
+            name_match is None
+            or name_match.group(1) != skill_name
+            or description_match is None
+        ):
+            raise RuntimeFailure(
+                "malformed-executor-result",
+                "SKILL.md name and description must match the artifact",
+            )
+        support_files = artifact.get("support_files", [])
+        if not isinstance(support_files, list):
+            raise RuntimeFailure(
+                "malformed-executor-result", "support_files must be a list"
+            )
+        seen: set[tuple[str, ...]] = set()
+        support_paths: list[tuple[str, ...]] = []
+        for item in support_files:
+            if not isinstance(item, dict):
+                raise RuntimeFailure(
+                    "malformed-executor-result", "support file must be an object"
+                )
+            relative = item.get("path")
+            content = item.get("content")
+            relative_path = Path(relative) if isinstance(relative, str) else None
+            collision_key = (
+                path_collision_key(relative_path)
+                if relative_path is not None
+                else ()
+            )
+            if (
+                not isinstance(relative, str)
+                or not relative
+                or relative_path is None
+                or not relative_path.parts
+                or relative_path.is_absolute()
+                or relative_path.as_posix() != relative
+                or ".." in relative_path.parts
+                or collision_key in seen
+                or collision_key[0] in RESERVED_SKILL_FILES
+                or not isinstance(content, str)
+            ):
+                raise RuntimeFailure(
+                    "malformed-executor-result", "support file is invalid"
+                )
+            if len(content.encode("utf-8")) > 256_000:
+                raise RuntimeFailure(
+                    "malformed-executor-result", "support file is too large"
+                )
+            seen.add(collision_key)
+            support_paths.append(collision_key)
+        for index, path in enumerate(support_paths):
+            for other in support_paths[index + 1 :]:
+                if (
+                    len(path) < len(other)
+                    and other[: len(path)] == path
+                    or len(other) < len(path)
+                    and path[: len(other)] == other
+                ):
+                    raise RuntimeFailure(
+                        "malformed-executor-result",
+                        "support file paths conflict",
+                    )
+        if operation != "support_file" and support_files:
+            raise RuntimeFailure(
+                "malformed-executor-result",
+                "only support_file operations may include support files",
+            )
+        if operation == "support_file" and not support_files:
+            raise RuntimeFailure(
+                "malformed-executor-result",
+                "support_file operation requires at least one support file",
+            )
+        return result
+
+    def _validated_draft_review(self, result: dict[str, Any]) -> dict[str, Any]:
+        if result.get("status") != "ok":
+            raise RuntimeFailure("draft-review-failed", "review status is not ok")
+        if result.get("completion_sentinel") != "DREAMING_DRAFT_REVIEW_COMPLETE":
+            raise RuntimeFailure("draft-review-failed", "completion sentinel missing")
+        if result.get("decision") not in {"approve", "reject"}:
+            raise RuntimeFailure("draft-review-malformed", "decision is invalid")
+        for field in ("summary", "model"):
+            value = result.get(field)
+            if not isinstance(value, str) or not value.strip():
+                raise RuntimeFailure(
+                    "draft-review-malformed", f"{field} is required"
+                )
+            if len(value.encode("utf-8")) > 4_000:
+                raise RuntimeFailure(
+                    "draft-review-malformed", f"{field} is too large"
+                )
+        return result
+
+    def _review_draft(
+        self,
+        reviewed_identity: dict[str, Any],
+        proposing_executor: str,
+        result: dict[str, Any],
+        reviewers: list[tuple[str, ExecutableAdapter]],
+    ) -> list[dict[str, Any]]:
+        selected = reviewers[:2] if len(reviewers) > 1 else reviewers * 2
+        packet = {
+            "contract_version": CONTRACT_VERSION,
+            "packet_kind": "draft_review",
+            "source_revision": reviewed_identity["source_revision"],
+            "snapshot_digest": reviewed_identity["snapshot_digest"],
+            "proposing_executor": proposing_executor,
+            "proposal": {
+                "terminal_route": result["terminal_route"],
+                "summary": result["summary"],
+                "routing_reason": result["routing_reason"],
+                "artifact": result["artifact"],
+            },
+        }
+        packet_digest = digest(packet)
+        packet_path = (
+            self.paths.state
+            / "draft-reviews"
+            / f"{packet_digest.removeprefix('sha256:')}.json"
+        )
+        if packet_path.exists():
+            if packet_path.read_bytes() != canonical(packet) + b"\n":
+                raise RuntimeFailure(
+                    "immutable-draft-review-collision", str(packet_path)
+                )
+        else:
+            atomic_json(packet_path, packet, mode=0o400)
+
+        reviews: list[dict[str, Any]] = []
+        for slot, (reviewer_id, reviewer) in enumerate(selected, 1):
+            doctor = reviewer.call("doctor")
+            if not doctor.get("healthy") or not doctor.get("boundary_ready"):
+                raise RuntimeFailure(
+                    "executor-boundary-unavailable", reviewer_id
+                )
+            result_path = (
+                self.paths.state
+                / "draft-reviews"
+                / (
+                    f"{packet_digest.removeprefix('sha256:')}-"
+                    f"{slot}-{hashlib.sha256(reviewer_id.encode()).hexdigest()}.result.json"
+                )
+            )
+            response = reviewer.call(
+                "run", snapshot=packet_path, result=result_path
+            )
+            if not result_path.exists():
+                raise RuntimeFailure("missing-draft-review-result", reviewer_id)
+            file_result = read_json(result_path, {})
+            if file_result != {
+                key: value for key, value in response.items() if key != "ok"
+            }:
+                raise RuntimeFailure("draft-review-channel-mismatch", reviewer_id)
+            validated = self._validated_draft_review(response)
+            review = {
+                "slot": slot,
+                "executor": reviewer_id,
+                "model": validated["model"],
+                "decision": validated["decision"],
+                "summary": validated["summary"],
+            }
+            reviews.append(review)
+            if validated["decision"] != "approve":
+                raise RuntimeFailure("draft-review-rejected", reviewer_id)
+        return reviews
+
+    def _append_review_evidence(
+        self,
+        source_name: str,
+        reviewed_identity: dict[str, Any],
+        executor_id: str,
+        result: dict[str, Any],
+        artifact_commit: str | None,
+    ) -> None:
+        records = self._state(self.paths.review_evidence, [])
+        if not isinstance(records, list):
+            raise RuntimeFailure(
+                "review-evidence-invalid", str(self.paths.review_evidence)
+            )
+        records.append(
+            {
+                "session_id": reviewed_identity["qualified_session_id"],
+                "source": source_name,
+                "source_revision": reviewed_identity["source_revision"],
+                "review_executor": executor_id,
+                "transfer_route": f"{source_name}>{executor_id}",
+                "policy_version": self.policy_version,
+                "destination": result["terminal_route"],
+                "summary": result["summary"],
+                "routing_reason": result["routing_reason"],
+                "draft_reviews": result.get("draft_reviews", []),
+                "artifact_commit": artifact_commit,
+                "observed_at": self.now(),
+            }
+        )
+        self._write(self.paths.review_evidence, records)
+
+    def _git(self, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
+        try:
+            return subprocess.run(
+                ["git", "-C", str(self.paths.skills), *arguments],
+                check=check,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+        except (OSError, subprocess.CalledProcessError) as error:
+            detail = getattr(error, "stderr", "") or str(error)
+            raise RuntimeFailure("skill-git-failed", detail.strip()) from error
+
+    def _apply_review_artifact(
+        self,
+        source_name: str,
+        reviewed_identity: dict[str, Any],
+        executor_id: str,
+        result: dict[str, Any],
+    ) -> str:
+        artifact = result["artifact"]
+        operation = artifact["operation"]
+        skill_name = artifact["skill_name"]
+        skills_root = self.paths.skills.resolve()
+        target = skills_root / skill_name
+        if target.parent != skills_root:
+            raise RuntimeFailure("artifact-path-escaped", skill_name)
+        if target.is_symlink():
+            raise RuntimeFailure("artifact-path-symlink", str(target))
+        if target.exists() and not target.is_dir():
+            raise RuntimeFailure("artifact-path-invalid", str(target))
+        exists = target.is_dir()
+        if operation == "create" and exists:
+            raise RuntimeFailure("skill-collision", skill_name)
+        if operation in {"patch", "support_file"} and not exists:
+            raise RuntimeFailure("skill-missing", skill_name)
+        if exists:
+            dirty = self._git("status", "--porcelain", "--", skill_name).stdout
+            if dirty.strip():
+                raise RuntimeFailure("skill-target-dirty", skill_name)
+        else:
+            tombstone = (
+                Path(os.environ.get("DREAMING_REPO_ROOT", Path(__file__).parents[3]))
+                / "skills/skill-review/scripts/check-tombstone.sh"
+            )
+            checked = subprocess.run(
+                [str(tombstone), skill_name],
+                env={
+                    **os.environ,
+                    "SKILLS_STATE_DIR": str(self.paths.state),
+                    "SKILLS_LOCAL_ROOT": str(self.paths.skills),
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            if checked.returncode == 0:
+                raise RuntimeFailure("skill-tombstoned", skill_name)
+            if checked.returncode != 1:
+                raise RuntimeFailure(
+                    "skill-tombstone-check-failed",
+                    (checked.stderr or checked.stdout).strip(),
+                )
+        destinations: list[tuple[Path, str]] = []
+        for item in artifact.get("support_files", []):
+            destination = target / item["path"]
+            resolved_parent = destination.parent.resolve()
+            if resolved_parent != target and target not in resolved_parent.parents:
+                raise RuntimeFailure("artifact-path-escaped", item["path"])
+            current = destination.parent
+            while current != target:
+                if current.is_symlink():
+                    raise RuntimeFailure("artifact-path-symlink", str(current))
+                if current.exists() and not current.is_dir():
+                    raise RuntimeFailure("artifact-path-invalid", str(current))
+                current = current.parent
+            if destination.is_symlink():
+                raise RuntimeFailure("artifact-path-symlink", str(destination))
+            if destination.exists() and not destination.is_file():
+                raise RuntimeFailure("artifact-path-invalid", str(destination))
+            destinations.append((destination, item["content"]))
+        try:
+            target.mkdir(parents=True, exist_ok=True)
+            atomic_text(target / "SKILL.md", artifact["skill_markdown"])
+            for destination, content in destinations:
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                atomic_text(destination, content)
+        except OSError as error:
+            raise RuntimeFailure("artifact-mutation-failed", str(error)) from error
+        marker = target / ".agent-created"
+        envelope = target / ".agent-created.json"
+        if operation == "create" or marker.exists():
+            evidence = (
+                Path(os.environ.get("DREAMING_REPO_ROOT", Path(__file__).parents[3]))
+                / "skills/skill-review/scripts/evidence-envelope.py"
+            )
+            task_key = (
+                "task:"
+                + hashlib.sha256(
+                    (
+                        reviewed_identity["qualified_session_id"]
+                        + "\0"
+                        + reviewed_identity["source_revision"]
+                    ).encode("utf-8")
+                ).hexdigest()
+            )
+            command = [
+                str(evidence),
+                "upsert",
+                str(envelope),
+                "--skill",
+                skill_name,
+                "--session-id",
+                reviewed_identity["qualified_session_id"],
+                "--source-mode",
+                "sweep",
+                "--task-key",
+                task_key,
+                "--independence",
+                "unverified",
+                "--evidence-kind",
+                "successful-procedure",
+                "--summary",
+                result["summary"],
+                "--destination",
+                result["terminal_route"],
+                "--reason",
+                result["routing_reason"],
+                "--source",
+                source_name,
+                "--source-revision",
+                reviewed_identity["source_revision"],
+                "--review-executor",
+                executor_id,
+                "--transfer-route",
+                f"{source_name}>{executor_id}",
+                "--policy-version",
+                str(self.policy_version),
+            ]
+            try:
+                subprocess.run(
+                    command,
+                    check=True,
+                    text=True,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                )
+            except (OSError, subprocess.CalledProcessError) as error:
+                detail = getattr(error, "stderr", "") or str(error)
+                raise RuntimeFailure(
+                    "skill-evidence-failed", detail.strip()
+                ) from error
+            envelope_data = read_json(envelope, {})
+            matching = next(
+                (
+                    item
+                    for item in envelope_data.get("evidence", [])
+                    if item.get("task_key") == task_key
+                ),
+                None,
+            )
+            if matching is None:
+                raise RuntimeFailure("skill-evidence-failed", "evidence item missing")
+            matching["draft_reviews"] = result.get("draft_reviews", [])
+            try:
+                atomic_json(envelope, envelope_data)
+                marker.touch()
+            except OSError as error:
+                raise RuntimeFailure("artifact-mutation-failed", str(error)) from error
+        self._git("add", "--", skill_name)
+        message = (
+            f"Learn {skill_name} from {source_name} session\n\n"
+            f"Reviewed-by: {executor_id}\n"
+            f"Source-revision: {reviewed_identity['source_revision']}"
+        )
+        self._git(
+            "-c",
+            "user.name=Dreaming",
+            "-c",
+            "user.email=dreaming@localhost",
+            "commit",
+            "-m",
+            message,
+            "--",
+            skill_name,
+        )
+        return self._git("rev-parse", "HEAD").stdout.strip()
+
     def review(
         self,
         source_name: str,
@@ -772,90 +1297,25 @@ class DreamingRuntime:
                         "run", snapshot=snapshot_path, result=result_path
                     )
                 except RuntimeFailure:
-                    partial = read_json(result_path, {}) if result_path.exists() else {}
-                    if partial.get("mutation_started"):
-                        mutation_started = True
-                        self._write_transaction(
-                            qualified_session_id,
-                            reviewed_identity["source_revision"],
-                            {
-                                "status": "mutation-recovery-required",
-                                "session_id": qualified_session_id,
-                                "source_revision": reviewed_identity["source_revision"],
-                                "executor": executor_id,
-                                "result_path": str(result_path),
-                                "mutation_started": True,
-                            },
-                        )
-                        attempts.append(
-                            {
-                                "session_id": qualified_session_id,
-                                "source": source_name,
-                                "executor": executor_id,
-                                "route": f"{source_name}>{executor_id}",
-                                "policy_version": self.policy_version,
-                                "status": "mutation-recovery-required",
-                                "mutation_started": True,
-                            }
-                        )
-                        self._write(self.paths.attempts, attempts)
-                        raise RuntimeFailure(
-                            "mutation-recovery-required", executor_id
-                        )
                     self._clear_transaction(
                         qualified_session_id,
                         reviewed_identity["source_revision"],
                     )
                     raise
                 if not result_path.exists():
-                    mutation_started = bool(result.get("mutation_started"))
-                    if mutation_started:
-                        self._write_transaction(
-                            qualified_session_id,
-                            reviewed_identity["source_revision"],
-                            {
-                                "status": "mutation-recovery-required",
-                                "session_id": qualified_session_id,
-                                "source_revision": reviewed_identity["source_revision"],
-                                "executor": executor_id,
-                                "result_path": str(result_path),
-                                "mutation_started": True,
-                            },
-                        )
-                    else:
-                        self._clear_transaction(
-                            qualified_session_id,
-                            reviewed_identity["source_revision"],
-                        )
+                    self._clear_transaction(
+                        qualified_session_id,
+                        reviewed_identity["source_revision"],
+                    )
                     raise RuntimeFailure("missing-executor-result", executor_id)
                 file_result = read_json(result_path, {})
-                mutation_started = bool(
-                    file_result.get("mutation_started")
-                    or result.get("mutation_started")
-                )
-                self._write_transaction(
-                    qualified_session_id,
-                    reviewed_identity["source_revision"],
-                    {
-                        "status": (
-                            "mutation-started"
-                            if mutation_started
-                            else "result-ready"
-                        ),
-                        "session_id": qualified_session_id,
-                        "source_revision": reviewed_identity["source_revision"],
-                        "executor": executor_id,
-                        "result_path": str(result_path),
-                        "mutation_started": mutation_started,
-                    },
-                )
                 if file_result != {key: value for key, value in result.items() if key != "ok"}:
-                    if not mutation_started:
-                        self._clear_transaction(
-                            qualified_session_id,
-                            reviewed_identity["source_revision"],
-                        )
+                    self._clear_transaction(
+                        qualified_session_id,
+                        reviewed_identity["source_revision"],
+                    )
                     raise RuntimeFailure("result-channel-mismatch", executor_id)
+                result = self._validated_review_result(result)
                 attempt = {
                     "session_id": qualified_session_id,
                     "source": source_name,
@@ -863,32 +1323,22 @@ class DreamingRuntime:
                     "route": f"{source_name}>{executor_id}",
                     "policy_version": self.policy_version,
                     "status": result.get("status"),
-                    "mutation_started": bool(result.get("mutation_started")),
+                    "terminal_route": result.get("terminal_route"),
+                    "mutation_started": False,
                 }
                 attempts.append(attempt)
                 self._write(self.paths.attempts, attempts)
-                if (
-                    result.get("status") != "ok"
-                    or result.get("completion_sentinel") != "DREAMING_REVIEW_COMPLETE"
-                ):
-                    if result.get("mutation_started"):
-                        raise RuntimeFailure(
-                            "mutation-recovery-required", executor_id
-                        )
-                    self._clear_transaction(
-                        qualified_session_id,
-                        reviewed_identity["source_revision"],
-                    )
-                    last_failure = RuntimeFailure("executor-failed", executor_id)
-                    continue
 
+                if result["terminal_route"] in {"skill", "support_file"}:
+                    result["draft_reviews"] = self._review_draft(
+                        reviewed_identity,
+                        executor_id,
+                        result,
+                        allowed,
+                    )
                 latest = source.call("inspect", session=qualified_session_id)["session"]
                 validate_identity(latest, source_name)
                 if not same_revision(reviewed_identity, latest):
-                    if mutation_started:
-                        raise RuntimeFailure(
-                            "mutation-recovery-required", executor_id
-                        )
                     attempt["status"] = "stale"
                     self._write(self.paths.attempts, attempts)
                     self._clear_transaction(
@@ -902,6 +1352,35 @@ class DreamingRuntime:
                         "queued_revision": latest["source_revision"],
                     }
 
+                mutation_started = True
+                self._write_transaction(
+                    qualified_session_id,
+                    reviewed_identity["source_revision"],
+                    {
+                        "status": "mutation-started",
+                        "session_id": qualified_session_id,
+                        "source_revision": reviewed_identity["source_revision"],
+                        "executor": executor_id,
+                        "result_path": str(result_path),
+                        "terminal_route": result["terminal_route"],
+                        "mutation_started": True,
+                    },
+                )
+                artifact_commit = None
+                if result["terminal_route"] in {"skill", "support_file"}:
+                    artifact_commit = self._apply_review_artifact(
+                        source_name,
+                        reviewed_identity,
+                        executor_id,
+                        result,
+                    )
+                self._append_review_evidence(
+                    source_name,
+                    reviewed_identity,
+                    executor_id,
+                    result,
+                    artifact_commit,
+                )
                 ledger = self._state(self.paths.ledger, [])
                 ledger.append(
                     {
@@ -912,11 +1391,16 @@ class DreamingRuntime:
                         "snapshot_digest": reviewed_identity["snapshot_digest"],
                         "adapter_version": reviewed_identity["adapter_version"],
                         "review_executor": executor_id,
-                        "terminal_route": result.get("terminal_route"),
+                        "transfer_route": f"{source_name}>{executor_id}",
+                        "policy_version": self.policy_version,
+                        "terminal_route": result["terminal_route"],
+                        "summary": result["summary"],
+                        "routing_reason": result["routing_reason"],
+                        "draft_reviews": result.get("draft_reviews", []),
+                        "artifact_commit": artifact_commit,
                         "reviewed_at": self.now(),
                     }
                 )
-                mutation_started = True
                 self._write(self.paths.ledger, ledger)
                 self._mark_queue(
                     qualified_session_id,
@@ -927,7 +1411,13 @@ class DreamingRuntime:
                     qualified_session_id,
                     reviewed_identity["source_revision"],
                 )
-                return {"status": "accepted", "executor": executor_id}
+                return {
+                    "status": "accepted",
+                    "executor": executor_id,
+                    "terminal_route": result["terminal_route"],
+                    "artifact_mutated": artifact_commit is not None,
+                    "artifact_commit": artifact_commit,
+                }
             except RuntimeFailure as error:
                 last_failure = error
                 if error.code == "mutation-recovery-required":
@@ -952,6 +1442,10 @@ class DreamingRuntime:
                     )
                     self._write(self.paths.attempts, attempts)
                     raise RuntimeFailure("mutation-recovery-required", executor_id)
+                self._clear_transaction(
+                    qualified_session_id,
+                    current["source_revision"],
+                )
                 attempts.append(
                     {
                         "session_id": qualified_session_id,
@@ -1070,7 +1564,8 @@ class DreamingRuntime:
         return imported
 
     def materialize_bundle(self, skills_root: Path) -> tuple[Path, str]:
-        inventory: list[dict[str, str]] = []
+        skills_root.mkdir(parents=True, exist_ok=True)
+        skill_inventory: list[dict[str, str]] = []
         for skill_root in sorted(skills_root.iterdir()):
             if skill_root.name.startswith("."):
                 continue
@@ -1088,7 +1583,7 @@ class DreamingRuntime:
                 if not path.is_file():
                     continue
                 relative = path.relative_to(skills_root)
-                inventory.append(
+                skill_inventory.append(
                     {
                         "path": relative.as_posix(),
                         "sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
@@ -1105,11 +1600,88 @@ class DreamingRuntime:
             ).stdout.strip()
         except (OSError, subprocess.CalledProcessError):
             pass
+        content_id = digest(
+            {
+                "files": skill_inventory,
+                "skills_revision": revision,
+                "orchestration_skills_absent": True,
+            }
+        )
+        publication_name = (
+            "dreaming-learned-" + content_id.removeprefix("sha256:")[:16]
+        )
+        skill_paths = sorted(
+            {
+                f"./{Path(item['path']).parts[0]}"
+                for item in skill_inventory
+                if len(Path(item["path"]).parts) > 1
+                and Path(item["path"]).parts[1] == "SKILL.md"
+            }
+        )
+        metadata = {
+            ".claude-plugin/plugin.json": {
+                "name": publication_name,
+                "version": "1.0.0",
+                "description": "Immutable learned skills published by Dreaming.",
+                "skills": skill_paths,
+            },
+            ".claude-plugin/marketplace.json": {
+                "name": publication_name,
+                "metadata": {
+                    "description": "Immutable learned skills published by Dreaming.",
+                    "version": "1.0.0",
+                },
+                "owner": {"name": "Dreaming"},
+                "plugins": [
+                    {
+                        "name": publication_name,
+                        "description": "Immutable learned skills published by Dreaming.",
+                        "version": "1.0.0",
+                        "source": "./",
+                    }
+                ],
+            },
+            ".codex-plugin/plugin.json": {
+                "name": publication_name,
+                "version": "1.0.0",
+                "description": "Immutable learned skills published by Dreaming.",
+                "skills": "./",
+            },
+            ".agents/plugins/marketplace.json": {
+                "name": publication_name,
+                "interface": {"displayName": "Dreaming learned skills"},
+                "plugins": [
+                    {
+                        "name": publication_name,
+                        "source": {"source": "local", "path": "./"},
+                        "policy": {
+                            "installation": "AVAILABLE",
+                            "authentication": "ON_INSTALL",
+                        },
+                        "category": "Productivity",
+                    }
+                ],
+            },
+        }
+        metadata_bytes = {
+            path: canonical(value) + b"\n" for path, value in metadata.items()
+        }
+        inventory = [
+            *skill_inventory,
+            *[
+                {
+                    "path": path,
+                    "sha256": hashlib.sha256(content).hexdigest(),
+                }
+                for path, content in sorted(metadata_bytes.items())
+            ],
+        ]
         proof = {
             "contract_version": CONTRACT_VERSION,
             "files": inventory,
             "skills_revision": revision,
             "orchestration_skills_absent": True,
+            "publication_name": publication_name,
         }
         bundle_id = digest(proof)
         bundle = self.paths.bundles / bundle_id.removeprefix("sha256:")
@@ -1117,10 +1689,12 @@ class DreamingRuntime:
             staging = self.paths.bundles / f".staging-{uuid.uuid4().hex}"
             staging.mkdir(parents=True)
             for item in inventory:
-                source = skills_root / item["path"]
                 destination = staging / item["path"]
                 destination.parent.mkdir(parents=True, exist_ok=True)
-                shutil.copyfile(source, destination)
+                if item["path"] in metadata_bytes:
+                    destination.write_bytes(metadata_bytes[item["path"]])
+                else:
+                    shutil.copyfile(skills_root / item["path"], destination)
             atomic_json(
                 staging / "dreaming-bundle-manifest.json",
                 {**proof, "bundle_id": bundle_id},
@@ -1230,7 +1804,24 @@ def configured_adapters(
                 raise RuntimeFailure(
                     "invalid-adapter-config", f"{key}.{name}.argv is invalid"
                 )
-            adapter = ExecutableAdapter(argv, role)
+            timeout = entry.get("timeout", 30)
+            run_timeout = entry.get("run_timeout", timeout)
+            if (
+                not isinstance(timeout, int)
+                or timeout < 1
+                or not isinstance(run_timeout, int)
+                or run_timeout < timeout
+            ):
+                raise RuntimeFailure(
+                    "invalid-adapter-config",
+                    f"{key}.{name} timeout is invalid",
+                )
+            adapter = ExecutableAdapter(
+                argv,
+                role,
+                timeout=timeout,
+                run_timeout=run_timeout,
+            )
             adapters[role][name] = adapter
             doctor = adapter.call("doctor")
             if doctor.get("healthy") is not True:
@@ -1281,7 +1872,24 @@ def configured_adapters_tolerant(
                     "invalid-adapter-config", f"{key}.{name}.argv is invalid"
                 )
             try:
-                adapter = ExecutableAdapter(argv, role)
+                timeout = entry.get("timeout", 30)
+                run_timeout = entry.get("run_timeout", timeout)
+                if (
+                    not isinstance(timeout, int)
+                    or timeout < 1
+                    or not isinstance(run_timeout, int)
+                    or run_timeout < timeout
+                ):
+                    raise RuntimeFailure(
+                        "invalid-adapter-config",
+                        f"{key}.{name} timeout is invalid",
+                    )
+                adapter = ExecutableAdapter(
+                    argv,
+                    role,
+                    timeout=timeout,
+                    run_timeout=run_timeout,
+                )
                 doctor = adapter.call("doctor")
                 if doctor.get("healthy") is not True:
                     raise RuntimeFailure("adapter-unhealthy", f"{role}:{name}")
@@ -1311,6 +1919,67 @@ def configured_adapters_tolerant(
                     "healthy": True,
                 }
             )
+    return adapters, reports, errors
+
+
+def configured_role_tolerant(
+    config: dict[str, Any],
+    key: str,
+    role: str,
+) -> tuple[dict[str, ExecutableAdapter], list[dict[str, Any]], list[dict[str, Any]]]:
+    entries = config.get(key, {})
+    if not isinstance(entries, dict):
+        raise RuntimeFailure("invalid-adapter-config", f"{key} must be an object")
+    adapters: dict[str, ExecutableAdapter] = {}
+    reports: list[dict[str, Any]] = []
+    errors: list[dict[str, Any]] = []
+    for name, entry in sorted(entries.items()):
+        if not isinstance(name, str) or not isinstance(entry, dict):
+            raise RuntimeFailure("invalid-adapter-config", f"invalid {key} entry")
+        argv = entry.get("argv")
+        timeout = entry.get("timeout", 30)
+        run_timeout = entry.get("run_timeout", timeout)
+        if (
+            not isinstance(argv, list)
+            or not argv
+            or not all(isinstance(item, str) and item for item in argv)
+            or not isinstance(timeout, int)
+            or timeout < 1
+            or not isinstance(run_timeout, int)
+            or run_timeout < timeout
+        ):
+            raise RuntimeFailure(
+                "invalid-adapter-config", f"{key}.{name} is invalid"
+            )
+        try:
+            adapter = ExecutableAdapter(
+                argv,
+                role,
+                timeout=timeout,
+                run_timeout=run_timeout,
+            )
+            doctor = adapter.call("doctor")
+            if doctor.get("healthy") is not True:
+                raise RuntimeFailure("adapter-unhealthy", f"{role}:{name}")
+        except RuntimeFailure as error:
+            errors.append(
+                {
+                    "phase": "adapter-health",
+                    "role": role,
+                    "adapter": name,
+                    "code": error.code,
+                }
+            )
+            continue
+        adapters[name] = adapter
+        reports.append(
+            {
+                "name": name,
+                "role": role,
+                "adapter_id": adapter.identity["adapter_id"],
+                "healthy": True,
+            }
+        )
     return adapters, reports, errors
 
 
@@ -1461,6 +2130,11 @@ def scheduled_run() -> dict[str, Any]:
         config, declared_sources, declared_executors
     )
     adapters, adapter_reports, adapter_errors = configured_adapters_tolerant(config)
+    retired_publishers, retired_reports, retired_errors = configured_role_tolerant(
+        config, "retired_publishers", "skill-publisher"
+    )
+    adapter_reports.extend(retired_reports)
+    adapter_errors.extend(retired_errors)
     sources = adapters["session-source"]
     executors = adapters["review-executor"]
     settings = configured_runtime_settings(config)
@@ -1490,6 +2164,7 @@ def scheduled_run() -> dict[str, Any]:
         "adapters": adapter_reports,
         "discovery": {},
         "reviews": [],
+        "publication": [],
         "errors": adapter_errors,
         "legacy_records_imported": imported_legacy,
     }
@@ -1561,8 +2236,157 @@ def scheduled_run() -> dict[str, Any]:
                     "code": error.code,
                 }
             )
+    for publisher_name, publisher in retired_publishers.items():
+        try:
+            publisher.call("remove")
+            report["publication"].append(
+                {"publisher": publisher_name, "status": "retired"}
+            )
+        except RuntimeFailure as error:
+            report["errors"].append(
+                {
+                    "phase": "publication-retire",
+                    "publisher": publisher_name,
+                    "code": error.code,
+                }
+            )
+    for publisher_name, publisher in adapters["skill-publisher"].items():
+        try:
+            result = core.publish(publisher, paths.skills)
+            report["publication"].append(
+                {"publisher": publisher_name, **result}
+            )
+        except RuntimeFailure as error:
+            report["errors"].append(
+                {
+                    "phase": "publication",
+                    "publisher": publisher_name,
+                    "code": error.code,
+                }
+            )
     report["ok"] = not report["errors"]
     return report
+
+
+def remove_publications() -> dict[str, Any]:
+    paths = default_paths()
+    config_path = default_adapter_config(paths)
+    config = load_adapter_config(config_path)
+    publishers, adapter_reports, adapter_errors = configured_role_tolerant(
+        config, "publishers", "skill-publisher"
+    )
+    retired, retired_reports, retired_errors = configured_role_tolerant(
+        config, "retired_publishers", "skill-publisher"
+    )
+    adapter_reports.extend(retired_reports)
+    adapter_errors.extend(retired_errors)
+    report: dict[str, Any] = {
+        "ok": True,
+        "runtime": "dreaming-core",
+        "command": "unpublish",
+        "adapters": adapter_reports,
+        "removed": [],
+        "errors": adapter_errors,
+    }
+    for publisher_name, publisher in {**retired, **publishers}.items():
+        try:
+            publisher.call("remove")
+            report["removed"].append(publisher_name)
+        except RuntimeFailure as error:
+            report["errors"].append(
+                {
+                    "phase": "publication-remove",
+                    "publisher": publisher_name,
+                    "code": error.code,
+                }
+            )
+    report["ok"] = not report["errors"]
+    return report
+
+
+def reconcile_publications() -> dict[str, Any]:
+    paths = default_paths()
+    config_path = default_adapter_config(paths)
+    config = load_adapter_config(config_path)
+    publishers, adapter_reports, adapter_errors = configured_role_tolerant(
+        config, "publishers", "skill-publisher"
+    )
+    retired, retired_reports, retired_errors = configured_role_tolerant(
+        config, "retired_publishers", "skill-publisher"
+    )
+    adapter_reports.extend(retired_reports)
+    adapter_errors.extend(retired_errors)
+    core = DreamingRuntime(paths, configured_routes(config))
+    report: dict[str, Any] = {
+        "ok": True,
+        "runtime": "dreaming-core",
+        "command": "publish",
+        "adapters": adapter_reports,
+        "publication": [],
+        "errors": adapter_errors,
+    }
+    for publisher_name, publisher in retired.items():
+        try:
+            publisher.call("remove")
+            report["publication"].append(
+                {"publisher": publisher_name, "status": "retired"}
+            )
+        except RuntimeFailure as error:
+            report["errors"].append(
+                {
+                    "phase": "publication-retire",
+                    "publisher": publisher_name,
+                    "code": error.code,
+                }
+            )
+    for publisher_name, publisher in publishers.items():
+        try:
+            result = core.publish(publisher, paths.skills)
+            report["publication"].append(
+                {"publisher": publisher_name, **result}
+            )
+        except RuntimeFailure as error:
+            report["errors"].append(
+                {
+                    "phase": "publication",
+                    "publisher": publisher_name,
+                    "code": error.code,
+                }
+            )
+    report["ok"] = not report["errors"]
+    return report
+
+
+def enqueue_session(source_name: str, qualified_session_id: str) -> dict[str, Any]:
+    paths = default_paths()
+    config_path = default_adapter_config(paths)
+    config = load_adapter_config(config_path)
+    adapters, _reports, errors = configured_adapters_tolerant(config)
+    if errors:
+        relevant = [
+            error
+            for error in errors
+            if error.get("role") == "session-source"
+            and error.get("adapter") == source_name
+        ]
+        if relevant:
+            raise RuntimeFailure(str(relevant[0]["code"]), source_name)
+    source = adapters["session-source"].get(source_name)
+    if source is None:
+        raise RuntimeFailure("source-not-configured", source_name)
+    routes = configured_routes(config)
+    core = DreamingRuntime(paths, routes)
+    session = source.call("inspect", session=qualified_session_id)["session"]
+    validate_identity(session, source_name)
+    admission = core._admit(session)
+    return {
+        "ok": True,
+        "runtime": "dreaming-core",
+        "command": "enqueue",
+        "source": source_name,
+        "session_id": qualified_session_id,
+        "admission": admission,
+    }
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -1571,6 +2395,11 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("selftest")
     subcommands.add_parser("doctor")
     subcommands.add_parser("run")
+    subcommands.add_parser("publish")
+    subcommands.add_parser("unpublish")
+    enqueue = subcommands.add_parser("enqueue")
+    enqueue.add_argument("--source", required=True)
+    enqueue.add_argument("--session", required=True)
     return parser
 
 
@@ -1589,11 +2418,16 @@ def main() -> None:
         )
         return
     try:
-        report = (
-            scheduled_run()
-            if args.command == "run"
-            else selftest(require_config=args.command == "doctor")
-        )
+        if args.command == "run":
+            report = scheduled_run()
+        elif args.command == "publish":
+            report = reconcile_publications()
+        elif args.command == "unpublish":
+            report = remove_publications()
+        elif args.command == "enqueue":
+            report = enqueue_session(args.source, args.session)
+        else:
+            report = selftest(require_config=args.command == "doctor")
         print(json.dumps(report, sort_keys=True))
         if report.get("ok") is not True:
             raise SystemExit(2)

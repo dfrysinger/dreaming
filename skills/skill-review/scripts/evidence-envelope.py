@@ -95,6 +95,46 @@ def validate_envelope(data: Any) -> dict[str, Any]:
         if item.get("evidence_kind") not in EVIDENCE_KINDS:
             raise EnvelopeError(f"evidence[{index}].evidence_kind is invalid")
         require_text(item.get("summary"), f"evidence[{index}].summary")
+        route_fields = {
+            "source",
+            "source_revision",
+            "review_executor",
+            "transfer_route",
+            "policy_version",
+            "destination",
+            "routing_reason",
+        }
+        present = route_fields & set(item)
+        if present:
+            if present != route_fields:
+                raise EnvelopeError(
+                    f"evidence[{index}] source routing metadata is incomplete"
+                )
+            require_text(item.get("source"), f"evidence[{index}].source")
+            require_text(
+                item.get("source_revision"),
+                f"evidence[{index}].source_revision",
+            )
+            require_text(
+                item.get("review_executor"),
+                f"evidence[{index}].review_executor",
+            )
+            require_text(
+                item.get("transfer_route"),
+                f"evidence[{index}].transfer_route",
+            )
+            if not isinstance(item.get("policy_version"), int):
+                raise EnvelopeError(
+                    f"evidence[{index}].policy_version must be an integer"
+                )
+            if item.get("destination") not in DESTINATIONS:
+                raise EnvelopeError(
+                    f"evidence[{index}].destination is invalid"
+                )
+            require_text(
+                item.get("routing_reason"),
+                f"evidence[{index}].routing_reason",
+            )
 
     if data["source_session_id"] != evidence[0]["session_id"]:
         raise EnvelopeError("source_session_id must mirror the first evidence session_id")
@@ -241,6 +281,18 @@ def upsert(args: argparse.Namespace) -> dict[str, Any]:
         "evidence_kind": args.evidence_kind,
         "summary": args.summary,
     }
+    if args.source is not None:
+        item.update(
+            {
+                "source": args.source,
+                "source_revision": args.source_revision,
+                "review_executor": args.review_executor,
+                "transfer_route": args.transfer_route,
+                "policy_version": args.policy_version,
+                "destination": args.destination,
+                "routing_reason": args.reason,
+            }
+        )
     path.parent.mkdir(parents=True, exist_ok=True)
     directory_fd = os.open(path.parent, os.O_RDONLY)
     try:
@@ -352,6 +404,11 @@ def build_parser() -> argparse.ArgumentParser:
     upsert_parser.add_argument("--summary", required=True)
     upsert_parser.add_argument("--destination", choices=sorted(DESTINATIONS), required=True)
     upsert_parser.add_argument("--reason", required=True)
+    upsert_parser.add_argument("--source")
+    upsert_parser.add_argument("--source-revision")
+    upsert_parser.add_argument("--review-executor")
+    upsert_parser.add_argument("--transfer-route")
+    upsert_parser.add_argument("--policy-version", type=int)
     upsert_parser.add_argument("--observed-at")
     evaluation_parser = subparsers.add_parser("set-evaluation")
     evaluation_parser.add_argument("file")
