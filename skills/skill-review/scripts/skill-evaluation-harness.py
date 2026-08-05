@@ -535,15 +535,27 @@ def call(argv: list[str], environment: dict[str, str], timeout: int, output_limi
                 stream.close()
             except OSError:
                 pass
+    stdout = bytes(captured["out"]).decode("utf-8", errors="replace")
     stderr = bytes(captured["err"]).decode("utf-8", errors="replace")[:512]
     if overflow:
         raise HarnessError("adapter output exceeds bound")
     if expired:
         raise HarnessError("adapter timeout; process group cancelled")
     if process.returncode != 0:
-        raise HarnessError(f"adapter failed ({process.returncode}): {stderr}")
+        detail = stderr
+        try:
+            failure = json.loads(stdout)
+            error = failure.get("error") if isinstance(failure, dict) else None
+            if isinstance(error, dict) and isinstance(error.get("code"), str):
+                message = error.get("message")
+                detail = error["code"] + (
+                    f": {message}" if isinstance(message, str) and message else ""
+                )
+        except json.JSONDecodeError:
+            pass
+        raise HarnessError(f"adapter failed ({process.returncode}): {detail[:512]}")
     try:
-        response = json.loads(bytes(captured["out"]).decode("utf-8"))
+        response = json.loads(stdout)
     except (UnicodeDecodeError, json.JSONDecodeError) as error:
         raise HarnessError("adapter did not emit one JSON object") from error
     if not isinstance(response, dict):

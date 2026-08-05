@@ -971,9 +971,13 @@ def project_claude_auth(credential_root: Path, destination: Path) -> bool:
     if source.is_file() and not source.is_symlink():
         copy_auth_file(source, destination)
         return True
-    if sys.platform != "darwin" or credential_root != Path.home().resolve():
+    account_record = pwd.getpwuid(os.getuid())
+    if (
+        sys.platform != "darwin"
+        or credential_root != Path(account_record.pw_dir).resolve()
+    ):
         return False
-    account = pwd.getpwuid(os.getuid()).pw_name
+    account = account_record.pw_name
     try:
         result = subprocess.run(
             [
@@ -2032,6 +2036,10 @@ def evaluation_sandbox_profile(
     for path in sorted(denied, key=str):
         rules.append(f'(deny file-read* file-write* (subpath "{sandbox_quote(path)}"))')
         rules.append(f'(deny file-read* file-write* (literal "{sandbox_quote(path)}"))')
+    for path in (root, *root.parents):
+        rules.append(
+            f'(allow file-read-metadata (literal "{sandbox_quote(path)}"))'
+        )
     for path in (root, Path(environment["TMPDIR"])):
         rules.append(
             f'(allow file-read* file-write* (subpath "{sandbox_quote(path)}"))'
