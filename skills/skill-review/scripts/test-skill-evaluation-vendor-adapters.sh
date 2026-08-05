@@ -128,22 +128,40 @@ loaded_name = "other-skill" if prompt == "WRONGLOAD" else "fixture-skill"
 if vendor == "copilot":
     if prompt == "CURRENTCOPILOT":
         events = [
-            {"type":"session.skills_loaded","data":{"skills":[]}},
+            {"type":"session.skills_loaded","data":{"skills":[
+                {"name":loaded_name,"path":loaded_path,"enabled":True}
+            ] if candidate else []}},
             {"type":"session.tools_updated","data":{"model":observed}},
             {"type":"model.call_start","data":{"model":observed}},
-            {"type":"assistant.message",
-             "data":{"content":"answer","outputTokens":tokens}},
+            {"type":"assistant.message","data":{
+                "content":"",
+                "outputTokens":tokens,
+                "toolRequests":[{
+                    "arguments":{"skill":loaded_name},
+                    "name":"skill",
+                    "toolCallId":"current-skill-call",
+                    "type":"function",
+                }] if candidate else [],
+            }},
         ]
     else:
         events = [{"type":"session.start","data":{"model":observed}},
                   {"type":"assistant.message","data":{"content":"answer"}},
                   {"type":"session.usage_checkpoint",
                    "usage":{"total_tokens":tokens}}]
-    if candidate:
+    if candidate and prompt != "CURRENTCOPILOT":
         events.append({"type":"skill.invoked","data":{
             "skillName":loaded_name,"resolvedPath":loaded_path}})
     if prompt == "CURRENTCOPILOT":
         events.extend([
+            {"type":"tool.execution_complete","data":{
+                "toolCallId":"current-skill-call",
+                "success":True,
+                "result":{"content":f'Skill "{loaded_name}" loaded successfully.'},
+            }} if candidate else
+            {"type":"session.tools_updated","data":{"model":observed}},
+            {"type":"assistant.message",
+             "data":{"content":"answer","outputTokens":0,"toolRequests":[]}},
             {"type":"assistant.turn_end","data":{}},
             {"type":"result","exitCode":0},
         ])
@@ -363,8 +381,16 @@ else:
             self.assertLess(profile.stat().st_size, 65535)
             self.assertIn("(deny network*)", profile.read_text())
             if vendor == "copilot":
+                broad_home_read = (
+                    "(allow file-read* "
+                    f'(require-all (subpath "{self.credentials.resolve()}") '
+                    f'(process-path "{self.binaries[vendor].resolve()}")))'
+                )
+                self.assertNotIn(broad_home_read, profile.read_text())
                 self.assertIn(
-                    f'(process-path "{self.binaries[vendor].resolve()}")',
+                    "(allow file-read-metadata "
+                    f'(require-all (subpath "{self.credentials.resolve()}") '
+                    f'(process-path "{self.binaries[vendor].resolve()}")))',
                     profile.read_text(),
                 )
             listener = socket.socket()
@@ -494,7 +520,7 @@ else:
     def test_current_native_load_and_failure_shapes(self):
         copilot, _, _, _ = self.prepare_and_run(
             "copilot",
-            treatment="control",
+            treatment="candidate",
             prompt="CURRENTCOPILOT",
         )
         self.call(
@@ -513,6 +539,20 @@ else:
         self.assertEqual(
             [event["data"]["total_tokens"] for event in copilot_events if event["kind"] == "usage"],
             [15],
+        )
+        copilot_proof = harness.proof(
+            copilot_events,
+            "candidate",
+            copilot["candidate_id"],
+            copilot["skill_md_sha256"],
+            "intended",
+        )
+        self.assertTrue(
+            copilot_proof[0],
+            (
+                copilot_proof,
+                [event for event in copilot_events if event["kind"] == "skill_load"],
+            ),
         )
 
         trial, _, _, _ = self.prepare_and_run("claude", prompt="NOPATH")

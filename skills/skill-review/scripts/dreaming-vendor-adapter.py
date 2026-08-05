@@ -2152,7 +2152,7 @@ def evaluation_sandbox_profile(
         )
     if args.vendor == "copilot":
         rules.append(
-            "(allow file-read* "
+            "(allow file-read-metadata "
             f'(require-all (subpath "{sandbox_quote(credential_root)}") '
             f'(process-path "{sandbox_quote(binary.resolve())}")))'
         )
@@ -2529,6 +2529,52 @@ def native_skill_evidence(
     evidence: list[dict[str, Any]] = []
     seen: set[str] = set()
     claude_projection: tuple[str, str] | None = None
+    copilot_projections: dict[str, tuple[str, str]] = {}
+    copilot_successful_skill_calls: dict[str, str] = {}
+    if vendor == "copilot" and skill_name is not None and skill_file is not None:
+        projections: dict[str, set[tuple[str, str]]] = {}
+        for value in values:
+            for item in recursive_values(value):
+                if item.get("type") == "session.skills_loaded":
+                    data = item.get("data", {})
+                    skills = data.get("skills") if isinstance(data, dict) else None
+                    if not isinstance(skills, list):
+                        continue
+                    for skill in skills:
+                        if not isinstance(skill, dict):
+                            continue
+                        name = skill.get("name")
+                        path = skill.get("path")
+                        if not isinstance(name, str) or not isinstance(path, str):
+                            continue
+                        candidate_path = Path(path)
+                        if (
+                            candidate_path.is_absolute()
+                            and candidate_path.resolve() == skill_file.resolve()
+                        ):
+                            projections.setdefault(name, set()).add((path, sha(item)))
+                elif item.get("type") == "tool.execution_complete":
+                    data = item.get("data", {})
+                    if not isinstance(data, dict) or data.get("success") is not True:
+                        continue
+                    call_id = data.get("toolCallId")
+                    result = data.get("result")
+                    content = result.get("content") if isinstance(result, dict) else None
+                    match = (
+                        re.match(r'^Skill "([^"]+)" loaded successfully\.', content)
+                        if isinstance(content, str)
+                        else None
+                    )
+                    if (
+                        isinstance(call_id, str)
+                        and match is not None
+                    ):
+                        copilot_successful_skill_calls[call_id] = match.group(1)
+        copilot_projections = {
+            name: next(iter(projected))
+            for name, projected in projections.items()
+            if len(projected) == 1
+        }
     if vendor == "claude" and skill_name is not None and skill_file is not None:
         projections: set[tuple[str, str]] = set()
         for value in values:
@@ -2568,6 +2614,28 @@ def native_skill_evidence(
                         "resolvedPath",
                         data.get("skillPath", data.get("path")),
                     )
+            elif vendor == "copilot" and item.get("type") == "assistant.message":
+                data = item.get("data", {})
+                requests = data.get("toolRequests") if isinstance(data, dict) else None
+                if isinstance(requests, list):
+                    skill_requests = [
+                        request
+                        for request in requests
+                        if isinstance(request, dict)
+                        and str(request.get("name", "")).lower() == "skill"
+                        and request.get("toolCallId") in copilot_successful_skill_calls
+                    ]
+                    if len(skill_requests) == 1:
+                        input_value = skill_requests[0].get("arguments", {})
+                        if isinstance(input_value, dict):
+                            name = input_value.get("skill", input_value.get("name"))
+                            call_id = skill_requests[0].get("toolCallId")
+                            if (
+                                isinstance(name, str)
+                                and copilot_successful_skill_calls.get(call_id) == name
+                                and name in copilot_projections
+                            ):
+                                loaded_path, projection_digest = copilot_projections[name]
             elif vendor == "claude" and item.get("type") == "tool_use":
                 if str(item.get("name", "")).lower() == "skill":
                     input_value = item.get("input", {})
