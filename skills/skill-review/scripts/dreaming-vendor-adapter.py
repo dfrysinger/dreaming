@@ -10,6 +10,7 @@ import os
 import pwd
 import re
 import selectors
+import shlex
 import signal
 import shutil
 import sqlite3
@@ -1134,6 +1135,49 @@ def sandbox_profile(
     return profile
 
 
+def deny_tree_except(root: Path, allowed: list[Path]) -> set[Path]:
+    root = root.resolve()
+    relative_allowed: list[tuple[str, ...]] = []
+    for path in allowed:
+        try:
+            relative = path.resolve().relative_to(root)
+        except ValueError:
+            continue
+        relative_allowed.append(relative.parts)
+    if not relative_allowed:
+        return {root}
+    denied: set[Path] = set()
+
+    def visit(current: Path, tails: list[tuple[str, ...]]) -> None:
+        if any(not tail for tail in tails):
+            return
+        expected = {tail[0] for tail in tails}
+        try:
+            children = list(current.iterdir())
+        except OSError as error:
+            raise AdapterError(
+                "executor-boundary-unavailable",
+                f"cannot enumerate sandbox boundary {current}: {error}",
+            ) from error
+        for child in children:
+            if child.name not in expected:
+                denied.add(child)
+        for name in expected:
+            next_path = current / name
+            if not next_path.is_dir() or next_path.is_symlink():
+                raise AdapterError(
+                    "executor-boundary-unavailable",
+                    f"sandbox allow path is not a real directory: {next_path}",
+                )
+            visit(
+                next_path,
+                [tail[1:] for tail in tails if tail and tail[0] == name],
+            )
+
+    visit(root, relative_allowed)
+    return denied
+
+
 def sandboxed_command(
     command: list[str],
     work: Path,
@@ -2031,8 +2075,13 @@ def evaluation_sandbox_profile(
     root = home.parent.resolve()
     binary = Path(evaluation_binary(args))
     credential_root = evaluation_credential_root(args)
+    allowed_under_credentials = [root]
+    if args.vendor == "copilot":
+        keychains = credential_root / "Library/Keychains"
+        if keychains.is_dir():
+            allowed_under_credentials.append(keychains)
     denied = {
-        credential_root,
+        *deny_tree_except(credential_root, allowed_under_credentials),
         root.parent,
         Path("/tmp"),
         Path("/private/tmp"),
@@ -2047,10 +2096,7 @@ def evaluation_sandbox_profile(
             f'(allow file-read-metadata (literal "{sandbox_quote(path)}"))'
         )
     if args.vendor == "copilot":
-        for path in (
-            credential_root / "Library/Keychains",
-            Path("/Library/Keychains"),
-        ):
+        for path in allowed_under_credentials[1:] + [Path("/Library/Keychains")]:
             rules.append(
                 f'(allow file-read* (subpath "{sandbox_quote(path)}"))'
             )
@@ -2280,29 +2326,12 @@ def recursive_values(value: Any) -> Iterable[dict[str, Any]]:
 
 
 def validate_native_schema(vendor: str, values: list[dict[str, Any]]) -> None:
-    common = {
-        "text",
-        "thinking",
-        "input_text",
-        "output_text",
-        "tool_use",
-        "tool_result",
-        "message",
-        "function_call",
-        "custom_tool_call",
-        "function_call_output",
-        "custom_tool_call_output",
-        "skill_load",
-    }
-    allowed = {
-        "copilot": COPILOT_EVENT_TYPES | common,
+    top_level = {
+        "copilot": COPILOT_EVENT_TYPES,
         "claude": CLAUDE_EVENT_TYPES
-        | common
         | {"result", "stream_event", "rate_limit_event"},
         "codex": CODEX_EVENT_TYPES
-        | common
         | {
-            "agent_message",
             "thread.started",
             "turn.started",
             "turn.completed",
@@ -2312,13 +2341,60 @@ def validate_native_schema(vendor: str, values: list[dict[str, Any]]) -> None:
         },
     }[vendor]
     for value in values:
-        for item in recursive_values(value):
-            item_type = item.get("type")
-            if item_type is not None and item_type not in allowed:
+        events = [value]
+        if vendor == "copilot" and set(value) == {"events"}:
+            nested = value.get("events")
+            if not isinstance(nested, list) or not all(
+                isinstance(item, dict) for item in nested
+            ):
+                raise AdapterError(
+                    "unsupported-native-schema",
+                    f"{vendor}:events",
+                )
+            events = nested
+        for event in events:
+            item_type = event.get("type")
+            if item_type not in top_level:
                 raise AdapterError(
                     "unsupported-native-schema",
                     f"{vendor}:{item_type}",
                 )
+            if vendor == "claude" and item_type in {"assistant", "user"}:
+                message = event.get("message", {})
+                content = (
+                    message.get("content", []) if isinstance(message, dict) else []
+                )
+                if not isinstance(content, list):
+                    raise AdapterError(
+                        "unsupported-native-schema",
+                        f"{vendor}:message-content",
+                    )
+                for block in content:
+                    if not isinstance(block, dict) or block.get("type") not in {
+                        "text",
+                        "thinking",
+                        "tool_use",
+                        "tool_result",
+                    }:
+                        raise AdapterError(
+                            "unsupported-native-schema",
+                            f"{vendor}:{block.get('type') if isinstance(block, dict) else 'content'}",
+                        )
+            if vendor == "codex" and item_type in {
+                "item.started",
+                "item.completed",
+            }:
+                item = event.get("item")
+                if not isinstance(item, dict) or item.get("type") not in {
+                    "agent_message",
+                    "command_execution",
+                    "file_change",
+                    "mcp_tool_call",
+                }:
+                    raise AdapterError(
+                        "unsupported-native-schema",
+                        f"{vendor}:{item.get('type') if isinstance(item, dict) else 'item'}",
+                    )
 
 
 def native_model(vendor: str, values: list[dict[str, Any]]) -> str | None:
@@ -2403,6 +2479,30 @@ def native_skill_evidence(
                         )
             elif vendor == "codex":
                 payload = item.get("payload", item)
+                completed_read = False
+                if (
+                    item.get("type") == "command_execution"
+                    and skill_file is not None
+                    and item.get("status") == "completed"
+                    and item.get("exit_code") == 0
+                    and isinstance(item.get("command"), str)
+                ):
+                    try:
+                        outer = shlex.split(item["command"])
+                        inner = (
+                            shlex.split(outer[2])
+                            if len(outer) == 3
+                            and outer[0] in {"/bin/sh", "/bin/bash", "/bin/zsh"}
+                            and outer[1] == "-lc"
+                            else []
+                        )
+                    except ValueError:
+                        inner = []
+                    completed_read = inner == ["/bin/cat", str(skill_file.resolve())]
+                if completed_read:
+                    name = skill_name
+                    input_value = {"command": "/bin/cat", "path": str(skill_file)}
+                    loaded_path = str(skill_file)
                 native_call = item.get("type") == "response_item" and isinstance(
                     payload, dict
                 ) and payload.get("type") in {
@@ -2410,7 +2510,7 @@ def native_skill_evidence(
                     "custom_tool_call",
                 }
                 native_load = item.get("type") == "skill_load"
-                if (native_call or native_load) and str(
+                if not completed_read and (native_call or native_load) and str(
                     payload.get("name", "skill")
                 ).lower() in {"skill", "skills"}:
                     input_value = payload.get("arguments", payload.get("input", payload))
@@ -2481,11 +2581,14 @@ def evaluation_run(args: argparse.Namespace) -> None:
         raise AdapterError("prepared-invalid", "projection")
     verify_evaluation_plugin(trial, plugin)
     expected_command = evaluation_command(args, trial, plugin)
-    profile = evaluation_sandbox_profile(args, trial, environment)
+    profile = Path(environment["HOME"]) / "evaluation.sb"
+    if profile.is_symlink() or not profile.is_file():
+        raise AdapterError("prepared-drift", "sandbox profile missing")
+    profile_sha = sha_bytes(profile.read_bytes())
     expected_prepared = {
         "command": expected_command,
         "environment": environment,
-        "sandbox_profile_sha256": sha_bytes(profile.read_bytes()),
+        "sandbox_profile_sha256": profile_sha,
         "projection": plugin,
     }
     if prepared["adapter_prepared"] != expected_prepared:
