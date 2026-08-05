@@ -88,7 +88,7 @@ if "plugin" in args:
 model = args[args.index("--model") + 1]
 prompt = next((value for value in args if value in {
     "fixture prompt", "DRIFT", "NOLOAD", "WRONGLOAD", "FALSETRIGGER", "TIMEOUT",
-    "TOKENOVER", "FLOOD", "SCHEMA"
+    "TOKENOVER", "FLOOD", "SCHEMA", "NOPATH", "NATIVEFAIL"
 }), "")
 observed = "drifted-model" if prompt == "DRIFT" else model
 workspace = Path(args[args.index("-C") + 1]) if "-C" in args else Path.cwd()
@@ -105,6 +105,10 @@ if prompt == "FLOOD":
 tokens = 1000 if prompt == "TOKENOVER" else 15
 if prompt == "SCHEMA":
     print(json.dumps({"type":"new_skill_activation_event"}))
+if prompt == "NATIVEFAIL":
+    if vendor == "codex":
+        print(json.dumps({"type":"error","message":"fixture native failure"}))
+    raise SystemExit(1)
 candidate = False
 loaded_path = None
 if "--plugin-dir" in args:
@@ -132,11 +136,23 @@ if vendor == "copilot":
     events.append({"type":"session.task_complete","data":{"summary":"answer"}})
     print(json.dumps({"events":events}))
 elif vendor == "claude":
-    print(json.dumps({"type":"system","model":observed}))
+    system = {"type":"system","model":observed}
+    if candidate:
+        system.update({
+            "subtype":"init",
+            "plugins":[{"name":"fixture-plugin","path":str(plugin)}],
+            "skills":["fixture-plugin:fixture-skill"],
+        })
+    print(json.dumps(system))
     content = [{"type":"text","text":"answer"}]
     if candidate:
+        skill_input = (
+            {"skill":"fixture-plugin:fixture-skill"}
+            if prompt == "NOPATH"
+            else {"skill":loaded_name,"resolved_path":loaded_path}
+        )
         content.append({"type":"tool_use","name":"Skill",
-                        "input":{"skill":loaded_name,"resolved_path":loaded_path}})
+                        "input":skill_input})
     print(json.dumps({"type":"assistant","message":{"content":content}}))
     print(json.dumps({"type":"result","result":"answer",
                       "usage":{"total_tokens":tokens}}))
@@ -202,6 +218,7 @@ else:
             env={
                 **os.environ,
                 "DREAMING_EXECUTOR_TEST_ALLOW_ROOT": str(self.root),
+                "GH_TOKEN": "fixture-token",
             },
             text=True,
             stdout=subprocess.PIPE,
@@ -454,6 +471,52 @@ else:
             _, _, _, response = self.prepare_and_run(vendor, prompt="DRIFT")
             self.assertEqual(response["error"]["code"], "exact-model-unproved")
 
+    def test_current_native_load_and_failure_shapes(self):
+        trial, _, _, _ = self.prepare_and_run("claude", prompt="NOPATH")
+        self.call(
+            "claude",
+            "normalize",
+            "--raw",
+            trial["raw"],
+            "--trace",
+            trial["trace"],
+        )
+        events = json.loads(Path(trial["trace"]).read_text())["events"]
+        self.assertTrue(
+            harness.proof(
+                events,
+                "candidate",
+                trial["candidate_id"],
+                trial["skill_md_sha256"],
+                "intended",
+            )[0]
+        )
+
+        failed, failed_path = self.trial("codex", prompt="NATIVEFAIL")
+        prepared = self.call("codex", "prepare", "--trial", failed_path)
+        record = {
+            "schema_version": 1,
+            "trial_id": failed["trial_id"],
+            "adapter_prepared": prepared["prepared"],
+            "execution": prepared["execution"],
+        }
+        record["prepared_digest"] = sha(record)
+        prepared_path = failed_path.parent / "prepared.json"
+        prepared_path.write_bytes(canonical(record) + b"\n")
+        response = self.call(
+            "codex",
+            "run",
+            "--trial",
+            failed_path,
+            "--prepared",
+            prepared_path,
+            "--output",
+            failed["raw"],
+            check=False,
+        )
+        self.assertEqual(response["error"]["code"], "executor-failed")
+        self.assertEqual(response["error"]["message"], "fixture native failure")
+
     def test_load_proof_activation_and_projection_drift_fail_closed(self):
         for vendor in ("copilot", "claude", "codex"):
             missing, _, _, _ = self.prepare_and_run(vendor, prompt="NOLOAD")
@@ -622,6 +685,7 @@ else:
             env={
                 **os.environ,
                 "DREAMING_EXECUTOR_TEST_ALLOW_ROOT": str(self.root),
+                "GH_TOKEN": "fixture-token",
             },
             text=True,
             stdout=subprocess.PIPE,

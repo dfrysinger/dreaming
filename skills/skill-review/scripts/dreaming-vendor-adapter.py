@@ -1010,6 +1010,46 @@ def project_claude_auth(credential_root: Path, destination: Path) -> bool:
     return True
 
 
+def copilot_auth_token(credential_root: Path) -> str | None:
+    for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+        token = os.environ.get(name, "")
+        if token and token.strip() == token and not any(
+            character.isspace() for character in token
+        ):
+            return token
+    account_record = pwd.getpwuid(os.getuid())
+    if credential_root != Path(account_record.pw_dir).resolve():
+        return None
+    gh = shutil.which("gh")
+    if gh is None:
+        return None
+    account = account_record.pw_name
+    try:
+        result = subprocess.run(
+            [gh, "auth", "token", "--hostname", "github.com"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=10,
+            env={
+                "HOME": account_record.pw_dir,
+                "USER": account,
+                "LOGNAME": account,
+                "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"),
+            },
+        )
+    except subprocess.TimeoutExpired:
+        return None
+    token = result.stdout.strip()
+    if (
+        result.returncode != 0
+        or not token
+        or any(character.isspace() for character in token)
+    ):
+        return None
+    return token
+
+
 def executor_environment(vendor: str, work: Path) -> dict[str, str]:
     environment = os.environ.copy()
     real_home = Path.home()
@@ -2445,11 +2485,37 @@ def native_skill_evidence(
 ) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
     seen: set[str] = set()
+    claude_projection: tuple[str, str] | None = None
+    if vendor == "claude" and skill_name is not None and skill_file is not None:
+        projections: set[tuple[str, str]] = set()
+        for value in values:
+            for item in recursive_values(value):
+                plugins = item.get("plugins")
+                skills = item.get("skills")
+                if not isinstance(plugins, list) or not isinstance(skills, list):
+                    continue
+                for plugin in plugins:
+                    if not isinstance(plugin, dict):
+                        continue
+                    name = plugin.get("name")
+                    path = plugin.get("path")
+                    if not isinstance(name, str) or not isinstance(path, str):
+                        continue
+                    candidate_path = Path(path)
+                    if (
+                        candidate_path.is_absolute()
+                        and candidate_path.resolve() == plugin_root.resolve()
+                        and f"{name}:{skill_name}" in skills
+                    ):
+                        projections.add((f"{name}:{skill_name}", sha(item)))
+        if len(projections) == 1:
+            claude_projection = next(iter(projections))
     for value in values:
         for item in recursive_values(value):
             name: Any = None
             input_value: Any = None
             loaded_path: Any = None
+            projection_digest: str | None = None
             if vendor == "copilot" and item.get("type") == "skill.invoked":
                 data = item.get("data", {})
                 if isinstance(data, dict):
@@ -2468,6 +2534,16 @@ def native_skill_evidence(
                             "resolved_path",
                             input_value.get("path"),
                         )
+                        if (
+                            claude_projection is not None
+                            and name == claude_projection[0]
+                            and loaded_path is None
+                            and skill_name is not None
+                            and skill_file is not None
+                        ):
+                            name = skill_name
+                            loaded_path = str(skill_file)
+                            projection_digest = claude_projection[1]
             elif vendor == "codex":
                 payload = item.get("payload", item)
                 completed_read = False
@@ -2517,7 +2593,12 @@ def native_skill_evidence(
                             input_value.get("path"),
                         )
             if isinstance(name, str):
-                event_digest = sha(item)
+                event_digest = sha(
+                    {
+                        "invocation": item,
+                        "projection_event_sha256": projection_digest,
+                    }
+                )
                 if event_digest in seen:
                     continue
                 seen.add(event_digest)
@@ -2543,10 +2624,46 @@ def native_skill_evidence(
                         else None,
                         "exact_candidate_path": exact_path,
                         "native_event_sha256": event_digest,
+                        "projection_event_sha256": projection_digest,
                         "input": input_value,
                     }
                 )
     return evidence
+
+
+def native_failure_message(vendor: str, stdout: str, stderr: str) -> str:
+    try:
+        values = native_objects(stdout)
+    except AdapterError:
+        values = []
+    messages: list[str] = []
+    for value in values:
+        for item in recursive_values(value):
+            if vendor == "codex" and item.get("type") in {"error", "turn.failed"}:
+                error = item.get("error")
+                message = (
+                    error.get("message")
+                    if isinstance(error, dict)
+                    else item.get("message")
+                )
+                if isinstance(message, str) and message:
+                    messages.append(message)
+            elif vendor == "claude" and item.get("type") == "result":
+                if item.get("is_error") is True:
+                    message = item.get("result", item.get("error"))
+                    if isinstance(message, str) and message:
+                        messages.append(message)
+            elif vendor == "copilot" and item.get("type") in {
+                "session.error",
+                "error",
+            }:
+                data = item.get("data", item)
+                if isinstance(data, dict):
+                    message = data.get("message", data.get("error"))
+                    if isinstance(message, str) and message:
+                        messages.append(message)
+    fallback = stderr.strip() or stdout.strip() or vendor
+    return (messages[-1] if messages else fallback)[-1000:]
 
 
 def evaluation_run(args: argparse.Namespace) -> None:
@@ -2590,9 +2707,17 @@ def evaluation_run(args: argparse.Namespace) -> None:
     sandbox = Path("/usr/bin/sandbox-exec")
     if not sandbox.is_file():
         raise AdapterError("executor-boundary-unavailable", "macOS sandbox-exec is required")
+    process_environment = environment
+    if args.vendor == "copilot":
+        token = copilot_auth_token(evaluation_credential_root(args))
+        if token is None:
+            raise AdapterError("authentication-required", args.vendor)
+        process_environment = dict(environment)
+        process_environment["GH_TOKEN"] = token
+        process_environment["GITHUB_TOKEN"] = token
     result = run_process_bounded(
         [str(sandbox), "-f", str(profile), *expected_command],
-        environment,
+        process_environment,
         args.timeout,
         args.output_bytes,
         Path(trial["workspace"]),
@@ -2600,7 +2725,7 @@ def evaluation_run(args: argparse.Namespace) -> None:
     if result.returncode != 0:
         raise AdapterError(
             "executor-failed",
-            (result.stderr or result.stdout).strip()[-1000:] or args.vendor,
+            native_failure_message(args.vendor, result.stdout, result.stderr),
         )
     values = native_objects(result.stdout)
     validate_native_schema(args.vendor, values)
