@@ -268,13 +268,18 @@ def validate_executors(value: Any) -> None:
     if not isinstance(value, list) or not value:
         raise HarnessError("executors must be a non-empty list")
     seen: set[str] = set()
-    required = {"name", *EXECUTOR_IDENTITY_KEYS}
+    required = {"name", "requirement", *EXECUTOR_IDENTITY_KEYS}
+    required_count = 0
     for index, executor in enumerate(value):
         require_keys(executor, required, f"executors[{index}]")
         name = text(executor["name"], f"executors[{index}].name")
         if name in seen:
             raise HarnessError("duplicate executor")
         seen.add(name)
+        requirement = text(executor["requirement"], f"executors[{index}].requirement")
+        if requirement not in {"required", "advisory"}:
+            raise HarnessError("executor requirement must be required or advisory")
+        required_count += requirement == "required"
         text(executor["model"], "executor model")
         identity(executor["adapter_id"], "executor adapter_id")
         integer(executor["adapter_version"], "executor adapter_version", 1, 1)
@@ -287,6 +292,8 @@ def validate_executors(value: Any) -> None:
         integer(executor["limits"]["timeout_seconds"], "executor timeout", 1, 600)
         integer(executor["limits"]["token_budget"], "executor token budget", 1, 1_000_000)
         integer(executor["limits"]["output_bytes"], "executor output budget", 1, MAX_OUTPUT_BYTES)
+    if required_count == 0:
+        raise HarnessError("at least one executor must be required")
 
 
 def validate_comparator(value: Any) -> None:
@@ -925,12 +932,18 @@ def run_trial(run: Path, result: Path, scratch: Scratch, sealed: dict[str, Any],
         scratch.discard(calls)
         try:
             shutil.rmtree(home)
-            shutil.rmtree(workspace)
-            shutil.rmtree(candidate_root, ignore_errors=True)
         except OSError as error:
-            record["errors"].append(f"cleanup failed: {error}")
+            record["errors"].append(f"credential projection cleanup failed: {error}")
             record["status"] = "inconclusive"
             record["cleanup_failed"] = True
+            record["shared_safety_failure"] = True
+        for path in (workspace, candidate_root):
+            try:
+                shutil.rmtree(path, ignore_errors=path == candidate_root)
+            except OSError as error:
+                record["errors"].append(f"evidence cleanup failed: {error}")
+                record["status"] = "inconclusive"
+                record["cleanup_failed"] = True
     write_json(root / "result.json", record)
     return record
 
@@ -1050,18 +1063,53 @@ def build_aggregate(manifest: dict[str, Any], records: list[dict[str, Any]],
                 "errors": sorted({error for item in trials for error in item.get("errors", [])} |
                                  {error for item in pairs for error in item.get("errors", [])}),
             }
-        executors[name] = {"model": executor["model"], "case_classes": classes}
+        executors[name] = {
+            "model": executor["model"],
+            "requirement": executor["requirement"],
+            "state": infrastructure["executor_states"][name]["state"],
+            "case_classes": classes,
+        }
     return {
         "schema_version": CONTRACT_VERSION, "authoritative": manifest["profile"] == "gate",
         "executors": executors, "infrastructure": infrastructure,
     }
 
 
-def infrastructure_state(records: list[dict[str, Any]], input_recheck: str) -> dict[str, Any]:
+def infrastructure_state(
+    manifest: dict[str, Any], records: list[dict[str, Any]], input_recheck: str
+) -> dict[str, Any]:
+    executor_states: dict[str, Any] = {}
+    for executor in manifest["executors"]:
+        own = [item for item in records if item["executor"] == executor["name"]]
+        errors = sum(bool(item.get("infrastructure_error")) for item in own)
+        cleanup = sum(bool(item.get("cleanup_failed")) for item in own)
+        executor_states[executor["name"]] = {
+            "requirement": executor["requirement"],
+            "state": "complete" if errors == 0 and cleanup == 0 else "incomplete",
+            "infrastructure_errors": errors,
+            "cleanup_failures": cleanup,
+        }
+    cleanup_failures = sum(item["cleanup_failures"] for item in executor_states.values())
+    shared_safety_failures = sum(
+        bool(item.get("shared_safety_failure")) for item in records
+    )
+    shared_complete = input_recheck == "unchanged" and shared_safety_failures == 0
+    required_complete = shared_complete and all(
+        item["state"] == "complete"
+        for item in executor_states.values()
+        if item["requirement"] == "required"
+    )
+    collection_complete = shared_complete and all(
+        item["state"] == "complete" for item in executor_states.values()
+    )
     return {
         "input_recheck": input_recheck,
         "infrastructure_errors": sum(bool(item.get("infrastructure_error")) for item in records),
-        "cleanup_failures": sum(bool(item.get("cleanup_failed")) for item in records),
+        "cleanup_failures": cleanup_failures,
+        "shared_safety_failures": shared_safety_failures,
+        "required_state": "complete" if required_complete else "incomplete",
+        "collection_state": "complete" if collection_complete else "incomplete",
+        "executor_states": executor_states,
     }
 
 
@@ -1069,9 +1117,7 @@ def seal_result(result: Path, sealed: dict[str, Any], trial_records: list[dict[s
                 comparisons: list[dict[str, Any]], identities: dict[str, Any], audit: dict[str, Any],
                 input_recheck: str) -> None:
     manifest, suite, projection = sealed["manifest"], sealed["suite"], sealed["projection"]
-    infrastructure = infrastructure_state(trial_records, input_recheck)
-    complete = (input_recheck == "unchanged" and infrastructure["infrastructure_errors"] == 0
-                and infrastructure["cleanup_failures"] == 0)
+    infrastructure = infrastructure_state(manifest, trial_records, input_recheck)
     write_json(result / "aggregate.json", build_aggregate(manifest, trial_records, comparisons, infrastructure))
     write_json(result / "sealed-input.json", {
         "schema_version": CONTRACT_VERSION, "run_manifest": manifest, "suite": suite,
@@ -1080,7 +1126,9 @@ def seal_result(result: Path, sealed: dict[str, Any], trial_records: list[dict[s
     inventory = regular_inventory(result, {"manifest.json"}, MAX_RESULT_FILES)
     output = {
         "schema_version": CONTRACT_VERSION, "kind": "skill_evaluation_result",
-        "state": "complete" if complete else "incomplete",
+        "state": infrastructure["required_state"],
+        "collection_state": infrastructure["collection_state"],
+        "executor_states": infrastructure["executor_states"],
         "input_run_id": manifest["run_id"], "invocation_nonce": manifest["invocation_nonce"],
         "harness_version": HARNESS_VERSION, "harness_executable_sha256": sha_bytes(Path(__file__).read_bytes()),
         "profile": manifest["profile"], "candidate_id": manifest["candidate_id"],
@@ -1162,7 +1210,8 @@ def verify(args: argparse.Namespace) -> int:
     result = Path(args.result).resolve()
     manifest = read_json(result / "manifest.json")
     require_keys(manifest, {
-        "schema_version", "kind", "state", "input_run_id", "invocation_nonce", "harness_version",
+        "schema_version", "kind", "state", "collection_state", "executor_states",
+        "input_run_id", "invocation_nonce", "harness_version",
         "harness_executable_sha256", "profile", "candidate_id", "suite_id", "grader_set_id",
         "trials", "pairs", "executor_identities", "comparator_identity", "producer_audit",
         "file_inventory", "result_id",
@@ -1231,15 +1280,29 @@ def verify(args: argparse.Namespace) -> int:
         scratch.remove()
     recorded = read_json(result / "aggregate.json")
     require_keys(recorded, {"schema_version", "authoritative", "executors", "infrastructure"}, "aggregate")
-    require_keys(recorded["infrastructure"], {"input_recheck", "infrastructure_errors", "cleanup_failures"}, "aggregate infrastructure")
+    require_keys(
+        recorded["infrastructure"],
+        {
+            "input_recheck",
+            "infrastructure_errors",
+            "cleanup_failures",
+            "shared_safety_failures",
+            "required_state",
+            "collection_state",
+            "executor_states",
+        },
+        "aggregate infrastructure",
+    )
     input_recheck = text(recorded["infrastructure"]["input_recheck"], "aggregate input_recheck")
-    if manifest["state"] == "complete" and input_recheck != "unchanged":
-        raise HarnessError("complete state contradicts the recorded sealed-input recheck")
-    infrastructure = infrastructure_state(records, input_recheck)
+    infrastructure = infrastructure_state(run_manifest, records, input_recheck)
     if build_aggregate(run_manifest, records, comparisons, infrastructure) != recorded:
         raise HarnessError("aggregate.json does not match the recomputed trial and comparison evidence")
-    if manifest["state"] == "complete" and (infrastructure["infrastructure_errors"] or infrastructure["cleanup_failures"]):
-        raise HarnessError("complete state contradicts recorded infrastructure failures")
+    if (
+        manifest["state"] != infrastructure["required_state"]
+        or manifest["collection_state"] != infrastructure["collection_state"]
+        or manifest["executor_states"] != infrastructure["executor_states"]
+    ):
+        raise HarnessError("result completion state contradicts recorded infrastructure")
     verify_inventory(result, manifest["file_inventory"], "result file_inventory", MAX_RESULT_FILES)
     print(json.dumps({"ok": True, "state": manifest["state"], "result_id": manifest["result_id"]}, sort_keys=True))
     return 0

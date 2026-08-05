@@ -54,6 +54,8 @@ RESULT_MANIFEST_KEYS = {
     "schema_version",
     "kind",
     "state",
+    "collection_state",
+    "executor_states",
     "input_run_id",
     "invocation_nonce",
     "harness_version",
@@ -485,7 +487,14 @@ def load_policy(path: Path) -> tuple[dict[str, Any], str]:
     require_exact_keys(
         raw,
         "policy",
-        {"schema_version", "profile", "policy_kind", "required_executors", "comparator"},
+        {
+            "schema_version",
+            "profile",
+            "policy_kind",
+            "required_executors",
+            "advisory_executors",
+            "comparator",
+        },
     )
     profile = raw.get("profile")
     if profile not in PROFILES:
@@ -493,21 +502,34 @@ def load_policy(path: Path) -> tuple[dict[str, Any], str]:
     policy_kind = raw.get("policy_kind")
     if policy_kind not in POLICY_KINDS:
         raise EvaluationError("policy.policy_kind must be capability_uplift or encoded_preference")
-    executors_value = raw.get("required_executors")
-    if not isinstance(executors_value, list) or not executors_value:
+    required_value = raw.get("required_executors")
+    if not isinstance(required_value, list) or not required_value:
         raise EvaluationError("policy.required_executors must be a non-empty ordered list")
-    executors = [
+    required_executors = [
         validate_executor(item, f"policy.required_executors[{index}]")
-        for index, item in enumerate(executors_value)
+        for index, item in enumerate(required_value)
     ]
-    names = [executor["name"] for executor in executors]
-    if len(set(names)) != len(names):
-        raise EvaluationError("policy.required_executors cannot repeat an executor")
-    canonical_order = [name for name in EXECUTOR_NAMES if name in names]
-    if names != canonical_order:
-        raise EvaluationError(
-            "policy.required_executors must follow copilot, claude, codex order"
-        )
+    advisory_value = raw.get("advisory_executors")
+    if not isinstance(advisory_value, list):
+        raise EvaluationError("policy.advisory_executors must be an ordered list")
+    advisory_executors = [
+        validate_executor(item, f"policy.advisory_executors[{index}]")
+        for index, item in enumerate(advisory_value)
+    ]
+    for field, executors in (
+        ("required_executors", required_executors),
+        ("advisory_executors", advisory_executors),
+    ):
+        names = [executor["name"] for executor in executors]
+        if len(set(names)) != len(names):
+            raise EvaluationError(f"policy.{field} cannot repeat an executor")
+        canonical_order = [name for name in EXECUTOR_NAMES if name in names]
+        if names != canonical_order:
+            raise EvaluationError(f"policy.{field} must follow copilot, claude, codex order")
+    required_names = {executor["name"] for executor in required_executors}
+    advisory_names = {executor["name"] for executor in advisory_executors}
+    if required_names & advisory_names:
+        raise EvaluationError("policy required and advisory executors must be disjoint")
     comparator_value = raw.get("comparator")
     if not isinstance(comparator_value, dict):
         raise EvaluationError("policy.comparator must be an object")
@@ -549,10 +571,34 @@ def load_policy(path: Path) -> tuple[dict[str, Any], str]:
         "profile": profile,
         "trials_per_arm": 3 if profile == "gate" else 1,
         "policy_kind": policy_kind,
-        "required_executors": executors,
+        "required_executors": required_executors,
+        "advisory_executors": advisory_executors,
         "comparator": comparator,
     }
-    return policy, f"sha256:{digest(canonical(policy))}"
+    return policy, policy_identity(policy)
+
+
+def policy_identity(policy: dict[str, Any]) -> str:
+    authority_policy = {
+        key: policy[key]
+        for key in (
+            "schema_version",
+            "profile",
+            "trials_per_arm",
+            "policy_kind",
+            "required_executors",
+            "comparator",
+        )
+    }
+    return f"sha256:{digest(canonical(authority_policy))}"
+
+
+def observation_plan_identity(policy: dict[str, Any], policy_id: str) -> str:
+    return f"sha256:{digest(canonical({
+        'schema_version': POLICY_SCHEMA_VERSION,
+        'policy_id': policy_id,
+        'advisory_executors': policy['advisory_executors'],
+    }))}"
 
 
 def cli_version(copilot: str) -> str:
@@ -1060,7 +1106,15 @@ def identity_with(field: str, value: dict[str, Any]) -> str:
 
 
 def validate_certificate(
-    value: Any, candidate: str, suite_id: str, policy_id: str, policy: dict[str, Any], index: int
+    value: Any,
+    candidate: str,
+    suite_id: str,
+    policy_id: str,
+    observation_plan_id: str,
+    profile: str,
+    requirement: str,
+    expected_executor: dict[str, Any],
+    index: int,
 ) -> dict[str, Any]:
     field = f"aggregate.certificates[{index}]"
     if not isinstance(value, dict):
@@ -1075,7 +1129,9 @@ def validate_certificate(
             "candidate_id",
             "suite_id",
             "policy_id",
+            "observation_plan_id",
             "profile",
+            "requirement",
             "executor",
             "result_bundle_sha256",
             "result_bundle_id",
@@ -1089,12 +1145,19 @@ def validate_certificate(
         raise EvaluationError(f"{field}.status is invalid")
     if value.get("candidate_id") != candidate or value.get("suite_id") != suite_id or value.get("policy_id") != policy_id:
         raise EvaluationError(f"{field} does not bind the aggregate inputs")
-    if value.get("profile") != policy["profile"]:
+    if value.get("profile") != profile:
         raise EvaluationError(f"{field}.profile does not match policy")
+    if value.get("requirement") != requirement:
+        raise EvaluationError(f"{field}.requirement does not match its aggregate partition")
+    expected_observation = observation_plan_id if requirement == "advisory" else None
+    if value.get("observation_plan_id") != expected_observation:
+        raise EvaluationError(f"{field}.observation_plan_id does not match its partition")
     require_sha256(value.get("result_bundle_sha256"), f"{field}.result_bundle_sha256")
     require_sha256(value.get("result_bundle_id"), f"{field}.result_bundle_id")
     require_sha256(value.get("run_id"), f"{field}.run_id")
     executor = validate_executor(value.get("executor"), f"{field}.executor")
+    if executor != expected_executor:
+        raise EvaluationError(f"{field}.executor does not match its aggregate partition")
     expected_id = identity_with("certificate_id", value)
     if value.get("certificate_id") != expected_id:
         raise EvaluationError(f"{field}.certificate_id does not match certificate content")
@@ -1103,7 +1166,7 @@ def validate_certificate(
 
 def validate_aggregate(
     value: Any, skill_dir: Path, candidate: str, suite: dict[str, Any], suite_id: str,
-    policy: dict[str, Any], policy_id: str
+    policy: dict[str, Any], policy_id: str, allow_advisory_drift: bool = False
 ) -> dict[str, Any]:
     if not suite["cross_executor_authority"]:
         raise EvaluationError("legacy-compiled suites cannot anchor cross-executor authority")
@@ -1121,8 +1184,12 @@ def validate_aggregate(
             "candidate_inventory",
             "suite_id",
             "policy_id",
+            "observation_plan_id",
             "profile",
+            "required_executors",
+            "advisory_executors",
             "certificates",
+            "required_certificate_set_id",
             "aggregate_id",
         },
     )
@@ -1140,18 +1207,63 @@ def validate_aggregate(
     candidate_inventory = value.get("candidate_inventory")
     if not isinstance(candidate_inventory, list) or f"sha256:{digest(canonical(candidate_inventory))}" != candidate:
         raise EvaluationError("aggregate receipt candidate inventory is stale or malformed")
+    required_executors = value.get("required_executors")
+    advisory_executors = value.get("advisory_executors")
+    if required_executors != policy["required_executors"]:
+        raise EvaluationError("aggregate required executors differ from the current authority policy")
+    if not isinstance(advisory_executors, list):
+        raise EvaluationError("aggregate advisory_executors must be a list")
+    advisory_executors = [
+        validate_executor(item, f"aggregate.advisory_executors[{index}]")
+        for index, item in enumerate(advisory_executors)
+    ]
+    advisory_names = [item["name"] for item in advisory_executors]
+    if (
+        len(set(advisory_names)) != len(advisory_names)
+        or advisory_names != [name for name in EXECUTOR_NAMES if name in advisory_names]
+        or set(advisory_names) & {item["name"] for item in required_executors}
+    ):
+        raise EvaluationError("aggregate advisory executor partition is invalid")
+    aggregate_observation_plan_id = observation_plan_identity(
+        {**policy, "advisory_executors": advisory_executors}, policy_id
+    )
+    if value.get("observation_plan_id") != aggregate_observation_plan_id:
+        raise EvaluationError("aggregate observation_plan_id does not match advisory inputs")
+    if not allow_advisory_drift and advisory_executors != policy["advisory_executors"]:
+        raise EvaluationError("aggregate advisory executors differ from the current observation plan")
     certificates_value = value.get("certificates")
     if not isinstance(certificates_value, list):
         raise EvaluationError("aggregate.certificates must be a list")
-    certificates = [
-        validate_certificate(item, candidate, suite_id, policy_id, policy, index)
-        for index, item in enumerate(certificates_value)
+    expected_partitions = [
+        (requirement, executor)
+        for requirement, executors in (
+            ("required", required_executors),
+            ("advisory", advisory_executors),
+        )
+        for executor in executors
     ]
-    expected_executors = policy["required_executors"]
-    actual_executors = [certificate["executor"] for certificate in certificates]
-    if actual_executors != expected_executors:
-        raise EvaluationError("aggregate certificates must contain every required executor in policy order")
-    statuses = [certificate["status"] for certificate in certificates]
+    if len(certificates_value) != len(expected_partitions):
+        raise EvaluationError("aggregate certificates must cover every selected executor")
+    certificates = [
+        validate_certificate(
+            item,
+            candidate,
+            suite_id,
+            policy_id,
+            aggregate_observation_plan_id,
+            policy["profile"],
+            requirement,
+            executor,
+            index,
+        )
+        for index, (item, (requirement, executor)) in enumerate(
+            zip(certificates_value, expected_partitions)
+        )
+    ]
+    required_certificates = [
+        certificate for certificate in certificates if certificate["requirement"] == "required"
+    ]
+    statuses = [certificate["status"] for certificate in required_certificates]
     expected_status = (
         "regression" if "regression" in statuses
         else "inconclusive" if any(status != "pass" for status in statuses)
@@ -1161,10 +1273,31 @@ def validate_aggregate(
         raise EvaluationError(
             f"aggregate.status must be {expected_status!r} for the independent executor certificates"
         )
+    expected_set_id = required_certificate_set_identity(
+        candidate, suite_id, policy_id, policy["profile"], required_certificates
+    )
+    if value.get("required_certificate_set_id") != expected_set_id:
+        raise EvaluationError("aggregate required_certificate_set_id does not match required evidence")
     expected_id = identity_with("aggregate_id", value)
     if value.get("aggregate_id") != expected_id:
         raise EvaluationError("aggregate.aggregate_id does not match aggregate content")
     return {**value, "certificates": certificates}
+
+
+def required_certificate_set_identity(
+    candidate: str,
+    suite_id: str,
+    policy_id: str,
+    profile: str,
+    certificates: list[dict[str, Any]],
+) -> str:
+    return f"sha256:{digest(canonical({
+        'candidate_id': candidate,
+        'suite_id': suite_id,
+        'policy_id': policy_id,
+        'profile': profile,
+        'certificate_ids': [item['certificate_id'] for item in certificates],
+    }))}"
 
 
 def load_v2_inputs(skill_dir: Path, suite_path: str | None, policy_path: str | None) -> tuple[
@@ -1188,9 +1321,11 @@ def v2_prepare(args: argparse.Namespace) -> dict[str, Any]:
         "candidate_inventory": files,
         "suite_id": suite_id,
         "policy_id": policy_id,
+        "observation_plan_id": observation_plan_identity(policy, policy_id),
         "profile": policy["profile"],
         "trials_per_arm": policy["trials_per_arm"],
         "required_executors": policy["required_executors"],
+        "advisory_executors": policy["advisory_executors"],
         "cross_executor_authority": suite["cross_executor_authority"],
     }
 
@@ -1210,26 +1345,48 @@ def v2_policy_validate(args: argparse.Namespace) -> dict[str, Any]:
     policy, policy_id = load_policy(Path(args.policy).resolve())
     return {
         "policy_id": policy_id,
+        "observation_plan_id": observation_plan_identity(policy, policy_id),
         "profile": policy["profile"],
         "trials_per_arm": policy["trials_per_arm"],
         "required_executors": policy["required_executors"],
+        "advisory_executors": policy["advisory_executors"],
         "comparator": policy["comparator"],
     }
 
 
-def desired_executor_names() -> list[str]:
-    configured = os.environ.get("DREAMING_EVALUATION_EXECUTORS")
-    if configured is None:
-        raise EvaluationError("DREAMING_EVALUATION_EXECUTORS must be explicitly configured")
+def configured_executor_names(variable: str, default: str, allow_empty: bool) -> list[str]:
+    configured = os.environ.get(variable, default)
+    if configured == "" and allow_empty:
+        return []
     names = [item.strip() for item in configured.split(",")]
     if not names or any(not item for item in names):
-        raise EvaluationError("DREAMING_EVALUATION_EXECUTORS must be a non-empty comma-separated ordered set")
+        qualifier = "an ordered comma-separated set" if allow_empty else "a non-empty ordered comma-separated set"
+        raise EvaluationError(f"{variable} must be {qualifier}")
     if len(set(names)) != len(names) or any(item not in EXECUTOR_NAMES for item in names):
-        raise EvaluationError("DREAMING_EVALUATION_EXECUTORS contains an unknown or duplicate executor")
+        raise EvaluationError(f"{variable} contains an unknown or duplicate executor")
     expected = [name for name in EXECUTOR_NAMES if name in names]
     if names != expected:
-        raise EvaluationError("DREAMING_EVALUATION_EXECUTORS must follow copilot, claude, codex order")
+        raise EvaluationError(f"{variable} must follow copilot, claude, codex order")
     return names
+
+
+def desired_executor_names() -> list[str]:
+    return configured_executor_names("DREAMING_EVALUATION_EXECUTORS", "copilot", False)
+
+
+def desired_advisory_executor_names() -> list[str]:
+    return configured_executor_names("DREAMING_ADVISORY_EVALUATION_EXECUTORS", "", True)
+
+
+def desired_executor_roles() -> tuple[list[str], list[str]]:
+    required = desired_executor_names()
+    advisory = desired_advisory_executor_names()
+    overlap = set(required) & set(advisory)
+    if overlap:
+        raise EvaluationError(
+            "DREAMING_EVALUATION_EXECUTORS and DREAMING_ADVISORY_EVALUATION_EXECUTORS must be disjoint"
+        )
+    return required, advisory
 
 
 def validate_harness_executor(value: Any, field: str) -> dict[str, Any]:
@@ -1240,6 +1397,7 @@ def validate_harness_executor(value: Any, field: str) -> dict[str, Any]:
         field,
         {
             "name",
+            "requirement",
             "model",
             "adapter_id",
             "adapter_version",
@@ -1251,6 +1409,9 @@ def validate_harness_executor(value: Any, field: str) -> dict[str, Any]:
             "sandbox_id",
         },
     )
+    requirement = value.get("requirement")
+    if requirement not in {"required", "advisory"}:
+        raise EvaluationError(f"{field}.requirement must be required or advisory")
     base = validate_executor(
         {key: value[key] for key in (
             "name", "model", "adapter_id", "adapter_version",
@@ -1264,6 +1425,7 @@ def validate_harness_executor(value: Any, field: str) -> dict[str, Any]:
     require_exact_keys(limits, f"{field}.limits", {"timeout_seconds", "token_budget", "output_bytes"})
     return {
         **base,
+        "requirement": requirement,
         "cli_version": require_text(value.get("cli_version"), f"{field}.cli_version"),
         "tool_policy_id": require_sha256(value.get("tool_policy_id"), f"{field}.tool_policy_id"),
         "limits": {
@@ -1382,16 +1544,35 @@ def validate_compilation_config(
         validate_harness_executor(item, f"compilation.executors[{index}]")
         for index, item in enumerate(executors_value)
     ]
-    if [item["name"] for item in executors] != desired_executor_names():
-        raise EvaluationError("compilation executors differ from DREAMING_EVALUATION_EXECUTORS")
-    if [
-        {key: item[key] for key in (
-            "name", "model", "adapter_id", "adapter_version",
-            "adapter_executable_sha256", "cli_executable_sha256",
-        )}
+    required_names, advisory_names = desired_executor_roles()
+    expected_names = required_names + advisory_names
+    if [item["name"] for item in executors] != expected_names:
+        raise EvaluationError("compilation executors differ from the configured required and advisory sets")
+    expected_executors = [
+        {**item, "requirement": requirement}
+        for requirement, values in (
+            ("required", policy["required_executors"]),
+            ("advisory", policy["advisory_executors"]),
+        )
+        for item in values
+    ]
+    compiled_policy_executors = [
+        {
+            key: item[key]
+            for key in (
+                "name",
+                "model",
+                "adapter_id",
+                "adapter_version",
+                "adapter_executable_sha256",
+                "cli_executable_sha256",
+                "requirement",
+            )
+        }
         for item in executors
-    ] != policy["required_executors"]:
-        raise EvaluationError("compilation executors differ from the exact policy executor identities")
+    ]
+    if compiled_policy_executors != expected_executors:
+        raise EvaluationError("compilation executors differ from the exact policy executor identities and roles")
     if any(item["tool_policy_id"] != tool_policy_id for item in executors):
         raise EvaluationError("executor tool policy differs from the compilation tool policy")
     comparator = raw.get("comparator")
@@ -1465,7 +1646,7 @@ def validate_routing(path: Path, executors: list[dict[str, Any]], comparator: di
             raise EvaluationError(f"{field} is not an authorized exact executor route")
         actual[name] = route
     if list(actual) != [item["name"] for item in executors]:
-        raise EvaluationError("routing executor set or order differs from the required executor set")
+        raise EvaluationError("routing executor set or order differs from the selected executor set")
     comparator_route = routing.get("comparator")
     if not isinstance(comparator_route, dict):
         raise EvaluationError("routing.comparator must be an object")
@@ -1515,9 +1696,13 @@ def v2_run_compile(args: argparse.Namespace) -> dict[str, Any]:
     candidate, files, suite, suite_id, policy, policy_id = load_v2_inputs(
         skill_dir, args.suite, args.policy
     )
-    desired = desired_executor_names()
-    if desired != [item["name"] for item in policy["required_executors"]]:
+    required_names, advisory_names = desired_executor_roles()
+    if required_names != [item["name"] for item in policy["required_executors"]]:
         raise EvaluationError("policy required executors differ from DREAMING_EVALUATION_EXECUTORS")
+    if advisory_names != [item["name"] for item in policy["advisory_executors"]]:
+        raise EvaluationError(
+            "policy advisory executors differ from DREAMING_ADVISORY_EVALUATION_EXECUTORS"
+        )
     config_path = Path(args.config).resolve()
     config, harness_suite = validate_compilation_config(config_path, suite, policy, harness_sha)
     validate_routing(Path(args.routing).resolve(), config["executors"], config["comparator"])
@@ -1535,6 +1720,7 @@ def v2_run_compile(args: argparse.Namespace) -> dict[str, Any]:
             "candidate_inventory": files,
             "suite_id": suite_id,
             "policy_id": policy_id,
+            "observation_plan_id": observation_plan_identity(policy, policy_id),
         },
     )
     atomic_write(run_dir / "suite.json", harness_suite)
@@ -1582,7 +1768,9 @@ def v2_run_compile(args: argparse.Namespace) -> dict[str, Any]:
         "candidate_inventory": files,
         "suite_id": suite_id,
         "policy_id": policy_id,
-        "required_executors": desired,
+        "observation_plan_id": observation_plan_identity(policy, policy_id),
+        "required_executors": required_names,
+        "advisory_executors": advisory_names,
     }
 
 
@@ -1673,22 +1861,50 @@ def verify_result_independently(
     scratch: Path,
     suite_path: str | None,
     policy_path: str | None,
+    allow_advisory_drift: bool = False,
 ) -> dict[str, Any]:
     candidate, files, suite, suite_id, policy, policy_id = load_v2_inputs(
         skill_dir, suite_path, policy_path
     )
-    if desired_executor_names() != [item["name"] for item in policy["required_executors"]]:
+    required_names, advisory_names = desired_executor_roles()
+    if required_names != [item["name"] for item in policy["required_executors"]]:
         raise EvaluationError("current policy differs from DREAMING_EVALUATION_EXECUTORS")
+    if (
+        not allow_advisory_drift
+        and advisory_names != [item["name"] for item in policy["advisory_executors"]]
+    ):
+        raise EvaluationError(
+            "current policy differs from DREAMING_ADVISORY_EVALUATION_EXECUTORS"
+        )
     run_manifest, source_suite, source_policy, compilation = load_compiled_run(run_dir)
     dreaming_input = load_json(run_dir / "dreaming-input.json")
     require_exact_keys(
         dreaming_input,
         "dreaming input",
-        {"schema_version", "candidate_id", "candidate_inventory", "suite_id", "policy_id"},
+        {
+            "schema_version",
+            "candidate_id",
+            "candidate_inventory",
+            "suite_id",
+            "policy_id",
+            "observation_plan_id",
+        },
     )
-    if source_suite != suite or source_policy != policy:
-        raise EvaluationError("compiled run binds stale suite or policy input")
-    expected_policy_executors = policy["required_executors"]
+    if source_suite != suite:
+        raise EvaluationError("compiled run binds stale suite input")
+    if policy_identity(source_policy) != policy_id:
+        raise EvaluationError("compiled run binds stale required policy input")
+    if not allow_advisory_drift and source_policy != policy:
+        raise EvaluationError("compiled run binds stale advisory policy input")
+    source_observation_plan_id = observation_plan_identity(source_policy, policy_id)
+    expected_policy_executors = [
+        {**item, "requirement": requirement}
+        for requirement, values in (
+            ("required", source_policy["required_executors"]),
+            ("advisory", source_policy["advisory_executors"]),
+        )
+        for item in values
+    ]
     compiled_policy_executors = [
         {
             key: item[key]
@@ -1699,6 +1915,7 @@ def verify_result_independently(
                 "adapter_version",
                 "adapter_executable_sha256",
                 "cli_executable_sha256",
+                "requirement",
             )
         }
         for item in compilation.get("executors", [])
@@ -1726,6 +1943,7 @@ def verify_result_independently(
         "candidate_inventory": files,
         "suite_id": suite_id,
         "policy_id": policy_id,
+        "observation_plan_id": source_observation_plan_id,
     }:
         raise EvaluationError("compiled run binds a stale candidate")
     run_projection = [
@@ -1771,7 +1989,7 @@ def verify_result_independently(
         or result_manifest.get("invocation_nonce") != nonce
         or result_manifest.get("input_run_id") != run_manifest["run_id"]
         or result_manifest.get("candidate_id") != run_manifest["candidate_id"]
-        or result_manifest.get("profile") != policy["profile"]
+        or result_manifest.get("profile") != source_policy["profile"]
         or result_manifest.get("harness_executable_sha256") != harness_sha
     ):
         raise EvaluationError("result manifest differs from the current sealed run")
@@ -1782,7 +2000,9 @@ def verify_result_independently(
         raise EvaluationError("result identity is forged or malformed")
     bundle_sha, result_id = result_bundle_identity(result_dir, result_manifest)
     expected_executor_identities = {
-        item["name"]: {key: value for key, value in item.items() if key != "name"}
+        item["name"]: {
+            key: value for key, value in item.items() if key not in {"name", "requirement"}
+        }
         for item in compilation["executors"]
     }
     if result_manifest.get("executor_identities") != expected_executor_identities:
@@ -1836,7 +2056,11 @@ def verify_result_independently(
                 raise EvaluationError(f"trial {trial_id} prepared execution digest is invalid")
             if record.get("prepared_digest") != prepared_digest:
                 raise EvaluationError(f"trial {trial_id} did not bind the prepared execution")
-            effective = {key: value for key, value in executor.items() if key != "name"}
+            effective = {
+                key: value
+                for key, value in executor.items()
+                if key not in {"name", "requirement"}
+            }
             if record.get("effective_execution") != effective or prepared.get("execution") != effective:
                 raise EvaluationError(f"trial {trial_id} prepared or effective execution drifted")
             raw = root / "raw.jsonl"
@@ -1873,11 +2097,14 @@ def verify_result_independently(
         "candidate_inventory": files,
         "suite_id": suite_id,
         "policy_id": policy_id,
-        "policy": policy,
+        "observation_plan_id": source_observation_plan_id,
+        "policy": source_policy,
         "run_id": run_manifest["run_id"],
         "result_bundle_sha256": bundle_sha,
         "result_bundle_id": result_id,
         "state": result_manifest.get("state"),
+        "collection_state": result_manifest.get("collection_state"),
+        "executor_states": result_manifest.get("executor_states"),
         "records": records,
         "comparisons": comparisons,
     }
@@ -1902,6 +2129,7 @@ def reverify_certification_record(
             scratch,
             None,
             None,
+            True,
         )
 
 
@@ -1990,7 +2218,9 @@ def make_executor_certificate(
     candidate: str,
     suite_id: str,
     policy_id: str,
+    observation_plan_id: str,
     profile: str,
+    requirement: str,
     executor: dict[str, Any],
     result_bundle_sha256: str,
     result_bundle_id: str,
@@ -2003,7 +2233,9 @@ def make_executor_certificate(
         "candidate_id": candidate,
         "suite_id": suite_id,
         "policy_id": policy_id,
+        "observation_plan_id": observation_plan_id if requirement == "advisory" else None,
         "profile": profile,
+        "requirement": requirement,
         "executor": executor,
         "result_bundle_sha256": result_bundle_sha256,
         "result_bundle_id": result_bundle_id,
@@ -2023,7 +2255,10 @@ def write_certification_aggregate(
     policy: dict[str, Any],
     certificates: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], Path, str]:
-    statuses = [item["status"] for item in certificates]
+    required_certificates = [
+        item for item in certificates if item["requirement"] == "required"
+    ]
+    statuses = [item["status"] for item in required_certificates]
     aggregate_status = (
         "regression"
         if "regression" in statuses
@@ -2040,8 +2275,14 @@ def write_certification_aggregate(
         "candidate_inventory": files,
         "suite_id": suite_id,
         "policy_id": policy_id,
+        "observation_plan_id": observation_plan_identity(policy, policy_id),
         "profile": policy["profile"],
+        "required_executors": policy["required_executors"],
+        "advisory_executors": policy["advisory_executors"],
         "certificates": certificates,
+        "required_certificate_set_id": required_certificate_set_identity(
+            candidate, suite_id, policy_id, policy["profile"], required_certificates
+        ),
     }
     aggregate["aggregate_id"] = identity_with("aggregate_id", aggregate)
     validated = validate_aggregate(
@@ -2071,26 +2312,36 @@ def v2_result_certify(args: argparse.Namespace) -> dict[str, Any]:
         args.policy,
     )
     policy = verified["policy"]
-    certificates = [
-        make_executor_certificate(
-            executor_policy_status(
-                executor["name"],
-                policy,
-                verified["state"],
-                verified["records"],
-                verified["comparisons"],
-            ),
-            verified["candidate_id"],
-            verified["suite_id"],
-            verified["policy_id"],
-            policy["profile"],
-            executor,
-            verified["result_bundle_sha256"],
-            verified["result_bundle_id"],
-            verified["run_id"],
-        )
-        for executor in policy["required_executors"]
-    ]
+    certificates = []
+    for requirement, executors in (
+        ("required", policy["required_executors"]),
+        ("advisory", policy["advisory_executors"]),
+    ):
+        for executor in executors:
+            executor_state = verified["executor_states"].get(executor["name"], {}).get(
+                "state", "incomplete"
+            )
+            certificates.append(
+                make_executor_certificate(
+                    executor_policy_status(
+                        executor["name"],
+                        policy,
+                        executor_state,
+                        verified["records"],
+                        verified["comparisons"],
+                    ),
+                    verified["candidate_id"],
+                    verified["suite_id"],
+                    verified["policy_id"],
+                    verified["observation_plan_id"],
+                    policy["profile"],
+                    requirement,
+                    executor,
+                    verified["result_bundle_sha256"],
+                    verified["result_bundle_id"],
+                    verified["run_id"],
+                )
+            )
     aggregate, path, receipt_sha = write_certification_aggregate(
         skill_dir,
         verified["candidate_id"],
@@ -2109,6 +2360,7 @@ def v2_result_certify(args: argparse.Namespace) -> dict[str, Any]:
             "candidate_id": verified["candidate_id"],
             "suite_id": verified["suite_id"],
             "policy_id": verified["policy_id"],
+            "required_certificate_set_id": aggregate["required_certificate_set_id"],
             "profile": policy["profile"],
             "aggregate_receipt_sha256": receipt_sha,
             "aggregate_id": aggregate["aggregate_id"],
@@ -2145,39 +2397,55 @@ def v2_unavailable_aggregate(args: argparse.Namespace) -> dict[str, Any]:
     candidate, files, suite, suite_id, policy, policy_id = load_v2_inputs(
         skill_dir, args.suite, args.policy
     )
-    desired = desired_executor_names()
-    if desired != [item["name"] for item in policy["required_executors"]]:
+    required_names, advisory_names = desired_executor_roles()
+    if required_names != [item["name"] for item in policy["required_executors"]]:
         raise EvaluationError("policy required executors differ from DREAMING_EVALUATION_EXECUTORS")
-    reasons = dict(parse_unavailable(item) for item in args.unavailable)
-    if set(reasons) != set(desired):
-        raise EvaluationError("unavailability evidence must name every required executor exactly once")
-    certificates = []
-    for executor in policy["required_executors"]:
-        evidence = {
-            "schema_version": 1,
-            "kind": "skill_evaluation_unavailable",
-            "candidate_id": candidate,
-            "suite_id": suite_id,
-            "policy_id": policy_id,
-            "profile": policy["profile"],
-            "executor": executor,
-            "reason": reasons[executor["name"]],
-        }
-        evidence["result_id"] = identity_with("result_id", evidence)
-        evidence_path, evidence_sha = write_v2_receipt(evidence)
-        certificates.append(
-            make_executor_certificate(
-                "unavailable",
-                candidate,
-                suite_id,
-                policy_id,
-                policy["profile"],
-                executor,
-                f"sha256:{evidence_sha}",
-                evidence["result_id"],
-                f"sha256:{digest(canonical({'unavailable': str(evidence_path)}))}",
-            )
+    if advisory_names != [item["name"] for item in policy["advisory_executors"]]:
+        raise EvaluationError(
+            "policy advisory executors differ from DREAMING_ADVISORY_EVALUATION_EXECUTORS"
         )
+    reasons = dict(parse_unavailable(item) for item in args.unavailable)
+    selected = required_names + advisory_names
+    if set(reasons) != set(selected):
+        raise EvaluationError("unavailability evidence must name every selected executor exactly once")
+    certificates = []
+    observation_plan_id = observation_plan_identity(policy, policy_id)
+    for requirement, executors in (
+        ("required", policy["required_executors"]),
+        ("advisory", policy["advisory_executors"]),
+    ):
+        for executor in executors:
+            evidence = {
+                "schema_version": 1,
+                "kind": "skill_evaluation_unavailable",
+                "candidate_id": candidate,
+                "suite_id": suite_id,
+                "policy_id": policy_id,
+                "observation_plan_id": (
+                    observation_plan_id if requirement == "advisory" else None
+                ),
+                "profile": policy["profile"],
+                "requirement": requirement,
+                "executor": executor,
+                "reason": reasons[executor["name"]],
+            }
+            evidence["result_id"] = identity_with("result_id", evidence)
+            evidence_path, evidence_sha = write_v2_receipt(evidence)
+            certificates.append(
+                make_executor_certificate(
+                    "unavailable",
+                    candidate,
+                    suite_id,
+                    policy_id,
+                    observation_plan_id,
+                    policy["profile"],
+                    requirement,
+                    executor,
+                    f"sha256:{evidence_sha}",
+                    evidence["result_id"],
+                    f"sha256:{digest(canonical({'unavailable': str(evidence_path)}))}",
+                )
+            )
     aggregate, path, receipt_sha = write_certification_aggregate(
         skill_dir, candidate, files, suite, suite_id, policy_id, policy, certificates
     )
@@ -2238,6 +2506,10 @@ def validate_authority(
             "candidate_id",
             "suite_id",
             "policy_id",
+            "observation_plan_id",
+            "required_certificate_set_id",
+            "required_executors",
+            "advisory_executors",
             "aggregate_receipt_sha256",
             "aggregate_id",
             "authority_id",
@@ -2253,7 +2525,16 @@ def validate_authority(
     aggregate, verified_sha = load_v2_receipt(v2_receipt_path(aggregate_sha))
     if verified_sha != aggregate_sha:
         raise EvaluationError("authority aggregate receipt digest does not match")
-    aggregate = validate_aggregate(aggregate, skill_dir, candidate, suite, suite_id, policy, policy_id)
+    aggregate = validate_aggregate(
+        aggregate,
+        skill_dir,
+        candidate,
+        suite,
+        suite_id,
+        policy,
+        policy_id,
+        allow_advisory_drift=True,
+    )
     if aggregate["status"] != "pass":
         raise EvaluationError("cross-CLI authority requires a passing aggregate receipt")
     if policy["profile"] != "gate":
@@ -2269,6 +2550,7 @@ def validate_authority(
             "candidate_id",
             "suite_id",
             "policy_id",
+            "required_certificate_set_id",
             "profile",
             "aggregate_receipt_sha256",
             "aggregate_id",
@@ -2290,6 +2572,8 @@ def validate_authority(
         or certification.get("candidate_id") != candidate
         or certification.get("suite_id") != suite_id
         or certification.get("policy_id") != policy_id
+        or certification.get("required_certificate_set_id")
+        != aggregate["required_certificate_set_id"]
         or certification.get("profile") != "gate"
         or certification.get("aggregate_receipt_sha256") != aggregate_sha
         or certification.get("aggregate_id") != aggregate["aggregate_id"]
@@ -2314,6 +2598,16 @@ def validate_authority(
             raise EvaluationError(f"authority certification evidence differs at {field}")
     if authority.get("aggregate_id") != aggregate["aggregate_id"]:
         raise EvaluationError("authority document aggregate identity does not match")
+    if (
+        authority.get("observation_plan_id") != aggregate["observation_plan_id"]
+        or authority.get("required_certificate_set_id")
+        != aggregate["required_certificate_set_id"]
+        or authority.get("required_executors")
+        != [item["name"] for item in aggregate["required_executors"]]
+        or authority.get("advisory_executors")
+        != [item["name"] for item in aggregate["advisory_executors"]]
+    ):
+        raise EvaluationError("authority document partition identities do not match the aggregate")
     expected_id = identity_with("authority_id", authority)
     if authority.get("authority_id") != expected_id:
         raise EvaluationError("authority.authority_id does not match authority content")
@@ -2343,6 +2637,10 @@ def v2_authority_write(args: argparse.Namespace) -> dict[str, Any]:
         "candidate_id": candidate,
         "suite_id": suite_id,
         "policy_id": policy_id,
+        "observation_plan_id": aggregate["observation_plan_id"],
+        "required_certificate_set_id": aggregate["required_certificate_set_id"],
+        "required_executors": [item["name"] for item in aggregate["required_executors"]],
+        "advisory_executors": [item["name"] for item in aggregate["advisory_executors"]],
         "aggregate_receipt_sha256": aggregate_sha,
         "aggregate_id": aggregate["aggregate_id"],
     }
@@ -2445,7 +2743,16 @@ def validate_v2_waiver(
     base_candidate = require_sha256(waiver.get("base_candidate_id"), "waiver.base_candidate_id")
     if base.get("candidate_id") != base_candidate:
         raise EvaluationError("cross-CLI waiver does not bind its base aggregate")
-    validate_aggregate(base, skill_dir, base_candidate, suite, suite_id, policy, policy_id)
+    validate_aggregate(
+        base,
+        skill_dir,
+        base_candidate,
+        suite,
+        suite_id,
+        policy,
+        policy_id,
+        allow_advisory_drift=True,
+    )
     if base.get("status") != "pass":
         raise EvaluationError("cross-CLI waiver base aggregate must pass")
     changed = changed_inventory_paths(base.get("candidate_inventory", []), files)
@@ -2486,7 +2793,16 @@ def v2_waive(args: argparse.Namespace) -> dict[str, Any]:
     candidate, files, suite, suite_id, policy, policy_id = load_v2_inputs(skill_dir, args.suite, args.policy)
     base, base_sha = load_v2_receipt(Path(args.base_aggregate).resolve())
     base_candidate = require_sha256(base.get("candidate_id"), "base aggregate candidate_id")
-    validate_aggregate(base, skill_dir, base_candidate, suite, suite_id, policy, policy_id)
+    validate_aggregate(
+        base,
+        skill_dir,
+        base_candidate,
+        suite,
+        suite_id,
+        policy,
+        policy_id,
+        allow_advisory_drift=True,
+    )
     if base["status"] != "pass":
         raise EvaluationError("cross-CLI waiver requires a passing version-2 aggregate receipt")
     changed = changed_inventory_paths(base.get("candidate_inventory", []), files)

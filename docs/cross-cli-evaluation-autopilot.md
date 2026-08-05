@@ -48,13 +48,23 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Landed baseline:** `b78c6ba6b7316f1406ac82677bcf4384af86ea2a`.
 - **Completed locally:** M5.1 policy and schemas at `7cab64a`; M5.2 sealed
   trial harness core at `745f32e`; M5.3 native adapters at `8002c9c`; M5.4
-  Dreaming certification integration in the current candidate.
+  Dreaming certification integration in the current candidate. The
+  required/advisory implementation now defaults required evaluation to
+  Copilot, keeps Claude and Codex opt-in advisory, partitions harness
+  infrastructure state, separates `policy_id` from `observation_plan_id`,
+  derives `required_certificate_set_id` from required evidence only, and
+  preserves required authority across advisory-only policy changes.
 - **Installed runtime:** `fddd07c2f2cf98b75d2072633c80762d69b80a7c` with
   generation `20260805T075531Z-install-19150`, behind the active halt switch.
 - **Live-proof receipt:**
   `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/cross-cli-m5-live-proof.txt`;
   gate remains closed.
-- **Current live status:** Copilot and Claude independently completed every
+- **Current live status:** The new required/advisory candidate passes the
+  deterministic harness, policy, certification, native-adapter, daemon, and
+  installer suites. Deterministic end-to-end certification proves advisory
+  regression and advisory collection failure remain visible without changing
+  Copilot-required authority, while empty required sets and required failures
+  refuse. Copilot and Claude independently completed every
   one-trial capability and encoded-preference class on the previous adapter
   identity, including exact native load proof, activation-negative behavior,
   related-task parity, blinded comparisons, deterministic artifacts, and
@@ -72,10 +82,12 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   installed required default and treats configured Claude and Codex routes as
   advisory. Advisory unavailability remains visible but does not block
   Copilot-backed authority.
-- **Next checkpoint:** implement required and advisory executor roles, then run
-  both full three-trial Copilot gates and prove advisory pass, regression,
-  inconclusive, and unavailable states cannot grant or block required
-  authority. Continue through negative evidence, rollback, review, final
-  installed self-test, documentation, and enablement.
+- **Next checkpoint:** commit the runnable required/advisory candidate, install
+  it behind the halt, and pass its generation-bound installed self-test. Then
+  run both full three-trial Copilot gates with Claude/Codex advisory evidence
+  and prove advisory pass, regression, inconclusive, and unavailable states
+  cannot grant or block required authority. Continue through negative
+  evidence, rollback, review, final installed self-test, documentation, and
+  enablement.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.

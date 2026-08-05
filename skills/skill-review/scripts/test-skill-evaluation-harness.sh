@@ -47,6 +47,7 @@ PY
 make_run() {
   local root="$1" fixture="${2:-correct}" profile="${3:-gate}" executors="${4:-1}"
   local timeout="${5:-5}" command_grader="${6:-none}" behavior_cases="${7:-1}"
+  local required_count="${8:-$executors}"
   mkdir -p "$root/candidate" "$root/fixtures" "$root/graders"
   cat > "$root/candidate/SKILL.md" <<'EOF'
 ---
@@ -56,10 +57,10 @@ Return the deterministic fixture result.
 EOF
   printf 'fixture\n' > "$root/fixtures/input.txt"
   python3 - "$root" "$fixture" "$profile" "$executors" "$timeout" "$HARNESS" "$ADAPTER" \
-      "$command_grader" "$behavior_cases" <<'PY'
+      "$command_grader" "$behavior_cases" "$required_count" <<'PY'
 import hashlib, json, os, sys
 from pathlib import Path
-root, fixture, profile, executors, timeout, harness, adapter, command_grader, behavior_cases = map(str, sys.argv[1:])
+root, fixture, profile, executors, timeout, harness, adapter, command_grader, behavior_cases, required_count = map(str, sys.argv[1:])
 root = Path(root)
 def canonical(x): return json.dumps(x, sort_keys=True, separators=(",", ":")).encode()
 def sha(x): return "sha256:" + hashlib.sha256(canonical(x)).hexdigest()
@@ -115,7 +116,8 @@ executor_values=[]
 routing_executors=[]
 for number in range(int(executors)):
     name=f"fixture-{number+1}"
-    executor={"name":name,"model":f"model-{number+1}","adapter_id":adapter_id,"adapter_version":1,
+    executor={"name":name,"requirement":"required" if number < int(required_count) else "advisory",
+      "model":f"model-{number+1}","adapter_id":adapter_id,"adapter_version":1,
       "adapter_executable_sha256":adapter_sha,"cli_executable_sha256":"sha256:"+str(number+3)*64,
       "cli_version":f"cli-{number+1}","tool_policy_id":tool,"limits":{"timeout_seconds":int(timeout),"token_budget":100,"output_bytes":100000},"sandbox_id":"sha256:"+str(number+4)*64}
     identity={key:executor[key] for key in ("adapter_id","adapter_version","adapter_executable_sha256","model","cli_executable_sha256","cli_version","tool_policy_id","limits","sandbox_id")}
@@ -450,8 +452,13 @@ import json, sys
 aggregate=json.load(open(__import__("pathlib").Path(sys.argv[1])/"aggregate.json"))
 assert sorted(aggregate["executors"]) == ["fixture-1","fixture-2"]
 assert not {"counts","comparison_counts","deltas","separate_executor_dimensions"} & set(aggregate)
-assert set(aggregate["infrastructure"]) == {"input_recheck","infrastructure_errors","cleanup_failures"}
+assert set(aggregate["infrastructure"]) == {
+    "input_recheck","infrastructure_errors","cleanup_failures",
+    "shared_safety_failures","required_state","collection_state","executor_states",
+}
 for name, block in aggregate["executors"].items():
+    assert block["requirement"] == "required"
+    assert block["state"] == "complete"
     classes=block["case_classes"]
     assert set(classes) == {"intended","activation_positive","activation_negative"}
     assert classes["intended"]["trial_counts"] == {"pass":1,"fail":1,"invalid":0,"regression":0,"inconclusive":0}
@@ -478,6 +485,43 @@ if harness_run "$oversized_input" "$oversized_output" >/dev/null 2>&1; then
 fi
 [[ -z "$(find "$oversized_output" -mindepth 1 -print -quit)" ]] || fail "oversized matrix created evidence"
 pass "an oversized projected matrix is refused before any trial process"
+
+advisory_input="$TMP/advisory-input"; advisory_output="$TMP/advisory-output"
+mkdir -p "$advisory_output"
+make_run "$advisory_input" correct iterate 2 5 none 1 1
+python3 - "$TMP/routing.json" <<'PY'
+import json, sys
+path=sys.argv[1]
+value=json.load(open(path))
+value["executors"][1]["argv"] += ["--fixture", "collect-fail"]
+open(path,"w").write(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n")
+PY
+harness_run "$advisory_input" "$advisory_output" >/dev/null
+harness_verify "$advisory_output" >/dev/null
+python3 - "$advisory_output" <<'PY'
+import json, sys
+root=sys.argv[1]
+manifest=json.load(open(root+"/manifest.json"))
+aggregate=json.load(open(root+"/aggregate.json"))
+assert manifest["state"]=="complete", manifest
+assert manifest["collection_state"]=="incomplete", manifest
+assert manifest["executor_states"]["fixture-1"]["state"]=="complete", manifest["executor_states"]
+assert manifest["executor_states"]["fixture-2"]["state"]=="incomplete", manifest["executor_states"]
+assert aggregate["infrastructure"]["required_state"]=="complete", aggregate["infrastructure"]
+assert aggregate["executors"]["fixture-1"]["requirement"]=="required", aggregate["executors"]
+assert aggregate["executors"]["fixture-2"]["requirement"]=="advisory", aggregate["executors"]
+PY
+pass "advisory infrastructure failure leaves required evidence complete"
+
+no_required_input="$TMP/no-required-input"; no_required_output="$TMP/no-required-output"
+mkdir -p "$no_required_output"
+make_run "$no_required_input" correct iterate 1 5 none 1 0
+if harness_run "$no_required_input" "$no_required_output" >/dev/null 2>&1; then
+  fail "empty required executor set ran"
+fi
+[[ -z "$(find "$no_required_output" -mindepth 1 -print -quit)" ]] ||
+  fail "empty required executor set created evidence"
+pass "an empty required executor set refuses before execution"
 
 realistic="$(run_case realistic correct gate 3 30 none 2)"
 harness_verify "$realistic" >/dev/null

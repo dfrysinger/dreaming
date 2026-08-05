@@ -114,9 +114,10 @@ with the case class are refused.
 
 The policy has `schema_version: 2`, `profile` (`gate` or `iterate`),
 `policy_kind` (`capability_uplift` or `encoded_preference`), a non-empty ordered
-`required_executors` selection, and an exact comparator configuration. Selected
-executors follow `copilot`, `claude`, then `codex` order, but a policy may
-require any explicit subset. Each executor binds its exact model, adapter
+`required_executors` selection, an ordered `advisory_executors` selection, and
+an exact comparator configuration. The two executor sets are disjoint and each
+follows `copilot`, `claude`, then `codex` order. A policy may require any
+explicit non-empty subset. Each executor binds its exact model, adapter
 identity/version/executable digest, and CLI executable digest. The comparator
 binds its route, exact model, adapter identity/version/executable digest,
 timeout, token budget, and rubric digest. Gate profiles have three trials per
@@ -135,9 +136,11 @@ legacy intended and one related case, with `cross_executor_authority: false`;
 they do not create activation cases or M5 authority.
 
 Dreaming compiles these inputs into a sealed run, invokes the replaceable
-harness, independently verifies the retained evidence, and issues one
-certificate per required executor. It stores the ordered aggregate receipt and
-schema-v3 authority only under
+harness, independently verifies the retained evidence, and issues one certificate per
+selected executor. Required certificates alone determine authority; advisory
+pass, regression, inconclusive, and unavailable states remain visible in the
+aggregate without granting or blocking it. It stores the ordered aggregate
+receipt and schema-v3 authority only under
 `~/.copilot/skill-state/skill-review/evaluations/v2/`. Authority paths are
 `authority/<skill-path-key>/<candidate-id>.json`; the optional schema-v2
 `.agent-created.json` field `evaluation_v3_sha256` is only an opaque digest.
@@ -145,11 +148,13 @@ schema-v3 authority only under
 bound result evidence. The legacy `gate` command reads only M2 state and cannot
 accept version-2 authority.
 
-Set `DREAMING_EVALUATION_EXECUTORS` to the explicit ordered executor set, then
-compile, execute, and certify:
+The installed default requires only Copilot and selects no advisory provider.
+Set the required and optional advisory sets explicitly when overriding that
+default, then compile, execute, and certify:
 
 ```bash
-export DREAMING_EVALUATION_EXECUTORS=copilot,claude,codex
+export DREAMING_EVALUATION_EXECUTORS=copilot
+export DREAMING_ADVISORY_EVALUATION_EXECUTORS=claude,codex
 skill-review/scripts/skill-evaluation.py v2-run-compile <skill-dir> \
   --run-dir <empty-run-dir> --config <compilation.json> \
   --routing <routing.json> --nonce <nonce> \

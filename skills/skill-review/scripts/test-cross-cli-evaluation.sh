@@ -9,7 +9,8 @@ mkdir -p "$TEST_ROOT"
 TMP="$(mktemp -d "$TEST_ROOT/cross-cli-evaluation.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 export SKILLS_STATE_DIR="$TMP/state"
-export DREAMING_EVALUATION_EXECUTORS="copilot,claude,codex"
+export DREAMING_EVALUATION_EXECUTORS="copilot"
+export DREAMING_ADVISORY_EVALUATION_EXECUTORS="claude,codex"
 EVAL="$SCRIPT_DIR/skill-evaluation.py"
 passes=0
 
@@ -68,7 +69,9 @@ write_policy() {
   "profile": "gate",
   "policy_kind": "capability_uplift",
   "required_executors": [
-    {"name":"copilot","model":"copilot-model-1","adapter_id":"sha256:1111111111111111111111111111111111111111111111111111111111111111","adapter_version":1,"adapter_executable_sha256":"sha256:1212121212121212121212121212121212121212121212121212121212121212","cli_executable_sha256":"sha256:1313131313131313131313131313131313131313131313131313131313131313"},
+    {"name":"copilot","model":"copilot-model-1","adapter_id":"sha256:1111111111111111111111111111111111111111111111111111111111111111","adapter_version":1,"adapter_executable_sha256":"sha256:1212121212121212121212121212121212121212121212121212121212121212","cli_executable_sha256":"sha256:1313131313131313131313131313131313131313131313131313131313131313"}
+  ],
+  "advisory_executors": [
     {"name":"claude","model":"claude-model-1","adapter_id":"sha256:2222222222222222222222222222222222222222222222222222222222222222","adapter_version":1,"adapter_executable_sha256":"sha256:2323232323232323232323232323232323232323232323232323232323232323","cli_executable_sha256":"sha256:2424242424242424242424242424242424242424242424242424242424242424"},
     {"name":"codex","model":"codex-model-1","adapter_id":"sha256:3333333333333333333333333333333333333333333333333333333333333333","adapter_version":1,"adapter_executable_sha256":"sha256:3434343434343434343434343434343434343434343434343434343434343434","cli_executable_sha256":"sha256:3535353535353535353535353535353535353535353535353535353535353535"}
   ],
@@ -91,11 +94,18 @@ def canonical(value):
 def identity(field, value):
     return "sha256:" + hashlib.sha256(canonical({k:v for k,v in value.items() if k != field})).hexdigest()
 certificates = []
-for index, (executor, status) in enumerate(zip(prepared["required_executors"], statuses)):
+partitions = [
+    ("required", executor) for executor in prepared["required_executors"]
+] + [
+    ("advisory", executor) for executor in prepared["advisory_executors"]
+]
+for index, ((requirement, executor), status) in enumerate(zip(partitions, statuses)):
     cert = {
         "schema_version": 2, "kind": "executor_certificate", "status": status,
         "candidate_id": prepared["candidate_id"], "suite_id": prepared["suite_id"],
-        "policy_id": prepared["policy_id"], "profile": prepared["profile"],
+        "policy_id": prepared["policy_id"],
+        "observation_plan_id": prepared["observation_plan_id"] if requirement == "advisory" else None,
+        "profile": prepared["profile"], "requirement": requirement,
         "executor": executor,
         "result_bundle_sha256": "sha256:" + str(index + 7) * 64,
         "result_bundle_id": "sha256:" + str(index + 4) * 64,
@@ -103,14 +113,25 @@ for index, (executor, status) in enumerate(zip(prepared["required_executors"], s
     }
     cert["certificate_id"] = identity("certificate_id", cert)
     certificates.append(cert)
-overall = "regression" if "regression" in statuses else "inconclusive" if any(s != "pass" for s in statuses) else "pass"
+required_statuses = statuses[:len(prepared["required_executors"])]
+overall = "regression" if "regression" in required_statuses else "inconclusive" if any(s != "pass" for s in required_statuses) else "pass"
 aggregate = {
     "schema_version": 2, "kind": "aggregate_receipt", "status": overall,
     "skill_path": __import__("os").path.realpath(sys.stdin.name) if False else None,
     "candidate_id": prepared["candidate_id"], "candidate_inventory": prepared["candidate_inventory"],
     "suite_id": prepared["suite_id"], "policy_id": prepared["policy_id"],
-    "profile": prepared["profile"], "certificates": certificates,
+    "observation_plan_id": prepared["observation_plan_id"],
+    "profile": prepared["profile"],
+    "required_executors": prepared["required_executors"],
+    "advisory_executors": prepared["advisory_executors"],
+    "certificates": certificates,
 }
+required_ids = [item["certificate_id"] for item in certificates if item["requirement"] == "required"]
+aggregate["required_certificate_set_id"] = "sha256:" + hashlib.sha256(canonical({
+    "candidate_id": prepared["candidate_id"], "suite_id": prepared["suite_id"],
+    "policy_id": prepared["policy_id"], "profile": prepared["profile"],
+    "certificate_ids": required_ids,
+})).hexdigest()
 # The fixture's skill path is supplied by the shell because JSON stdin has no path identity.
 aggregate["skill_path"] = __import__("os").path.realpath(output + "/..") if False else ""
 aggregate["aggregate_id"] = identity("aggregate_id", aggregate)
@@ -182,7 +203,7 @@ python3 - "$ROOT/valid-skill/.skill-evaluation-policy.json" <<'PY'
 import json, sys
 p = sys.argv[1]
 d = json.load(open(p))
-d["required_executors"][0], d["required_executors"][1] = d["required_executors"][1], d["required_executors"][0]
+d["advisory_executors"][0], d["advisory_executors"][1] = d["advisory_executors"][1], d["advisory_executors"][0]
 json.dump(d, open(p, "w"))
 PY
 if "$EVAL" v2-policy-validate "$ROOT/valid-skill/.skill-evaluation-policy.json" >/dev/null 2>&1; then
@@ -191,20 +212,64 @@ fi
 write_policy "$ROOT/valid-skill"
 pass "ordered exact executor and comparator inputs bind policy identity"
 
+policy_required="$("$EVAL" v2-policy-validate "$ROOT/valid-skill/.skill-evaluation-policy.json")"
+python3 - "$ROOT/valid-skill/.skill-evaluation-policy.json" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p))
+d["advisory_executors"][0]["model"]="claude-observation-model-2"
+json.dump(d, open(p, "w"))
+PY
+policy_advisory_changed="$("$EVAL" v2-policy-validate "$ROOT/valid-skill/.skill-evaluation-policy.json")"
+python3 - "$policy_required" "$policy_advisory_changed" <<'PY'
+import json, sys
+before, after=(json.loads(item) for item in sys.argv[1:])
+assert before["policy_id"] == after["policy_id"]
+assert before["observation_plan_id"] != after["observation_plan_id"]
+PY
+write_policy "$ROOT/valid-skill"
+pass "advisory executor inputs change observation identity but not authority policy identity"
+
 python3 - "$ROOT/valid-skill/.skill-evaluation-policy.json" <<'PY'
 import json, sys
 p = sys.argv[1]
 d = json.load(open(p))
-d["required_executors"] = [
-    executor
-    for executor in d["required_executors"]
-    if executor["name"] in {"copilot", "codex"}
-]
+codex = d["advisory_executors"].pop()
+d["required_executors"].append(codex)
 json.dump(d, open(p, "w"))
 PY
-"$EVAL" v2-policy-validate "$ROOT/valid-skill/.skill-evaluation-policy.json" >/dev/null
+moved_policy="$("$EVAL" v2-policy-validate "$ROOT/valid-skill/.skill-evaluation-policy.json")"
+[[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["policy_id"])' <<<"$moved_policy")" != \
+   "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["policy_id"])' <<<"$policy_required")" ]] ||
+  fail "moving an executor into required scope preserved authority policy identity"
 write_policy "$ROOT/valid-skill"
-pass "gate policy accepts an explicit ordered executor subset"
+pass "moving an executor into the required set creates a valid new authority policy"
+
+python3 - "$ROOT/valid-skill/.skill-evaluation-policy.json" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p)); d["required_executors"]=[]
+json.dump(d, open(p, "w"))
+PY
+if "$EVAL" v2-policy-validate "$ROOT/valid-skill/.skill-evaluation-policy.json" >/dev/null 2>&1; then
+  fail "empty required executor set passed"
+fi
+write_policy "$ROOT/valid-skill"
+pass "an empty required executor set is refused at policy load"
+
+env -u DREAMING_EVALUATION_EXECUTORS -u DREAMING_ADVISORY_EVALUATION_EXECUTORS \
+  python3 - "$EVAL" <<'PY'
+import importlib.util, os, sys
+spec=importlib.util.spec_from_file_location("evaluation", sys.argv[1])
+module=importlib.util.module_from_spec(spec); spec.loader.exec_module(module)
+assert module.desired_executor_roles() == (["copilot"], [])
+os.environ["DREAMING_EVALUATION_EXECUTORS"] = ""
+try:
+    module.desired_executor_roles()
+except module.EvaluationError:
+    pass
+else:
+    raise AssertionError("empty required environment set passed")
+PY
+pass "installed defaults require Copilot only and refuse an explicit empty required set"
 
 cat > "$TMP/legacy-cases.json" <<'JSON'
 {"schema_version":1,"source":{"task_id":"source:fixture-0001","prompt":"source","required_regex":[{"id":"right","pattern":"RIGHT"}]},"sibling":{"task_id":"sibling:fixture-0002","prompt":"sibling","required_regex":[{"id":"safe","pattern":"SAFE"}]}}
@@ -239,6 +304,17 @@ if "$EVAL" v2-authority-write "$ROOT/valid-skill" --aggregate "$TMP/inconclusive
   fail "inconclusive executor issued authority"
 fi
 pass "executor certificates remain isolated and unavailable or inconclusive cannot pass"
+
+make_aggregate "$ROOT/valid-skill" "$TMP/advisory-failures.json" pass regression unavailable
+python3 - "$TMP/advisory-failures.json" <<'PY'
+import json, sys
+value=json.load(open(sys.argv[1]))
+assert value["status"] == "pass", value
+assert [item["requirement"] for item in value["certificates"]] == [
+    "required", "advisory", "advisory"
+]
+PY
+pass "advisory regression and unavailability remain visible without changing required status"
 
 make_aggregate "$ROOT/valid-skill" "$TMP/passing.json" pass pass pass
 if "$EVAL" v2-authority-write "$ROOT/valid-skill" --aggregate "$TMP/passing.json" >/dev/null 2>&1; then

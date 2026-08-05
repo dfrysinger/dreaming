@@ -53,6 +53,7 @@ def main() -> int:
     parser.add_argument("--artifacts")
     parser.add_argument("--packet")
     parser.add_argument("--mutate")
+    parser.add_argument("--fixture")
     args = parser.parse_args()
     expected = identity(args.identity)
     if args.command == "version":
@@ -79,7 +80,7 @@ def main() -> int:
         emit({"raw_sha256": digest(raw.read_bytes()), "trace_sha256": digest(Path(args.trace).read_bytes())})
         return 0
     trial = load(args.trial)
-    fixture = trial["case"]["fixture"]
+    fixture = args.fixture or trial["case"]["fixture"]
     execution = dict(expected)
     if fixture == "prepared-model-mismatch" and trial["treatment"] == "candidate" and args.command == "prepare":
         execution["model"] = "wrong-model"

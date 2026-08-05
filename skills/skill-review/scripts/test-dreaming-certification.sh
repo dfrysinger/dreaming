@@ -12,7 +12,8 @@ EVAL="$SCRIPT_DIR/skill-evaluation.py"
 HARNESS="$SCRIPT_DIR/skill-evaluation-harness.py"
 ADAPTER="$SCRIPT_DIR/fake-skill-evaluation-adapter.py"
 export SKILLS_STATE_DIR="$TMP/state"
-export DREAMING_EVALUATION_EXECUTORS="copilot,claude,codex"
+export DREAMING_EVALUATION_EXECUTORS="copilot"
+export DREAMING_ADVISORY_EVALUATION_EXECUTORS="claude,codex"
 passes=0
 
 pass() { echo "PASS  $*"; passes=$((passes + 1)); }
@@ -70,21 +71,24 @@ rubric={"id":"quality","instruction":"Choose the better response only by task qu
 comparator={"route":"fixture-route","model":"judge-1","adapter_id":adapter_id,
  "adapter_version":1,"adapter_executable_sha256":adapter_sha,"timeout_seconds":30,
  "token_budget":100,"rubric_id":sha(rubric)}
-policy_executors=[]; compiled_executors=[]; routes=[]
+required_executors=[]; advisory_executors=[]; compiled_executors=[]; routes=[]
 for number, name in enumerate(("copilot","claude","codex"), 1):
     base={"name":name,"model":f"{name}-model-1","adapter_id":adapter_id,"adapter_version":1,
           "adapter_executable_sha256":adapter_sha,"cli_executable_sha256":"sha256:"+str(number+2)*64}
-    full={**base,"cli_version":f"{name}-cli-1","tool_policy_id":tool,
+    requirement="required" if name == "copilot" else "advisory"
+    full={**base,"requirement":requirement,"cli_version":f"{name}-cli-1","tool_policy_id":tool,
           "limits":{"timeout_seconds":30,"token_budget":100,"output_bytes":100000},
           "sandbox_id":"sha256:"+str(number+5)*64}
-    identity={key:value for key,value in full.items() if key != "name"}
+    identity={key:value for key,value in full.items() if key not in {"name","requirement"}}
     identity_path=config_root/f"{name}-identity.json"
     identity_path.write_bytes(canonical(identity)+b"\n")
-    policy_executors.append(base); compiled_executors.append(full)
+    (required_executors if requirement == "required" else advisory_executors).append(base)
+    compiled_executors.append(full)
     routes.append({"name":name,"adapter_id":adapter_id,"adapter_executable_sha256":adapter_sha,
                    "argv":[adapter,"--identity",str(identity_path)]})
 policy={"schema_version":2,"profile":profile,"policy_kind":kind,
-        "required_executors":policy_executors,"comparator":comparator}
+        "required_executors":required_executors,"advisory_executors":advisory_executors,
+        "comparator":comparator}
 skill.joinpath(".skill-evaluation-policy.json").write_bytes(canonical(policy)+b"\n")
 comparator_path=config_root/"comparator-identity.json"
 comparator_path.write_bytes(canonical(comparator)+b"\n")
@@ -137,6 +141,25 @@ authority="$("$EVAL" v2-authority-write "$BASE/skill" --aggregate "$aggregate")"
 [[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["authoritative"])' <<<"$certification")" == "True" ]] ||
   fail "passing gate result was not marked authoritative"
 pass "compile, execute, independent verify, certificates, aggregate, and authority pass end to end"
+
+policy_before="$("$EVAL" v2-policy-validate "$BASE/skill/.skill-evaluation-policy.json")"
+cp "$BASE/skill/.skill-evaluation-policy.json" "$BASE/policy.advisory-saved"
+python3 - "$BASE/skill/.skill-evaluation-policy.json" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p))
+d["advisory_executors"][0]["model"]="claude-observation-model-2"
+open(p,"w").write(json.dumps(d,sort_keys=True,separators=(",",":"))+"\n")
+PY
+policy_after="$("$EVAL" v2-policy-validate "$BASE/skill/.skill-evaluation-policy.json")"
+python3 - "$policy_before" "$policy_after" <<'PY'
+import json, sys
+before, after = (json.loads(item) for item in sys.argv[1:])
+assert before["policy_id"] == after["policy_id"]
+assert before["observation_plan_id"] != after["observation_plan_id"]
+PY
+"$EVAL" current-gate "$BASE/skill" >/dev/null
+mv "$BASE/policy.advisory-saved" "$BASE/skill/.skill-evaluation-policy.json"
+pass "advisory-only policy changes supersede observations without staling required authority"
 
 trace_path="$(find "$BASE/result/trials" -name trace.json | head -1)"
 cp "$trace_path" "$BASE/trace.saved"
@@ -226,6 +249,45 @@ infrastructure="$(run_fixture "$INFRA" infrastructure-nonce)"
 [[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$infrastructure")" == "inconclusive" ]] ||
   fail "infrastructure failure was scored as candidate behavior"
 pass "inconclusive infrastructure cannot authorize"
+
+ADVISORY_INFRA="$TMP/advisory-infrastructure"
+make_fixture "$ADVISORY_INFRA"
+python3 - "$ADVISORY_INFRA/config/routing.json" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p))
+d["executors"][2]["argv"] += ["--fixture", "collect-fail"]
+open(p,"w").write(json.dumps(d,sort_keys=True,separators=(",",":"))+"\n")
+PY
+advisory_infrastructure="$(run_fixture "$ADVISORY_INFRA" advisory-infrastructure-nonce)"
+python3 - "$advisory_infrastructure" <<'PY'
+import json, sys
+value=json.loads(sys.argv[1])
+statuses={item["executor"]["name"]:item["status"] for item in value["certificates"]}
+assert value["status"] == "pass", value
+assert statuses == {"copilot":"pass","claude":"pass","codex":"inconclusive"}, statuses
+PY
+advisory_aggregate="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["aggregate"])' <<<"$advisory_infrastructure")"
+"$EVAL" v2-authority-write "$ADVISORY_INFRA/skill" --aggregate "$advisory_aggregate" >/dev/null
+"$EVAL" current-gate "$ADVISORY_INFRA/skill" >/dev/null
+pass "advisory infrastructure failure remains visible without blocking required authority"
+
+ADVISORY_REGRESSION="$TMP/advisory-regression"
+make_fixture "$ADVISORY_REGRESSION"
+python3 - "$ADVISORY_REGRESSION/config/routing.json" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p))
+d["executors"][1]["argv"] += ["--fixture", "artifact-missing"]
+open(p,"w").write(json.dumps(d,sort_keys=True,separators=(",",":"))+"\n")
+PY
+advisory_regression="$(run_fixture "$ADVISORY_REGRESSION" advisory-regression-nonce)"
+python3 - "$advisory_regression" <<'PY'
+import json, sys
+value=json.loads(sys.argv[1])
+statuses={item["executor"]["name"]:item["status"] for item in value["certificates"]}
+assert value["status"] == "pass", value
+assert statuses["copilot"] == "pass" and statuses["claude"] == "regression", statuses
+PY
+pass "advisory behavioral regression remains visible without changing the required decision"
 
 UNAVAILABLE="$TMP/unavailable"
 make_fixture "$UNAVAILABLE"
