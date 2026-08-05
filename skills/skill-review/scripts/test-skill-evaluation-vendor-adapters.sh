@@ -306,6 +306,7 @@ else:
     def test_contract_doctor_version_and_command_construction(self):
         commands = {}
         identities = []
+        tool_policy_ids = []
         for vendor in ("copilot", "claude", "codex"):
             contract = self.call(
                 vendor, "contract", "--role", "skill-evaluation-executor"
@@ -317,6 +318,7 @@ else:
             self.assertTrue(doctor["healthy"])
             version = self.call(vendor, "version")
             identities.append(set(version))
+            tool_policy_ids.append(version["tool_policy_id"])
             trial, path = self.trial(vendor)
             prepared = self.call(vendor, "prepare", "--trial", path)
             self.assertEqual(prepared["execution"], version)
@@ -365,8 +367,16 @@ else:
                 trial["candidate_inventory"],
             )
         self.assertEqual(identities[0], identities[1])
+        self.assertEqual(len(set(tool_policy_ids)), 1)
         self.assertIn("--plugin-dir", commands["copilot"])
         self.assertIn("--plugin-dir", commands["claude"])
+        self.assertNotIn("--bare", commands["claude"])
+        self.assertTrue(
+            next(self.root.glob("claude-candidate-*/home/.claude/.credentials.json")).is_file()
+        )
+        self.assertFalse(
+            next(self.root.glob("claude-candidate-*/home")).joinpath(".claude.json").exists()
+        )
         self.assertIn("--ignore-user-config", commands["codex"])
         self.assertIn("--json", commands["codex"])
 

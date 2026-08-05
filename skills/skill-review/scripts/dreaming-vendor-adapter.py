@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import json
 import os
+import pwd
 import re
 import selectors
 import signal
@@ -965,6 +966,39 @@ def copy_auth_file(source: Path, destination: Path) -> None:
     os.chmod(destination, 0o600)
 
 
+def project_claude_auth(credential_root: Path, destination: Path) -> bool:
+    source = credential_root / ".claude/.credentials.json"
+    if source.is_file() and not source.is_symlink():
+        copy_auth_file(source, destination)
+        return True
+    if sys.platform != "darwin" or credential_root != Path.home().resolve():
+        return False
+    account = pwd.getpwuid(os.getuid()).pw_name
+    try:
+        result = subprocess.run(
+            [
+                "/usr/bin/security",
+                "find-generic-password",
+                "-a",
+                account,
+                "-s",
+                "Claude Code-credentials",
+                "-w",
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=10,
+        )
+    except subprocess.TimeoutExpired:
+        return False
+    if result.returncode != 0 or not result.stdout.strip():
+        return False
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    destination.write_bytes(result.stdout)
+    os.chmod(destination, 0o600)
+    return True
+
+
 def executor_environment(vendor: str, work: Path) -> dict[str, str]:
     environment = os.environ.copy()
     real_home = Path.home()
@@ -1668,8 +1702,7 @@ def evaluation_policy(args: argparse.Namespace) -> dict[str, Any]:
     return {
         "protocol": "dreaming.skill-evaluation-executor",
         "version": EVALUATION_ADAPTER_VERSION,
-        "vendor": args.vendor,
-        "tools": EVALUATION_TOOLS[args.vendor],
+        "capabilities": ["skill", "read", "write", "edit", "shell"],
         "network": "model-provider-only-by-cli",
         "filesystem": "trial-root-only",
         "instructions": "none-inherited",
@@ -1683,7 +1716,13 @@ def evaluation_identity(args: argparse.Namespace) -> dict[str, Any]:
     binary = Path(evaluation_binary(args))
     adapter_path = Path(__file__).resolve()
     return {
-        "adapter_id": args.vendor,
+        "adapter_id": sha(
+            {
+                "protocol": "dreaming.skill-evaluation-executor",
+                "version": EVALUATION_ADAPTER_VERSION,
+                "vendor": args.vendor,
+            }
+        ),
         "adapter_version": EVALUATION_ADAPTER_VERSION,
         "adapter_executable_sha256": sha_bytes(adapter_path.read_bytes()),
         "model": args.model,
@@ -1861,9 +1900,12 @@ def evaluation_environment(args: argparse.Namespace, trial: dict[str, Any]) -> d
             copy_auth_file(credential_root / relative, home / relative)
         environment["COPILOT_HOME"] = str(home / ".copilot")
     elif args.vendor == "claude":
-        for relative in (".claude.json", ".claude/.credentials.json"):
-            copy_auth_file(credential_root / relative, home / relative)
-        environment["CLAUDE_CONFIG_DIR"] = str(home / ".claude")
+        claude_config = home / ".claude"
+        if not project_claude_auth(
+            credential_root, claude_config / ".credentials.json"
+        ):
+            raise AdapterError("authentication-required", args.vendor)
+        environment["CLAUDE_CONFIG_DIR"] = str(claude_config)
         environment["CLAUDE_CODE_TMPDIR"] = str(temporary)
     else:
         codex_home = home / ".codex"
@@ -2093,7 +2135,6 @@ def evaluation_command(
             prompt,
             "--model",
             args.model,
-            "--bare",
             "--setting-sources",
             "",
             "--settings",
@@ -2757,10 +2798,13 @@ def evaluation_doctor(args: argparse.Namespace) -> None:
     if args.vendor == "copilot":
         authenticated = (credential_root / ".config/gh/hosts.yml").is_file()
     elif args.vendor == "claude":
-        authenticated = any(
-            (credential_root / relative).is_file()
-            for relative in (".claude/.credentials.json", ".claude.json")
-        )
+        probe = Path.cwd().resolve() / f".dreaming-auth-doctor-{os.getpid()}"
+        try:
+            authenticated = project_claude_auth(
+                credential_root, probe / ".credentials.json"
+            )
+        finally:
+            shutil.rmtree(probe, ignore_errors=True)
     else:
         authenticated = (credential_root / ".codex/auth.json").is_file()
     if not authenticated:
