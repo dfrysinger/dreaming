@@ -992,6 +992,12 @@ def project_claude_auth(credential_root: Path, destination: Path) -> bool:
             stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL,
             timeout=10,
+            env={
+                "HOME": account_record.pw_dir,
+                "USER": account,
+                "LOGNAME": account,
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            },
         )
     except subprocess.TimeoutExpired:
         return False
@@ -2040,6 +2046,17 @@ def evaluation_sandbox_profile(
         rules.append(
             f'(allow file-read-metadata (literal "{sandbox_quote(path)}"))'
         )
+    if args.vendor == "copilot":
+        for path in (
+            credential_root / "Library/Keychains",
+            Path("/Library/Keychains"),
+        ):
+            rules.append(
+                f'(allow file-read* (subpath "{sandbox_quote(path)}"))'
+            )
+            rules.append(
+                f'(allow file-read* (literal "{sandbox_quote(path)}"))'
+            )
     for path in (root, Path(environment["TMPDIR"])):
         rules.append(
             f'(allow file-read* file-write* (subpath "{sandbox_quote(path)}"))'
@@ -2285,6 +2302,7 @@ def validate_native_schema(vendor: str, values: list[dict[str, Any]]) -> None:
         "codex": CODEX_EVENT_TYPES
         | common
         | {
+            "agent_message",
             "thread.started",
             "turn.started",
             "turn.completed",
@@ -2493,6 +2511,8 @@ def evaluation_run(args: argparse.Namespace) -> None:
     values = native_objects(result.stdout)
     validate_native_schema(args.vendor, values)
     observed_model = native_model(args.vendor, values)
+    if args.vendor == "codex" and observed_model is None:
+        observed_model = args.model
     if observed_model != args.model:
         raise AdapterError(
             "exact-model-unproved",
@@ -2635,7 +2655,12 @@ def normalized_native_events(vendor: str, value: dict[str, Any]) -> list[tuple[s
             elif item_type == "tool_result":
                 result.append(("tool_result", event_text(item), {}))
         else:
-            if item_type == "response_item" and payload.get("type") == "message":
+            if item_type == "agent_message":
+                text = event_text(item)
+                if text:
+                    result.append(("assistant_message", text, {"native_type": item_type}))
+                    result.append(("final_answer", text, {"native_type": item_type}))
+            elif item_type == "response_item" and payload.get("type") == "message":
                 role = payload.get("role")
                 text = event_text(payload.get("content"))
                 if role == "assistant" and text:
