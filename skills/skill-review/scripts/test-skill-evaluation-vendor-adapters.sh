@@ -304,6 +304,10 @@ else:
         return trial, trial_path, prepared, run
 
     def test_contract_doctor_version_and_command_construction(self):
+        keychains = self.credentials / "Library/Keychains"
+        keychains.mkdir(parents=True)
+        for index in range(1200):
+            (keychains.parent / f"Sibling-{index:04d}").mkdir()
         commands = {}
         identities = []
         tool_policy_ids = []
@@ -324,6 +328,7 @@ else:
             self.assertEqual(prepared["execution"], version)
             commands[vendor] = prepared["prepared"]["command"]
             profile = Path(trial["home"]) / "evaluation.sb"
+            self.assertLess(profile.stat().st_size, 65535)
             self.assertIn("(deny network*)", profile.read_text())
             listener = socket.socket()
             listener.bind(("127.0.0.1", 0))

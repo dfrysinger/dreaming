@@ -1135,47 +1135,38 @@ def sandbox_profile(
     return profile
 
 
-def deny_tree_except(root: Path, allowed: list[Path]) -> set[Path]:
+def deny_tree_except(root: Path, allowed: list[Path]) -> list[str]:
     root = root.resolve()
-    relative_allowed: list[tuple[str, ...]] = []
+    allowed_filters: list[str] = []
     for path in allowed:
+        resolved = path.resolve()
         try:
-            relative = path.resolve().relative_to(root)
+            relative = resolved.relative_to(root)
         except ValueError:
             continue
-        relative_allowed.append(relative.parts)
-    if not relative_allowed:
-        return {root}
-    denied: set[Path] = set()
-
-    def visit(current: Path, tails: list[tuple[str, ...]]) -> None:
-        if any(not tail for tail in tails):
-            return
-        expected = {tail[0] for tail in tails}
-        try:
-            children = list(current.iterdir())
-        except OSError as error:
+        if not relative.parts:
+            return []
+        if not resolved.is_dir() or resolved.is_symlink():
             raise AdapterError(
                 "executor-boundary-unavailable",
-                f"cannot enumerate sandbox boundary {current}: {error}",
-            ) from error
-        for child in children:
-            if child.name not in expected:
-                denied.add(child)
-        for name in expected:
-            next_path = current / name
-            if not next_path.is_dir() or next_path.is_symlink():
-                raise AdapterError(
-                    "executor-boundary-unavailable",
-                    f"sandbox allow path is not a real directory: {next_path}",
-                )
-            visit(
-                next_path,
-                [tail[1:] for tail in tails if tail and tail[0] == name],
+                f"sandbox allow path is not a real directory: {resolved}",
             )
-
-    visit(root, relative_allowed)
-    return denied
+        allowed_filters.append(
+            f'(subpath "{sandbox_quote(resolved)}")'
+        )
+    if not allowed_filters:
+        return [
+            f'(deny file-read* file-write* (subpath "{sandbox_quote(root)}"))',
+            f'(deny file-read* file-write* (literal "{sandbox_quote(root)}"))',
+        ]
+    exception = allowed_filters[0]
+    if len(allowed_filters) > 1:
+        exception = f'(require-any {" ".join(allowed_filters)})'
+    return [
+        "(deny file-read* file-write* "
+        f'(require-all (subpath "{sandbox_quote(root)}") '
+        f"(require-not {exception})))"
+    ]
 
 
 def sandboxed_command(
@@ -2081,13 +2072,13 @@ def evaluation_sandbox_profile(
         if keychains.is_dir():
             allowed_under_credentials.append(keychains)
     denied = {
-        *deny_tree_except(credential_root, allowed_under_credentials),
         root.parent,
         Path("/tmp"),
         Path("/private/tmp"),
         *(Path(value).expanduser().resolve() for value in args.deny_root),
     }
     rules = ["(version 1)", "(allow default)", "(deny network*)"]
+    rules.extend(deny_tree_except(credential_root, allowed_under_credentials))
     for path in sorted(denied, key=str):
         rules.append(f'(deny file-read* file-write* (subpath "{sandbox_quote(path)}"))')
         rules.append(f'(deny file-read* file-write* (literal "{sandbox_quote(path)}"))')
