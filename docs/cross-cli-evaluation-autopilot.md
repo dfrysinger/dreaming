@@ -49,9 +49,17 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Completed locally:** M5.1 policy and schemas at `7cab64a`; M5.2 sealed
   trial harness core at `745f32e`; M5.3 native adapters at `8002c9c`; M5.4
   Dreaming certification integration in the current candidate.
-- **Current candidate:** install readers and writers behind halt, run the real
-  three-CLI acceptance suite, prove rollback remains inert, complete review,
-  and enable only after the installed self-test passes.
-- **Live-proof receipt:** not started; required before implementation review.
+- **Current candidate:** `f10ba3b` with installed generation
+  `20260805T062012Z-install-64992`, behind the active halt switch.
+- **Live-proof receipt:**
+  `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/cross-cli-m5-live-proof.txt`;
+  gate remains closed.
+- **Current live status:** Claude completes the one-trial capability matrix;
+  Copilot now completes a direct process-confined native probe and must rerun
+  the matrix with the sealed 1 MB output budget; Codex fails closed because its
+  account usage limit does not reset until August 7, 2026 at 10:41 PM.
+- **Next checkpoint:** rerun the one-trial matrix on the clean current
+  candidate, inspect Copilot and Claude evidence, then wait for the real Codex
+  route rather than substituting or waiving a required executor.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.
