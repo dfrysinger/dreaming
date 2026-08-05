@@ -256,13 +256,19 @@ one run-level refusal and no trial process.
 
 ## Output bundle
 
-The harness writes only beneath a caller-provided empty output directory:
+The harness writes result evidence only beneath a caller-provided empty output
+directory, and disposable process state only beneath a separate caller-provided
+empty scratch directory that lies outside both sealed trees:
 
 ```text
 result/
   manifest.json
+  sealed-input.json
+  graders/
+    <sealed-command-grader-program>
   trials/
     <trial-id>/
+      trial.json
       result.json
       prepared.json
       raw.jsonl
@@ -271,8 +277,15 @@ result/
       grader-results.json
   comparisons/
     <pair-id>.json
+    <pair-id>.packet.json
+    <pair-id>.response.json
   aggregate.json
 ```
+
+The run identity is the canonical digest of the sealed candidate, suite,
+profile, trial count, executors, comparator, harness, tool policy, grader set,
+retention policy, limits, and input file inventory excluding the manifest
+itself. A manifest whose `run_id` differs from that digest is refused.
 
 The output manifest records:
 
@@ -282,15 +295,23 @@ The output manifest records:
 - observed harness executable digest and per-executor adapter identity;
 - observed CLI executable identity and version;
 - authorized comparator route, exact model, adapter identity, and budgets;
-- host and process-boundary metadata that is safe to retain;
 - every trial and pair ID;
+- resolved routing, argv, and environment digests as producer audit only;
 - file inventory and SHA-256 digest;
-- start and completion timestamps;
-- complete, incomplete, or refused state.
+- complete or incomplete state.
+
+A run refused before execution leaves the caller-provided output directory
+empty rather than creating a success-shaped result manifest.
+
+Input and result file-count bounds are separate, because a realistic
+three-executor gate matrix produces far more result files than input files. The
+harness computes the projected trial and result-file matrix before the first
+trial and refuses an oversized run then, rather than failing at sealing.
 
 The harness never writes a `pass` promotion decision. `aggregate.json` reports
-counts, scores, deltas, variance, trigger rates, invalid trials, and
-infrastructure errors. Dreaming applies policy afterward.
+diagnostics partitioned per executor and case class, plus overall
+infrastructure state. It exposes no pooled score surface. Dreaming applies
+policy afterward.
 
 ## Trial matrix
 
@@ -457,10 +478,20 @@ A command grader:
 - executes after the model process exits;
 - runs inside the same sandbox with network denied unless the task explicitly
   allows it;
+- declares its sealed program digest, which is verified against the sealed
+  input immediately before every execution;
 - receives declared artifact paths only;
+- runs with its own scratch home and working directory rather than the artifact
+  directory, and cannot mutate the collected artifacts;
 - has a fixed timeout and output limit;
 - is part of the grader-set digest;
+- has its sealed program bytes copied into the result bundle so verification can
+  rerun it without the input bundle;
 - cannot construct another command from model output.
+
+The sealed input inventory is rechecked immediately before command graders run
+and again before result sealing. A change at either point refuses that trial and
+leaves the bundle incomplete.
 
 Any deterministic safety assertion is mandatory and cannot be overridden.
 
@@ -469,23 +500,32 @@ Any deterministic safety assertion is mandatory and cannot be overridden.
 Semantic comparison uses the exact Dreaming-supplied comparator route, model,
 adapter, rubric, and budgets bound in the run manifest:
 
-1. create an A/B assignment after both paired trials complete;
-2. provide the task, rubric, and bounded declared outputs;
-3. remove transport metadata such as treatment, executor command, temporary
-   paths, execution order, and prior grader results;
-4. scan the resulting packet for suite-declared skill names, slugs, projection
+1. refuse the pair unless both arms are valid, proved, and matched by case,
+   repetition, executor, and effective execution;
+2. derive the A/B assignment from the caller nonce plus the pair identity after
+   both paired trials complete;
+3. provide the task, rubric, and bounded declared outputs;
+4. remove transport metadata such as treatment, executor command, temporary
+   paths, execution order, and prior grader results, and expose neither the pair
+   identity nor the treatment through comparator argv, working directory, or
+   home;
+5. run the comparator from a fresh opaque scratch directory outside the result
+   tree and remove it afterwards;
+6. scan the resulting packet for suite-declared skill names, slugs, projection
    paths, and identity markers without rewriting judged task content;
-5. mark the comparison inconclusive if treatment identity remains observable;
-6. require structured `A`, `B`, or `tie` plus criterion scores and evidence;
-7. validate the response against a schema;
-8. unblind only after comparator output is durable.
+7. mark the comparison inconclusive if treatment identity remains observable;
+8. require structured `A`, `B`, or `tie` plus criterion scores and evidence;
+9. validate the response against a schema;
+10. record the assignment only after comparator output is durable.
 
 Comparator execution uses no candidate skill, no task tools, and no writable
 task workspace. The route must be explicitly authorized before any task or
-output transfer. The result records the resolved route, model, adapter,
-budgets, packet digest, and response digest. An unauthorized route, identity
-leak, configuration mismatch, or invalid comparator output makes the semantic
-comparison inconclusive.
+output transfer, and the comparator attests its own route, model, adapter
+identity, version, budgets, and rubric before the first packet. Each comparison
+and the result manifest record that observed comparator identity alongside the
+resolved route, model, adapter, budgets, packet digest, and response digest. An
+unauthorized route, identity leak, configuration mismatch, or invalid comparator
+output makes the semantic comparison inconclusive.
 
 ## Artifact and outcome handling
 
@@ -569,13 +609,18 @@ semantics differ.
 | Raw log or trace is missing | Trial is invalid |
 | Cleanup fails | Result bundle remains incomplete |
 | Output directory is not empty | Refuse before writing |
+| `run_id` is not the canonical sealed-input digest | Refuse the run before creating a trial |
+| Projected trial or result-file matrix exceeds its bound | Refuse the run before creating a trial |
+| Sealed input changes during the run | Refuse the affected trial and seal an incomplete bundle |
+| Comparator identity is unattested | Refuse before any packet transfer |
 | Result file changes after sealing | Dreaming rejects its digest |
 
 ## Security and privacy
 
 - Run only caller-sealed commands and grader executables.
 - Construct subprocess arguments as arrays without shell evaluation.
-- Pass an explicit environment allowlist.
+- Give every child a fixed minimal harness-owned environment. Routing supplies
+  a trusted path-to-argv map only and can never widen the environment.
 - Keep provider credentials out of logs, traces, artifacts, and receipts.
 - Deny native session roots, unrelated home content, SSH material, keychains
   beyond the narrow existing authentication boundary, and repository roots not
