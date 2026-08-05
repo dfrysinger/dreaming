@@ -46,6 +46,7 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Harness contract:** `docs/skill-evaluation-trial-harness-design.md`.
 - **Current phase:** M5.5, rollout and live proof.
 - **Landed baseline:** `af92f812164dcdccfee4957b382560a4f981d896`.
+- **Installed candidate:** `e2b18561350244bc077593e48976d8631df9e689`.
 - **Completed locally:** M5.1 policy and schemas at `7cab64a`; M5.2 sealed
   trial harness core at `745f32e`; M5.3 native adapters at `8002c9c`; M5.4
   Dreaming certification integration in the current candidate. The
@@ -54,8 +55,8 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   infrastructure state, separates `policy_id` from `observation_plan_id`,
   derives `required_certificate_set_id` from required evidence only, and
   preserves required authority across advisory-only policy changes.
-- **Installed runtime:** `fddd07c2f2cf98b75d2072633c80762d69b80a7c` with
-  generation `20260805T075531Z-install-19150`, behind the active halt switch.
+- **Installed runtime:** `e2b18561350244bc077593e48976d8631df9e689` with
+  generation `20260805T201010Z-install-86507`, behind the active halt switch.
 - **Live-proof receipt:**
   `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/cross-cli-m5-live-proof.txt`;
   gate remains closed.
@@ -81,13 +82,17 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   executable-identity rejection. The selected policy now makes Copilot the
   installed required default and treats configured Claude and Codex routes as
   advisory. Advisory unavailability remains visible but does not block
-  Copilot-backed authority.
-- **Next checkpoint:** commit the runnable required/advisory candidate, install
-  it behind the halt, and pass its generation-bound installed self-test. Then
-  run both full three-trial Copilot gates with Claude/Codex advisory evidence
-  and prove advisory pass, regression, inconclusive, and unavailable states
-  cannot grant or block required authority. Continue through negative
-  evidence, rollback, review, final installed self-test, documentation, and
-  enablement.
+  Copilot-backed authority. The current generation-bound installed self-test
+  remains open: sustained host load between 38 and 70 caused multiple
+  timing-sensitive fixtures to miss startup and evidence deadlines, while
+  otherwise small subprocesses took minutes. The infrastructure-invalid run
+  was stopped by exact PID with no residual test processes; no product defect
+  or passing receipt has been claimed.
+- **Next checkpoint:** rerun the current generation-bound installed self-test
+  when host load is reasonable. Then run both full three-trial Copilot gates
+  with Claude/Codex advisory evidence and prove advisory pass, regression,
+  inconclusive, and unavailable states cannot grant or block required
+  authority. Continue through negative evidence, rollback, review, final
+  installed self-test, documentation, and enablement.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.
