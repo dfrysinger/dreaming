@@ -263,11 +263,11 @@ passing evaluation anchor, may proceed.
 
 Under cross-CLI certification, a waiver is valid only for an enumerated
 documentation, reference, or deterministic-helper change whose base candidate
-has a current gate-profile aggregate certificate. The waiver binds the new
-candidate, base aggregate receipt, policy, suite, required executor set,
-restricted changed-file inventory, test command, and test-result digest in the
-version-2 receipt store. It cannot anchor to a legacy single-executor receipt
-or remove an executor requirement.
+has a current gate-profile required certificate set. The waiver binds the new
+candidate, base required certificate set, authority policy, suite, required
+executor set, restricted changed-file inventory, test command, and test-result
+digest in the version-2 receipt store. It cannot anchor to a legacy
+single-executor receipt or remove an executor requirement.
 
 ### 6. Protect scheduled dependencies
 
@@ -422,24 +422,57 @@ certificate.
 
 #### Executor selection and certification
 
-`DREAMING_EVALUATION_EXECUTORS` is an explicit ordered set containing
-`copilot`, `claude`, and/or `codex`. No absent or merely installed CLI becomes
-required implicitly. Each selected executor must have a healthy
-`skill-evaluation-executor` adapter and an explicitly configured model.
+`DREAMING_EVALUATION_EXECUTORS` is the explicit ordered set of required
+executors. The installed default is `copilot`. A user may replace that default
+with any non-empty ordered subset of `copilot`, `claude`, and `codex`; no
+absent or merely installed CLI becomes required implicitly. An empty required
+set is a policy-load refusal. It does not start a run, produce an aggregate
+pass, or write authority.
+
+`DREAMING_ADVISORY_EVALUATION_EXECUTORS` is a separate explicit ordered set of
+optional executors. Required and advisory sets are disjoint. An advisory
+executor runs only when configured, healthy, authenticated, and within its
+provider limits. Installing a CLI does not automatically send it evaluation
+tasks or consume model credits.
+
+Each selected executor must have a `skill-evaluation-executor` adapter and an
+explicitly configured model. The required set and required executor inputs are
+sealed into the authority policy identity. The advisory set and advisory
+executor inputs are sealed into a separate observation-plan identity. Both are
+recorded in the full run receipt, but only the authority policy identity and
+required certificate digest determine authority currency. Adding, removing, or
+reconfiguring an advisory executor creates a new observation plan without
+invalidating existing required authority. Moving an executor between required
+and advisory roles changes the required set and requires new authority.
 
 Each CLI produces its own certificate. Results are never pooled into one
 cross-provider score. The aggregate gate passes only when every required
 executor has a current passing certificate for the same candidate, suite,
-policy, and gate profile.
+policy, and gate profile. Advisory certificates are retained and reported but
+cannot create authority, satisfy a missing required certificate, or block an
+otherwise passing required set.
 
 An unavailable required executor yields `inconclusive`, not pass. The owner may
 change the required executor set and run a new certification policy. Removing
 an executor changes the policy identity and cannot reuse the prior aggregate
-receipt.
+receipt. An advisory executor that fails preflight yields `unavailable`
+without changing the required aggregate decision. This means no trial process
+started because adapter, authentication, or provider-capacity preflight could
+not establish a usable route. It records a machine-readable reason and
+configured model, and has no result receipt. `inconclusive` means execution
+began but trustworthy complete evidence could not be produced; it carries the
+sealed partial-result receipt. A regressing advisory certificate is reported
+prominently; users who need that provider to gate promotion must move it into
+the required set.
+
+Advisory behavior and evidence status cannot block required authority. Shared
+safety failures remain global: a surviving process, credential residue, or
+corruption of shared sealed evidence halts authority regardless of which
+executor exposed it.
 
 #### Default gate policy
 
-For each required executor:
+For each selected executor:
 
 - every intended candidate arm must pass at least two of three trials;
 - a `capability_uplift` intended case must improve by at least one successful
@@ -456,13 +489,14 @@ For each required executor:
   unproved skill load, invalid grader, invalid required comparator output, or
   incomplete pair makes the executor certificate `inconclusive`.
 
-All three required encoded-preference comparisons must be schema-valid and
-bound to matched pairs. One or two valid comparisons cannot authorize a
-certificate, even if every valid comparison favors the candidate.
+All three encoded-preference comparisons for one executor must be schema-valid
+and bound to matched pairs. One or two valid comparisons cannot authorize that
+executor's certificate, even if every valid comparison favors the candidate.
 
 The suite may declare stricter thresholds. It may not weaken deterministic
 safety assertions, admit an unpaired treatment, or treat an infrastructure
-failure as a candidate result.
+failure as a candidate result. Advisory status changes only aggregate authority
+semantics; it does not weaken the executor-level certificate.
 
 #### Provenance schema
 
@@ -492,12 +526,28 @@ do not authorize that unknown field.
     "suite_id": "sha256:...",
     "candidate_id": "sha256:...",
     "profile": "gate",
-    "required_executors": ["copilot", "claude", "codex"],
+    "required_executors": ["copilot"],
+    "advisory_executors": ["claude", "codex"],
+    "observation_plan_id": "sha256:...",
+    "required_certificate_set_id": "sha256:...",
     "certifications": {
       "copilot": {
+        "requirement": "required",
         "status": "pass",
         "model": "exact-model-id",
         "receipt_sha256": "sha256:..."
+      },
+      "claude": {
+        "requirement": "advisory",
+        "status": "pass",
+        "model": "exact-model-id",
+        "receipt_sha256": "sha256:..."
+      },
+      "codex": {
+        "requirement": "advisory",
+        "status": "unavailable",
+        "model": "exact-model-id",
+        "reason": "provider_capacity_unavailable"
       }
     },
     "aggregate_receipt_sha256": "sha256:..."
@@ -517,7 +567,11 @@ The aggregate receipt binds:
 
 - candidate inventory and ID;
 - complete case manifest and suite ID;
-- required executor set and policy ID;
+- the authority policy identity, required executor set, and every required
+  executor input and certificate digest;
+- the separate observation-plan identity, advisory executor set, and every
+  advisory executor input, observation status, and available certificate
+  digest;
 - profile and trial count;
 - every executor, model, CLI version, adapter version, harness version, tool
   policy, budget, grader version, comparator route, comparator model,
@@ -526,8 +580,18 @@ The aggregate receipt binds:
 - blind-comparison assignments without revealing them to the comparator;
 - final per-executor and aggregate decisions.
 
-Any bound input change makes the certificate stale. Receipt paths remain
-content-addressed. The envelope contains only receipt identities and
+`policy_id` is the authority policy identity and excludes advisory-only inputs.
+`observation_plan_id` identifies the advisory configuration. The
+`required_certificate_set_id` is derived only from the candidate, suite,
+profile, authority policy, and required certificates. The full aggregate
+receipt remains an immutable audit record of both partitions.
+
+A changed required-scope input makes the required certificate set and authority
+stale. A changed advisory-scope input supersedes only that observation plan and
+its advisory records. It does not make an unchanged required certificate set
+or existing authority stale. Receipt paths remain content-addressed and are
+never rewritten. The envelope contains only the authority policy identity,
+required certificate set identity, aggregate receipt identity, and
 non-sensitive summaries; prompts, raw traces, and artifacts remain local
 evaluation state and are removed according to an explicit retention policy.
 
@@ -537,23 +601,33 @@ executables that it launches by exact digest. A Dreaming-owned verifier checks
 the run nonce, producer digests, native event structure, prepared and effective
 execution records, file inventory, and result hashes, then reruns required
 deterministic graders over the sealed artifacts before issuing a certificate.
-Evidence from an unknown producer, an unapproved executable digest, or a bundle
-whose deterministic results cannot be reproduced is untrusted and
-`inconclusive`.
+An unknown or unapproved shared harness or comparator identity invalidates
+every partition that depends on it. An unknown required-executor adapter, CLI,
+prepared execution, effective execution, or irreproducible deterministic result
+makes the required partition untrusted and `inconclusive`. The same defect on
+an advisory executor makes only that advisory partition untrusted and
+`inconclusive`, or `unavailable` when detected before any trial starts.
 
 #### Promotion and consolidation policy
 
 Promotion or a material consolidation requires:
 
 1. public-safety inventory and content review;
-2. a gate-profile aggregate certificate for the exact candidate;
+2. a gate-profile required certificate set for the exact candidate;
 3. passing certificates for every executor required by the active policy;
-4. no stale, inconclusive, or regressing case;
-5. a current schema-v3 authority document linked to the evidence envelope.
+4. no stale, inconclusive, or regressing required certificate;
+5. a current schema-v3 authority document whose authority policy and required
+   certificate set identities match the evidence envelope.
+
+Advisory certificates never satisfy item 3 and never change item 4. Their
+status remains visible in the aggregate receipt and authority document. The
+promotion gate does not compare the active advisory observation plan when
+validating existing authority.
 
 A cross-CLI waiver substitutes for items 2 and 3 only under the restricted
-waiver contract in section 5. It inherits the base aggregate's policy, suite,
-and required executor set and must be current for the exact changed candidate.
+waiver contract in section 5. It inherits the base authority policy, suite,
+and required certificate set and must be current for the exact changed
+candidate.
 
 Evaluation proves behavior under named executors and cases. It does not prove
 universal correctness. Public documentation may state only the executors,
@@ -582,7 +656,7 @@ so rollback cannot overwrite or reinterpret earlier evidence.
 When cross-CLI certification is enabled, a legacy passing or waived receipt is
 insufficient for promotion and triggers a fresh gate-profile evaluation. No
 bulk backfill runs. A new cross-CLI waiver may anchor only to a current
-version-2 aggregate certificate.
+version-2 required certificate set.
 
 Rollback:
 
@@ -606,13 +680,23 @@ The critical boundary is proved when deliberate tests show that:
 - an inherited instruction, unrelated skill, or native session root is absent
   from each trial;
 - a changed candidate, case, model, CLI, adapter, harness, grader, budget, or
-  required-executor set invalidates the gate;
+  required executor set invalidates authority;
+- a changed advisory executor set creates a new run and aggregate receipt
+  without invalidating existing required authority;
+- an empty required executor set is refused before any trial or authority
+  write;
 - a missing arm, trial, trace, collected artifact record, skill-load event, or
   deterministic grader result produces `inconclusive`; an artifact proved
   absent from a valid completed workspace remains a deterministic task result;
-- an unknown or changed harness, adapter, comparator, or producer identity
-  produces `inconclusive`;
-- a related-task or activation-negative regression blocks promotion;
+- an unknown or changed shared harness, comparator, or required-executor
+  producer identity makes required authority `inconclusive`;
+- an unknown or changed advisory adapter, CLI, or producer identity marks only
+  that advisory partition `inconclusive` or `unavailable`;
+- a required related-task or activation-negative regression blocks promotion;
+- an advisory related-task or activation-negative regression remains visible
+  without changing required authority;
+- a surviving process, credential residue, or corrupted shared sealed evidence
+  blocks authority regardless of executor role;
 - a forged, moved, or hash-mismatched receipt is rejected;
 - rollback leaves new evidence inert and cannot silently downgrade it into a
   passing legacy record.
@@ -678,9 +762,12 @@ The critical boundary is proved when deliberate tests show that:
 | Required evaluation executor is unavailable | Record `inconclusive`; do not reuse another executor's certificate |
 | Trial pair is incomplete or budgets differ | Reject the pair as invalid evidence |
 | Skill load cannot be proved | Reject the candidate trial as invalid evidence |
-| Activation-negative prompt loads the skill | Reject the candidate and keep it local |
+| Required activation-negative prompt loads the skill | Reject the candidate and keep it local |
+| Advisory activation-negative prompt loads the skill | Regress that advisory certificate and preserve required authority |
+| Any trial leaves a process or projected credential behind | Halt authority until cleanup is proved |
 | Evaluation route is not authorized | Do not invoke the executor or materialize its packet |
-| Cross-CLI receipt input changes | Mark the aggregate certificate stale |
+| Required-scope cross-CLI receipt input changes | Mark required authority stale |
+| Advisory-scope cross-CLI receipt input changes | Supersede only the advisory observation |
 | Evaluation rollback encounters schema-v3 authority | Keep promotion halted; never reinterpret it as a legacy pass |
 | Scheduled dependency discovery fails | Do not archive or consolidate the candidate |
 | Curator run partially commits | Manifest remains incomplete; rollback or resume explicitly |
@@ -830,10 +917,10 @@ phase becomes authoritative.
 
 #### M5.1: Policy and schemas
 
-Define suite schema v2, candidate and policy identities, required-executor
-selection, per-executor certificate and aggregate-receipt schemas, version-2
-authority state, cross-CLI waiver rules, stale detection, migration, retention,
-and rollback behavior. The existing evaluator remains authoritative.
+Define suite schema v2, candidate and policy identities, required and advisory
+executor selection, per-executor certificate and aggregate-receipt schemas,
+version-2 authority state, cross-CLI waiver rules, stale detection, migration,
+retention, and rollback behavior. The existing evaluator remains authoritative.
 
 #### M5.2: Trial harness core
 
@@ -861,8 +948,9 @@ consolidation, waiver, and stale-evidence policy.
 #### M5.5: Rollout and live proof
 
 Install readers before writers, exercise migration and halt behavior, prove
-rollback leaves version-2 authority inert, run the real public synthetic suite
-through all three CLIs, complete implementation review, update operating
+rollback leaves version-2 authority inert, run the real public synthetic gate
+through the required Copilot default, collect advisory Claude and Codex
+evidence when available, complete implementation review, update operating
 documentation, and enable the new gate only after the final self-test passes.
 
 Deliver:
@@ -870,14 +958,16 @@ Deliver:
 - schema-v2 evaluation suites with intended, related, activation-positive, and
   activation-negative cases;
 - capability-uplift and encoded-preference policies;
-- an explicit `DREAMING_EVALUATION_EXECUTORS` desired set;
+- explicit required and advisory executor sets, with Copilot as the installed
+  required default;
 - a versioned `skill-evaluation-executor` adapter contract for Copilot, Claude,
   and Codex;
 - a separate trial harness conforming to
   `skill-evaluation-trial-harness-design.md`;
 - three-trial paired gate runs and one-trial non-authoritative iteration runs;
 - deterministic outcome graders, trajectory checks, and blind comparison;
-- per-executor certificates and one content-addressed aggregate receipt;
+- per-executor certificates, an authority-bearing required certificate set,
+  and one content-addressed aggregate audit receipt;
 - schema-v3 cross-CLI authority documents in version-2 evaluation state,
   linked from unchanged schema-v2 evidence envelopes;
 - promotion and consolidation enforcement;
@@ -885,8 +975,14 @@ Deliver:
 
 Acceptance:
 
-- the same candidate and suite run through Copilot, Claude, and Codex without
+- the same candidate and suite run through every required executor without
   inherited user instructions or unrelated skills;
+- every advisory run uses the same sealed candidate and suite as its required
+  run, without inherited user instructions or unrelated skills;
+- Copilot is the installed required default; Claude and Codex can be configured
+  as advisory or promoted to required without changing adapter semantics;
+- an unavailable or inconclusive advisory executor does not block authority,
+  cannot satisfy a required certificate, and remains visible in receipts;
 - every candidate trial proves whether the named skill loaded;
 - a helpful capability skill improves at least one successful trial over its
   control on every required executor;
@@ -896,12 +992,17 @@ Acceptance:
   mutate the prior skill;
 - positive trigger cases load the skill at the required rate and every
   negative trigger case remains unloaded;
-- changing any candidate, case, executor, model, CLI, adapter, harness, grader,
-  budget, profile, or required-executor input invalidates the certificate;
-- an unavailable executor, partial pair, missing trace, artifact collection or
-  sealing failure, or other infrastructure failure is `inconclusive`; an
-  artifact genuinely absent from a valid completed workspace is a deterministic
-  task failure;
+- changing any candidate, case, harness, grader, profile, required executor,
+  required model, required CLI, required adapter, required budget, or other
+  required-scope input invalidates the affected required certificate and
+  authority;
+- changing only an advisory executor or observation-plan input supersedes that
+  advisory evidence without invalidating unchanged required authority;
+- an unavailable required executor, partial pair, missing trace, artifact
+  collection or sealing failure, or other infrastructure failure is
+  `inconclusive`; the same state on an advisory executor remains advisory and
+  does not change required authority; an artifact genuinely absent from a valid
+  completed workspace is a deterministic task failure;
 - promotion refuses stale, partial, regressing, or unauthorized evidence;
 - rollback leaves version-2 receipts inert and cannot turn them into legacy
   passing authority.
@@ -984,17 +1085,27 @@ Acceptance:
   candidate. Confirm capability, encoded-preference, related, and activation
   thresholds produce pass, regression, and inconclusive states exactly.
 - **Per-executor isolation:** Give one executor a regression and two passes.
-  Only that executor certificate regresses, while the aggregate gate fails.
-  This proves scores are not pooled.
+  When the regressing executor is required, only that certificate regresses and
+  the aggregate gate fails. When the regressing executor is advisory, only that
+  certificate regresses, the required aggregate still passes, and the
+  regression remains visible. Repeat the advisory case with `inconclusive` and
+  `unavailable`.
+- **Required-set floor:** Configure an empty required set with populated
+  advisory executors. Policy loading must refuse before a trial starts, and no
+  aggregate pass or authority document may be written.
 - **Authorization:** Configure an executor without an allow entry. Assert no
   process starts and no packet exists.
-- **Receipt binding:** Change each bound input independently and confirm the
-  latest gate becomes stale. Move or alter a receipt and confirm hash
-  verification fails.
-- **Producer trust:** Change the harness, adapter, prepared execution, effective
-  execution, or comparator executable digest. Reject the bundle. Change a
-  deterministic grader result without changing its sealed artifacts and
-  confirm Dreaming's recomputation rejects it.
+- **Receipt binding:** Change each required-scope input independently and
+  confirm authority becomes stale. Change each advisory-scope input and confirm
+  only the observation plan is superseded while existing required authority
+  remains current. Move or alter any receipt and confirm hash verification
+  fails.
+- **Producer trust:** Change the shared harness or comparator digest and reject
+  every dependent partition. Change a required adapter, CLI, prepared
+  execution, effective execution, or deterministic grader result and confirm
+  required authority is `inconclusive`. Repeat with an advisory-only producer
+  digest and confirm only that advisory partition is rejected while required
+  certificates remain issuable and the rejection remains visible.
 - **Waiver migration:** Attempt to anchor a deterministic-helper waiver to a
   legacy passing receipt and reject it. Anchor the same restricted change to a
   current version-2 aggregate, bind its tests and required executors, and
@@ -1062,12 +1173,19 @@ Run a public, synthetic suite with no private repository or session content:
 3. one related task that an intentionally overfitted candidate damages;
 4. positive and negative activation prompts.
 
-Run the gate profile through real Copilot, Claude, and Codex executors on the
-exact reviewed tree. Inspect each native raw log, normalized trace,
-deterministic artifact, blinded comparison, per-executor certificate,
-aggregate receipt, and schema-v3 authority document. Confirm the helpful
-candidates pass, the overfitted candidate cannot promote, no negative prompt
-loads the skill, and no unrelated home or skill content appears.
+Run the gate profile through every required executor on the exact reviewed
+tree, using Copilot as the installed default. Inspect each native raw log,
+normalized trace, deterministic artifact, blinded comparison, per-executor
+certificate, required certificate set, aggregate receipt, and schema-v3
+authority document. Confirm the helpful candidates pass, the overfitted
+candidate cannot promote, no negative prompt loads the skill, and no unrelated
+home or skill content appears.
+
+Run the same suite through configured advisory executors when they are healthy,
+authenticated, and within provider limits. Inspect completed advisory evidence
+to the same executor-level standard. Record unavailable advisory providers
+explicitly and confirm pass, regression, inconclusive, and unavailable advisory
+states neither grant nor block required authority.
 
 Then alter one bound input, prove the gate becomes stale, replace one
 authorized producer or comparator digest and prove the bundle is refused,
@@ -1140,6 +1258,11 @@ rollback without deleting evaluation evidence or enabling promotion.
       have deterministic pass, regression, and inconclusive fixtures.
 - [ ] Every required executor has an independent certificate; results are not
       pooled across providers.
+- [ ] Copilot is the installed required default; Claude and Codex are explicit
+      advisory options that can be promoted to required by policy.
+- [ ] Advisory pass, regression, inconclusive, and unavailable results remain
+      independently visible but cannot grant, satisfy, or block required
+      authority.
 - [ ] Promotion and consolidation reject partial, stale, regressing,
       unauthorized, or legacy-only evidence.
 - [ ] Schema-v2 cases and envelopes remain readable; schema-v3 authority in
@@ -1147,7 +1270,9 @@ rollback without deleting evaluation evidence or enabling promotion.
       older gate.
 - [ ] Unauthorized routes, inherited instructions, unrelated skills, and
       native session roots are absent from trial packets and traces.
-- [ ] The real three-CLI acceptance suite passes on the reviewed tree.
+- [ ] The real Copilot gate-profile acceptance suite passes on the reviewed
+      tree; configured advisory executors run best effort and unavailable
+      advisory providers do not block completion.
 - [ ] Rollback preserves evidence, restores the prior gate, and keeps promotion
       halted until self-test passes.
 

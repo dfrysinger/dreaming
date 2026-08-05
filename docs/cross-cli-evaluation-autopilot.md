@@ -5,10 +5,10 @@
 Achieve the Definition of Done in
 `docs/evidence-backed-learning-plan.md`, the
 "Cross-CLI skill certification Definition of Done" section: complete every
-remaining M5 phase so Dreaming certifies skills independently through Copilot
-CLI, Claude Code, and Codex using the replaceable trial harness. Keep working
-through the plan; finish only once every item in that section is verifiably
-met.
+remaining M5 phase so Dreaming requires independent Copilot CLI certification
+by default and can collect independent advisory Claude Code and Codex evidence
+through the replaceable trial harness. Keep working through the plan; finish
+only once every item in that section is verifiably met.
 
 ## Charter
 
@@ -49,9 +49,8 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Completed locally:** M5.1 policy and schemas at `7cab64a`; M5.2 sealed
   trial harness core at `745f32e`; M5.3 native adapters at `8002c9c`; M5.4
   Dreaming certification integration in the current candidate.
-- **Current candidate:** `e934a5e42ad60f4cb33ee0cfbf29416d331d6cc1` with
-  installed generation `20260805T075531Z-install-19150`, behind the active
-  halt switch.
+- **Installed runtime:** `fddd07c2f2cf98b75d2072633c80762d69b80a7c` with
+  generation `20260805T075531Z-install-19150`, behind the active halt switch.
 - **Live-proof receipt:**
   `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/cross-cli-m5-live-proof.txt`;
   gate remains closed.
@@ -69,13 +68,14 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   `602aa04a5305ead9c556ade76cfe29e616acd2ba00973d5b770aff70a90cbe99`.
   The retained matrices bind immutable Copilot CLI bytes after a mutable
   installed executable changed during an earlier run and correctly triggered
-  executable-identity rejection. Codex remains gated on account quota
-  availability after August 7, 2026 at 10:41 PM; it is required and cannot be
-  substituted or waived.
-- **Next checkpoint:** after Codex quota is available, run the same pinned
-  one-trial matrices through all three real providers. If Codex evidence is
-  complete, run both full three-trial gates and continue through authority,
-  negative evidence, rollback, review, final installed self-test,
-  documentation, and enablement.
+  executable-identity rejection. The selected policy now makes Copilot the
+  installed required default and treats configured Claude and Codex routes as
+  advisory. Advisory unavailability remains visible but does not block
+  Copilot-backed authority.
+- **Next checkpoint:** implement required and advisory executor roles, then run
+  both full three-trial Copilot gates and prove advisory pass, regression,
+  inconclusive, and unavailable states cannot grant or block required
+  authority. Continue through negative evidence, rollback, review, final
+  installed self-test, documentation, and enablement.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.

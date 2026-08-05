@@ -110,7 +110,7 @@ Do not overload `review-executor`. Add a separate
 
 - a sealed evaluation suite;
 - the immutable candidate snapshot;
-- selected executors and exact models;
+- selected executors, their required or advisory role, and exact models;
 - the explicitly authorized comparator route, exact model, adapter, and
   budgets;
 - treatment and trial matrix;
@@ -228,6 +228,7 @@ run/
   "trials_per_arm": 3,
   "executors": {
     "copilot": {
+      "requirement": "required",
       "model": "exact-model-id",
       "adapter_id": "sha256:...",
       "adapter_version": 1,
@@ -298,7 +299,8 @@ The output manifest records:
 - every trial and pair ID;
 - resolved routing, argv, and environment digests as producer audit only;
 - file inventory and SHA-256 digest;
-- complete or incomplete state.
+- per-executor complete, incomplete, unavailable, or refused state;
+- required-partition completion separately from whole-run collection state.
 
 A run refused before execution leaves the caller-provided output directory
 empty rather than creating a success-shaped result manifest.
@@ -309,9 +311,17 @@ harness computes the projected trial and result-file matrix before the first
 trial and refuses an oversized run then, rather than failing at sealing.
 
 The harness never writes a `pass` promotion decision. `aggregate.json` reports
-diagnostics partitioned per executor and case class, plus overall
-infrastructure state. It exposes no pooled score surface. Dreaming applies
-policy afterward.
+diagnostics partitioned per executor and case class, per-executor completion,
+required-partition completion, and whole-run collection state. It exposes no
+pooled score surface. Dreaming applies policy afterward.
+
+A valid sealed run may contain complete required partitions and incomplete or
+unavailable advisory partitions. The result bundle remains content-addressed
+and independently verifiable; it does not present the advisory partition as
+complete. A run-level input refusal before partitioning invalidates the whole
+run. After input sealing succeeds, one executor's runtime, collection, or
+cleanup failure changes only that executor partition unless it corrupts shared
+sealed evidence.
 
 ## Trial matrix
 
@@ -580,7 +590,13 @@ semantics differ.
 - Cleanup runs only after result files are flushed and hashed.
 - Credentials and projected authentication are removed before ordinary
   artifacts.
-- Cleanup failure is reported and blocks authoritative completion.
+- Ordinary evidence-cleanup failure is reported and makes the owning executor
+  partition incomplete. The harness reports the partition state; Dreaming
+  applies its required or advisory authority effect.
+- A surviving process or unremoved projected credential is a shared safety
+  failure. The harness reports it separately from partition completeness, and
+  Dreaming refuses authority regardless of executor role until cleanup is
+  proved.
 - The halt switch prevents new trials and cancels active disposable trials
   without deleting durable result evidence.
 
@@ -607,11 +623,12 @@ semantics differ.
 | Comparator output is invalid | Semantic comparison is inconclusive |
 | Comparator route is unauthorized or packet leaks treatment identity | Do not transfer, or mark the comparison inconclusive if detected before execution |
 | Raw log or trace is missing | Trial is invalid |
-| Cleanup fails | Result bundle remains incomplete |
+| Ordinary evidence cleanup fails | Owning executor partition remains incomplete |
+| Process or projected credential cleanup fails | Record shared safety failure; refuse authority until cleanup is proved |
 | Output directory is not empty | Refuse before writing |
 | `run_id` is not the canonical sealed-input digest | Refuse the run before creating a trial |
 | Projected trial or result-file matrix exceeds its bound | Refuse the run before creating a trial |
-| Sealed input changes during the run | Refuse the affected trial and seal an incomplete bundle |
+| Sealed input changes during the run | Refuse affected work; invalidate every partition that can no longer prove its original sealed input |
 | Comparator identity is unattested | Refuse before any packet transfer |
 | Result file changes after sealing | Dreaming rejects its digest |
 
@@ -663,8 +680,10 @@ The current Copilot-specific runner remains authoritative until:
 1. the harness input and output schemas are installed;
 2. all three adapters pass deterministic contract tests;
 3. Dreaming can verify sealed result bundles without invoking a model;
-4. the public synthetic three-CLI acceptance suite passes;
-5. the promotion gate is switched to the new receipt version.
+4. the public synthetic Copilot gate-profile acceptance suite passes;
+5. advisory unavailable, inconclusive, regression, and pass states are proved
+   unable to change required authority;
+6. the promotion gate is switched to the new receipt version.
 
 The new harness writes separate versioned run and result directories. It does
 not alter existing receipts.
@@ -779,7 +798,10 @@ receipts automatically.
 - **Invariant:** interrupted trials leave no active process or credential copy.
 - **Setup:** cancel during model execution and during artifact collection.
 - **Pass signal:** process group exits, credentials are removed, durable partial
-  evidence says incomplete, and no authoritative aggregate is emitted.
+  evidence marks the owning partition incomplete, and no complete-looking
+  result is emitted for that partition. A cleanly cancelled advisory partition
+  leaves required evidence usable. A surviving process or credential copy
+  records a shared safety failure and prevents authority regardless of role.
 - **Failure proof:** a surviving process or complete-looking result breaks the
   fail-closed boundary.
 
@@ -797,7 +819,7 @@ receipts automatically.
 
 Use public synthetic tasks and an exact reviewed candidate.
 
-For each of Copilot CLI, Claude Code, and Codex:
+For Copilot CLI as the installed required default:
 
 1. run a control/candidate capability pair three times;
 2. run a control/candidate encoded-preference pair three times;
@@ -808,6 +830,12 @@ For each of Copilot CLI, Claude Code, and Codex:
 6. confirm seeded unrelated instructions, skills, and denied home files do not
    appear;
 7. cancel one disposable trial and prove cleanup.
+
+For each configured advisory executor, run the same public suite when the
+executor is healthy, authenticated, and within provider limits. A completed
+advisory run must satisfy the same executor-level evidence checks. An
+unavailable advisory executor must produce an explicit advisory result and
+must not change the required aggregate decision.
 
 Then hand the sealed result to Dreaming and confirm Dreaming independently
 recomputes its identity and produces the expected per-executor certificates and
@@ -822,6 +850,8 @@ aggregate refusal or pass.
 - Control and candidate arms differ only by the exact candidate projection.
 - Copilot CLI, Claude Code, and Codex implement the same
   `skill-evaluation-executor` contract.
+- Every selected executor is sealed as required or advisory; the harness
+  records the role but does not decide its authority effect.
 - Every candidate trial proves the exact skill loaded; every negative
   activation trial proves it did not.
 - Deterministic final-state checks override model claims and semantic judges.
@@ -840,8 +870,13 @@ aggregate refusal or pass.
   and native session roots are excluded.
 - Cancellation removes processes and projected credentials without emitting a
   complete-looking result.
-- Result bundles are content-addressed, complete, and independently verifiable
-  by Dreaming.
-- The public synthetic three-CLI live acceptance passes on the reviewed tree.
+- Result bundles are content-addressed and independently verifiable by
+  Dreaming. The required partition must be complete for authority; advisory
+  partitions may be incomplete or unavailable and are never presented as
+  complete.
+- The public synthetic Copilot gate-profile live acceptance passes on the
+  reviewed tree.
+- Advisory pass, regression, inconclusive, and unavailable evidence remains
+  sealed and independently verifiable without changing required authority.
 - Rollback restores the prior runner, preserves evidence, and keeps promotion
   halted until self-test passes.
