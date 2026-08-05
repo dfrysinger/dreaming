@@ -55,16 +55,20 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Live-proof receipt:**
   `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/cross-cli-m5-live-proof.txt`;
   gate remains closed.
-- **Current live status:** Copilot now completes every one-trial capability
-  class with exact current native load proof and no personal plugin inventory.
-  Claude completes every candidate and related/activation path; one control
-  trial timed out and must be repeated. The first Copilot semantic comparison
-  was correctly refused because the public suite mistakenly treated
-  task-semantic wording as an identity marker; the retained suite builder now
-  uses packaging-only markers. Codex fails closed because its account usage
-  limit does not reset until August 7, 2026 at 10:41 PM.
-- **Next checkpoint:** rerun the corrected one-trial capability matrix, inspect
-  Copilot and Claude comparisons and isolation, then retain Codex as
-  quota-inconclusive rather than substituting or waiving a required executor.
+- **Current live status:** Copilot and Claude independently complete every
+  one-trial capability and encoded-preference class, including exact native
+  load proof, activation-negative behavior, related-task parity, blinded
+  comparisons, deterministic artifacts, and sealed budgets. Copilot exposes no
+  personal installed-plugin inventory under the metadata-only real-home
+  exception. The targeted harness, cross-CLI policy, and Dreaming
+  certification suites pass 29/29, 8/8, and 15/15. Codex remains the only
+  blocker because its account usage limit does not reset until August 7, 2026
+  at 10:41 PM.
+- **Next checkpoint:** after Codex quota resets, rerun the one-trial capability
+  and encoded-preference matrices through all three real providers. If Codex
+  evidence is complete, run both full three-trial gates and continue through
+  authority, negative evidence, rollback, review, final installed self-test,
+  documentation, and enablement. Do not substitute or waive the required Codex
+  executor.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.
