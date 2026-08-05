@@ -7,7 +7,7 @@
     "failure": "nonzero exit plus a final {\"ok\":false,\"error\":{\"code\":...,\"message\":...}} object"
   },
   "handshake": {
-    "command": ["contract", "--role", "<session-source|review-executor|skill-publisher>"],
+    "command": ["contract", "--role", "<session-source|review-executor|skill-evaluation-executor|skill-publisher>"],
     "required_response": {
       "ok": true,
       "protocol": "dreaming.<role>",
@@ -33,6 +33,17 @@
       "run": "accepts --snapshot and --result; writes a structured result and emits the same result"
     },
     "required_capabilities": ["source-blind", "mutation-fence", "completion-sentinel"]
+  },
+  "skill-evaluation-executor": {
+    "commands": {
+      "doctor": "verifies native CLI identity, authentication, isolation prerequisites, and skill-load observability",
+      "version": "returns exact adapter, CLI, model, tool-policy, limits, and sandbox identity",
+      "prepare": "accepts --trial; creates only trial-local projection files and returns the sealed execution",
+      "run": "accepts --trial, --prepared, and --output; executes the exact prepared native command",
+      "normalize": "accepts --raw and --trace; emits the common trace vocabulary with digest linkage",
+      "collect": "accepts --trial and --artifacts; exports only task-declared workspace artifacts"
+    },
+    "required_capabilities": ["isolated-control", "isolated-candidate", "skill-load-proof", "bounded-tools", "normalized-trace", "artifact-export", "exact-execution-identity"]
   },
   "skill-publisher": {
     "commands": {

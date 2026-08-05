@@ -7,6 +7,8 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import selectors
 import signal
 import shutil
 import sqlite3
@@ -30,6 +32,18 @@ PROTOCOLS = {
     "review-executor": (
         "dreaming.review-executor",
         ["source-blind", "mutation-fence", "completion-sentinel"],
+    ),
+    "skill-evaluation-executor": (
+        "dreaming.skill-evaluation-executor",
+        [
+            "isolated-control",
+            "isolated-candidate",
+            "skill-load-proof",
+            "bounded-tools",
+            "normalized-trace",
+            "artifact-export",
+            "exact-execution-identity",
+        ],
     ),
     "skill-publisher": (
         "dreaming.skill-publisher",
@@ -130,6 +144,10 @@ def sha(value: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical(value)).hexdigest()
 
 
+def sha_bytes(value: bytes) -> str:
+    return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
 def emit(value: dict[str, Any], status: int = 0) -> None:
     print(json.dumps(value, sort_keys=True))
     raise SystemExit(status)
@@ -153,6 +171,21 @@ def atomic_json(path: Path, value: Any) -> None:
     temporary = path.parent / f".{path.name}.{os.getpid()}"
     temporary.write_bytes(canonical(value) + b"\n")
     os.replace(temporary, path)
+
+
+def exclusive_write(path: Path, value: bytes, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, mode)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as handle:
+            handle.write(value)
+            handle.flush()
+            os.fsync(handle.fileno())
+    finally:
+        os.close(descriptor)
 
 
 def opaque_scope(value: str) -> str:
@@ -783,6 +816,16 @@ def executable(vendor: str) -> str:
     return str(canonical)
 
 
+def selected_executable(vendor: str, override: str | None = None) -> str:
+    if override:
+        path = Path(override).expanduser()
+        canonical_path = path.parent.resolve() / path.name
+        if not canonical_path.is_file():
+            raise AdapterError("executor-unavailable", vendor)
+        return str(canonical_path)
+    return executable(vendor)
+
+
 def run_process(
     command: list[str],
     environment: dict[str, str],
@@ -816,6 +859,102 @@ def run_process(
             process.wait()
         raise AdapterError("executor-timeout", str(error)) from error
     return subprocess.CompletedProcess(command, process.returncode, stdout, stderr)
+
+
+def run_process_bounded(
+    command: list[str],
+    environment: dict[str, str],
+    timeout: int,
+    output_limit: int,
+    cwd: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=environment,
+            cwd=cwd,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise AdapterError("executor-unavailable", str(error)) from error
+    captured = {"stdout": bytearray(), "stderr": bytearray()}
+    total = 0
+    deadline = time.monotonic() + timeout
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    failure: AdapterError | None = None
+    previous_handlers: dict[int, Any] = {}
+
+    def cancel(signum: int, _frame: Any) -> None:
+        try:
+            os.killpg(process.pid, signal.SIGTERM)
+            process.wait(timeout=5)
+        except (ProcessLookupError, subprocess.TimeoutExpired):
+            try:
+                os.killpg(process.pid, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+            process.wait()
+        raise AdapterError("executor-cancelled", signal.Signals(signum).name)
+
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        previous_handlers[signum] = signal.signal(signum, cancel)
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failure = AdapterError("executor-timeout", args_text(command))
+                break
+            for key, _ in selector.select(min(remaining, 0.25)):
+                chunk = os.read(key.fileobj.fileno(), 65_536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                total += len(chunk)
+                if total > output_limit:
+                    failure = AdapterError("executor-output-limit", str(output_limit))
+                    break
+                captured[key.data].extend(chunk)
+            if failure is not None:
+                break
+        if failure is None:
+            remaining = deadline - time.monotonic()
+            try:
+                process.wait(timeout=max(remaining, 0))
+            except subprocess.TimeoutExpired:
+                failure = AdapterError("executor-timeout", args_text(command))
+    finally:
+        for signum, handler in previous_handlers.items():
+            signal.signal(signum, handler)
+        selector.close()
+        if failure is not None or process.poll() is None:
+            try:
+                os.killpg(process.pid, signal.SIGTERM)
+                process.wait(timeout=5)
+            except (ProcessLookupError, subprocess.TimeoutExpired):
+                try:
+                    os.killpg(process.pid, signal.SIGKILL)
+                except ProcessLookupError:
+                    pass
+                process.wait()
+        for stream in (process.stdout, process.stderr):
+            stream.close()
+    if failure is not None:
+        raise failure
+    return subprocess.CompletedProcess(
+        command,
+        process.returncode,
+        captured["stdout"].decode("utf-8", errors="replace"),
+        captured["stderr"].decode("utf-8", errors="replace"),
+    )
+
+
+def args_text(command: list[str]) -> str:
+    return Path(command[0]).name
 
 
 def copy_auth_file(source: Path, destination: Path) -> None:
@@ -1474,6 +1613,1233 @@ def executor_run(args: argparse.Namespace) -> None:
     emit({"ok": True, **final})
 
 
+EVALUATION_ADAPTER_VERSION = 1
+EVALUATION_TOOLS = {
+    "copilot": "skill,view,create,edit,apply_patch,bash",
+    "claude": "Skill,Read,Write,Edit,Bash",
+    "codex": "native-workspace-tools",
+}
+
+
+def evaluation_binary(args: argparse.Namespace) -> str:
+    selected = Path(selected_executable(args.vendor, args.binary))
+    try:
+        first_line = selected.read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, UnicodeDecodeError, IndexError):
+        return str(selected)
+    if not first_line.startswith("#!"):
+        return str(selected)
+    if args.vendor != "codex":
+        raise AdapterError(
+            "executor-boundary-unavailable",
+            "script-based CLI executables cannot receive process-scoped network access",
+        )
+    package_root = selected.resolve().parents[1]
+    architecture = "aarch64" if os.uname().machine == "arm64" else "x86_64"
+    package = "codex-darwin-arm64" if architecture == "aarch64" else "codex-darwin-x64"
+    native = (
+        package_root
+        / "node_modules/@openai"
+        / package
+        / "vendor"
+        / f"{architecture}-apple-darwin"
+        / "bin/codex"
+    )
+    if not native.is_file() or native.is_symlink():
+        raise AdapterError(
+            "executor-boundary-unavailable",
+            "Codex packaged native executable is unavailable",
+        )
+    return str(native.resolve())
+
+
+def evaluation_cli_version(args: argparse.Namespace) -> str:
+    binary = evaluation_binary(args)
+    result = run_process([binary, "--version"], {"PATH": os.environ.get("PATH", "")}, 30)
+    if result.returncode != 0:
+        raise AdapterError("executor-unavailable", args.vendor)
+    version = (result.stdout or result.stderr).strip()
+    if not version:
+        raise AdapterError("unsupported-executor-version", args.vendor)
+    return version
+
+
+def evaluation_policy(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "protocol": "dreaming.skill-evaluation-executor",
+        "version": EVALUATION_ADAPTER_VERSION,
+        "vendor": args.vendor,
+        "tools": EVALUATION_TOOLS[args.vendor],
+        "network": "model-provider-only-by-cli",
+        "filesystem": "trial-root-only",
+        "instructions": "none-inherited",
+        "sessions": "ephemeral",
+    }
+
+
+def evaluation_identity(args: argparse.Namespace) -> dict[str, Any]:
+    if args.model == "default":
+        raise AdapterError("model-required", args.vendor)
+    binary = Path(evaluation_binary(args))
+    adapter_path = Path(__file__).resolve()
+    return {
+        "adapter_id": args.vendor,
+        "adapter_version": EVALUATION_ADAPTER_VERSION,
+        "adapter_executable_sha256": sha_bytes(adapter_path.read_bytes()),
+        "model": args.model,
+        "cli_executable_sha256": sha_bytes(binary.read_bytes()),
+        "cli_version": evaluation_cli_version(args),
+        "tool_policy_id": sha(evaluation_policy(args)),
+        "limits": {
+            "timeout_seconds": args.timeout,
+            "token_budget": args.token_budget,
+            "output_bytes": args.output_bytes,
+        },
+        "sandbox_id": sha(
+            {
+                "version": 1,
+                "platform": "macos",
+                "default": "allow",
+                "denied": [
+                    "inherited-home",
+                    "native-session-roots",
+                    "unrelated-skill-roots",
+                    "system-temporary-roots",
+                ],
+                "allowed": ["trial-root", "cli-executable", "projected-credentials"],
+            }
+        ),
+    }
+
+
+def evaluation_trial(path: str) -> dict[str, Any]:
+    trial_path = Path(path)
+    if trial_path.is_symlink() or not trial_path.is_file():
+        raise AdapterError("trial-invalid", path)
+    trial = load_json(trial_path)
+    required = {
+        "schema_version",
+        "trial_id",
+        "case",
+        "treatment",
+        "executor",
+        "candidate_id",
+        "candidate_inventory",
+        "skill_md_sha256",
+        "home",
+        "workspace",
+        "candidate_root",
+        "raw",
+        "trace",
+        "artifacts",
+    }
+    if not isinstance(trial, dict) or set(trial) != required:
+        raise AdapterError("trial-invalid", path)
+    if trial["schema_version"] != 1 or trial["treatment"] not in {
+        "control",
+        "candidate",
+    }:
+        raise AdapterError("trial-invalid", path)
+    root = trial_path.resolve().parent
+    for field in ("home", "workspace", "raw", "trace", "artifacts"):
+        trial_value = Path(trial[field])
+        if trial_value.is_symlink() or not within(trial_value.resolve(), root):
+            raise AdapterError("trial-path-escaped", field)
+    candidate_root = trial["candidate_root"]
+    if candidate_root is not None and not within(Path(candidate_root).resolve(), root):
+        raise AdapterError("trial-path-escaped", "candidate_root")
+    return trial
+
+
+def candidate_skill_name(skill_file: Path) -> str:
+    lines = skill_file.read_text(encoding="utf-8").splitlines()
+    if not lines or lines[0] != "---":
+        raise AdapterError("candidate-invalid", "SKILL.md frontmatter missing")
+    for line in lines[1:]:
+        if line == "---":
+            break
+        if line.startswith("name:"):
+            name = line.split(":", 1)[1].strip()
+            if name and re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name):
+                return name
+    raise AdapterError("candidate-invalid", "SKILL.md name missing")
+
+
+def verify_candidate_projection(trial: dict[str, Any]) -> tuple[Path | None, str | None]:
+    inventory = trial["candidate_inventory"]
+    if trial["treatment"] == "control":
+        if inventory or trial["candidate_root"] is not None or trial["skill_md_sha256"] is not None:
+            raise AdapterError("control-contaminated", "control has a candidate projection")
+        return None, None
+    if not isinstance(inventory, list) or not inventory:
+        raise AdapterError("candidate-invalid", "candidate inventory missing")
+    candidate_root = Path(trial["candidate_root"]).resolve()
+    actual: list[dict[str, Any]] = []
+    expected_paths: set[str] = set()
+    for entry in inventory:
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"path", "sha256", "size"}
+            or Path(entry["path"]).is_absolute()
+            or ".." in Path(entry["path"]).parts
+        ):
+            raise AdapterError("candidate-invalid", "candidate inventory invalid")
+        expected_paths.add(entry["path"])
+        source = candidate_root / entry["path"]
+        if source.is_symlink() or not source.is_file():
+            raise AdapterError("candidate-invalid", entry["path"])
+        data = source.read_bytes()
+        row = {"path": entry["path"], "sha256": sha_bytes(data), "size": len(data)}
+        if row != entry:
+            raise AdapterError("candidate-drift", entry["path"])
+        actual.append(row)
+    observed_paths: set[str] = set()
+    for source in candidate_root.rglob("*"):
+        relative = str(source.relative_to(candidate_root))
+        if source.is_symlink():
+            raise AdapterError("candidate-invalid", relative)
+        if source.is_file():
+            observed_paths.add(relative)
+    if observed_paths != expected_paths:
+        raise AdapterError("candidate-drift", "candidate inventory changed")
+    if sha(actual) != trial["candidate_id"]:
+        raise AdapterError("candidate-drift", "candidate_id")
+    skill = candidate_root / "SKILL.md"
+    if sha_bytes(skill.read_bytes()) != trial["skill_md_sha256"]:
+        raise AdapterError("candidate-drift", "SKILL.md")
+    return candidate_root, candidate_skill_name(skill)
+
+
+def evaluation_credential_root(args: argparse.Namespace) -> Path:
+    return Path(args.credential_root).expanduser().resolve() if args.credential_root else Path.home().resolve()
+
+
+def evaluation_environment(args: argparse.Namespace, trial: dict[str, Any]) -> dict[str, str]:
+    home = Path(trial["home"]).resolve()
+    workspace = Path(trial["workspace"]).resolve()
+    temporary = home / "tmp"
+    for directory in (
+        home,
+        workspace,
+        temporary,
+        home / ".cache",
+        home / ".config",
+        home / ".local/share",
+        home / ".local/state",
+    ):
+        directory.mkdir(parents=True, exist_ok=True)
+    environment = {
+        "PATH": os.pathsep.join(
+            dict.fromkeys(
+                [
+                    str(Path(evaluation_binary(args)).parent),
+                    "/opt/homebrew/bin",
+                    "/usr/local/bin",
+                    "/usr/bin",
+                    "/bin",
+                    "/usr/sbin",
+                    "/sbin",
+                ]
+            )
+        ),
+        "HOME": str(home),
+        "TMPDIR": str(temporary),
+        "XDG_CACHE_HOME": str(home / ".cache"),
+        "XDG_CONFIG_HOME": str(home / ".config"),
+        "XDG_DATA_HOME": str(home / ".local/share"),
+        "XDG_STATE_HOME": str(home / ".local/state"),
+        "LANG": "C",
+        "LC_ALL": "C",
+    }
+    credential_root = evaluation_credential_root(args)
+    if args.vendor == "copilot":
+        for relative in (
+            ".config/gh/hosts.yml",
+            ".config/gh/config.yml",
+            ".copilot/config.json",
+        ):
+            copy_auth_file(credential_root / relative, home / relative)
+        environment["COPILOT_HOME"] = str(home / ".copilot")
+    elif args.vendor == "claude":
+        for relative in (".claude.json", ".claude/.credentials.json"):
+            copy_auth_file(credential_root / relative, home / relative)
+        environment["CLAUDE_CONFIG_DIR"] = str(home / ".claude")
+        environment["CLAUDE_CODE_TMPDIR"] = str(temporary)
+    else:
+        codex_home = home / ".codex"
+        codex_home.mkdir(exist_ok=True)
+        copy_auth_file(credential_root / ".codex/auth.json", codex_home / "auth.json")
+        environment["CODEX_HOME"] = str(codex_home)
+    return environment
+
+
+def evaluation_projection(trial: dict[str, Any]) -> dict[str, Any]:
+    home = Path(trial["home"]).resolve()
+    plugin = home / "evaluation-plugin"
+    candidate_root, skill_name = verify_candidate_projection(trial)
+    publication_name = "dreaming-evaluation-candidate"
+    return {
+        "root": str(plugin),
+        "name": publication_name,
+        "skill_name": skill_name,
+        "candidate_id": trial["candidate_id"] if candidate_root else None,
+        "skill_md_sha256": trial["skill_md_sha256"] if candidate_root else None,
+        "inventory": trial["candidate_inventory"],
+    }
+
+
+def evaluation_plugin_files(projection: dict[str, Any]) -> dict[str, Any]:
+    skill_name = projection["skill_name"]
+    skill_paths = [f"./skills/{skill_name}"] if skill_name else []
+    publication_name = projection["name"]
+    return {
+        ".claude-plugin/plugin.json": {
+            "name": publication_name,
+            "version": "1.0.0",
+            "description": "Sealed Dreaming evaluation candidate.",
+            "skills": skill_paths,
+        },
+        ".claude-plugin/marketplace.json": {
+            "name": publication_name,
+            "owner": {"name": "Dreaming"},
+            "plugins": [
+                {
+                    "name": publication_name,
+                    "description": "Sealed Dreaming evaluation candidate.",
+                    "version": "1.0.0",
+                    "source": "./",
+                }
+            ],
+        },
+        ".codex-plugin/plugin.json": {
+            "name": publication_name,
+            "version": "1.0.0",
+            "description": "Sealed Dreaming evaluation candidate.",
+            "skills": "./skills",
+        },
+        ".agents/plugins/marketplace.json": {
+            "name": publication_name,
+            "plugins": [
+                {
+                    "name": publication_name,
+                    "source": {"source": "local", "path": "./"},
+                    "policy": {"installation": "AVAILABLE"},
+                }
+            ],
+        },
+    }
+
+
+def evaluation_plugin(args: argparse.Namespace, trial: dict[str, Any]) -> dict[str, Any]:
+    projection = evaluation_projection(trial)
+    plugin = Path(projection["root"])
+    plugin.mkdir(parents=True, exist_ok=True)
+    candidate_root, skill_name = verify_candidate_projection(trial)
+    if candidate_root is not None:
+        skills = plugin / "skills"
+        skills.mkdir()
+        projected = skills / skill_name
+        projected.symlink_to(candidate_root, target_is_directory=True)
+    for relative, value in evaluation_plugin_files(projection).items():
+        atomic_json(plugin / relative, value)
+    return projection
+
+
+def verify_evaluation_plugin(
+    trial: dict[str, Any],
+    projection: dict[str, Any],
+) -> None:
+    expected = evaluation_projection(trial)
+    if projection != expected:
+        raise AdapterError("prepared-drift", "candidate projection changed")
+    plugin = Path(expected["root"])
+    if plugin.is_symlink() or not plugin.is_dir():
+        raise AdapterError("prepared-drift", "candidate plugin root")
+    for relative, value in evaluation_plugin_files(expected).items():
+        path = plugin / relative
+        if path.is_symlink() or not path.is_file() or path.read_bytes() != canonical(value) + b"\n":
+            raise AdapterError("prepared-drift", relative)
+    skill_name = expected["skill_name"]
+    skills = plugin / "skills"
+    if skill_name is None:
+        if skills.exists():
+            raise AdapterError("control-contaminated", "control plugin has skills")
+        return
+    link = skills / skill_name
+    if not link.is_symlink() or link.resolve() != Path(trial["candidate_root"]).resolve():
+        raise AdapterError("prepared-drift", "candidate skill projection")
+
+
+def evaluation_sandbox_profile(
+    args: argparse.Namespace,
+    trial: dict[str, Any],
+    environment: dict[str, str],
+) -> Path:
+    home = Path(trial["home"]).resolve()
+    root = home.parent.resolve()
+    binary = Path(evaluation_binary(args))
+    credential_root = evaluation_credential_root(args)
+    denied = {
+        credential_root,
+        root.parent,
+        Path("/tmp"),
+        Path("/private/tmp"),
+        *(Path(value).expanduser().resolve() for value in args.deny_root),
+    }
+    rules = ["(version 1)", "(allow default)", "(deny network*)"]
+    for path in sorted(denied, key=str):
+        rules.append(f'(deny file-read* file-write* (subpath "{sandbox_quote(path)}"))')
+        rules.append(f'(deny file-read* file-write* (literal "{sandbox_quote(path)}"))')
+    for path in (root, Path(environment["TMPDIR"])):
+        rules.append(
+            f'(allow file-read* file-write* (subpath "{sandbox_quote(path)}"))'
+        )
+    for path in {binary, binary.resolve()}:
+        rules.append(
+            f'(deny file-write* (literal "{sandbox_quote(path)}"))'
+        )
+        rules.append(
+            '(allow file-read* file-read-metadata process-exec '
+            f'(literal "{sandbox_quote(path)}"))'
+        )
+    test_root = os.environ.get("DREAMING_EXECUTOR_TEST_ALLOW_ROOT")
+    if test_root:
+        rules.append(
+            '(allow file-read* (subpath "'
+            + sandbox_quote(Path(test_root).resolve())
+            + '"))'
+        )
+    try:
+        first_line = binary.read_text(encoding="utf-8").splitlines()[0]
+    except (OSError, UnicodeDecodeError, IndexError):
+        first_line = ""
+    if first_line.startswith("#!"):
+        raise AdapterError(
+            "executor-boundary-unavailable",
+            "script-based CLI executables cannot receive process-scoped network access",
+        )
+    rules.append(
+        '(allow network-outbound '
+        f'(process-path "{sandbox_quote(binary.resolve())}"))'
+    )
+    for path in (
+        Path(environment["HOME"]) / ".config/gh/hosts.yml",
+        Path(environment["HOME"]) / ".config/gh/config.yml",
+        Path(environment["HOME"]) / ".copilot/config.json",
+        Path(environment["HOME"]) / ".claude.json",
+        Path(environment["HOME"]) / ".claude/.credentials.json",
+        Path(environment["HOME"]) / ".codex/auth.json",
+    ):
+        if path.exists():
+            rules.append(f'(deny file-write* (literal "{sandbox_quote(path)}"))')
+            rules.append(f'(allow file-read* (literal "{sandbox_quote(path)}"))')
+    candidate_root = trial.get("candidate_root")
+    if candidate_root:
+        rules.append(
+            f'(deny file-write* (subpath "{sandbox_quote(Path(candidate_root).resolve())}"))'
+        )
+    plugin_root = Path(environment["HOME"]) / "evaluation-plugin"
+    if plugin_root.exists():
+        rules.append(
+            f'(deny file-write* (subpath "{sandbox_quote(plugin_root.resolve())}"))'
+        )
+    profile = home / "evaluation.sb"
+    profile.write_text("\n".join(rules) + "\n", encoding="utf-8")
+    return profile
+
+
+def evaluation_command(
+    args: argparse.Namespace,
+    trial: dict[str, Any],
+    plugin: dict[str, Any],
+) -> list[str]:
+    binary = evaluation_binary(args)
+    prompt = trial["case"].get("prompt")
+    if not isinstance(prompt, str) or not prompt:
+        raise AdapterError("trial-invalid", "case prompt")
+    workspace = trial["workspace"]
+    plugin_root = plugin["root"]
+    if args.vendor == "copilot":
+        command = [
+            binary,
+            "-p",
+            prompt,
+            "--model",
+            args.model,
+            "--allow-all-tools",
+            f"--available-tools={EVALUATION_TOOLS['copilot']}",
+            "--disable-builtin-mcps",
+            "--no-custom-instructions",
+            "--no-ask-user",
+            "--no-remote",
+            "--no-remote-export",
+            "--disallow-temp-dir",
+            "--output-format",
+            "json",
+            "-C",
+            workspace,
+        ]
+        if trial["treatment"] == "candidate":
+            command[command.index("--output-format"):command.index("--output-format")] = [
+                "--plugin-dir",
+                plugin_root,
+            ]
+    elif args.vendor == "claude":
+        empty_mcp = Path(trial["home"]) / "empty-mcp.json"
+        atomic_json(empty_mcp, {"mcpServers": {}})
+        command = [
+            binary,
+            "--print",
+            prompt,
+            "--model",
+            args.model,
+            "--bare",
+            "--setting-sources",
+            "",
+            "--settings",
+            "{}",
+            "--mcp-config",
+            str(empty_mcp),
+            "--strict-mcp-config",
+            "--tools",
+            EVALUATION_TOOLS["claude"],
+            "--allowedTools",
+            EVALUATION_TOOLS["claude"],
+            "--permission-mode",
+            "dontAsk",
+            "--no-session-persistence",
+            "--output-format",
+            "stream-json",
+            "--verbose",
+        ]
+        if trial["treatment"] == "candidate":
+            command[command.index("--setting-sources"):command.index("--setting-sources")] = [
+                "--plugin-dir",
+                plugin_root,
+            ]
+    else:
+        command = [
+            binary,
+            "exec",
+            prompt,
+            "--model",
+            args.model,
+            "--ephemeral",
+            "--ignore-user-config",
+            "--ignore-rules",
+            "--sandbox",
+            "workspace-write",
+            "--skip-git-repo-check",
+            "--json",
+            "--color",
+            "never",
+            "-c",
+            'shell_environment_policy.inherit="none"',
+            "-C",
+            workspace,
+        ]
+    return command
+
+
+def evaluation_prepare(args: argparse.Namespace) -> None:
+    trial = evaluation_trial(args.trial)
+    environment = evaluation_environment(args, trial)
+    plugin = evaluation_plugin(args, trial)
+    if args.vendor == "codex" and trial["treatment"] == "candidate":
+        binary = evaluation_binary(args)
+        for command in (
+            [binary, "plugin", "marketplace", "add", plugin["root"]],
+            [
+                binary,
+                "plugin",
+                "add",
+                plugin["name"],
+                "--marketplace",
+                plugin["name"],
+                "--json",
+            ],
+        ):
+            result = run_process(command, environment, min(args.timeout, 60), Path(trial["workspace"]))
+            if result.returncode != 0:
+                raise AdapterError(
+                    "candidate-projection-failed",
+                    (result.stderr or result.stdout).strip()[-1000:],
+                )
+    profile = evaluation_sandbox_profile(args, trial, environment)
+    command = evaluation_command(args, trial, plugin)
+    emit(
+        {
+            "prepared": {
+                "command": command,
+                "environment": environment,
+                "sandbox_profile_sha256": sha_bytes(profile.read_bytes()),
+                "projection": plugin,
+            },
+            "execution": evaluation_identity(args),
+        }
+    )
+
+
+def native_objects(text: str) -> list[dict[str, Any]]:
+    stripped = text.strip()
+    if not stripped:
+        raise AdapterError("native-output-invalid", "empty structured output")
+    values: list[Any] = []
+    for line in stripped.splitlines():
+        try:
+            values.append(json.loads(line))
+        except json.JSONDecodeError:
+            if len(stripped.splitlines()) != 1:
+                raise AdapterError("native-output-invalid", "non-JSON output")
+            try:
+                values = [json.loads(stripped)]
+            except json.JSONDecodeError as error:
+                raise AdapterError("native-output-invalid", str(error)) from error
+    result: list[dict[str, Any]] = []
+    for value in values:
+        if not isinstance(value, dict):
+            raise AdapterError("native-output-invalid", "event is not an object")
+        result.append(value)
+    return result
+
+
+def recursive_values(value: Any) -> Iterable[dict[str, Any]]:
+    if isinstance(value, dict):
+        yield value
+        for nested in value.values():
+            yield from recursive_values(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from recursive_values(nested)
+
+
+def validate_native_schema(vendor: str, values: list[dict[str, Any]]) -> None:
+    common = {
+        "text",
+        "thinking",
+        "input_text",
+        "output_text",
+        "tool_use",
+        "tool_result",
+        "message",
+        "function_call",
+        "custom_tool_call",
+        "function_call_output",
+        "custom_tool_call_output",
+        "skill_load",
+    }
+    allowed = {
+        "copilot": COPILOT_EVENT_TYPES | common,
+        "claude": CLAUDE_EVENT_TYPES
+        | common
+        | {"result", "stream_event", "rate_limit_event"},
+        "codex": CODEX_EVENT_TYPES
+        | common
+        | {
+            "thread.started",
+            "turn.started",
+            "turn.completed",
+            "item.started",
+            "item.completed",
+            "error",
+        },
+    }[vendor]
+    for value in values:
+        for item in recursive_values(value):
+            item_type = item.get("type")
+            if item_type is not None and item_type not in allowed:
+                raise AdapterError(
+                    "unsupported-native-schema",
+                    f"{vendor}:{item_type}",
+                )
+
+
+def native_model(vendor: str, values: list[dict[str, Any]]) -> str | None:
+    for value in values:
+        for item in recursive_values(value):
+            if vendor == "copilot" and item.get("type") in {
+                "session.start",
+                "session.model_change",
+            }:
+                data = item.get("data", {})
+                if isinstance(data, dict) and isinstance(data.get("model"), str):
+                    return data["model"]
+            if vendor == "claude" and item.get("type") == "system":
+                if isinstance(item.get("model"), str):
+                    return item["model"]
+            if vendor == "codex" and (
+                item.get("type") == "turn_context"
+                or (
+                    item.get("type") == "event_msg"
+                    and isinstance(item.get("payload"), dict)
+                    and item["payload"].get("type") == "turn_started"
+                )
+            ):
+                payload = item.get("payload", item)
+                if isinstance(payload, dict) and isinstance(payload.get("model"), str):
+                    return payload["model"]
+    return None
+
+
+def native_token_usage(values: list[dict[str, Any]]) -> int | None:
+    totals: list[int] = []
+    for value in values:
+        for item in recursive_values(value):
+            for key in ("usage", "token_usage"):
+                usage = item.get(key)
+                if not isinstance(usage, dict):
+                    continue
+                total = usage.get("total_tokens", usage.get("totalTokens"))
+                if isinstance(total, int) and not isinstance(total, bool):
+                    totals.append(total)
+                    continue
+                pieces = [
+                    usage.get("input_tokens", usage.get("inputTokens")),
+                    usage.get("output_tokens", usage.get("outputTokens")),
+                ]
+                if all(isinstance(piece, int) and not isinstance(piece, bool) for piece in pieces):
+                    totals.append(sum(pieces))
+    return max(totals) if totals else None
+
+
+def native_skill_evidence(
+    vendor: str,
+    values: list[dict[str, Any]],
+    skill_name: str | None,
+    skill_file: Path | None,
+    plugin_root: Path,
+) -> list[dict[str, Any]]:
+    evidence: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    for value in values:
+        for item in recursive_values(value):
+            name: Any = None
+            input_value: Any = None
+            loaded_path: Any = None
+            if vendor == "copilot" and item.get("type") == "skill.invoked":
+                data = item.get("data", {})
+                if isinstance(data, dict):
+                    name = data.get("skillName", data.get("name"))
+                    input_value = data
+                    loaded_path = data.get(
+                        "resolvedPath",
+                        data.get("skillPath", data.get("path")),
+                    )
+            elif vendor == "claude" and item.get("type") == "tool_use":
+                if str(item.get("name", "")).lower() == "skill":
+                    input_value = item.get("input", {})
+                    if isinstance(input_value, dict):
+                        name = input_value.get("skill", input_value.get("name"))
+                        loaded_path = input_value.get(
+                            "resolved_path",
+                            input_value.get("path"),
+                        )
+            elif vendor == "codex":
+                payload = item.get("payload", item)
+                native_call = item.get("type") == "response_item" and isinstance(
+                    payload, dict
+                ) and payload.get("type") in {
+                    "function_call",
+                    "custom_tool_call",
+                }
+                native_load = item.get("type") == "skill_load"
+                if (native_call or native_load) and str(
+                    payload.get("name", "skill")
+                ).lower() in {"skill", "skills"}:
+                    input_value = payload.get("arguments", payload.get("input", payload))
+                    if isinstance(input_value, str):
+                        try:
+                            input_value = json.loads(input_value)
+                        except json.JSONDecodeError:
+                            input_value = {"skill": input_value}
+                    if isinstance(input_value, dict):
+                        name = input_value.get("skill", input_value.get("name"))
+                        loaded_path = input_value.get(
+                            "resolved_path",
+                            input_value.get("path"),
+                        )
+            if isinstance(name, str):
+                event_digest = sha(item)
+                if event_digest in seen:
+                    continue
+                seen.add(event_digest)
+                resolved_path: Path | None = None
+                if isinstance(loaded_path, str) and loaded_path:
+                    candidate_path = Path(loaded_path)
+                    if candidate_path.is_absolute():
+                        resolved_path = candidate_path.resolve()
+                    else:
+                        resolved_path = (plugin_root / candidate_path).resolve()
+                exact_path = (
+                    skill_file is not None
+                    and resolved_path is not None
+                    and resolved_path == skill_file.resolve()
+                )
+                evidence.append(
+                    {
+                        "name": name.lstrip("/"),
+                        "matches_candidate": skill_name is not None
+                        and name.lstrip("/") == skill_name,
+                        "resolved_path": str(resolved_path)
+                        if resolved_path is not None
+                        else None,
+                        "exact_candidate_path": exact_path,
+                        "native_event_sha256": event_digest,
+                        "input": input_value,
+                    }
+                )
+    return evidence
+
+
+def evaluation_run(args: argparse.Namespace) -> None:
+    trial = evaluation_trial(args.trial)
+    prepared_path = Path(args.prepared)
+    if prepared_path.is_symlink() or not prepared_path.is_file():
+        raise AdapterError("prepared-invalid", args.prepared)
+    prepared = load_json(prepared_path)
+    if not isinstance(prepared, dict) or set(prepared) != {
+        "schema_version",
+        "trial_id",
+        "adapter_prepared",
+        "execution",
+        "prepared_digest",
+    }:
+        raise AdapterError("prepared-invalid", args.prepared)
+    digest_input = {key: value for key, value in prepared.items() if key != "prepared_digest"}
+    if sha(digest_input) != prepared["prepared_digest"] or prepared["trial_id"] != trial["trial_id"]:
+        raise AdapterError("prepared-invalid", "digest or trial mismatch")
+    environment = evaluation_environment(args, trial)
+    plugin = prepared["adapter_prepared"].get("projection")
+    if not isinstance(plugin, dict):
+        raise AdapterError("prepared-invalid", "projection")
+    verify_evaluation_plugin(trial, plugin)
+    expected_command = evaluation_command(args, trial, plugin)
+    profile = evaluation_sandbox_profile(args, trial, environment)
+    expected_prepared = {
+        "command": expected_command,
+        "environment": environment,
+        "sandbox_profile_sha256": sha_bytes(profile.read_bytes()),
+        "projection": plugin,
+    }
+    if prepared["adapter_prepared"] != expected_prepared:
+        raise AdapterError("prepared-drift", "prepared execution changed")
+    identity = evaluation_identity(args)
+    if prepared["execution"] != identity:
+        raise AdapterError("prepared-drift", "execution identity changed")
+    sandbox = Path("/usr/bin/sandbox-exec")
+    if not sandbox.is_file():
+        raise AdapterError("executor-boundary-unavailable", "macOS sandbox-exec is required")
+    result = run_process_bounded(
+        [str(sandbox), "-f", str(profile), *expected_command],
+        environment,
+        args.timeout,
+        args.output_bytes,
+        Path(trial["workspace"]),
+    )
+    if result.returncode != 0:
+        raise AdapterError(
+            "executor-failed",
+            (result.stderr or result.stdout).strip()[-1000:] or args.vendor,
+        )
+    values = native_objects(result.stdout)
+    validate_native_schema(args.vendor, values)
+    observed_model = native_model(args.vendor, values)
+    if observed_model != args.model:
+        raise AdapterError(
+            "exact-model-unproved",
+            f"expected {args.model}, observed {observed_model or 'none'}",
+        )
+    token_usage = native_token_usage(values)
+    if token_usage is None:
+        raise AdapterError("token-limit-unproved", args.vendor)
+    if token_usage > args.token_budget:
+        raise AdapterError(
+            "token-limit-exceeded",
+            f"{token_usage} > {args.token_budget}",
+        )
+    candidate_root, skill_name = verify_candidate_projection(trial)
+    loads = native_skill_evidence(
+        args.vendor,
+        values,
+        skill_name,
+        candidate_root / "SKILL.md" if candidate_root else None,
+        Path(plugin["root"]),
+    )
+    records: list[dict[str, Any]] = [
+        {
+            "type": "dreaming.execution",
+            "vendor": args.vendor,
+            "model": observed_model,
+            "identity": identity,
+            "prompt": trial["case"]["prompt"],
+        }
+    ]
+    records.extend({"type": "dreaming.native", "event": value} for value in values)
+    records.append(
+        {
+            "type": "dreaming.usage",
+            "total_tokens": token_usage,
+            "token_budget": args.token_budget,
+        }
+    )
+    for load in loads:
+        row = {
+            "type": "dreaming.skill_load_attestation",
+            "native": load,
+            "non_builtin": True,
+            "candidate_id": None,
+            "skill_md_sha256": None,
+            "path": None,
+        }
+        if load["matches_candidate"] and load["exact_candidate_path"]:
+            if candidate_root is None:
+                raise AdapterError("control-contaminated", "candidate skill loaded")
+            skill_file = candidate_root / "SKILL.md"
+            row.update(
+                {
+                    "candidate_id": trial["candidate_id"],
+                    "skill_md_sha256": sha_bytes(skill_file.read_bytes()),
+                    "path": "candidate/SKILL.md",
+                }
+            )
+        records.append(row)
+    records.append({"type": "dreaming.trial_end", "completed": True})
+    output = Path(args.output)
+    if output.resolve() != Path(trial["raw"]).resolve():
+        raise AdapterError("trial-path-mismatch", "raw output")
+    data = b"".join(canonical(record) + b"\n" for record in records)
+    if len(data) > args.output_bytes:
+        raise AdapterError("executor-output-limit", str(len(data)))
+    try:
+        exclusive_write(output, data)
+    except FileExistsError as error:
+        raise AdapterError("raw-output-exists", str(output)) from error
+    emit(
+        {
+            "prepared_digest": prepared["prepared_digest"],
+            "effective_execution": identity,
+            "completed": True,
+        }
+    )
+
+
+def event_text(value: Any) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, list):
+        return "\n".join(
+            part
+            for part in (event_text(item) for item in value)
+            if part
+        )
+    if isinstance(value, dict):
+        for key in (
+            "text",
+            "content",
+            "message",
+            "result",
+            "summary",
+            "last_agent_message",
+        ):
+            if key in value:
+                text = event_text(value[key])
+                if text:
+                    return text
+    return ""
+
+
+def normalized_native_events(vendor: str, value: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
+    result: list[tuple[str, str, dict[str, Any]]] = []
+    for item in recursive_values(value):
+        item_type = item.get("type")
+        payload = item.get("payload", item)
+        if not isinstance(payload, dict):
+            continue
+        if vendor == "copilot":
+            data = item.get("data", {})
+            if not isinstance(data, dict):
+                data = {}
+            mapping = {
+                "assistant.message": "assistant_message",
+                "tool.execution_start": "tool_call",
+                "tool.execution_complete": "tool_result",
+            }
+            kind = mapping.get(item_type)
+            if kind:
+                result.append((kind, event_text(data), {"native_type": item_type}))
+            elif item_type in {"assistant.turn_end", "session.task_complete"}:
+                text = event_text(data)
+                if text:
+                    result.append(("final_answer", text, {"native_type": item_type}))
+        elif vendor == "claude":
+            if item_type == "assistant":
+                message = item.get("message", {})
+                text = event_text(message)
+                if text:
+                    result.append(("assistant_message", text, {"native_type": item_type}))
+            elif item_type == "result":
+                text = event_text(item.get("result", item))
+                if text:
+                    result.append(("final_answer", text, {"native_type": item_type}))
+            elif item_type == "tool_use" and str(item.get("name", "")).lower() != "skill":
+                result.append(("tool_call", "", {"tool": item.get("name")}))
+            elif item_type == "tool_result":
+                result.append(("tool_result", event_text(item), {}))
+        else:
+            if item_type == "response_item" and payload.get("type") == "message":
+                role = payload.get("role")
+                text = event_text(payload.get("content"))
+                if role == "assistant" and text:
+                    result.append(("assistant_message", text, {"native_type": item_type}))
+                    result.append(("final_answer", text, {"native_type": item_type}))
+            elif item_type == "event_msg" and payload.get("type") in {
+                "agent_message",
+                "task_complete",
+            }:
+                text = event_text(payload)
+                if text:
+                    result.append(("final_answer", text, {"native_type": item_type}))
+            elif item_type == "response_item" and payload.get("type") in {
+                "function_call",
+                "custom_tool_call",
+            } and str(payload.get("name", "")).lower() not in {"skill", "skills"}:
+                result.append(("tool_call", "", {"tool": payload.get("name")}))
+            elif item_type == "response_item" and payload.get("type") in {
+                "function_call_output",
+                "custom_tool_call_output",
+            }:
+                result.append(("tool_result", event_text(payload), {}))
+    return result
+
+
+def evaluation_normalize(args: argparse.Namespace) -> None:
+    raw = Path(args.raw)
+    if raw.is_symlink() or not raw.is_file():
+        raise AdapterError("raw-invalid", args.raw)
+    events: list[dict[str, Any]] = []
+    diagnostics: list[dict[str, Any]] = []
+
+    def append(kind: str, text: str = "", data: dict[str, Any] | None = None) -> None:
+        events.append(
+            {
+                "sequence": len(events) + 1,
+                "kind": kind,
+                "text": text,
+                "data": data or {},
+            }
+        )
+
+    for line_number, line in enumerate(raw.read_text(encoding="utf-8").splitlines(), 1):
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise AdapterError("raw-invalid", f"line {line_number}: {error}") from error
+        if not isinstance(record, dict):
+            raise AdapterError("raw-invalid", f"line {line_number}")
+        record_type = record.get("type")
+        if record_type == "dreaming.execution":
+            append("user_message", record.get("prompt", ""), {"model": record.get("model")})
+        elif record_type == "dreaming.native":
+            produced = normalized_native_events(args.vendor, record.get("event", {}))
+            for kind, text, data in produced:
+                append(kind, text, data)
+            if not produced:
+                diagnostics.append(
+                    {
+                        "line": line_number,
+                        "kind": "unmapped-native-event",
+                        "native_sha256": sha(record.get("event")),
+                    }
+                )
+        elif record_type == "dreaming.skill_load_attestation":
+            append(
+                "skill_load",
+                "",
+                {
+                    "candidate_id": record.get("candidate_id"),
+                    "skill_md_sha256": record.get("skill_md_sha256"),
+                    "path": record.get("path"),
+                    "non_builtin": record.get("non_builtin", True),
+                    "native_event_sha256": record.get("native", {}).get(
+                        "native_event_sha256"
+                    ),
+                },
+            )
+        elif record_type == "dreaming.usage":
+            append(
+                "usage",
+                "",
+                {
+                    "total_tokens": record.get("total_tokens"),
+                    "token_budget": record.get("token_budget"),
+                },
+            )
+        elif record_type == "dreaming.trial_end" and record.get("completed") is True:
+            append("trial_end")
+        else:
+            raise AdapterError("raw-invalid", f"unknown adapter record {record_type}")
+    if not events or events[-1]["kind"] != "trial_end":
+        raise AdapterError("raw-invalid", "trial completion missing")
+    trace = {"schema_version": 1, "events": events, "diagnostics": diagnostics}
+    trace_path = Path(args.trace)
+    atomic_json(trace_path, trace)
+    emit(
+        {
+            "raw_sha256": sha_bytes(raw.read_bytes()),
+            "trace_sha256": sha_bytes(trace_path.read_bytes()),
+        }
+    )
+
+
+def evaluation_collect(args: argparse.Namespace) -> None:
+    trial = evaluation_trial(args.trial)
+    artifacts = Path(args.artifacts).resolve()
+    if artifacts != Path(trial["artifacts"]).resolve():
+        raise AdapterError("trial-path-mismatch", "artifacts")
+    workspace = Path(trial["workspace"]).resolve()
+    declared = trial["case"].get("artifacts")
+    if not isinstance(declared, list) or not all(isinstance(item, str) for item in declared):
+        raise AdapterError("trial-invalid", "case artifacts")
+    statuses: list[dict[str, Any]] = []
+    for relative in declared:
+        component = Path(relative)
+        if component.is_absolute() or ".." in component.parts or str(component) in {"", "."}:
+            raise AdapterError("artifact-path-invalid", relative)
+        source = workspace / component
+        destination = artifacts / component
+        exists = source.exists()
+        if exists:
+            resolved = source.resolve()
+            if (
+                source.is_symlink()
+                or not within(resolved, workspace)
+                or not source.is_file()
+                or any(
+                    parent.is_symlink()
+                    for parent in [source.parent, *source.parents]
+                    if within(parent.resolve(), workspace) and parent != workspace
+                )
+            ):
+                raise AdapterError("artifact-invalid", relative)
+            data = source.read_bytes()
+            if len(data) > args.output_bytes:
+                raise AdapterError("artifact-limit", relative)
+            try:
+                exclusive_write(destination, data)
+            except FileExistsError as error:
+                raise AdapterError(
+                    "artifact-destination-exists",
+                    relative,
+                ) from error
+        statuses.append({"path": relative, "source_exists": exists})
+    emit(
+        {
+            "completed_workspace": True,
+            "declared_artifacts": statuses,
+        }
+    )
+
+
+def evaluation_doctor(args: argparse.Namespace) -> None:
+    binary = evaluation_binary(args)
+    version = evaluation_cli_version(args)
+    help_command = [binary, "--help"] if args.vendor != "codex" else [binary, "exec", "--help"]
+    help_result = run_process(help_command, {"PATH": os.environ.get("PATH", "")}, 30)
+    required_flags = {
+        "copilot": ("--plugin-dir", "--output-format", "--model"),
+        "claude": ("--plugin-dir", "--output-format", "--model"),
+        "codex": ("--json", "--ignore-user-config", "--model"),
+    }[args.vendor]
+    help_text = help_result.stdout + help_result.stderr
+    if help_result.returncode != 0 or any(flag not in help_text for flag in required_flags):
+        raise AdapterError("unsupported-executor-version", version)
+    credential_root = evaluation_credential_root(args)
+    if args.vendor == "copilot":
+        authenticated = (credential_root / ".config/gh/hosts.yml").is_file()
+    elif args.vendor == "claude":
+        authenticated = any(
+            (credential_root / relative).is_file()
+            for relative in (".claude/.credentials.json", ".claude.json")
+        )
+    else:
+        authenticated = (credential_root / ".codex/auth.json").is_file()
+    if not authenticated:
+        raise AdapterError("authentication-required", args.vendor)
+    doctor_root = Path.cwd().resolve() / f".dreaming-evaluation-doctor-{os.getpid()}"
+    if doctor_root.exists():
+        raise AdapterError("doctor-workspace-exists", str(doctor_root))
+    try:
+        trial_root = doctor_root / "trial"
+        home = trial_root / "home"
+        workspace = trial_root / "workspace"
+        for path in (home, workspace):
+            path.mkdir(parents=True)
+        trial = {
+            "home": str(home),
+            "workspace": str(workspace),
+        }
+        environment = evaluation_environment(args, trial)
+        profile = evaluation_sandbox_profile(args, trial, environment)
+        allowed = workspace / "allowed"
+        allowed.write_text("allowed\n", encoding="utf-8")
+        denied = credential_root / next(
+            relative
+            for relative in (
+                ".config/gh/hosts.yml",
+                ".claude/.credentials.json",
+                ".claude.json",
+                ".codex/auth.json",
+            )
+            if (credential_root / relative).is_file()
+        )
+        allowed_result = run_process(
+            ["/usr/bin/sandbox-exec", "-f", str(profile), "/bin/cat", str(allowed)],
+            environment,
+            10,
+            workspace,
+        )
+        denied_result = run_process(
+            ["/usr/bin/sandbox-exec", "-f", str(profile), "/bin/cat", str(denied)],
+            environment,
+            10,
+            workspace,
+        )
+        write_result = run_process(
+            [
+                "/usr/bin/sandbox-exec",
+                "-f",
+                str(profile),
+                "/bin/sh",
+                "-c",
+                'exec 3>>"$1"',
+                "doctor",
+                binary,
+            ],
+            environment,
+            10,
+            workspace,
+        )
+        if (
+            allowed_result.returncode != 0
+            or denied_result.returncode == 0
+            or write_result.returncode == 0
+        ):
+            raise AdapterError(
+                "executor-boundary-unavailable",
+                "filesystem boundary canary failed",
+            )
+    finally:
+        shutil.rmtree(doctor_root, ignore_errors=True)
+    emit(
+        {
+            "healthy": True,
+            "boundary_ready": Path("/usr/bin/sandbox-exec").is_file(),
+            "native_skill_load_observable": True,
+            "execution": evaluation_identity(args),
+        }
+    )
+
+
 def publisher_state(args: argparse.Namespace) -> tuple[Path, dict[str, Any]]:
     path = Path(
         args.ownership_journal
@@ -1848,6 +3214,11 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--quiet-seconds", type=int, default=300)
     result.add_argument("--max-field-bytes", type=int, default=64_000)
     result.add_argument("--timeout", type=int, default=600)
+    result.add_argument("--token-budget", type=int, default=100_000)
+    result.add_argument("--output-bytes", type=int, default=1_000_000)
+    result.add_argument("--model", default="default")
+    result.add_argument("--binary")
+    result.add_argument("--credential-root")
     result.add_argument("--ownership-journal")
     result.add_argument("--deny-root", action="append", default=[])
     sub = result.add_subparsers(dest="command", required=True)
@@ -1864,8 +3235,19 @@ def parser() -> argparse.ArgumentParser:
         command = sub.add_parser(name)
         command.add_argument("--session", required=True)
     run = sub.add_parser("run")
-    run.add_argument("--snapshot", required=True)
-    run.add_argument("--result", required=True)
+    run.add_argument("--snapshot")
+    run.add_argument("--result")
+    run.add_argument("--trial")
+    run.add_argument("--prepared")
+    run.add_argument("--output")
+    prepare = sub.add_parser("prepare")
+    prepare.add_argument("--trial", required=True)
+    normalize = sub.add_parser("normalize")
+    normalize.add_argument("--raw", required=True)
+    normalize.add_argument("--trace", required=True)
+    collect = sub.add_parser("collect")
+    collect.add_argument("--trial", required=True)
+    collect.add_argument("--artifacts", required=True)
     install = sub.add_parser("install")
     install.add_argument("--bundle", required=True)
     install.add_argument("--bundle-id", required=True)
@@ -1898,7 +3280,25 @@ def main() -> None:
             if args.command == "version":
                 emit(executor_doctor(args))
             if args.command == "run":
+                if not args.snapshot or not args.result:
+                    raise AdapterError("missing-argument", "review run")
                 executor_run(args)
+            raise AdapterError("unsupported-command", args.command)
+        if args.role == "skill-evaluation-executor":
+            if args.command == "doctor":
+                evaluation_doctor(args)
+            if args.command == "version":
+                emit(evaluation_identity(args))
+            if args.command == "prepare":
+                evaluation_prepare(args)
+            if args.command == "run":
+                if not args.trial or not args.prepared or not args.output:
+                    raise AdapterError("missing-argument", "evaluation run")
+                evaluation_run(args)
+            if args.command == "normalize":
+                evaluation_normalize(args)
+            if args.command == "collect":
+                evaluation_collect(args)
             raise AdapterError("unsupported-command", args.command)
         publisher_command(args)
     except AdapterError as error:
