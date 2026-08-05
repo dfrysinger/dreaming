@@ -88,7 +88,7 @@ if "plugin" in args:
 model = args[args.index("--model") + 1]
 prompt = next((value for value in args if value in {
     "fixture prompt", "DRIFT", "NOLOAD", "WRONGLOAD", "FALSETRIGGER", "TIMEOUT",
-    "TOKENOVER", "FLOOD", "SCHEMA", "NOPATH", "NATIVEFAIL"
+    "TOKENOVER", "FLOOD", "SCHEMA", "NOPATH", "NATIVEFAIL", "CURRENTCOPILOT"
 }), "")
 observed = "drifted-model" if prompt == "DRIFT" else model
 workspace = Path(args[args.index("-C") + 1]) if "-C" in args else Path.cwd()
@@ -126,14 +126,29 @@ elif vendor == "codex":
 candidate = candidate and prompt != "NOLOAD"
 loaded_name = "other-skill" if prompt == "WRONGLOAD" else "fixture-skill"
 if vendor == "copilot":
-    events = [{"type":"session.start","data":{"model":observed}},
-              {"type":"assistant.message","data":{"content":"answer"}},
-              {"type":"session.usage_checkpoint",
-               "usage":{"total_tokens":tokens}}]
+    if prompt == "CURRENTCOPILOT":
+        events = [
+            {"type":"session.skills_loaded","data":{"skills":[]}},
+            {"type":"session.tools_updated","data":{"model":observed}},
+            {"type":"model.call_start","data":{"model":observed}},
+            {"type":"assistant.message",
+             "data":{"content":"answer","outputTokens":tokens}},
+        ]
+    else:
+        events = [{"type":"session.start","data":{"model":observed}},
+                  {"type":"assistant.message","data":{"content":"answer"}},
+                  {"type":"session.usage_checkpoint",
+                   "usage":{"total_tokens":tokens}}]
     if candidate:
         events.append({"type":"skill.invoked","data":{
             "skillName":loaded_name,"resolvedPath":loaded_path}})
-    events.append({"type":"session.task_complete","data":{"summary":"answer"}})
+    if prompt == "CURRENTCOPILOT":
+        events.extend([
+            {"type":"assistant.turn_end","data":{}},
+            {"type":"result","exitCode":0},
+        ])
+    else:
+        events.append({"type":"session.task_complete","data":{"summary":"answer"}})
     print(json.dumps({"events":events}))
 elif vendor == "claude":
     system = {"type":"system","model":observed}
@@ -347,6 +362,11 @@ else:
             profile = Path(trial["home"]) / "evaluation.sb"
             self.assertLess(profile.stat().st_size, 65535)
             self.assertIn("(deny network*)", profile.read_text())
+            if vendor == "copilot":
+                self.assertIn(
+                    f'(process-path "{self.binaries[vendor].resolve()}")',
+                    profile.read_text(),
+                )
             listener = socket.socket()
             listener.bind(("127.0.0.1", 0))
             listener.listen()
@@ -472,6 +492,29 @@ else:
             self.assertEqual(response["error"]["code"], "exact-model-unproved")
 
     def test_current_native_load_and_failure_shapes(self):
+        copilot, _, _, _ = self.prepare_and_run(
+            "copilot",
+            treatment="control",
+            prompt="CURRENTCOPILOT",
+        )
+        self.call(
+            "copilot",
+            "normalize",
+            "--raw",
+            copilot["raw"],
+            "--trace",
+            copilot["trace"],
+        )
+        copilot_events = json.loads(Path(copilot["trace"]).read_text())["events"]
+        self.assertEqual(
+            [event["text"] for event in copilot_events if event["kind"] == "final_answer"],
+            ["answer"],
+        )
+        self.assertEqual(
+            [event["data"]["total_tokens"] for event in copilot_events if event["kind"] == "usage"],
+            [15],
+        )
+
         trial, _, _, _ = self.prepare_and_run("claude", prompt="NOPATH")
         self.call(
             "claude",

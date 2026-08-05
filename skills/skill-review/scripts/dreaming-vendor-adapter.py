@@ -68,18 +68,27 @@ SUPPORTED_SOURCE_VERSIONS = {
 }
 COPILOT_EVENT_TYPES = {
     "abort",
+    "assistant.idle",
     "assistant.message",
+    "assistant.message_delta",
+    "assistant.message_start",
+    "assistant.reasoning",
+    "assistant.tool_call_delta",
     "assistant.turn_end",
     "assistant.turn_start",
     "external_tool.completed",
     "external_tool.requested",
     "hook.end",
     "hook.start",
+    "model.call_start",
     "permission.completed",
     "permission.requested",
+    "result",
+    "session.background_tasks_changed",
     "session.binary_asset",
     "session.compaction_complete",
     "session.compaction_start",
+    "session.custom_agents_updated",
     "session.error",
     "session.info",
     "session.mode_changed",
@@ -96,6 +105,8 @@ COPILOT_EVENT_TYPES = {
     "session.workspace_file_changed",
     "session.schedule_created",
     "session.schedule_cancelled",
+    "session.skills_loaded",
+    "session.tools_updated",
     "skill.invoked",
     "subagent.completed",
     "subagent.selected",
@@ -103,6 +114,7 @@ COPILOT_EVENT_TYPES = {
     "system.message",
     "system.notification",
     "tool.execution_complete",
+    "tool.execution_partial_result",
     "tool.execution_start",
     "tool.user_requested",
     "user.message",
@@ -2139,6 +2151,11 @@ def evaluation_sandbox_profile(
             f'(allow file-read-metadata (literal "{sandbox_quote(path)}"))'
         )
     if args.vendor == "copilot":
+        rules.append(
+            "(allow file-read* "
+            f'(require-all (subpath "{sandbox_quote(credential_root)}") '
+            f'(process-path "{sandbox_quote(binary.resolve())}")))'
+        )
         for path in allowed_under_credentials[1:] + [Path("/Library/Keychains")]:
             rules.append(
                 f'(allow file-read* (subpath "{sandbox_quote(path)}"))'
@@ -2444,6 +2461,7 @@ def native_model(vendor: str, values: list[dict[str, Any]]) -> str | None:
     for value in values:
         for item in recursive_values(value):
             if vendor == "copilot" and item.get("type") in {
+                "model.call_start",
                 "session.start",
                 "session.model_change",
             }:
@@ -2467,10 +2485,21 @@ def native_model(vendor: str, values: list[dict[str, Any]]) -> str | None:
     return None
 
 
-def native_token_usage(values: list[dict[str, Any]]) -> int | None:
+def native_token_usage(vendor: str, values: list[dict[str, Any]]) -> int | None:
     totals: list[int] = []
+    copilot_output_tokens = 0
     for value in values:
         for item in recursive_values(value):
+            if (
+                vendor == "copilot"
+                and item.get("type") == "assistant.message"
+                and isinstance(item.get("data"), dict)
+            ):
+                output_tokens = item["data"].get("outputTokens")
+                if isinstance(output_tokens, int) and not isinstance(
+                    output_tokens, bool
+                ):
+                    copilot_output_tokens += output_tokens
             for key in ("usage", "token_usage"):
                 usage = item.get(key)
                 if not isinstance(usage, dict):
@@ -2485,6 +2514,8 @@ def native_token_usage(values: list[dict[str, Any]]) -> int | None:
                 ]
                 if all(isinstance(piece, int) and not isinstance(piece, bool) for piece in pieces):
                     totals.append(sum(pieces))
+    if copilot_output_tokens:
+        return copilot_output_tokens
     return max(totals) if totals else None
 
 
@@ -2749,7 +2780,7 @@ def evaluation_run(args: argparse.Namespace) -> None:
             "exact-model-unproved",
             f"expected {args.model}, observed {observed_model or 'none'}",
         )
-    token_usage = native_token_usage(values)
+    token_usage = native_token_usage(args.vendor, values)
     if token_usage is None:
         raise AdapterError("token-limit-unproved", args.vendor)
     if token_usage > args.token_budget:
@@ -2985,6 +3016,30 @@ def evaluation_normalize(args: argparse.Namespace) -> None:
             raise AdapterError("raw-invalid", f"unknown adapter record {record_type}")
     if not events or events[-1]["kind"] != "trial_end":
         raise AdapterError("raw-invalid", "trial completion missing")
+    if args.vendor == "copilot" and not any(
+        event["kind"] == "final_answer" for event in events
+    ):
+        final_message = next(
+            (
+                event
+                for event in reversed(events)
+                if event["kind"] == "assistant_message" and event["text"]
+            ),
+            None,
+        )
+        if final_message is None:
+            raise AdapterError("raw-invalid", "Copilot final answer missing")
+        events.insert(
+            len(events) - 1,
+            {
+                "sequence": 0,
+                "kind": "final_answer",
+                "text": final_message["text"],
+                "data": {"native_type": "assistant.message"},
+            },
+        )
+        for sequence, event in enumerate(events, 1):
+            event["sequence"] = sequence
     trace = {"schema_version": 1, "events": events, "diagnostics": diagnostics}
     trace_path = Path(args.trace)
     atomic_json(trace_path, trace)
