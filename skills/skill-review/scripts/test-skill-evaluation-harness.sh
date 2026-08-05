@@ -479,7 +479,7 @@ fi
 [[ -z "$(find "$oversized_output" -mindepth 1 -print -quit)" ]] || fail "oversized matrix created evidence"
 pass "an oversized projected matrix is refused before any trial process"
 
-realistic="$(run_case realistic correct gate 3 5 none 2)"
+realistic="$(run_case realistic correct gate 3 30 none 2)"
 harness_verify "$realistic" >/dev/null
 [[ "$(state_of "$realistic")" == "complete" ]] || fail "realistic three-executor gate suite did not complete"
 python3 - "$realistic" <<'PY'
