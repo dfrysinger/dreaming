@@ -48,6 +48,28 @@ CASE_CLASSES = {
 POLICY_KINDS = {"capability_uplift", "encoded_preference"}
 PROFILES = {"gate", "iterate"}
 CERTIFICATE_STATUSES = {"pass", "regression", "inconclusive", "unavailable"}
+HARNESS_CONTRACT_VERSION = 1
+COMPILATION_SCHEMA_VERSION = 1
+RESULT_MANIFEST_KEYS = {
+    "schema_version",
+    "kind",
+    "state",
+    "input_run_id",
+    "invocation_nonce",
+    "harness_version",
+    "harness_executable_sha256",
+    "profile",
+    "candidate_id",
+    "suite_id",
+    "grader_set_id",
+    "trials",
+    "pairs",
+    "executor_identities",
+    "comparator_identity",
+    "producer_audit",
+    "file_inventory",
+    "result_id",
+}
 
 
 class EvaluationError(ValueError):
@@ -201,6 +223,58 @@ def require_nonnegative_int(value: Any, field: str) -> int:
     if not isinstance(value, int) or isinstance(value, bool) or value < 0:
         raise EvaluationError(f"{field} must be a non-negative integer")
     return value
+
+
+def require_positive_int(value: Any, field: str) -> int:
+    value = require_nonnegative_int(value, field)
+    if value == 0:
+        raise EvaluationError(f"{field} must be a positive integer")
+    return value
+
+
+def sha256_file(path: Path) -> str:
+    if not path.is_file() or path.is_symlink():
+        raise EvaluationError(f"{path} must be a regular executable file")
+    return f"sha256:{digest(path.read_bytes())}"
+
+
+def trusted_harness_path() -> Path:
+    path = Path(__file__).with_name("skill-evaluation-harness.py").resolve()
+    if not path.is_file() or path.is_symlink():
+        raise EvaluationError("reviewed Dreaming harness executable is unavailable")
+    return path
+
+
+def require_trusted_harness(path: Path) -> Path:
+    resolved = path.resolve()
+    trusted = trusted_harness_path()
+    if resolved != trusted:
+        raise EvaluationError("selected harness is not the reviewed Dreaming harness executable")
+    return trusted
+
+
+def canonical_file_inventory(root: Path, exclude: set[str] | None = None) -> list[dict[str, Any]]:
+    excluded = exclude or set()
+    result: list[dict[str, Any]] = []
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if relative in excluded:
+            continue
+        if path.is_symlink():
+            raise EvaluationError(f"{relative}: symlinks are forbidden in sealed bundles")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise EvaluationError(f"{relative}: sealed input must be a regular file")
+        content = path.read_bytes()
+        result.append(
+            {
+                "path": relative,
+                "sha256": f"sha256:{digest(content)}",
+                "size": len(content),
+            }
+        )
+    return result
 
 
 def require_exact_keys(value: dict[str, Any], field: str, keys: set[str]) -> None:
@@ -973,6 +1047,14 @@ def v2_authority_path(skill_dir: Path, current_candidate_id: str) -> Path:
     )
 
 
+def v2_certification_path(aggregate_sha256: str) -> Path:
+    return v2_evaluation_dir() / "certifications" / f"{aggregate_sha256}.json"
+
+
+def v2_latest_waiver_path(skill_dir: Path) -> Path:
+    return v2_evaluation_dir() / "latest-waiver" / f"{latest_key(str(skill_dir))}.json"
+
+
 def identity_with(field: str, value: dict[str, Any]) -> str:
     return f"sha256:{digest(canonical({key: item for key, item in value.items() if key != field}))}"
 
@@ -996,6 +1078,8 @@ def validate_certificate(
             "profile",
             "executor",
             "result_bundle_sha256",
+            "result_bundle_id",
+            "run_id",
             "certificate_id",
         },
     )
@@ -1008,6 +1092,8 @@ def validate_certificate(
     if value.get("profile") != policy["profile"]:
         raise EvaluationError(f"{field}.profile does not match policy")
     require_sha256(value.get("result_bundle_sha256"), f"{field}.result_bundle_sha256")
+    require_sha256(value.get("result_bundle_id"), f"{field}.result_bundle_id")
+    require_sha256(value.get("run_id"), f"{field}.run_id")
     executor = validate_executor(value.get("executor"), f"{field}.executor")
     expected_id = identity_with("certificate_id", value)
     if value.get("certificate_id") != expected_id:
@@ -1131,6 +1217,978 @@ def v2_policy_validate(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def desired_executor_names() -> list[str]:
+    configured = os.environ.get("DREAMING_EVALUATION_EXECUTORS")
+    if configured is None:
+        raise EvaluationError("DREAMING_EVALUATION_EXECUTORS must be explicitly configured")
+    names = [item.strip() for item in configured.split(",")]
+    if not names or any(not item for item in names):
+        raise EvaluationError("DREAMING_EVALUATION_EXECUTORS must be a non-empty comma-separated ordered set")
+    if len(set(names)) != len(names) or any(item not in EXECUTOR_NAMES for item in names):
+        raise EvaluationError("DREAMING_EVALUATION_EXECUTORS contains an unknown or duplicate executor")
+    expected = [name for name in EXECUTOR_NAMES if name in names]
+    if names != expected:
+        raise EvaluationError("DREAMING_EVALUATION_EXECUTORS must follow copilot, claude, codex order")
+    return names
+
+
+def validate_harness_executor(value: Any, field: str) -> dict[str, Any]:
+    if not isinstance(value, dict):
+        raise EvaluationError(f"{field} must be an object")
+    require_exact_keys(
+        value,
+        field,
+        {
+            "name",
+            "model",
+            "adapter_id",
+            "adapter_version",
+            "adapter_executable_sha256",
+            "cli_executable_sha256",
+            "cli_version",
+            "tool_policy_id",
+            "limits",
+            "sandbox_id",
+        },
+    )
+    base = validate_executor(
+        {key: value[key] for key in (
+            "name", "model", "adapter_id", "adapter_version",
+            "adapter_executable_sha256", "cli_executable_sha256",
+        )},
+        field,
+    )
+    limits = value.get("limits")
+    if not isinstance(limits, dict):
+        raise EvaluationError(f"{field}.limits must be an object")
+    require_exact_keys(limits, f"{field}.limits", {"timeout_seconds", "token_budget", "output_bytes"})
+    return {
+        **base,
+        "cli_version": require_text(value.get("cli_version"), f"{field}.cli_version"),
+        "tool_policy_id": require_sha256(value.get("tool_policy_id"), f"{field}.tool_policy_id"),
+        "limits": {
+            "timeout_seconds": require_positive_int(limits.get("timeout_seconds"), f"{field}.limits.timeout_seconds"),
+            "token_budget": require_positive_int(limits.get("token_budget"), f"{field}.limits.token_budget"),
+            "output_bytes": require_positive_int(limits.get("output_bytes"), f"{field}.limits.output_bytes"),
+        },
+        "sandbox_id": require_sha256(value.get("sandbox_id"), f"{field}.sandbox_id"),
+    }
+
+
+def validate_compilation_config(
+    path: Path, suite: dict[str, Any], policy: dict[str, Any], harness_sha: str
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    raw = load_json(path)
+    require_exact_keys(
+        raw,
+        "compilation",
+        {
+            "schema_version",
+            "kind",
+            "harness_executable_sha256",
+            "tool_policy_id",
+            "retention_policy_id",
+            "limits",
+            "identity_markers",
+            "graders",
+            "case_runtime",
+            "rubric",
+            "executors",
+            "comparator",
+        },
+    )
+    if raw.get("schema_version") != COMPILATION_SCHEMA_VERSION or raw.get("kind") != "dreaming_evaluation_compilation":
+        raise EvaluationError("unsupported Dreaming evaluation compilation config")
+    if raw.get("harness_executable_sha256") != harness_sha:
+        raise EvaluationError("compilation harness digest does not match the selected executable")
+    tool_policy_id = require_sha256(raw.get("tool_policy_id"), "compilation.tool_policy_id")
+    retention_policy_id = require_sha256(
+        raw.get("retention_policy_id"), "compilation.retention_policy_id"
+    )
+    limits = raw.get("limits")
+    if not isinstance(limits, dict):
+        raise EvaluationError("compilation.limits must be an object")
+    require_exact_keys(
+        limits,
+        "compilation.limits",
+        {"timeout_seconds", "output_bytes", "file_bytes", "global_concurrency", "per_executor_concurrency"},
+    )
+    normalized_limits = {
+        key: require_positive_int(limits.get(key), f"compilation.limits.{key}")
+        for key in limits
+    }
+    markers = raw.get("identity_markers")
+    if not isinstance(markers, list) or not markers or not all(isinstance(item, str) and item for item in markers):
+        raise EvaluationError("compilation.identity_markers must be a non-empty text list")
+    if len(set(markers)) != len(markers):
+        raise EvaluationError("compilation.identity_markers cannot contain duplicates")
+    grader_values = raw.get("graders")
+    if not isinstance(grader_values, list) or not grader_values:
+        raise EvaluationError("compilation.graders must be a non-empty list")
+    source_graders = {item["id"]: item for item in suite["graders"]}
+    graders: list[dict[str, Any]] = []
+    for index, grader in enumerate(grader_values):
+        field = f"compilation.graders[{index}]"
+        if not isinstance(grader, dict):
+            raise EvaluationError(f"{field} must be an object")
+        require_exact_keys(grader, field, {"id", "type", "safety", "config"})
+        grader_id = require_text(grader.get("id"), f"{field}.id")
+        source = source_graders.get(grader_id)
+        if source is None:
+            raise EvaluationError(f"{field}.id is not declared by the schema-v2 suite")
+        if grader.get("type") != source["type"] or grader.get("safety") != source["safety"]:
+            raise EvaluationError(f"{field} changes the schema-v2 grader contract")
+        if not isinstance(grader.get("config"), dict):
+            raise EvaluationError(f"{field}.config must be an object")
+        if source["identity"] != f"sha256:{digest(canonical(grader))}":
+            raise EvaluationError(f"{field} does not match the suite grader identity")
+        graders.append(grader)
+    if {item["id"] for item in graders} != set(source_graders):
+        raise EvaluationError("compilation.graders must define every suite grader exactly once")
+    runtime_values = raw.get("case_runtime")
+    if not isinstance(runtime_values, list):
+        raise EvaluationError("compilation.case_runtime must be a list")
+    runtime: dict[str, dict[str, Any]] = {}
+    for index, item in enumerate(runtime_values):
+        field = f"compilation.case_runtime[{index}]"
+        if not isinstance(item, dict):
+            raise EvaluationError(f"{field} must be an object")
+        require_exact_keys(item, field, {"id", "fixture", "artifacts", "semantic"})
+        case_id = require_text(item.get("id"), f"{field}.id")
+        artifacts = item.get("artifacts")
+        if (
+            case_id in runtime
+            or not isinstance(artifacts, list)
+            or len(set(artifacts)) != len(artifacts)
+            or not all(isinstance(value, str) and value and not Path(value).is_absolute() and ".." not in Path(value).parts for value in artifacts)
+        ):
+            raise EvaluationError(f"{field} has invalid case runtime data")
+        if not isinstance(item.get("semantic"), bool):
+            raise EvaluationError(f"{field}.semantic must be a boolean")
+        runtime[case_id] = {
+            "fixture": require_text(item.get("fixture"), f"{field}.fixture"),
+            "artifacts": artifacts,
+            "semantic": item["semantic"],
+        }
+    if set(runtime) != {case["id"] for case in suite["cases"]}:
+        raise EvaluationError("compilation.case_runtime must define every suite case exactly once")
+    rubric = raw.get("rubric")
+    if not isinstance(rubric, dict) or f"sha256:{digest(canonical(rubric))}" != policy["comparator"]["rubric_id"]:
+        raise EvaluationError("compilation.rubric does not match policy comparator rubric identity")
+    executors_value = raw.get("executors")
+    if not isinstance(executors_value, list):
+        raise EvaluationError("compilation.executors must be a list")
+    executors = [
+        validate_harness_executor(item, f"compilation.executors[{index}]")
+        for index, item in enumerate(executors_value)
+    ]
+    if [item["name"] for item in executors] != desired_executor_names():
+        raise EvaluationError("compilation executors differ from DREAMING_EVALUATION_EXECUTORS")
+    if [
+        {key: item[key] for key in (
+            "name", "model", "adapter_id", "adapter_version",
+            "adapter_executable_sha256", "cli_executable_sha256",
+        )}
+        for item in executors
+    ] != policy["required_executors"]:
+        raise EvaluationError("compilation executors differ from the exact policy executor identities")
+    if any(item["tool_policy_id"] != tool_policy_id for item in executors):
+        raise EvaluationError("executor tool policy differs from the compilation tool policy")
+    comparator = raw.get("comparator")
+    if comparator != policy["comparator"]:
+        raise EvaluationError("compilation comparator differs from the exact policy comparator")
+    harness_suite = {
+        "schema_version": HARNESS_CONTRACT_VERSION,
+        "kind": "skill_evaluation_suite",
+        "grader_set_id": f"sha256:{digest(canonical(graders))}",
+        "identity_markers": markers,
+        "graders": graders,
+        "cases": [
+            {
+                "id": case["id"],
+                "class": case["class"],
+                "task_id": case["task_id"],
+                "prompt": case["prompt"],
+                "fixture": runtime[case["id"]]["fixture"],
+                "artifacts": runtime[case["id"]]["artifacts"],
+                "graders": case["deterministic_graders"],
+                "semantic": runtime[case["id"]]["semantic"],
+            }
+            for case in suite["cases"]
+        ],
+        "rubric": rubric,
+    }
+    normalized = {
+        "schema_version": COMPILATION_SCHEMA_VERSION,
+        "kind": "dreaming_evaluation_compilation",
+        "harness_executable_sha256": harness_sha,
+        "tool_policy_id": tool_policy_id,
+        "retention_policy_id": retention_policy_id,
+        "limits": normalized_limits,
+        "identity_markers": markers,
+        "graders": graders,
+        "case_runtime": runtime_values,
+        "rubric": rubric,
+        "executors": executors,
+        "comparator": comparator,
+    }
+    return normalized, harness_suite
+
+
+def validate_routing(path: Path, executors: list[dict[str, Any]], comparator: dict[str, Any]) -> dict[str, Any]:
+    routing = load_json(path)
+    require_exact_keys(routing, "routing", {"schema_version", "kind", "executors", "comparator"})
+    if routing.get("schema_version") != 1 or routing.get("kind") != "skill_evaluation_routing":
+        raise EvaluationError("unsupported harness routing config")
+    values = routing.get("executors")
+    if not isinstance(values, list):
+        raise EvaluationError("routing.executors must be a list")
+    expected = {item["name"]: item for item in executors}
+    actual: dict[str, dict[str, Any]] = {}
+    for index, route in enumerate(values):
+        field = f"routing.executors[{index}]"
+        if not isinstance(route, dict):
+            raise EvaluationError(f"{field} must be an object")
+        require_exact_keys(route, field, {"name", "adapter_id", "adapter_executable_sha256", "argv"})
+        name = require_text(route.get("name"), f"{field}.name")
+        argv = route.get("argv")
+        if name in actual or not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
+            raise EvaluationError(f"{field} has invalid argv or duplicate name")
+        executable = Path(argv[0]).resolve()
+        expected_executor = expected.get(name)
+        if (
+            expected_executor is None
+            or route.get("adapter_id") != expected_executor["adapter_id"]
+            or route.get("adapter_executable_sha256") != expected_executor["adapter_executable_sha256"]
+            or sha256_file(executable) != expected_executor["adapter_executable_sha256"]
+        ):
+            raise EvaluationError(f"{field} is not an authorized exact executor route")
+        actual[name] = route
+    if list(actual) != [item["name"] for item in executors]:
+        raise EvaluationError("routing executor set or order differs from the required executor set")
+    comparator_route = routing.get("comparator")
+    if not isinstance(comparator_route, dict):
+        raise EvaluationError("routing.comparator must be an object")
+    require_exact_keys(
+        comparator_route,
+        "routing.comparator",
+        {"route", "adapter_id", "adapter_executable_sha256", "argv"},
+    )
+    argv = comparator_route.get("argv")
+    if not isinstance(argv, list) or not argv or not all(isinstance(item, str) and item for item in argv):
+        raise EvaluationError("routing.comparator.argv must be a non-empty text list")
+    if (
+        any(comparator_route.get(key) != comparator[key] for key in ("route", "adapter_id", "adapter_executable_sha256"))
+        or sha256_file(Path(argv[0]).resolve()) != comparator["adapter_executable_sha256"]
+    ):
+        raise EvaluationError("routing.comparator is not the authorized exact comparator route")
+    return routing
+
+
+def copy_sealed_tree(source: Path, destination: Path) -> None:
+    if not source.exists():
+        return
+    if not source.is_dir() or source.is_symlink():
+        raise EvaluationError(f"{source} must be a real directory")
+    for path in sorted(source.rglob("*")):
+        relative = path.relative_to(source)
+        if path.is_symlink():
+            raise EvaluationError(f"{path}: symlinks are forbidden in sealed inputs")
+        target = destination / relative
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif path.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(path.read_bytes())
+            os.chmod(target, path.stat().st_mode & 0o777)
+        else:
+            raise EvaluationError(f"{path}: sealed input must be a regular file")
+
+
+def v2_run_compile(args: argparse.Namespace) -> dict[str, Any]:
+    skill_dir = Path(args.skill_dir).resolve()
+    run_dir = Path(args.run_dir).resolve()
+    if not run_dir.is_dir() or run_dir.is_symlink() or any(run_dir.iterdir()):
+        raise EvaluationError("run directory must exist, be real, and be empty")
+    harness = require_trusted_harness(Path(args.harness))
+    harness_sha = sha256_file(harness)
+    candidate, files, suite, suite_id, policy, policy_id = load_v2_inputs(
+        skill_dir, args.suite, args.policy
+    )
+    desired = desired_executor_names()
+    if desired != [item["name"] for item in policy["required_executors"]]:
+        raise EvaluationError("policy required executors differ from DREAMING_EVALUATION_EXECUTORS")
+    config_path = Path(args.config).resolve()
+    config, harness_suite = validate_compilation_config(config_path, suite, policy, harness_sha)
+    validate_routing(Path(args.routing).resolve(), config["executors"], config["comparator"])
+    inventory(skill_dir, run_dir / "candidate")
+    copy_sealed_tree(config_path.parent / "fixtures", run_dir / "fixtures")
+    copy_sealed_tree(config_path.parent / "graders", run_dir / "graders")
+    atomic_write(run_dir / "source-suite.json", suite)
+    atomic_write(run_dir / "source-policy.json", policy)
+    atomic_write(run_dir / "compilation.json", config)
+    atomic_write(
+        run_dir / "dreaming-input.json",
+        {
+            "schema_version": 1,
+            "candidate_id": candidate,
+            "candidate_inventory": files,
+            "suite_id": suite_id,
+            "policy_id": policy_id,
+        },
+    )
+    atomic_write(run_dir / "suite.json", harness_suite)
+    file_inventory = canonical_file_inventory(run_dir)
+    harness_projection = [
+        {
+            "path": item["path"].removeprefix("candidate/"),
+            "sha256": item["sha256"],
+            "size": item["size"],
+        }
+        for item in file_inventory
+        if item["path"].startswith("candidate/")
+    ]
+    manifest = {
+        "schema_version": HARNESS_CONTRACT_VERSION,
+        "kind": "skill_evaluation_run",
+        "invocation_nonce": require_text(args.nonce, "invocation nonce"),
+        "candidate_id": f"sha256:{digest(canonical(harness_projection))}",
+        "suite_id": f"sha256:{digest(canonical(harness_suite))}",
+        "profile": policy["profile"],
+        "trials_per_arm": policy["trials_per_arm"],
+        "executors": config["executors"],
+        "comparator": config["comparator"],
+        "harness_executable_sha256": harness_sha,
+        "tool_policy_id": config["tool_policy_id"],
+        "grader_set_id": harness_suite["grader_set_id"],
+        "retention_policy_id": config["retention_policy_id"],
+        "limits": config["limits"],
+        "file_inventory": file_inventory,
+    }
+    manifest["run_id"] = f"sha256:{digest(canonical({
+        key: manifest[key]
+        for key in (
+            "schema_version", "kind", "candidate_id", "suite_id", "profile",
+            "trials_per_arm", "executors", "comparator",
+            "harness_executable_sha256", "tool_policy_id", "grader_set_id",
+            "retention_policy_id", "limits", "file_inventory",
+        )
+    }))}"
+    atomic_write(run_dir / "manifest.json", manifest)
+    return {
+        "run_dir": str(run_dir),
+        "run_id": manifest["run_id"],
+        "candidate_id": candidate,
+        "candidate_inventory": files,
+        "suite_id": suite_id,
+        "policy_id": policy_id,
+        "required_executors": desired,
+    }
+
+
+def load_compiled_run(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    manifest = load_json(run_dir / "manifest.json")
+    source_suite = load_json(run_dir / "source-suite.json")
+    source_policy = load_json(run_dir / "source-policy.json")
+    compilation = load_json(run_dir / "compilation.json")
+    actual_inventory = canonical_file_inventory(run_dir, {"manifest.json"})
+    if manifest.get("file_inventory") != actual_inventory:
+        raise EvaluationError("compiled run file inventory was modified")
+    expected_run_id = f"sha256:{digest(canonical({
+        key: manifest.get(key)
+        for key in (
+            "schema_version", "kind", "candidate_id", "suite_id", "profile",
+            "trials_per_arm", "executors", "comparator",
+            "harness_executable_sha256", "tool_policy_id", "grader_set_id",
+            "retention_policy_id", "limits", "file_inventory",
+        )
+    }))}"
+    if manifest.get("run_id") != expected_run_id:
+        raise EvaluationError("compiled run_id is not canonical")
+    return manifest, source_suite, source_policy, compilation
+
+
+def v2_run_execute(args: argparse.Namespace) -> dict[str, Any]:
+    run_dir = Path(args.run_dir).resolve()
+    result_dir = Path(args.result_dir).resolve()
+    scratch_dir = Path(args.scratch).resolve()
+    harness = require_trusted_harness(Path(args.harness))
+    manifest, _, _, compilation = load_compiled_run(run_dir)
+    if sha256_file(harness) != manifest.get("harness_executable_sha256"):
+        raise EvaluationError("selected harness executable differs from the compiled run")
+    validate_routing(Path(args.routing).resolve(), compilation["executors"], compilation["comparator"])
+    if not result_dir.is_dir() or result_dir.is_symlink() or any(result_dir.iterdir()):
+        raise EvaluationError("result directory must exist, be real, and be empty")
+    if not scratch_dir.is_dir() or scratch_dir.is_symlink() or any(scratch_dir.iterdir()):
+        raise EvaluationError("scratch directory must exist, be real, and be empty")
+    subprocess.run(
+        [
+            str(harness),
+            "run",
+            "--input",
+            str(run_dir),
+            "--output",
+            str(result_dir),
+            "--routing",
+            str(Path(args.routing).resolve()),
+            "--scratch",
+            str(scratch_dir),
+        ],
+        check=True,
+    )
+    return {"result_dir": str(result_dir), "run_id": manifest["run_id"]}
+
+
+def result_bundle_identity(result_dir: Path, manifest: dict[str, Any]) -> tuple[str, str]:
+    inventory_value = manifest.get("file_inventory")
+    if inventory_value != canonical_file_inventory(result_dir, {"manifest.json"}):
+        raise EvaluationError("result file inventory differs from the sealed manifest")
+    result_id = require_sha256(manifest.get("result_id"), "result.result_id")
+    bundle_sha = f"sha256:{digest(canonical({'manifest': manifest, 'files': inventory_value}))}"
+    return bundle_sha, result_id
+
+
+def verify_native_raw(path: Path, field: str) -> None:
+    if not path.is_file() or path.is_symlink():
+        raise EvaluationError(f"{field} is missing")
+    lines = path.read_text(encoding="utf-8").splitlines()
+    if not lines:
+        raise EvaluationError(f"{field} must contain native events")
+    for index, line in enumerate(lines):
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as exc:
+            raise EvaluationError(f"{field}[{index}] is not valid JSON") from exc
+        if not isinstance(event, dict) or not event:
+            raise EvaluationError(f"{field}[{index}] must be a non-empty native event object")
+
+
+def verify_result_independently(
+    skill_dir: Path,
+    run_dir: Path,
+    result_dir: Path,
+    routing_path: Path,
+    harness: Path,
+    nonce: str,
+    scratch: Path,
+    suite_path: str | None,
+    policy_path: str | None,
+) -> dict[str, Any]:
+    candidate, files, suite, suite_id, policy, policy_id = load_v2_inputs(
+        skill_dir, suite_path, policy_path
+    )
+    if desired_executor_names() != [item["name"] for item in policy["required_executors"]]:
+        raise EvaluationError("current policy differs from DREAMING_EVALUATION_EXECUTORS")
+    run_manifest, source_suite, source_policy, compilation = load_compiled_run(run_dir)
+    dreaming_input = load_json(run_dir / "dreaming-input.json")
+    require_exact_keys(
+        dreaming_input,
+        "dreaming input",
+        {"schema_version", "candidate_id", "candidate_inventory", "suite_id", "policy_id"},
+    )
+    if source_suite != suite or source_policy != policy:
+        raise EvaluationError("compiled run binds stale suite or policy input")
+    expected_policy_executors = policy["required_executors"]
+    compiled_policy_executors = [
+        {
+            key: item[key]
+            for key in (
+                "name",
+                "model",
+                "adapter_id",
+                "adapter_version",
+                "adapter_executable_sha256",
+                "cli_executable_sha256",
+            )
+        }
+        for item in compilation.get("executors", [])
+    ]
+    if compiled_policy_executors != expected_policy_executors:
+        raise EvaluationError("compiled executor identities differ from the current policy")
+    if compilation.get("comparator") != policy["comparator"]:
+        raise EvaluationError("compiled comparator identity differs from the current policy")
+    if (
+        run_manifest.get("executors") != compilation.get("executors")
+        or run_manifest.get("comparator") != compilation.get("comparator")
+        or run_manifest.get("tool_policy_id") != compilation.get("tool_policy_id")
+        or run_manifest.get("retention_policy_id") != compilation.get("retention_policy_id")
+        or run_manifest.get("limits") != compilation.get("limits")
+    ):
+        raise EvaluationError("compiled run manifest differs from its reviewed compilation")
+    if any(
+        item.get("tool_policy_id") != compilation.get("tool_policy_id")
+        for item in compilation.get("executors", [])
+    ):
+        raise EvaluationError("compiled executor tool policy differs from the reviewed compilation")
+    if dreaming_input != {
+        "schema_version": 1,
+        "candidate_id": candidate,
+        "candidate_inventory": files,
+        "suite_id": suite_id,
+        "policy_id": policy_id,
+    }:
+        raise EvaluationError("compiled run binds a stale candidate")
+    run_projection = [
+        {
+            "path": item["path"].removeprefix("candidate/"),
+            "sha256": item["sha256"],
+            "size": item["size"],
+        }
+        for item in run_manifest["file_inventory"]
+        if item["path"].startswith("candidate/")
+    ]
+    if run_manifest.get("candidate_id") != f"sha256:{digest(canonical(run_projection))}":
+        raise EvaluationError("compiled harness candidate identity is stale")
+    harness = require_trusted_harness(harness)
+    harness_sha = sha256_file(harness)
+    if (
+        harness_sha != run_manifest.get("harness_executable_sha256")
+        or harness_sha != compilation.get("harness_executable_sha256")
+    ):
+        raise EvaluationError("unknown or changed harness producer")
+    routing = validate_routing(routing_path, compilation["executors"], compilation["comparator"])
+    if not scratch.is_dir() or scratch.is_symlink() or any(scratch.iterdir()):
+        raise EvaluationError("verification scratch directory must exist, be real, and be empty")
+    subprocess.run(
+        [
+            str(harness),
+            "verify",
+            "--result",
+            str(result_dir),
+            "--scratch",
+            str(scratch),
+            "--nonce",
+            nonce,
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+    )
+    result_manifest = load_json(result_dir / "manifest.json")
+    require_exact_keys(result_manifest, "result manifest", RESULT_MANIFEST_KEYS)
+    if (
+        result_manifest.get("schema_version") != HARNESS_CONTRACT_VERSION
+        or result_manifest.get("kind") != "skill_evaluation_result"
+        or result_manifest.get("invocation_nonce") != nonce
+        or result_manifest.get("input_run_id") != run_manifest["run_id"]
+        or result_manifest.get("candidate_id") != run_manifest["candidate_id"]
+        or result_manifest.get("profile") != policy["profile"]
+        or result_manifest.get("harness_executable_sha256") != harness_sha
+    ):
+        raise EvaluationError("result manifest differs from the current sealed run")
+    expected_result_id = f"sha256:{digest(canonical({
+        key: value for key, value in result_manifest.items() if key != 'result_id'
+    }))}"
+    if result_manifest.get("result_id") != expected_result_id:
+        raise EvaluationError("result identity is forged or malformed")
+    bundle_sha, result_id = result_bundle_identity(result_dir, result_manifest)
+    expected_executor_identities = {
+        item["name"]: {key: value for key, value in item.items() if key != "name"}
+        for item in compilation["executors"]
+    }
+    if result_manifest.get("executor_identities") != expected_executor_identities:
+        raise EvaluationError("result executor identities differ from the required exact set")
+    if result_manifest.get("comparator_identity") != compilation["comparator"]:
+        raise EvaluationError("result comparator identity differs from the authorized comparator")
+    producer_audit = result_manifest.get("producer_audit")
+    if not isinstance(producer_audit, dict):
+        raise EvaluationError("result producer audit is missing")
+    require_exact_keys(
+        producer_audit,
+        "result.producer_audit",
+        {"routing_config_sha256", "executor_argv_sha256", "comparator_argv_sha256", "environment_sha256"},
+    )
+    if producer_audit["routing_config_sha256"] != f"sha256:{digest(routing_path.read_bytes())}":
+        raise EvaluationError("result producer routing digest differs from the authorized route")
+    expected_executor_argv = {
+        item["name"]: f"sha256:{digest(canonical(item['argv']))}"
+        for item in routing["executors"]
+    }
+    if producer_audit["executor_argv_sha256"] != expected_executor_argv:
+        raise EvaluationError("result executor argv identities differ from authorized routing")
+    if producer_audit["comparator_argv_sha256"] != f"sha256:{digest(canonical(routing['comparator']['argv']))}":
+        raise EvaluationError("result comparator argv identity differs from authorized routing")
+    records: list[dict[str, Any]] = []
+    for trial_id in result_manifest.get("trials", []):
+        require_sha256(trial_id, "result.trials[]")
+        root = result_dir / "trials" / trial_id.removeprefix("sha256:")
+        record = load_json(root / "result.json")
+        if record.get("trial_id") != trial_id:
+            raise EvaluationError(f"trial {trial_id} has a forged result identity")
+        executor = next(
+            (item for item in compilation["executors"] if item["name"] == record.get("executor")),
+            None,
+        )
+        if executor is None or record.get("model") != executor["model"]:
+            raise EvaluationError(f"trial {trial_id} uses an unauthorized executor or model")
+        trial = load_json(root / "trial.json")
+        if (
+            trial.get("trial_id") != trial_id
+            or trial.get("candidate_id") != run_manifest["candidate_id"]
+            or trial.get("executor") != executor
+        ):
+            raise EvaluationError(f"trial {trial_id} differs from its sealed input identity")
+        if record.get("status") != "inconclusive":
+            prepared = load_json(root / "prepared.json")
+            prepared_digest = prepared.get("prepared_digest")
+            if prepared_digest != f"sha256:{digest(canonical({
+                key: value for key, value in prepared.items() if key != 'prepared_digest'
+            }))}":
+                raise EvaluationError(f"trial {trial_id} prepared execution digest is invalid")
+            if record.get("prepared_digest") != prepared_digest:
+                raise EvaluationError(f"trial {trial_id} did not bind the prepared execution")
+            effective = {key: value for key, value in executor.items() if key != "name"}
+            if record.get("effective_execution") != effective or prepared.get("execution") != effective:
+                raise EvaluationError(f"trial {trial_id} prepared or effective execution drifted")
+            raw = root / "raw.jsonl"
+            trace = root / "trace.json"
+            verify_native_raw(raw, f"trial {trial_id} raw log")
+            if (
+                record.get("raw_sha256") != f"sha256:{digest(raw.read_bytes())}"
+                or record.get("trace_sha256") != f"sha256:{digest(trace.read_bytes())}"
+            ):
+                raise EvaluationError(f"trial {trial_id} raw or trace link is stale")
+            artifact_inventory = canonical_file_inventory(root / "artifacts")
+            if record.get("artifact_inventory") != artifact_inventory:
+                raise EvaluationError(f"trial {trial_id} artifact inventory is stale")
+            if not (root / "grader-results.json").is_file():
+                raise EvaluationError(f"trial {trial_id} is missing deterministic grader evidence")
+        records.append(record)
+    if set(result_manifest.get("trials", [])) != {item.get("trial_id") for item in records}:
+        raise EvaluationError("result trial matrix is partial or duplicated")
+    comparisons = []
+    for pair_id in result_manifest.get("pairs", []):
+        require_sha256(pair_id, "result.pairs[]")
+        comparison = load_json(
+            result_dir / "comparisons" / f"{pair_id.removeprefix('sha256:')}.json"
+        )
+        if comparison.get("pair_id") != pair_id:
+            raise EvaluationError(f"comparison {pair_id} has a forged identity")
+        if comparison.get("comparator") != compilation["comparator"]:
+            raise EvaluationError(f"comparison {pair_id} uses an unauthorized comparator")
+        comparisons.append(comparison)
+    if set(result_manifest.get("pairs", [])) != {item.get("pair_id") for item in comparisons}:
+        raise EvaluationError("result comparison matrix is partial or duplicated")
+    return {
+        "candidate_id": candidate,
+        "candidate_inventory": files,
+        "suite_id": suite_id,
+        "policy_id": policy_id,
+        "policy": policy,
+        "run_id": run_manifest["run_id"],
+        "result_bundle_sha256": bundle_sha,
+        "result_bundle_id": result_id,
+        "state": result_manifest.get("state"),
+        "records": records,
+        "comparisons": comparisons,
+    }
+
+
+def reverify_certification_record(
+    certification: dict[str, Any], skill_dir: Path
+) -> dict[str, Any]:
+    scratch_parent = v2_evaluation_dir() / "verification-scratch"
+    scratch_parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="authority-", dir=scratch_parent) as temporary:
+        scratch = Path(temporary)
+        return verify_result_independently(
+            skill_dir,
+            Path(require_text(certification.get("run_dir"), "certification.run_dir")).resolve(),
+            Path(require_text(certification.get("result_dir"), "certification.result_dir")).resolve(),
+            Path(require_text(certification.get("routing_path"), "certification.routing_path")).resolve(),
+            require_trusted_harness(
+                Path(require_text(certification.get("harness_path"), "certification.harness_path"))
+            ),
+            require_text(certification.get("invocation_nonce"), "certification.invocation_nonce"),
+            scratch,
+            None,
+            None,
+        )
+
+
+def candidate_comparison_wins(comparisons: list[dict[str, Any]]) -> int:
+    wins = 0
+    for comparison in comparisons:
+        winner = comparison.get("winner")
+        assignment = comparison.get("assignment")
+        if (
+            comparison.get("status") == "complete"
+            and winner in {"A", "B"}
+            and isinstance(assignment, dict)
+            and assignment.get(winner) == "candidate"
+        ):
+            wins += 1
+    return wins
+
+
+def executor_policy_status(
+    executor_name: str,
+    policy: dict[str, Any],
+    state: str,
+    records: list[dict[str, Any]],
+    comparisons: list[dict[str, Any]],
+) -> str:
+    if policy["profile"] != "gate":
+        return "inconclusive"
+    selected = [item for item in records if item.get("executor") == executor_name]
+    if state != "complete" or not selected:
+        return "inconclusive"
+    if any(item.get("status") == "inconclusive" or item.get("infrastructure_error") or item.get("cleanup_failed") for item in selected):
+        return "inconclusive"
+    by_case: dict[str, list[dict[str, Any]]] = {}
+    for item in selected:
+        by_case.setdefault(require_text(item.get("case_id"), "trial.case_id"), []).append(item)
+    for case_records in by_case.values():
+        case_class = case_records[0].get("case_class")
+        candidate_records = [item for item in case_records if item.get("treatment") == "candidate"]
+        control_records = [item for item in case_records if item.get("treatment") == "control"]
+        if len(candidate_records) != 3 or (case_class in {"intended", "related"} and len(control_records) != 3):
+            return "inconclusive"
+        if case_class == "intended":
+            if any(item.get("status") == "invalid" for item in case_records):
+                return "inconclusive"
+            candidate_passes = sum(item.get("status") == "pass" for item in candidate_records)
+            control_passes = sum(item.get("status") == "pass" for item in control_records)
+            if candidate_passes < 2:
+                return "regression"
+            if policy["policy_kind"] == "capability_uplift":
+                if candidate_passes - control_passes < 1 or control_passes == 3:
+                    return "regression"
+            else:
+                case_comparisons = [
+                    item
+                    for item in comparisons
+                    if item.get("executor") == executor_name
+                    and item.get("case_id") == case_records[0].get("case_id")
+                ]
+                if len(case_comparisons) != 3 or any(item.get("status") != "complete" for item in case_comparisons):
+                    return "inconclusive"
+                if candidate_comparison_wins(case_comparisons) < 2:
+                    return "regression"
+        elif case_class == "related":
+            if any(item.get("status") == "invalid" for item in case_records):
+                return "inconclusive"
+            if (
+                any(item.get("status") == "regression" for item in candidate_records)
+                or any(item.get("deterministic_pass") is not True for item in candidate_records)
+                or sum(item.get("status") == "pass" for item in candidate_records)
+                < sum(item.get("status") == "pass" for item in control_records)
+            ):
+                return "regression"
+        elif case_class == "activation_positive":
+            if sum(item.get("skill_load_proved") is True for item in candidate_records) < 2:
+                return "regression"
+        elif case_class == "activation_negative":
+            if any(item.get("skill_load_proved") is not True or item.get("status") == "regression" for item in candidate_records):
+                return "regression"
+        else:
+            return "inconclusive"
+    return "pass"
+
+
+def make_executor_certificate(
+    status: str,
+    candidate: str,
+    suite_id: str,
+    policy_id: str,
+    profile: str,
+    executor: dict[str, Any],
+    result_bundle_sha256: str,
+    result_bundle_id: str,
+    run_id: str,
+) -> dict[str, Any]:
+    certificate = {
+        "schema_version": 2,
+        "kind": "executor_certificate",
+        "status": status,
+        "candidate_id": candidate,
+        "suite_id": suite_id,
+        "policy_id": policy_id,
+        "profile": profile,
+        "executor": executor,
+        "result_bundle_sha256": result_bundle_sha256,
+        "result_bundle_id": result_bundle_id,
+        "run_id": run_id,
+    }
+    certificate["certificate_id"] = identity_with("certificate_id", certificate)
+    return certificate
+
+
+def write_certification_aggregate(
+    skill_dir: Path,
+    candidate: str,
+    files: list[dict[str, Any]],
+    suite: dict[str, Any],
+    suite_id: str,
+    policy_id: str,
+    policy: dict[str, Any],
+    certificates: list[dict[str, Any]],
+) -> tuple[dict[str, Any], Path, str]:
+    statuses = [item["status"] for item in certificates]
+    aggregate_status = (
+        "regression"
+        if "regression" in statuses
+        else "inconclusive"
+        if any(item != "pass" for item in statuses)
+        else "pass"
+    )
+    aggregate = {
+        "schema_version": 2,
+        "kind": "aggregate_receipt",
+        "status": aggregate_status,
+        "skill_path": str(skill_dir),
+        "candidate_id": candidate,
+        "candidate_inventory": files,
+        "suite_id": suite_id,
+        "policy_id": policy_id,
+        "profile": policy["profile"],
+        "certificates": certificates,
+    }
+    aggregate["aggregate_id"] = identity_with("aggregate_id", aggregate)
+    validated = validate_aggregate(
+        aggregate,
+        skill_dir,
+        candidate,
+        suite,
+        suite_id,
+        policy,
+        policy_id,
+    )
+    path, receipt_sha = write_v2_receipt(validated)
+    return validated, path, receipt_sha
+
+
+def v2_result_certify(args: argparse.Namespace) -> dict[str, Any]:
+    skill_dir = Path(args.skill_dir).resolve()
+    verified = verify_result_independently(
+        skill_dir,
+        Path(args.run_dir).resolve(),
+        Path(args.result_dir).resolve(),
+        Path(args.routing).resolve(),
+        Path(args.harness).resolve(),
+        require_text(args.nonce, "invocation nonce"),
+        Path(args.scratch).resolve(),
+        args.suite,
+        args.policy,
+    )
+    policy = verified["policy"]
+    certificates = [
+        make_executor_certificate(
+            executor_policy_status(
+                executor["name"],
+                policy,
+                verified["state"],
+                verified["records"],
+                verified["comparisons"],
+            ),
+            verified["candidate_id"],
+            verified["suite_id"],
+            verified["policy_id"],
+            policy["profile"],
+            executor,
+            verified["result_bundle_sha256"],
+            verified["result_bundle_id"],
+            verified["run_id"],
+        )
+        for executor in policy["required_executors"]
+    ]
+    aggregate, path, receipt_sha = write_certification_aggregate(
+        skill_dir,
+        verified["candidate_id"],
+        verified["candidate_inventory"],
+        load_suite(Path(args.suite).resolve() if args.suite else skill_dir / CASE_FILE)[0],
+        verified["suite_id"],
+        verified["policy_id"],
+        policy,
+        certificates,
+    )
+    if policy["profile"] == "gate" and aggregate["status"] == "pass":
+        certification = {
+            "schema_version": 1,
+            "kind": "dreaming_certification",
+            "skill_path": str(skill_dir),
+            "candidate_id": verified["candidate_id"],
+            "suite_id": verified["suite_id"],
+            "policy_id": verified["policy_id"],
+            "profile": policy["profile"],
+            "aggregate_receipt_sha256": receipt_sha,
+            "aggregate_id": aggregate["aggregate_id"],
+            "result_bundle_sha256": verified["result_bundle_sha256"],
+            "result_bundle_id": verified["result_bundle_id"],
+            "run_id": verified["run_id"],
+            "run_dir": str(Path(args.run_dir).resolve()),
+            "result_dir": str(Path(args.result_dir).resolve()),
+            "routing_path": str(Path(args.routing).resolve()),
+            "harness_path": str(Path(args.harness).resolve()),
+            "invocation_nonce": require_text(args.nonce, "invocation nonce"),
+        }
+        certification["certification_id"] = identity_with("certification_id", certification)
+        atomic_write(v2_certification_path(receipt_sha), certification)
+    return {
+        "status": aggregate["status"],
+        "aggregate": str(path),
+        "aggregate_receipt_sha256": receipt_sha,
+        "aggregate_id": aggregate["aggregate_id"],
+        "certificates": certificates,
+        "authoritative": policy["profile"] == "gate" and aggregate["status"] == "pass",
+    }
+
+
+def parse_unavailable(value: str) -> tuple[str, str]:
+    name, separator, reason = value.partition("=")
+    if not separator or name not in EXECUTOR_NAMES:
+        raise EvaluationError("--unavailable must be executor=reason")
+    return name, require_text(reason, f"unavailable reason for {name}")
+
+
+def v2_unavailable_aggregate(args: argparse.Namespace) -> dict[str, Any]:
+    skill_dir = Path(args.skill_dir).resolve()
+    candidate, files, suite, suite_id, policy, policy_id = load_v2_inputs(
+        skill_dir, args.suite, args.policy
+    )
+    desired = desired_executor_names()
+    if desired != [item["name"] for item in policy["required_executors"]]:
+        raise EvaluationError("policy required executors differ from DREAMING_EVALUATION_EXECUTORS")
+    reasons = dict(parse_unavailable(item) for item in args.unavailable)
+    if set(reasons) != set(desired):
+        raise EvaluationError("unavailability evidence must name every required executor exactly once")
+    certificates = []
+    for executor in policy["required_executors"]:
+        evidence = {
+            "schema_version": 1,
+            "kind": "skill_evaluation_unavailable",
+            "candidate_id": candidate,
+            "suite_id": suite_id,
+            "policy_id": policy_id,
+            "profile": policy["profile"],
+            "executor": executor,
+            "reason": reasons[executor["name"]],
+        }
+        evidence["result_id"] = identity_with("result_id", evidence)
+        evidence_path, evidence_sha = write_v2_receipt(evidence)
+        certificates.append(
+            make_executor_certificate(
+                "unavailable",
+                candidate,
+                suite_id,
+                policy_id,
+                policy["profile"],
+                executor,
+                f"sha256:{evidence_sha}",
+                evidence["result_id"],
+                f"sha256:{digest(canonical({'unavailable': str(evidence_path)}))}",
+            )
+        )
+    aggregate, path, receipt_sha = write_certification_aggregate(
+        skill_dir, candidate, files, suite, suite_id, policy_id, policy, certificates
+    )
+    return {
+        "status": aggregate["status"],
+        "aggregate": str(path),
+        "aggregate_receipt_sha256": receipt_sha,
+        "authoritative": False,
+    }
+
+
 def load_v2_receipt(path: Path) -> tuple[dict[str, Any], str]:
     resolved = path.resolve()
     if resolved.parent != (v2_evaluation_dir() / "receipts").resolve():
@@ -1198,6 +2256,62 @@ def validate_authority(
     aggregate = validate_aggregate(aggregate, skill_dir, candidate, suite, suite_id, policy, policy_id)
     if aggregate["status"] != "pass":
         raise EvaluationError("cross-CLI authority requires a passing aggregate receipt")
+    if policy["profile"] != "gate":
+        raise EvaluationError("cross-CLI authority requires a gate-profile policy")
+    certification = load_json(v2_certification_path(aggregate_sha))
+    require_exact_keys(
+        certification,
+        "certification record",
+        {
+            "schema_version",
+            "kind",
+            "skill_path",
+            "candidate_id",
+            "suite_id",
+            "policy_id",
+            "profile",
+            "aggregate_receipt_sha256",
+            "aggregate_id",
+            "result_bundle_sha256",
+            "result_bundle_id",
+            "run_id",
+            "run_dir",
+            "result_dir",
+            "routing_path",
+            "harness_path",
+            "invocation_nonce",
+            "certification_id",
+        },
+    )
+    if (
+        certification.get("schema_version") != 1
+        or certification.get("kind") != "dreaming_certification"
+        or certification.get("skill_path") != str(skill_dir)
+        or certification.get("candidate_id") != candidate
+        or certification.get("suite_id") != suite_id
+        or certification.get("policy_id") != policy_id
+        or certification.get("profile") != "gate"
+        or certification.get("aggregate_receipt_sha256") != aggregate_sha
+        or certification.get("aggregate_id") != aggregate["aggregate_id"]
+        or certification.get("certification_id") != identity_with("certification_id", certification)
+    ):
+        raise EvaluationError("authority certification record is stale or malformed")
+    certificates = aggregate["certificates"]
+    for field in ("result_bundle_sha256", "result_bundle_id", "run_id"):
+        values = {item[field] for item in certificates}
+        if values != {certification[field]}:
+            raise EvaluationError(f"authority certification record does not bind aggregate {field}")
+    verified = reverify_certification_record(certification, skill_dir)
+    for field in (
+        "candidate_id",
+        "suite_id",
+        "policy_id",
+        "run_id",
+        "result_bundle_sha256",
+        "result_bundle_id",
+    ):
+        if certification[field] != verified[field]:
+            raise EvaluationError(f"authority certification evidence differs at {field}")
     if authority.get("aggregate_id") != aggregate["aggregate_id"]:
         raise EvaluationError("authority document aggregate identity does not match")
     expected_id = identity_with("authority_id", authority)
@@ -1209,11 +2323,19 @@ def validate_authority(
 def v2_authority_write(args: argparse.Namespace) -> dict[str, Any]:
     skill_dir = Path(args.skill_dir).resolve()
     candidate, _, suite, suite_id, policy, policy_id = load_v2_inputs(skill_dir, args.suite, args.policy)
-    aggregate = load_json(Path(args.aggregate).resolve())
+    aggregate, aggregate_sha = load_v2_receipt(Path(args.aggregate).resolve())
     aggregate = validate_aggregate(aggregate, skill_dir, candidate, suite, suite_id, policy, policy_id)
-    if aggregate["status"] != "pass":
+    if aggregate["status"] != "pass" or policy["profile"] != "gate":
         raise EvaluationError("only a passing aggregate receipt can issue cross-CLI authority")
-    aggregate_path, aggregate_sha = write_v2_receipt(aggregate)
+    certification = load_json(v2_certification_path(aggregate_sha))
+    if (
+        certification.get("kind") != "dreaming_certification"
+        or certification.get("aggregate_receipt_sha256") != aggregate_sha
+        or certification.get("certification_id") != identity_with("certification_id", certification)
+    ):
+        raise EvaluationError("aggregate lacks a valid Dreaming certification record")
+    reverify_certification_record(certification, skill_dir)
+    aggregate_path = v2_receipt_path(aggregate_sha)
     authority = {
         "schema_version": AUTHORITY_SCHEMA_VERSION,
         "kind": "cross_cli_authority",
@@ -1412,6 +2534,16 @@ def v2_waive(args: argparse.Namespace) -> dict[str, Any]:
     }
     waiver["waiver_id"] = identity_with("waiver_id", waiver)
     path, waiver_sha = write_v2_receipt(waiver)
+    atomic_write(
+        v2_latest_waiver_path(skill_dir),
+        {
+            "schema_version": 2,
+            "skill_path": str(skill_dir),
+            "candidate_id": candidate,
+            "waiver_path": str(path),
+            "waiver_sha256": waiver_sha,
+        },
+    )
     return {"status": "waived", "receipt": str(path), "receipt_sha256": waiver_sha}
 
 
@@ -1420,6 +2552,56 @@ def v2_waiver_validate(args: argparse.Namespace) -> dict[str, Any]:
     candidate, files, suite, suite_id, policy, policy_id = load_v2_inputs(skill_dir, args.suite, args.policy)
     waiver, waiver_sha = load_v2_receipt(Path(args.waiver).resolve())
     validate_v2_waiver(waiver, skill_dir, candidate, files, suite, suite_id, policy, policy_id)
+    return {"status": "waived", "candidate_id": candidate, "receipt_sha256": waiver_sha}
+
+
+def current_gate(args: argparse.Namespace) -> dict[str, Any]:
+    skill_dir = Path(args.skill_dir).resolve()
+    skill_key = latest_key(str(skill_dir))
+    v2_state_exists = (
+        (v2_evaluation_dir() / "latest" / f"{skill_key}.json").exists()
+        or v2_latest_waiver_path(skill_dir).exists()
+        or (v2_evaluation_dir() / "authority" / skill_key).exists()
+    )
+    if not (skill_dir / POLICY_FILE).is_file():
+        if v2_state_exists:
+            raise EvaluationError("cross-CLI evaluation state exists; legacy gate downgrade is forbidden")
+        legacy = argparse.Namespace(skill_dir=str(skill_dir))
+        return gate(legacy)
+    if load_json(skill_dir / POLICY_FILE).get("schema_version") != POLICY_SCHEMA_VERSION:
+        if v2_state_exists:
+            raise EvaluationError("cross-CLI evaluation state exists; legacy policy downgrade is forbidden")
+        legacy = argparse.Namespace(skill_dir=str(skill_dir))
+        return gate(legacy)
+    candidate, files, suite, suite_id, policy, policy_id = load_v2_inputs(skill_dir, None, None)
+    if desired_executor_names() != [item["name"] for item in policy["required_executors"]]:
+        raise EvaluationError("active required executor set differs from DREAMING_EVALUATION_EXECUTORS")
+    authority_path = v2_authority_path(skill_dir, candidate)
+    if authority_path.is_file():
+        validate_args = argparse.Namespace(
+            skill_dir=str(skill_dir), authority=str(authority_path), suite=None, policy=None
+        )
+        return v2_authority_validate(validate_args)
+    latest_path = v2_latest_waiver_path(skill_dir)
+    latest = load_json(latest_path)
+    require_exact_keys(
+        latest,
+        "latest waiver",
+        {"schema_version", "skill_path", "candidate_id", "waiver_path", "waiver_sha256"},
+    )
+    waiver_path = Path(require_text(latest.get("waiver_path"), "latest waiver path")).resolve()
+    waiver, waiver_sha = load_v2_receipt(waiver_path)
+    if latest != {
+        "schema_version": 2,
+        "skill_path": str(skill_dir),
+        "candidate_id": candidate,
+        "waiver_path": str(waiver_path),
+        "waiver_sha256": waiver_sha,
+    }:
+        raise EvaluationError("latest cross-CLI waiver pointer is stale or malformed")
+    validate_v2_waiver(
+        waiver, skill_dir, candidate, files, suite, suite_id, policy, policy_id
+    )
     return {"status": "waived", "candidate_id": candidate, "receipt_sha256": waiver_sha}
 
 
@@ -1436,6 +2618,8 @@ def build_parser() -> argparse.ArgumentParser:
     finalize_parser.add_argument("--run-dir", required=True)
     gate_parser = commands.add_parser("gate")
     gate_parser.add_argument("skill_dir")
+    current_gate_parser = commands.add_parser("current-gate")
+    current_gate_parser.add_argument("skill_dir")
     waive_parser = commands.add_parser("waive")
     waive_parser.add_argument("skill_dir")
     waive_parser.add_argument("--base-receipt", required=True)
@@ -1450,6 +2634,36 @@ def build_parser() -> argparse.ArgumentParser:
     v2_prepare_parser.add_argument("skill_dir")
     v2_prepare_parser.add_argument("--suite")
     v2_prepare_parser.add_argument("--policy")
+    run_compile_parser = commands.add_parser("v2-run-compile")
+    run_compile_parser.add_argument("skill_dir")
+    run_compile_parser.add_argument("--run-dir", required=True)
+    run_compile_parser.add_argument("--config", required=True)
+    run_compile_parser.add_argument("--routing", required=True)
+    run_compile_parser.add_argument("--nonce", required=True)
+    run_compile_parser.add_argument("--harness", required=True)
+    run_compile_parser.add_argument("--suite")
+    run_compile_parser.add_argument("--policy")
+    run_execute_parser = commands.add_parser("v2-run-execute")
+    run_execute_parser.add_argument("--run-dir", required=True)
+    run_execute_parser.add_argument("--result-dir", required=True)
+    run_execute_parser.add_argument("--routing", required=True)
+    run_execute_parser.add_argument("--scratch", required=True)
+    run_execute_parser.add_argument("--harness", required=True)
+    result_certify_parser = commands.add_parser("v2-result-certify")
+    result_certify_parser.add_argument("skill_dir")
+    result_certify_parser.add_argument("--run-dir", required=True)
+    result_certify_parser.add_argument("--result-dir", required=True)
+    result_certify_parser.add_argument("--routing", required=True)
+    result_certify_parser.add_argument("--scratch", required=True)
+    result_certify_parser.add_argument("--nonce", required=True)
+    result_certify_parser.add_argument("--harness", required=True)
+    result_certify_parser.add_argument("--suite")
+    result_certify_parser.add_argument("--policy")
+    unavailable_parser = commands.add_parser("v2-unavailable-aggregate")
+    unavailable_parser.add_argument("skill_dir")
+    unavailable_parser.add_argument("--unavailable", action="append", required=True)
+    unavailable_parser.add_argument("--suite")
+    unavailable_parser.add_argument("--policy")
     authority_write_parser = commands.add_parser("v2-authority-write")
     authority_write_parser.add_argument("skill_dir")
     authority_write_parser.add_argument("--aggregate", required=True)
@@ -1482,10 +2696,15 @@ def main() -> int:
             "prepare": prepare,
             "finalize": finalize,
             "gate": gate,
+            "current-gate": current_gate,
             "waive": waive,
             "v2-suite-validate": v2_suite_validate,
             "v2-policy-validate": v2_policy_validate,
             "v2-prepare": v2_prepare,
+            "v2-run-compile": v2_run_compile,
+            "v2-run-execute": v2_run_execute,
+            "v2-result-certify": v2_result_certify,
+            "v2-unavailable-aggregate": v2_unavailable_aggregate,
             "v2-authority-write": v2_authority_write,
             "v2-authority-validate": v2_authority_validate,
             "v2-waive": v2_waive,

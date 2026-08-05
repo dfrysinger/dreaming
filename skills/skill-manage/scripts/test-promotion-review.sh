@@ -97,7 +97,7 @@ EOF
   }
 }
 JSON
-  printf '{"schema_version":2,"fixture":"local-only-policy"}\n' \
+  printf '{"schema_version":1,"fixture":"local-only-policy"}\n' \
     > "$root/$name/.skill-evaluation-policy.json"
 }
 

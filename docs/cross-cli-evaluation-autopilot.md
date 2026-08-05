@@ -44,11 +44,14 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Push policy:** local only.
 - **Plan:** `docs/evidence-backed-learning-plan.md`.
 - **Harness contract:** `docs/skill-evaluation-trial-harness-design.md`.
-- **Current phase:** M5.2, trial harness core.
+- **Current phase:** M5.5, rollout and live proof.
 - **Landed baseline:** `b78c6ba6b7316f1406ac82677bcf4384af86ea2a`.
-- **Completed locally:** M5.1 policy and schemas at `7cab64a`.
-- **Current candidate:** build the replaceable harness against the committed
-  suite, policy, authority, and receipt contracts.
+- **Completed locally:** M5.1 policy and schemas at `7cab64a`; M5.2 sealed
+  trial harness core at `745f32e`; M5.3 native adapters at `8002c9c`; M5.4
+  Dreaming certification integration in the current candidate.
+- **Current candidate:** install readers and writers behind halt, run the real
+  three-CLI acceptance suite, prove rollback remains inert, complete review,
+  and enable only after the installed self-test passes.
 - **Live-proof receipt:** not started; required before implementation review.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.

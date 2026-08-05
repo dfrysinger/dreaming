@@ -114,7 +114,7 @@ if [[ -n "$ABSORBED" ]]; then
       exit 1
     }
   fi
-  "$SCRIPT_DIR/../../skill-review/scripts/skill-evaluation.py" gate "$DESTINATION"
+  "$SCRIPT_DIR/../../skill-review/scripts/skill-evaluation.py" current-gate "$DESTINATION"
 fi
 
 # A retirement is only recoverable if the tree is committed first: the restore

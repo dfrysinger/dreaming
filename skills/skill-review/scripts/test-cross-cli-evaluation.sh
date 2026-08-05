@@ -9,6 +9,7 @@ mkdir -p "$TEST_ROOT"
 TMP="$(mktemp -d "$TEST_ROOT/cross-cli-evaluation.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 export SKILLS_STATE_DIR="$TMP/state"
+export DREAMING_EVALUATION_EXECUTORS="copilot,claude,codex"
 EVAL="$SCRIPT_DIR/skill-evaluation.py"
 passes=0
 
@@ -97,6 +98,8 @@ for index, (executor, status) in enumerate(zip(prepared["required_executors"], s
         "policy_id": prepared["policy_id"], "profile": prepared["profile"],
         "executor": executor,
         "result_bundle_sha256": "sha256:" + str(index + 7) * 64,
+        "result_bundle_id": "sha256:" + str(index + 4) * 64,
+        "run_id": "sha256:" + str(index + 1) * 64,
     }
     cert["certificate_id"] = identity("certificate_id", cert)
     certificates.append(cert)
@@ -238,59 +241,27 @@ fi
 pass "executor certificates remain isolated and unavailable or inconclusive cannot pass"
 
 make_aggregate "$ROOT/valid-skill" "$TMP/passing.json" pass pass pass
-authority="$("$EVAL" v2-authority-write "$ROOT/valid-skill" --aggregate "$TMP/passing.json")"
-authority_path="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["authority"])' <<<"$authority")"
-[[ "$authority_path" == "$SKILLS_STATE_DIR/skill-review/evaluations/v2/authority/"*"sha256:"*".json" ]] ||
-  fail "authority was not stored under the version-2 authority boundary"
-"$EVAL" v2-authority-validate "$ROOT/valid-skill" >/dev/null
-pointer="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["evaluation_v3_sha256"])' "$ROOT/valid-skill/.agent-created.json")"
-[[ "$pointer" =~ ^[0-9a-f]{64}$ ]] || fail "envelope lacks opaque v3 pointer"
-python3 - "$ROOT/valid-skill/.agent-created.json" <<'PY'
-import json, sys
-p = sys.argv[1]
-d = json.load(open(p))
-d.pop("evaluation_v3_sha256")
-json.dump(d, open(p, "w"))
-PY
-if "$EVAL" v2-authority-validate "$ROOT/valid-skill" >/dev/null 2>&1; then
-  fail "authority passed without its envelope pointer"
+if "$EVAL" v2-authority-write "$ROOT/valid-skill" --aggregate "$TMP/passing.json" >/dev/null 2>&1; then
+  fail "fabricated passing aggregate issued authority"
 fi
-python3 - "$ROOT/valid-skill/.agent-created.json" "$pointer" <<'PY'
-import json, sys
-p, pointer = sys.argv[1:]
-d = json.load(open(p))
-d["evaluation_v3_sha256"] = pointer
-json.dump(d, open(p, "w"))
-PY
 if "$EVAL" gate "$ROOT/valid-skill" >/dev/null 2>&1; then
   fail "legacy M2 gate accepted v2 authority"
 fi
-pass "v3 authority requires an opaque envelope pointer and remains inert to the old gate"
-
-python3 - "$ROOT/valid-skill/.skill-evaluation-cases.json" <<'PY'
-import json, sys
-p = sys.argv[1]
-d = json.load(open(p))
-d["cases"][0]["prompt"] = "Changed sealed task input."
-json.dump(d, open(p, "w"))
-PY
-if "$EVAL" v2-authority-validate "$ROOT/valid-skill" >/dev/null 2>&1; then
-  fail "suite input change did not stale authority"
-fi
-write_suite "$ROOT/valid-skill"
-write_policy "$ROOT/valid-skill" judge-2
-if "$EVAL" v2-authority-validate "$ROOT/valid-skill" >/dev/null 2>&1; then
-  fail "policy input change did not stale authority"
-fi
-pass "suite and policy input changes stale v2 authority"
+pass "authority requires production certification and remains inert to the old gate"
 
 make_skill "$ROOT" waiver-skill
 write_suite "$ROOT/waiver-skill"
 write_policy "$ROOT/waiver-skill"
 make_aggregate "$ROOT/waiver-skill" "$TMP/waiver-base.json" pass pass pass
-waiver_authority="$("$EVAL" v2-authority-write "$ROOT/waiver-skill" --aggregate "$TMP/waiver-base.json")"
-base_receipt="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["aggregate_receipt"])' <<<"$waiver_authority")"
 mkdir -p "$SKILLS_STATE_DIR/skill-review/evaluations/v2/receipts"
+base_sha="$(python3 - "$TMP/waiver-base.json" <<'PY'
+import hashlib, json, sys
+value=json.load(open(sys.argv[1]))
+print(hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest())
+PY
+)"
+base_receipt="$SKILLS_STATE_DIR/skill-review/evaluations/v2/receipts/$base_sha.json"
+cp "$TMP/waiver-base.json" "$base_receipt"
 legacy_receipt="$SKILLS_STATE_DIR/skill-review/evaluations/v2/receipts/$(python3 - <<'PY'
 import hashlib, json
 d = {"schema_version": 1, "kind": "evaluation", "status": "pass"}
@@ -311,6 +282,7 @@ waiver="$("$EVAL" v2-waive "$ROOT/waiver-skill" --base-aggregate "$base_receipt"
   --reason "Bound helper behavior is covered by its unchanged test" --test-script scripts/test-helper.sh)"
 waiver_receipt="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt"])' <<<"$waiver")"
 "$EVAL" v2-waiver-validate "$ROOT/waiver-skill" --waiver "$waiver_receipt" >/dev/null
+"$EVAL" current-gate "$ROOT/waiver-skill" >/dev/null
 echo "# stale" >> "$ROOT/waiver-skill/scripts/test-helper.sh"
 if "$EVAL" v2-waiver-validate "$ROOT/waiver-skill" --waiver "$waiver_receipt" >/dev/null 2>&1; then
   fail "changed waiver test identity remained valid"

@@ -121,7 +121,8 @@ for script in daemon-pass.sh daemon-run.sh daemon-lock.sh daemon-lock.py \
   test-evidence-envelope.sh skill-evaluation.py run-skill-evaluation.sh \
   test-skill-evaluation.sh test-cross-cli-evaluation.sh \
   skill-evaluation-harness.py fake-skill-evaluation-adapter.py \
-  test-skill-evaluation-harness.sh; do
+  test-skill-evaluation-harness.sh test-skill-evaluation-vendor-adapters.sh \
+  test-dreaming-certification.sh; do
   [[ -x "$SCRIPT_DIR/$script" ]] && ok "executable: $script" || bad "not executable: $script"
 done
 
@@ -191,6 +192,16 @@ if run_isolated_test "$SCRIPT_DIR/test-skill-evaluation-harness.sh" >>"$RESULT" 
   ok "deterministic trial-harness checks"
 else
   bad "deterministic trial-harness checks"
+fi
+if run_isolated_test "$SCRIPT_DIR/test-skill-evaluation-vendor-adapters.sh" >>"$RESULT" 2>&1; then
+  ok "deterministic skill-evaluation adapter checks"
+else
+  bad "deterministic skill-evaluation adapter checks"
+fi
+if run_isolated_test "$SCRIPT_DIR/test-dreaming-certification.sh" >>"$RESULT" 2>&1; then
+  ok "deterministic Dreaming certification checks"
+else
+  bad "deterministic Dreaming certification checks"
 fi
 if run_isolated_test "$MANAGE_SCRIPT_DIR/test-promotion-review.sh" >>"$RESULT" 2>&1; then
   ok "deterministic promotion checks"

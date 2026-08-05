@@ -55,12 +55,11 @@ Receipts are content-addressed under
 inventory, case manifest, exact model, Copilot CLI version, runner, prompt,
 comparator, and flags. Any candidate or case edit makes the gate stale.
 
-## Cross-CLI schema v2 (not yet the active gate)
+## Cross-CLI schema v2
 
-M5.1 adds a separately validated, non-authoritative cross-CLI contract. Keep
-the suite in the same local `.skill-evaluation-cases.json` file and put its
-executor/comparator policy in local `.skill-evaluation-policy.json`; neither
-file is candidate runtime input.
+Cross-CLI certification keeps the suite in the local
+`.skill-evaluation-cases.json` file and the executor/comparator policy in local
+`.skill-evaluation-policy.json`; neither file is candidate runtime input.
 
 ```json
 {
@@ -135,17 +134,43 @@ Schema-v1 source/sibling manifests remain readable. They compile only to one
 legacy intended and one related case, with `cross_executor_authority: false`;
 they do not create activation cases or M5 authority.
 
-Future M5 phases supply sealed executor certificates and aggregates. The
-schema helpers store content-addressed aggregate receipts and schema-v3
-authority only under
+Dreaming compiles these inputs into a sealed run, invokes the replaceable
+harness, independently verifies the retained evidence, and issues one
+certificate per required executor. It stores the ordered aggregate receipt and
+schema-v3 authority only under
 `~/.copilot/skill-state/skill-review/evaluations/v2/`. Authority paths are
 `authority/<skill-path-key>/<candidate-id>.json`; the optional schema-v2
 `.agent-created.json` field `evaluation_v3_sha256` is only an opaque digest.
-The current `gate` command reads only legacy M2 state and cannot accept that
-authority.
+`current-gate`, promotion, and consolidation revalidate that authority and its
+bound result evidence. The legacy `gate` command reads only M2 state and cannot
+accept version-2 authority.
 
-`v2-waive` and `v2-waiver-validate` are likewise non-authoritative helpers.
-They require a passing version-2 aggregate, exact current candidate, suite,
-policy, required executor list, restricted changed `scripts/` paths, an
-unchanged test script identity, and a bound JSON test-result digest. Legacy M2
-receipts cannot anchor these waivers.
+Set `DREAMING_EVALUATION_EXECUTORS` to the explicit ordered executor set, then
+compile, execute, and certify:
+
+```bash
+export DREAMING_EVALUATION_EXECUTORS=copilot,claude,codex
+skill-review/scripts/skill-evaluation.py v2-run-compile <skill-dir> \
+  --run-dir <empty-run-dir> --config <compilation.json> \
+  --routing <routing.json> --nonce <nonce> \
+  --harness skill-review/scripts/skill-evaluation-harness.py
+skill-review/scripts/skill-evaluation.py v2-run-execute \
+  --run-dir <run-dir> --result-dir <empty-result-dir> \
+  --routing <routing.json> --scratch <empty-scratch-dir> \
+  --harness skill-review/scripts/skill-evaluation-harness.py
+skill-review/scripts/skill-evaluation.py v2-result-certify <skill-dir> \
+  --run-dir <run-dir> --result-dir <result-dir> \
+  --routing <routing.json> --scratch <empty-verify-scratch-dir> \
+  --nonce <same-nonce> \
+  --harness skill-review/scripts/skill-evaluation-harness.py
+```
+
+The compilation file binds the exact harness, executor, comparator, tool,
+budget, grader, case-runtime, and retention identities. The routing file maps
+those already-authorized identities to argument arrays; it does not grant
+policy or environment authority.
+
+`v2-waive` and `v2-waiver-validate` require a passing version-2 aggregate,
+exact current candidate, suite, policy, required executor list, restricted
+changed `scripts/` paths, an unchanged test script identity, and a bound JSON
+test-result digest. Legacy M2 receipts cannot anchor these waivers.

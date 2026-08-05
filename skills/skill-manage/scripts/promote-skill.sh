@@ -82,7 +82,7 @@ LOCK_TOKEN="$("$LOCK_SCRIPT" acquire --mode session --owner "promote-skill:$NAME
 
 # Validate before moving anything.
 "$SCRIPT_DIR/validate-skill.sh" "$SRC/SKILL.md"
-"$EVALUATION_SCRIPT" gate "$SRC"
+"$EVALUATION_SCRIPT" current-gate "$SRC"
 "$SCRIPT_DIR/promotion-review.py" verify "$SRC"
 
 # Capture the exact staged state of every public path this promotion may touch.
