@@ -28,6 +28,20 @@ pass() { echo "PASS  $*"; passes=$((passes + 1)); }
 fail() { echo "FAIL  $*" >&2; exit 1; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "$3 (expected '$2', got '$1')"; }
 
+OVERRIDE_CONFIG="$TMP/override-config.env"
+printf "DREAMING_RECEIPT_FILE='%s'\n" \
+  "$REPO/scripts/shared-deps-receipt.json" > "$OVERRIDE_CONFIG"
+if (
+  export DREAMING_CONFIG_FILE="$OVERRIDE_CONFIG"
+  # shellcheck source=lib-daemon.sh
+  source "$SCRIPT_DIR/lib-daemon.sh"
+  dreaming_require_roots
+); then
+  pass "explicit dependency receipt survives generated config loading"
+else
+  fail "generated config overrode the explicit dependency receipt"
+fi
+
 FAKE_PASS="$TMP/fake-pass.sh"
 cat > "$FAKE_PASS" <<'SH'
 #!/usr/bin/env bash

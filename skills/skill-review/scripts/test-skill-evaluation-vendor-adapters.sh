@@ -245,7 +245,7 @@ else:
             "100000",
         ]
 
-    def call(self, vendor, *args, check=True, adapter_timeout=10):
+    def call(self, vendor, *args, check=True, adapter_timeout=10, cwd=None):
         result = subprocess.run(
             [*self.base(vendor, adapter_timeout), *map(str, args)],
             env={
@@ -256,6 +256,7 @@ else:
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
+            cwd=cwd,
         )
         if check and result.returncode:
             self.fail(result.stdout + result.stderr)
@@ -368,7 +369,7 @@ else:
             self.assertEqual(
                 contract["protocol"], "dreaming.skill-evaluation-executor"
             )
-            doctor = self.call(vendor, "doctor")
+            doctor = self.call(vendor, "doctor", cwd="/")
             self.assertTrue(doctor["healthy"])
             version = self.call(vendor, "version")
             identities.append(set(version))

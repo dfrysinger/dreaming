@@ -3182,24 +3182,20 @@ def evaluation_doctor(args: argparse.Namespace) -> None:
     if help_result.returncode != 0 or any(flag not in help_text for flag in required_flags):
         raise AdapterError("unsupported-executor-version", version)
     credential_root = evaluation_credential_root(args)
-    if args.vendor == "copilot":
-        authenticated = (credential_root / ".config/gh/hosts.yml").is_file()
-    elif args.vendor == "claude":
-        probe = Path.cwd().resolve() / f".dreaming-auth-doctor-{os.getpid()}"
-        try:
-            authenticated = project_claude_auth(
-                credential_root, probe / ".credentials.json"
-            )
-        finally:
-            shutil.rmtree(probe, ignore_errors=True)
-    else:
-        authenticated = (credential_root / ".codex/auth.json").is_file()
-    if not authenticated:
-        raise AdapterError("authentication-required", args.vendor)
-    doctor_root = Path.cwd().resolve() / f".dreaming-evaluation-doctor-{os.getpid()}"
-    if doctor_root.exists():
-        raise AdapterError("doctor-workspace-exists", str(doctor_root))
+    doctor_root = Path(
+        tempfile.mkdtemp(prefix="dreaming-evaluation-doctor-")
+    ).resolve()
     try:
+        if args.vendor == "copilot":
+            authenticated = (credential_root / ".config/gh/hosts.yml").is_file()
+        elif args.vendor == "claude":
+            authenticated = project_claude_auth(
+                credential_root, doctor_root / "auth/.credentials.json"
+            )
+        else:
+            authenticated = (credential_root / ".codex/auth.json").is_file()
+        if not authenticated:
+            raise AdapterError("authentication-required", args.vendor)
         trial_root = doctor_root / "trial"
         home = trial_root / "home"
         workspace = trial_root / "workspace"
