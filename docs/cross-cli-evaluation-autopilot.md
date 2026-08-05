@@ -45,7 +45,7 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Plan:** `docs/evidence-backed-learning-plan.md`.
 - **Harness contract:** `docs/skill-evaluation-trial-harness-design.md`.
 - **Current phase:** M5.5, rollout and live proof.
-- **Landed baseline:** `b78c6ba6b7316f1406ac82677bcf4384af86ea2a`.
+- **Landed baseline:** `af92f812164dcdccfee4957b382560a4f981d896`.
 - **Completed locally:** M5.1 policy and schemas at `7cab64a`; M5.2 sealed
   trial harness core at `745f32e`; M5.3 native adapters at `8002c9c`; M5.4
   Dreaming certification integration in the current candidate. The
