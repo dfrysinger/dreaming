@@ -544,6 +544,15 @@ else:
                     "candidate",
                     missing["candidate_id"],
                     missing["skill_md_sha256"],
+                    "related",
+                )[0]
+            )
+            self.assertTrue(
+                harness.proof(
+                    missing_events,
+                    "candidate",
+                    missing["candidate_id"],
+                    missing["skill_md_sha256"],
                     "activation_negative",
                 )[0]
             )

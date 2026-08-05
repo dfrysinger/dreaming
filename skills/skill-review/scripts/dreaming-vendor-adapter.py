@@ -1022,6 +1022,18 @@ def copilot_auth_token(credential_root: Path) -> str | None:
         return None
     gh = shutil.which("gh")
     if gh is None:
+        gh = next(
+            (
+                str(path)
+                for path in (
+                    Path("/opt/homebrew/bin/gh"),
+                    Path("/usr/local/bin/gh"),
+                )
+                if path.is_file()
+            ),
+            None,
+        )
+    if gh is None:
         return None
     account = account_record.pw_name
     try:

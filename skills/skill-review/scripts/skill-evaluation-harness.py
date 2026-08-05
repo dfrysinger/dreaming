@@ -674,6 +674,8 @@ def proof(events: list[dict[str, Any]], treatment: str, candidate_id: str, skill
         if loads:
             return False, "activation-negative loaded a skill"
         return True, None
+    if case_class == "related" and not loads:
+        return True, None
     matching = [
         item for item in loads
         if item["data"].get("candidate_id") == candidate_id
