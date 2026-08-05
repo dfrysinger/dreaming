@@ -49,26 +49,28 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Completed locally:** M5.1 policy and schemas at `7cab64a`; M5.2 sealed
   trial harness core at `745f32e`; M5.3 native adapters at `8002c9c`; M5.4
   Dreaming certification integration in the current candidate.
-- **Current candidate:** `4fadf1336c4dd528fe1b09d4fadcb31a1cbe070f` with
-  installed generation `20260805T065210Z-install-97490`, behind the active
+- **Current candidate:** `fddd07c2f2cf98b75d2072633c80762d69b80a7c` with
+  installed generation `20260805T075531Z-install-19150`, behind the active
   halt switch.
 - **Live-proof receipt:**
   `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/cross-cli-m5-live-proof.txt`;
   gate remains closed.
-- **Current live status:** Copilot and Claude independently complete every
-  one-trial capability and encoded-preference class, including exact native
-  load proof, activation-negative behavior, related-task parity, blinded
-  comparisons, deterministic artifacts, and sealed budgets. Copilot exposes no
-  personal installed-plugin inventory under the metadata-only real-home
-  exception. The targeted harness, cross-CLI policy, and Dreaming
-  certification suites pass 29/29, 8/8, and 15/15. Codex remains the only
-  blocker because its account usage limit does not reset until August 7, 2026
-  at 10:41 PM.
-- **Next checkpoint:** after Codex quota resets, rerun the one-trial capability
-  and encoded-preference matrices through all three real providers. If Codex
-  evidence is complete, run both full three-trial gates and continue through
-  authority, negative evidence, rollback, review, final installed self-test,
-  documentation, and enablement. Do not substitute or waive the required Codex
-  executor.
+- **Current live status:** Copilot and Claude independently completed every
+  one-trial capability and encoded-preference class on the previous adapter
+  identity, including exact native load proof, activation-negative behavior,
+  related-task parity, blinded comparisons, deterministic artifacts, and
+  sealed budgets. Copilot exposed no personal installed-plugin inventory under
+  the metadata-only real-home exception. The current targeted harness,
+  cross-CLI policy, Dreaming certification, native-adapter, and installer
+  suites pass. Activation generation `20260805T075531Z-install-19150` passed
+  the full installed self-test with zero failures while the halt remained
+  active. Codex remains gated on account quota availability after August 7,
+  2026 at 10:41 PM; it is required and cannot be substituted or waived.
+- **Next checkpoint:** refresh the one-trial capability and encoded-preference
+  matrices on the current adapter identity. After Codex quota is available,
+  run the same matrices through all three real providers. If Codex evidence is
+  complete, run both full three-trial gates and continue through authority,
+  negative evidence, rollback, review, final installed self-test,
+  documentation, and enablement.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.
