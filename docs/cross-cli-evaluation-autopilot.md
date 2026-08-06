@@ -89,8 +89,13 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   was stopped by exact PID with no residual test processes; no product defect
   or passing receipt has been claimed.
 - **Next checkpoint:** rerun the current generation-bound installed self-test
-  when host load is reasonable. Then run both full three-trial Copilot gates
-  with Claude/Codex advisory evidence and prove advisory pass, regression,
+  only after the one-minute load average remains at or below the machine's 18
+  logical CPUs for two consecutive minutes and a no-op Python subprocess
+  starts, prints, and exits within one second. Run the previously failed
+  targeted fixtures first, then the unmodified full installed self-test on the
+  same generation. Do not weaken fixture or product timeouts to accommodate a
+  saturated host. Then run both full three-trial Copilot gates with
+  Claude/Codex advisory evidence and prove advisory pass, regression,
   inconclusive, and unavailable states cannot grant or block required
   authority. Continue through negative evidence, rollback, review, final
   installed self-test, documentation, and enablement.
