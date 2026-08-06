@@ -59,7 +59,7 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   generation `20260806T131624Z-install-23818`, behind the active halt switch.
 - **Live-proof receipt:**
   `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/cross-cli-m5-live-proof.txt`;
-  gate remains closed.
+  pre-review live gate passed; rollout remains halted for review.
 - **Current live status:** The new required/advisory candidate passes the
   deterministic harness, policy, certification, native-adapter, daemon, and
   installer suites. Deterministic end-to-end certification proves advisory
@@ -139,8 +139,13 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   probe. All four implicated suites passed, the immediate pre-full sample was
   13.30, and the installed self-test completed with `0 failure(s)`. Its receipt
   exactly matches the restored generation.
-- **Next checkpoint:** settle the remaining overfit-policy live-proof
-  requirement, then run formal behavior validation and implementation review
-  before final validation, documentation, and enablement.
+  A dedicated Copilot gate then evaluated an intentionally broad,
+  overfitted candidate. The intended candidate passed all three trials while
+  its controls failed, but all three related candidate trials failed against
+  passing controls and all three activation-negative trials regressed. The
+  required Copilot certificate and aggregate were `regression`,
+  `authoritative: false`, and authority issuance refused.
+- **Next checkpoint:** run formal behavior validation and implementation
+  review before final validation, documentation, and enablement.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.
