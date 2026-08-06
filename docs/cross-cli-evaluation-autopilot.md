@@ -100,7 +100,9 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   entered under load samples 15.84 and 12.12 with a 0.089-second subprocess
   probe, and all four targeted suites passed. The mandatory immediate
   pre-full-run load sample was 23.67, so the full self-test was not launched
-  and no receipt was written.
+  and no receipt was written. The next scheduled retry stopped at its first
+  admission sample of 18.24, above the 18-CPU ceiling; it ran no probe, targeted
+  suite, or installed self-test.
 - **Next checkpoint:** rerun the current generation-bound installed self-test
   only after the one-minute load average remains at or below the machine's 18
   logical CPUs for two consecutive minutes and a no-op Python subprocess
