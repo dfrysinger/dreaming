@@ -108,10 +108,23 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   installed self-test completed with `0 failure(s)`. The independently written
   `selftest-passed-generation` receipt exactly matches active generation
   `20260806T090147Z-install-48248`; the halt remains active.
-- **Next checkpoint:** run both full three-trial Copilot gates with
-  Claude/Codex advisory evidence and prove advisory pass, regression,
-  inconclusive, and unavailable states cannot grant or block required
-  authority. Continue through negative evidence, rollback, review, final
-  installed self-test, documentation, and enablement.
+  The first two three-trial capability attempts then failed closed because one
+  no-skill control wandered through broad instruction search until it crossed
+  the sealed output limit. The earliest divergence was the synthetic prompt's
+  missing unavailable contract, not the production harness. The live fixture
+  now requires exact skill invocation and a fixed unavailable response without
+  search. Fresh bounded capability run `capability-cbf3d7c-bounded1` completed
+  all required Copilot infrastructure with zero errors: three intended
+  candidate trials passed, three intended controls failed behaviorally,
+  related-task parity passed, both activation classes passed, and final
+  certification was authoritative. Claude remained visible as advisory
+  inconclusive because its OAuth token is revoked; Codex remained visible as
+  advisory inconclusive because its quota is exhausted. Neither advisory
+  failure blocked Copilot authority.
+- **Next checkpoint:** run the separate bounded three-trial encoded-preference
+  Copilot gate with Claude/Codex advisory evidence. Then prove advisory pass,
+  regression, inconclusive, and unavailable states cannot grant or block
+  required authority. Continue through negative evidence, rollback, review,
+  final installed self-test, documentation, and enablement.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.
