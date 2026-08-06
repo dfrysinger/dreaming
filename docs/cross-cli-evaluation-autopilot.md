@@ -83,18 +83,28 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   installed required default and treats configured Claude and Codex routes as
   advisory. Advisory unavailability remains visible but does not block
   Copilot-backed authority. The current generation-bound installed self-test
-  remains open: sustained host load between 38 and 70 caused multiple
-  timing-sensitive fixtures to miss startup and evidence deadlines, while
-  otherwise small subprocesses took minutes. The infrastructure-invalid run
-  was stopped by exact PID with no residual test processes; no product defect
-  or passing receipt has been claimed.
-- **Next checkpoint:** rerun the current generation-bound installed self-test
-  only after the one-minute load average remains at or below the machine's 18
-  logical CPUs for two consecutive minutes and a no-op Python subprocess
-  starts, prints, and exits within one second. Run the previously failed
-  targeted fixtures first, then the unmodified full installed self-test on the
-  same generation. Do not weaken fixture or product timeouts to accommodate a
-  saturated host. Then run both full three-trial Copilot gates with
+  remains open.
+  The first attempt was infrastructure-invalid under sustained load between 38
+  and 70. A retry entered under two compliant load samples and passed the
+  subprocess probe plus every previously failed targeted suite, but load had
+  risen to 20.65 immediately before the full suite. Its only failure was the
+  harness output-flood fixture: the fixture's 100,000-byte cap required two
+  pipe reads, so scheduler delay let its timeout win after the same suite had
+  passed standalone. The runtime bounds remain unchanged; the fixture now uses
+  a 4,096-byte cap so normal protocol envelopes fit while one read
+  deterministically proves streaming overflow.
+  Neither invalid attempt produced a passing receipt, and no test process
+  remains.
+- **Next checkpoint:** validate the deterministic output-flood fixture,
+  reinstall the resulting candidate behind the halt, and rerun its
+  generation-bound installed self-test only after the one-minute load average
+  remains at or below the machine's 18 logical CPUs for two consecutive
+  minutes and a no-op Python subprocess starts, prints, and exits within one
+  second. Run the previously failed targeted fixtures, then require a fresh
+  load sample at or below 18 immediately before the full installed self-test.
+  Abort rather than launch if that final sample exceeds the ceiling. Do not
+  weaken fixture or product timeouts to accommodate a saturated host. Then run
+  both full three-trial Copilot gates with
   Claude/Codex advisory evidence and prove advisory pass, regression,
   inconclusive, and unavailable states cannot grant or block required
   authority. Continue through negative evidence, rollback, review, final

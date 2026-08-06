@@ -48,6 +48,7 @@ make_run() {
   local root="$1" fixture="${2:-correct}" profile="${3:-gate}" executors="${4:-1}"
   local timeout="${5:-5}" command_grader="${6:-none}" behavior_cases="${7:-1}"
   local required_count="${8:-$executors}"
+  local output_bytes="${9:-100000}"
   mkdir -p "$root/candidate" "$root/fixtures" "$root/graders"
   cat > "$root/candidate/SKILL.md" <<'EOF'
 ---
@@ -57,10 +58,10 @@ Return the deterministic fixture result.
 EOF
   printf 'fixture\n' > "$root/fixtures/input.txt"
   python3 - "$root" "$fixture" "$profile" "$executors" "$timeout" "$HARNESS" "$ADAPTER" \
-      "$command_grader" "$behavior_cases" "$required_count" <<'PY'
+      "$command_grader" "$behavior_cases" "$required_count" "$output_bytes" <<'PY'
 import hashlib, json, os, sys
 from pathlib import Path
-root, fixture, profile, executors, timeout, harness, adapter, command_grader, behavior_cases, required_count = map(str, sys.argv[1:])
+root, fixture, profile, executors, timeout, harness, adapter, command_grader, behavior_cases, required_count, output_bytes = map(str, sys.argv[1:])
 root = Path(root)
 def canonical(x): return json.dumps(x, sort_keys=True, separators=(",", ":")).encode()
 def sha(x): return "sha256:" + hashlib.sha256(canonical(x)).hexdigest()
@@ -119,7 +120,7 @@ for number in range(int(executors)):
     executor={"name":name,"requirement":"required" if number < int(required_count) else "advisory",
       "model":f"model-{number+1}","adapter_id":adapter_id,"adapter_version":1,
       "adapter_executable_sha256":adapter_sha,"cli_executable_sha256":"sha256:"+str(number+3)*64,
-      "cli_version":f"cli-{number+1}","tool_policy_id":tool,"limits":{"timeout_seconds":int(timeout),"token_budget":100,"output_bytes":100000},"sandbox_id":"sha256:"+str(number+4)*64}
+      "cli_version":f"cli-{number+1}","tool_policy_id":tool,"limits":{"timeout_seconds":int(timeout),"token_budget":100,"output_bytes":int(output_bytes)},"sandbox_id":"sha256:"+str(number+4)*64}
     identity={key:executor[key] for key in ("adapter_id","adapter_version","adapter_executable_sha256","model","cli_executable_sha256","cli_version","tool_policy_id","limits","sandbox_id")}
     identity_path=root.parent/f"{name}-identity.json"
     identity_path.write_bytes(canonical(identity)+b"\n")
@@ -139,7 +140,7 @@ manifest={"schema_version":1,"kind":"skill_evaluation_run","invocation_nonce":"f
  "candidate_id":sha(candidate),"suite_id":sha(suite),"profile":profile,"trials_per_arm":3 if profile=="gate" else 1,
  "executors":executor_values,"comparator":comparator,"harness_executable_sha256":file_sha(harness),
  "tool_policy_id":tool,"grader_set_id":sha(grader_set),"retention_policy_id":"sha256:"+"b"*64,
- "limits":{"timeout_seconds":int(timeout),"output_bytes":100000,"file_bytes":100000,"global_concurrency":1,"per_executor_concurrency":1},
+ "limits":{"timeout_seconds":int(timeout),"output_bytes":int(output_bytes),"file_bytes":100000,"global_concurrency":1,"per_executor_concurrency":1},
  "file_inventory":inv(root)}
 fields=("schema_version","kind","candidate_id","suite_id","profile","trials_per_arm","executors","comparator",
         "harness_executable_sha256","tool_policy_id","grader_set_id","retention_policy_id","limits","file_inventory")
@@ -151,9 +152,11 @@ PY
 run_case() {
   local name="$1" fixture="${2:-correct}" profile="${3:-gate}" executors="${4:-1}"
   local timeout="${5:-5}" command_grader="${6:-none}" behavior_cases="${7:-1}"
+  local required_count="${8:-$executors}" output_bytes="${9:-100000}"
   local input="$TMP/$name-input" output="$TMP/$name-output"
   mkdir -p "$output"
-  make_run "$input" "$fixture" "$profile" "$executors" "$timeout" "$command_grader" "$behavior_cases"
+  make_run "$input" "$fixture" "$profile" "$executors" "$timeout" "$command_grader" \
+    "$behavior_cases" "$required_count" "$output_bytes"
   harness_run "$input" "$output" >/dev/null
   printf '%s\n' "$output"
 }
@@ -425,7 +428,7 @@ PY
 [[ "$(state_of "$mutate")" == "incomplete" ]] || fail "mutated sealed input produced a complete result"
 pass "input mutation is rechecked before command graders and before sealing"
 
-flood="$(run_case flood output-flood iterate)"
+flood="$(run_case flood output-flood iterate 1 5 none 1 1 4096)"
 python3 - "$flood" <<'PY'
 import json, sys
 records=[json.load(open(p)) for p in __import__("pathlib").Path(sys.argv[1],"trials").glob("*/result.json")]
