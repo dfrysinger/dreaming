@@ -96,7 +96,11 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   Neither invalid attempt produced a passing receipt, and no test process
   remains. The corrected fixture passed three complete harness runs while load
   ranged from 19.76 to 26.17, and candidate `cc5fe2e` is installed as
-  generation `20260806T090147Z-install-48248` behind the halt.
+  generation `20260806T090147Z-install-48248` behind the halt. Its next retry
+  entered under load samples 15.84 and 12.12 with a 0.089-second subprocess
+  probe, and all four targeted suites passed. The mandatory immediate
+  pre-full-run load sample was 23.67, so the full self-test was not launched
+  and no receipt was written.
 - **Next checkpoint:** rerun the current generation-bound installed self-test
   only after the one-minute load average remains at or below the machine's 18
   logical CPUs for two consecutive minutes and a no-op Python subprocess
