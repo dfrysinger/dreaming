@@ -83,7 +83,7 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   installed required default and treats configured Claude and Codex routes as
   advisory. Advisory unavailability remains visible but does not block
   Copilot-backed authority. The current generation-bound installed self-test
-  remains open.
+  now passes.
   The first attempt was infrastructure-invalid under sustained load between 38
   and 70. A retry entered under two compliant load samples and passed the
   subprocess probe plus every previously failed targeted suite, but load had
@@ -102,16 +102,13 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   pre-full-run load sample was 23.67, so the full self-test was not launched
   and no receipt was written. The next scheduled retry stopped at its first
   admission sample of 18.24, above the 18-CPU ceiling; it ran no probe, targeted
-  suite, or installed self-test.
-- **Next checkpoint:** rerun the current generation-bound installed self-test
-  only after the one-minute load average remains at or below the machine's 18
-  logical CPUs for two consecutive minutes and a no-op Python subprocess
-  starts, prints, and exits within one second. Run the previously failed
-  targeted fixtures, then require a fresh load sample at or below 18
-  immediately before the full installed self-test. Abort rather than launch if
-  that final sample exceeds the ceiling. Do not weaken fixture or product
-  timeouts to accommodate a saturated host. Then run both full three-trial
-  Copilot gates with
+  suite, or installed self-test. The accepted retry entered under load samples
+  11.04 and 10.19 with a 0.137-second subprocess probe. All four implicated
+  targeted suites passed, the immediate pre-full sample was 11.87, and the
+  installed self-test completed with `0 failure(s)`. The independently written
+  `selftest-passed-generation` receipt exactly matches active generation
+  `20260806T090147Z-install-48248`; the halt remains active.
+- **Next checkpoint:** run both full three-trial Copilot gates with
   Claude/Codex advisory evidence and prove advisory pass, regression,
   inconclusive, and unavailable states cannot grant or block required
   authority. Continue through negative evidence, rollback, review, final
