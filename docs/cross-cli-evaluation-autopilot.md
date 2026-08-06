@@ -56,7 +56,7 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   derives `required_certificate_set_id` from required evidence only, and
   preserves required authority across advisory-only policy changes.
 - **Installed runtime:** `cc5fe2ed6bc8516cff56f5d01e6809a29c327e29` with
-  generation `20260806T090147Z-install-48248`, behind the active halt switch.
+  generation `20260806T131624Z-install-23818`, behind the active halt switch.
 - **Live-proof receipt:**
   `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/cross-cli-m5-live-proof.txt`;
   gate remains closed.
@@ -128,11 +128,19 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   Its certification is also authoritative. Claude again remained revoked-token
   advisory inconclusive and Codex quota-inconclusive, without granting or
   blocking authority.
-- **Next checkpoint:** prove advisory pass, regression, inconclusive, and
-  unavailable states cannot grant or block required authority. Then prove
-  required failure, stale or partial evidence, unauthorized producers,
-  overfitted candidates, and legacy evidence cannot authorize. Continue
-  through rollback, review, final installed self-test, documentation, and
-  enablement.
+  Fresh deterministic authority checks passed all 61 policy, certification,
+  harness, cancellation, cleanup, stale-evidence, producer-identity, and legacy
+  rejection contracts. The halted rollback restored the prior runner, whose
+  legacy evaluator refused version-2 authority; both authoritative aggregate
+  evidence hashes remained unchanged. Reinstalling the reviewed tree created
+  generation `20260806T131624Z-install-23818`, restored verified managed
+  Copilot instructions and repository-backed LaunchAgents, and preserved the
+  halt. Admission samples were 16.42 and 15.43 with a 0.187-second subprocess
+  probe. All four implicated suites passed, the immediate pre-full sample was
+  13.30, and the installed self-test completed with `0 failure(s)`. Its receipt
+  exactly matches the restored generation.
+- **Next checkpoint:** settle the remaining overfit-policy live-proof
+  requirement, then run formal behavior validation and implementation review
+  before final validation, documentation, and enablement.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.
