@@ -398,20 +398,27 @@ def compile_legacy_cases(raw: dict[str, Any]) -> dict[str, Any]:
 def load_suite(path: Path) -> tuple[dict[str, Any], str]:
     raw = load_json(path)
     schema_version = raw.get("schema_version")
+    normalized = "compiled_from_schema_version" in raw or "cross_executor_authority" in raw
+    if normalized and (
+        not isinstance(schema_version, int)
+        or isinstance(schema_version, bool)
+        or schema_version != SUITE_SCHEMA_VERSION
+    ):
+        raise EvaluationError("suite schema_version must be 1 or 2")
     if schema_version == 1:
         suite = compile_legacy_cases(raw)
         return suite, f"sha256:{digest(canonical(suite))}"
     if schema_version != SUITE_SCHEMA_VERSION:
         raise EvaluationError("suite schema_version must be 1 or 2")
-    normalized = "compiled_from_schema_version" in raw or "cross_executor_authority" in raw
     keys = {"schema_version", "graders", "cases"}
     if normalized:
         keys.update({"compiled_from_schema_version", "cross_executor_authority"})
+    require_exact_keys(raw, "suite", keys)
+    if normalized:
         if raw.get("compiled_from_schema_version") is not None:
             raise EvaluationError("normalized version-2 suite has invalid source schema")
         if raw.get("cross_executor_authority") is not True:
             raise EvaluationError("normalized version-2 suite must retain cross-executor authority")
-    require_exact_keys(raw, "suite", keys)
     graders_value = raw.get("graders")
     if not isinstance(graders_value, list) or not graders_value:
         raise EvaluationError("suite.graders must be a non-empty list")
@@ -512,8 +519,15 @@ def load_policy(path: Path) -> tuple[dict[str, Any], str]:
     if profile not in PROFILES:
         raise EvaluationError("policy.profile must be gate or iterate")
     trials_per_arm = 3 if profile == "gate" else 1
-    if normalized and raw.get("trials_per_arm") != trials_per_arm:
-        raise EvaluationError("normalized policy trials_per_arm does not match profile")
+    retained_trials = raw.get("trials_per_arm")
+    if normalized and (
+        not isinstance(retained_trials, int)
+        or isinstance(retained_trials, bool)
+        or retained_trials != trials_per_arm
+    ):
+        raise EvaluationError(
+            "normalized policy trials_per_arm must be the profile-derived integer"
+        )
     policy_kind = raw.get("policy_kind")
     if policy_kind not in POLICY_KINDS:
         raise EvaluationError("policy.policy_kind must be capability_uplift or encoded_preference")
@@ -2000,11 +2014,10 @@ def verify_result_independently(
             text=True,
         )
     except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or "").strip()
-        if detail:
-            raise EvaluationError(f"independent result verification failed: {detail}") from exc
+        detail = " ".join((exc.stderr or "").splitlines()).strip()
+        suffix = f": {detail}" if detail else ""
         raise EvaluationError(
-            f"independent result verification failed with exit status {exc.returncode}"
+            f"independent result verification failed with exit status {exc.returncode}{suffix}"
         ) from exc
     result_manifest = load_json(result_dir / "manifest.json")
     require_exact_keys(result_manifest, "result manifest", RESULT_MANIFEST_KEYS)

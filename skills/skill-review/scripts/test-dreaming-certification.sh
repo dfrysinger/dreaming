@@ -19,6 +19,16 @@ passes=0
 pass() { echo "PASS  $*"; passes=$((passes + 1)); }
 fail() { echo "FAIL  $*" >&2; exit 1; }
 
+expect_refusal() {
+  local name="$1" expected="$2"
+  shift 2
+  if "$@" >"$TMP/$name.out" 2>"$TMP/$name.err"; then
+    fail "$name unexpectedly succeeded"
+  fi
+  grep -q "$expected" "$TMP/$name.err" ||
+    fail "$name omitted expected refusal: $expected"
+}
+
 make_fixture() {
   local root="$1" profile="${2:-gate}" kind="${3:-capability_uplift}" fixture="${4:-correct}"
   mkdir -p "$root/skill" "$root/config"
@@ -142,6 +152,47 @@ replayed="$("$EVAL" v2-result-certify "$BASE/skill" --run-dir "$BASE/run" \
 [[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$replayed")" == "pass" ]] ||
   fail "retained normalized suite did not replay through certification"
 pass "retained normalized suite replays through certification"
+python3 - "$BASE/run/source-suite.json" "$BASE/run/source-policy.json" "$BASE" <<'PY'
+import json, sys
+from pathlib import Path
+suite_path, policy_path, root = map(Path, sys.argv[1:])
+suite = json.loads(suite_path.read_text())
+policy = json.loads(policy_path.read_text())
+variants = {
+    "suite-source-schema.json": {**suite, "compiled_from_schema_version": 1},
+    "suite-no-authority.json": {**suite, "cross_executor_authority": False},
+    "suite-half-marked.json": {
+        key: value for key, value in suite.items() if key != "cross_executor_authority"
+    },
+    "suite-float-version.json": {**suite, "schema_version": 2.0},
+    "suite-legacy-markers.json": {**suite, "schema_version": 1},
+    "suite-bool-version.json": {**suite, "schema_version": True},
+    "policy-wrong-trials.json": {**policy, "trials_per_arm": 1},
+    "policy-float-trials.json": {**policy, "trials_per_arm": 3.0},
+    "policy-bool-trials.json": {**policy, "profile": "iterate", "trials_per_arm": True},
+}
+for name, value in variants.items():
+    root.joinpath(name).write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+expect_refusal suite-source-schema "invalid source schema" \
+  "$EVAL" v2-suite-validate "$BASE/suite-source-schema.json"
+expect_refusal suite-no-authority "must retain cross-executor authority" \
+  "$EVAL" v2-suite-validate "$BASE/suite-no-authority.json"
+expect_refusal suite-half-marked "suite has missing keys.*cross_executor_authority" \
+  "$EVAL" v2-suite-validate "$BASE/suite-half-marked.json"
+expect_refusal suite-float-version "suite schema_version must be 1 or 2" \
+  "$EVAL" v2-suite-validate "$BASE/suite-float-version.json"
+expect_refusal suite-legacy-markers "suite schema_version must be 1 or 2" \
+  "$EVAL" v2-suite-validate "$BASE/suite-legacy-markers.json"
+expect_refusal suite-bool-version "suite schema_version must be 1 or 2" \
+  "$EVAL" v2-suite-validate "$BASE/suite-bool-version.json"
+expect_refusal policy-wrong-trials "profile-derived integer" \
+  "$EVAL" v2-policy-validate "$BASE/policy-wrong-trials.json"
+expect_refusal policy-float-trials "profile-derived integer" \
+  "$EVAL" v2-policy-validate "$BASE/policy-float-trials.json"
+expect_refusal policy-bool-trials "profile-derived integer" \
+  "$EVAL" v2-policy-validate "$BASE/policy-bool-trials.json"
+pass "retained suite and policy authority guards fail closed"
 mkdir "$BASE/wrong-nonce-scratch"
 if "$EVAL" v2-result-certify "$BASE/skill" --run-dir "$BASE/run" \
   --result-dir "$BASE/result" --routing "$BASE/config/routing.json" \
@@ -153,6 +204,8 @@ fi
   fail "wrong nonce refusal did not begin with REFUSED:"
 grep -q "caller nonce mismatch" "$BASE/wrong-nonce.err" ||
   fail "wrong nonce refusal omitted verifier detail"
+[[ "$(grep -c '^REFUSED:' "$BASE/wrong-nonce.err")" == "1" ]] ||
+  fail "wrong nonce emitted multiple public REFUSED lines"
 pass "nested verifier failures emit one public REFUSED line first"
 aggregate="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["aggregate"])' <<<"$certification")"
 authority="$("$EVAL" v2-authority-write "$BASE/skill" --aggregate "$aggregate")"
