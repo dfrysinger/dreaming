@@ -120,11 +120,19 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   certification was authoritative. Claude remained visible as advisory
   inconclusive because its OAuth token is revoked; Codex remained visible as
   advisory inconclusive because its quota is exhausted. Neither advisory
-  failure blocked Copilot authority.
-- **Next checkpoint:** run the separate bounded three-trial encoded-preference
-  Copilot gate with Claude/Codex advisory evidence. Then prove advisory pass,
-  regression, inconclusive, and unavailable states cannot grant or block
-  required authority. Continue through negative evidence, rollback, review,
-  final installed self-test, documentation, and enablement.
+  failure blocked Copilot authority. Fresh bounded encoded-preference run
+  `encoded-cbf3d7c-bounded1` then completed the same required matrix with zero
+  Copilot infrastructure errors: all three intended candidates passed, all
+  three intended controls failed behaviorally, related candidate/control
+  trials passed with comparison parity, and both activation classes passed.
+  Its certification is also authoritative. Claude again remained revoked-token
+  advisory inconclusive and Codex quota-inconclusive, without granting or
+  blocking authority.
+- **Next checkpoint:** prove advisory pass, regression, inconclusive, and
+  unavailable states cannot grant or block required authority. Then prove
+  required failure, stale or partial evidence, unauthorized producers,
+  overfitted candidates, and legacy evidence cannot authorize. Continue
+  through rollback, review, final installed self-test, documentation, and
+  enablement.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.
