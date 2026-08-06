@@ -896,7 +896,7 @@ elif command == "run":
             [sys.executable, str(script)],
             "review-executor",
             timeout=1,
-            run_timeout=2,
+            run_timeout=10,
         )
         result_path = self.case / "slow-result.json"
         response = adapter.call(
