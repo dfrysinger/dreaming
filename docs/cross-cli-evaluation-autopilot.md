@@ -46,7 +46,7 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Harness contract:** `docs/skill-evaluation-trial-harness-design.md`.
 - **Current phase:** M5.5, rollout and live proof.
 - **Landed baseline:** `af92f812164dcdccfee4957b382560a4f981d896`.
-- **Installed candidate:** `e2b18561350244bc077593e48976d8631df9e689`.
+- **Installed candidate:** `cc5fe2ed6bc8516cff56f5d01e6809a29c327e29`.
 - **Completed locally:** M5.1 policy and schemas at `7cab64a`; M5.2 sealed
   trial harness core at `745f32e`; M5.3 native adapters at `8002c9c`; M5.4
   Dreaming certification integration in the current candidate. The
@@ -55,8 +55,8 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   infrastructure state, separates `policy_id` from `observation_plan_id`,
   derives `required_certificate_set_id` from required evidence only, and
   preserves required authority across advisory-only policy changes.
-- **Installed runtime:** `e2b18561350244bc077593e48976d8631df9e689` with
-  generation `20260805T201010Z-install-86507`, behind the active halt switch.
+- **Installed runtime:** `cc5fe2ed6bc8516cff56f5d01e6809a29c327e29` with
+  generation `20260806T090147Z-install-48248`, behind the active halt switch.
 - **Live-proof receipt:**
   `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/cross-cli-m5-live-proof.txt`;
   gate remains closed.
@@ -94,17 +94,18 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   a 4,096-byte cap so normal protocol envelopes fit while one read
   deterministically proves streaming overflow.
   Neither invalid attempt produced a passing receipt, and no test process
-  remains.
-- **Next checkpoint:** validate the deterministic output-flood fixture,
-  reinstall the resulting candidate behind the halt, and rerun its
-  generation-bound installed self-test only after the one-minute load average
-  remains at or below the machine's 18 logical CPUs for two consecutive
-  minutes and a no-op Python subprocess starts, prints, and exits within one
-  second. Run the previously failed targeted fixtures, then require a fresh
-  load sample at or below 18 immediately before the full installed self-test.
-  Abort rather than launch if that final sample exceeds the ceiling. Do not
-  weaken fixture or product timeouts to accommodate a saturated host. Then run
-  both full three-trial Copilot gates with
+  remains. The corrected fixture passed three complete harness runs while load
+  ranged from 19.76 to 26.17, and candidate `cc5fe2e` is installed as
+  generation `20260806T090147Z-install-48248` behind the halt.
+- **Next checkpoint:** rerun the current generation-bound installed self-test
+  only after the one-minute load average remains at or below the machine's 18
+  logical CPUs for two consecutive minutes and a no-op Python subprocess
+  starts, prints, and exits within one second. Run the previously failed
+  targeted fixtures, then require a fresh load sample at or below 18
+  immediately before the full installed self-test. Abort rather than launch if
+  that final sample exceeds the ceiling. Do not weaken fixture or product
+  timeouts to accommodate a saturated host. Then run both full three-trial
+  Copilot gates with
   Claude/Codex advisory evidence and prove advisory pass, regression,
   inconclusive, and unavailable states cannot grant or block required
   authority. Continue through negative evidence, rollback, review, final
