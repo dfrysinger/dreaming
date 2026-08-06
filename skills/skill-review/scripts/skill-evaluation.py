@@ -403,7 +403,15 @@ def load_suite(path: Path) -> tuple[dict[str, Any], str]:
         return suite, f"sha256:{digest(canonical(suite))}"
     if schema_version != SUITE_SCHEMA_VERSION:
         raise EvaluationError("suite schema_version must be 1 or 2")
-    require_exact_keys(raw, "suite", {"schema_version", "graders", "cases"})
+    normalized = "compiled_from_schema_version" in raw or "cross_executor_authority" in raw
+    keys = {"schema_version", "graders", "cases"}
+    if normalized:
+        keys.update({"compiled_from_schema_version", "cross_executor_authority"})
+        if raw.get("compiled_from_schema_version") is not None:
+            raise EvaluationError("normalized version-2 suite has invalid source schema")
+        if raw.get("cross_executor_authority") is not True:
+            raise EvaluationError("normalized version-2 suite must retain cross-executor authority")
+    require_exact_keys(raw, "suite", keys)
     graders_value = raw.get("graders")
     if not isinstance(graders_value, list) or not graders_value:
         raise EvaluationError("suite.graders must be a non-empty list")
@@ -484,21 +492,28 @@ def load_policy(path: Path) -> tuple[dict[str, Any], str]:
     raw = load_json(path)
     if raw.get("schema_version") != POLICY_SCHEMA_VERSION:
         raise EvaluationError(f"policy schema_version must be {POLICY_SCHEMA_VERSION}")
+    normalized = "trials_per_arm" in raw
+    keys = {
+        "schema_version",
+        "profile",
+        "policy_kind",
+        "required_executors",
+        "advisory_executors",
+        "comparator",
+    }
+    if normalized:
+        keys.add("trials_per_arm")
     require_exact_keys(
         raw,
         "policy",
-        {
-            "schema_version",
-            "profile",
-            "policy_kind",
-            "required_executors",
-            "advisory_executors",
-            "comparator",
-        },
+        keys,
     )
     profile = raw.get("profile")
     if profile not in PROFILES:
         raise EvaluationError("policy.profile must be gate or iterate")
+    trials_per_arm = 3 if profile == "gate" else 1
+    if normalized and raw.get("trials_per_arm") != trials_per_arm:
+        raise EvaluationError("normalized policy trials_per_arm does not match profile")
     policy_kind = raw.get("policy_kind")
     if policy_kind not in POLICY_KINDS:
         raise EvaluationError("policy.policy_kind must be capability_uplift or encoded_preference")
@@ -569,7 +584,7 @@ def load_policy(path: Path) -> tuple[dict[str, Any], str]:
     policy = {
         "schema_version": POLICY_SCHEMA_VERSION,
         "profile": profile,
-        "trials_per_arm": 3 if profile == "gate" else 1,
+        "trials_per_arm": trials_per_arm,
         "policy_kind": policy_kind,
         "required_executors": required_executors,
         "advisory_executors": advisory_executors,
@@ -1967,20 +1982,30 @@ def verify_result_independently(
     routing = validate_routing(routing_path, compilation["executors"], compilation["comparator"])
     if not scratch.is_dir() or scratch.is_symlink() or any(scratch.iterdir()):
         raise EvaluationError("verification scratch directory must exist, be real, and be empty")
-    subprocess.run(
-        [
-            str(harness),
-            "verify",
-            "--result",
-            str(result_dir),
-            "--scratch",
-            str(scratch),
-            "--nonce",
-            nonce,
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-    )
+    try:
+        subprocess.run(
+            [
+                str(harness),
+                "verify",
+                "--result",
+                str(result_dir),
+                "--scratch",
+                str(scratch),
+                "--nonce",
+                nonce,
+            ],
+            check=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+    except subprocess.CalledProcessError as exc:
+        detail = (exc.stderr or "").strip()
+        if detail:
+            raise EvaluationError(f"independent result verification failed: {detail}") from exc
+        raise EvaluationError(
+            f"independent result verification failed with exit status {exc.returncode}"
+        ) from exc
     result_manifest = load_json(result_dir / "manifest.json")
     require_exact_keys(result_manifest, "result manifest", RESULT_MANIFEST_KEYS)
     if (

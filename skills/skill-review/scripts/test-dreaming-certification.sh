@@ -134,6 +134,26 @@ make_fixture "$BASE"
 certification="$(run_fixture "$BASE" fixture-nonce)"
 [[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$certification")" == "pass" ]] ||
   fail "valid gate result did not certify"
+mkdir "$BASE/replay-scratch"
+replayed="$("$EVAL" v2-result-certify "$BASE/skill" --run-dir "$BASE/run" \
+  --result-dir "$BASE/result" --routing "$BASE/config/routing.json" \
+  --scratch "$BASE/replay-scratch" --nonce fixture-nonce --harness "$HARNESS" \
+  --suite "$BASE/run/source-suite.json" --policy "$BASE/run/source-policy.json")"
+[[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$replayed")" == "pass" ]] ||
+  fail "retained normalized suite did not replay through certification"
+pass "retained normalized suite replays through certification"
+mkdir "$BASE/wrong-nonce-scratch"
+if "$EVAL" v2-result-certify "$BASE/skill" --run-dir "$BASE/run" \
+  --result-dir "$BASE/result" --routing "$BASE/config/routing.json" \
+  --scratch "$BASE/wrong-nonce-scratch" --nonce wrong-nonce --harness "$HARNESS" \
+  >"$BASE/wrong-nonce.out" 2>"$BASE/wrong-nonce.err"; then
+  fail "wrong nonce certified"
+fi
+[[ "$(head -n 1 "$BASE/wrong-nonce.err")" == REFUSED:* ]] ||
+  fail "wrong nonce refusal did not begin with REFUSED:"
+grep -q "caller nonce mismatch" "$BASE/wrong-nonce.err" ||
+  fail "wrong nonce refusal omitted verifier detail"
+pass "nested verifier failures emit one public REFUSED line first"
 aggregate="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["aggregate"])' <<<"$certification")"
 authority="$("$EVAL" v2-authority-write "$BASE/skill" --aggregate "$aggregate")"
 "$EVAL" v2-authority-validate "$BASE/skill" >/dev/null

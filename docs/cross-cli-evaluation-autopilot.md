@@ -145,7 +145,23 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   passing controls and all three activation-negative trials regressed. The
   required Copilot certificate and aggregate were `regression`,
   `authoritative: false`, and authority issuance refused.
-- **Next checkpoint:** run formal behavior validation and implementation
-  review before final validation, documentation, and enablement.
+- **Behavior-validation status:** Formal external validation designed 50
+  scenarios across seven behavioral areas and executed the 12 highest-value
+  scenarios. Final blind adjudication recorded eight supported, one flaky, one
+  insufficient, and two not-supported scenarios; 38 remain explicitly
+  deferred by the global execution budget. Investigation found two
+  product-facing replay and diagnostic defects. Retained normalized suite and
+  policy inputs now replay through `v2-result-certify`, and independent
+  verifier failures now emit one public `REFUSED:` line before nested detail.
+  External CLI follow-up reproduces the retained overfit regression certificate
+  and the forged-nonce refusal with unchanged pointers. SC-017 remains a
+  validation-fixture finding: its detached worktree path was correctly rejected
+  by the reviewed-harness trust boundary, while the reviewed checkout proved
+  advisory regression and unavailability do not change Copilot authority.
+  SC-025 remains honestly recorded as flaky after its permitted retry.
+- **Next checkpoint:** preserve the final behavior ledger and follow-up
+  receipt, clean its exact disposable paths, then run dual review and the
+  critical fail-closed-boundary ensemble review before final validation,
+  documentation, installation, and enablement.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.
