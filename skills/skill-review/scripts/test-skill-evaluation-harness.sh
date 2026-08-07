@@ -7,7 +7,17 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
 TEST_ROOT="$REPO_ROOT/.test-work"
 mkdir -p "$TEST_ROOT"
 TMP="$(mktemp -d "$TEST_ROOT/skill-evaluation-harness.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+cleanup() {
+  local rc=$?
+  trap - EXIT
+  if [[ $rc -eq 0 ]]; then
+    rm -rf "$TMP"
+  else
+    echo "DIAGNOSTIC retained failed harness evidence: $TMP" >&2
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
 HARNESS="$SCRIPT_DIR/skill-evaluation-harness.py"
 ADAPTER="$SCRIPT_DIR/fake-skill-evaluation-adapter.py"
 passes=0
@@ -21,6 +31,61 @@ harness_run() { "$HARNESS" run --input "$1" --output "$2" --routing "$TMP/routin
 harness_verify() { "$HARNESS" verify --result "$1" --scratch "$(scratch_dir "verify-$(basename "$1")")" --nonce fixture-nonce; }
 
 state_of() { python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["state"])' "$1/manifest.json"; }
+
+dump_result_diagnostics() {
+  local label="$1" root="$2"
+  python3 - "$label" "$root" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+label, root_arg = sys.argv[1:]
+root = Path(root_arg)
+print(f"DIAGNOSTIC {label}: result={root}", file=sys.stderr)
+manifest_path = root / "manifest.json"
+if not manifest_path.is_file():
+    print("DIAGNOSTIC manifest missing", file=sys.stderr)
+    raise SystemExit
+manifest = json.loads(manifest_path.read_text())
+summary = {
+    key: manifest.get(key)
+    for key in ("state", "collection_state", "executor_states")
+}
+print(
+    "DIAGNOSTIC manifest=" + json.dumps(summary, sort_keys=True, separators=(",", ":")),
+    file=sys.stderr,
+)
+for result_path in sorted((root / "trials").glob("*/result.json")):
+    result = json.loads(result_path.read_text())
+    trial = {
+        key: result.get(key)
+        for key in (
+            "executor",
+            "case_id",
+            "case_class",
+            "treatment",
+            "status",
+            "errors",
+            "infrastructure_error",
+            "cleanup_failed",
+            "shared_safety_failure",
+        )
+    }
+    grader_path = result_path.with_name("grader-results.json")
+    if grader_path.is_file():
+        trial["grader_results"] = json.loads(grader_path.read_text()).get("results")
+    print(
+        "DIAGNOSTIC trial=" + json.dumps(trial, sort_keys=True, separators=(",", ":")),
+        file=sys.stderr,
+    )
+PY
+}
+
+fail_result() {
+  local label="$1" root="$2" message="$3"
+  dump_result_diagnostics "$label" "$root"
+  fail "$message"
+}
 
 reseal() { python3 - "$1" <<'PY'
 import hashlib, json, sys
@@ -165,7 +230,8 @@ chmod +x "$HARNESS" "$ADAPTER"
 export DREAMING_LEAK_CANARY=leaked
 base="$(run_case base)"
 harness_verify "$base" >/dev/null
-[[ "$(state_of "$base")" == "complete" ]] || fail "valid result was not complete"
+[[ "$(state_of "$base")" == "complete" ]] ||
+  fail_result "base completion" "$base" "valid result was not complete"
 [[ "$(find "$base/trials" -name result.json | wc -l | tr -d ' ')" == "12" ]] ||
   fail "gate did not create three pairs plus activation trials"
 python3 - "$base" <<'PY'
@@ -334,7 +400,7 @@ pass "comparator argv, cwd, and home reveal no pair identity or treatment"
 
 command_pass="$(run_case command-pass correct iterate 1 5 pass)"
 harness_verify "$command_pass" >/dev/null
-python3 - "$command_pass" <<'PY'
+if ! python3 - "$command_pass" <<'PY'
 import json, sys
 from pathlib import Path
 root=Path(sys.argv[1])
@@ -345,14 +411,22 @@ command=[item for g in grades for item in g["results"] if item["type"]=="command
 assert command and all(item["passed"] for item in command)
 assert (root/"graders"/"check-artifact.py").is_file()
 PY
+then
+  fail_result "command grader pass" "$command_pass" \
+    "passing sealed command grader did not produce passing trial evidence"
+fi
 pass "sealed command graders run, seal their program bytes, and replay under verification"
 
 command_fail="$(run_case command-fail correct iterate 1 5 fail)"
-python3 - "$command_fail" <<'PY'
+if ! python3 - "$command_fail" <<'PY'
 import json, sys
 records=[json.load(open(p)) for p in __import__("pathlib").Path(sys.argv[1],"trials").glob("*/result.json")]
 assert any(x["case_id"]=="behavior" and x["treatment"]=="candidate" and x["status"]=="fail" for x in records)
 PY
+then
+  fail_result "command grader fail" "$command_fail" \
+    "failing sealed command grader did not produce failing trial evidence"
+fi
 pass "a failing sealed command grader fails the trial outcome"
 
 command_tamper="$TMP/command-tamper-output"; cp -R "$command_pass" "$command_tamper"

@@ -6,9 +6,14 @@ TEST_ROOT="$ROOT/.test-work"
 mkdir -p "$TEST_ROOT"
 WORK="$(mktemp -d "$TEST_ROOT/skill-evaluation-vendor-adapters.XXXXXX")"
 cleanup() {
-  status=$?
-  chmod -R u+w "$WORK" 2>/dev/null || true
-  rm -rf "$WORK"
+  local status=$?
+  trap - EXIT
+  if [[ $status -eq 0 ]]; then
+    chmod -R u+w "$WORK" 2>/dev/null || true
+    rm -rf "$WORK"
+  else
+    echo "DIAGNOSTIC retained failed vendor-adapter evidence: $WORK" >&2
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -246,6 +251,7 @@ else:
         ]
 
     def call(self, vendor, *args, check=True, adapter_timeout=10, cwd=None):
+        started = time.monotonic()
         result = subprocess.run(
             [*self.base(vendor, adapter_timeout), *map(str, args)],
             env={
@@ -258,9 +264,33 @@ else:
             stderr=subprocess.PIPE,
             cwd=cwd,
         )
+        self.last_call = {
+            "argv": [*self.base(vendor, adapter_timeout), *map(str, args)],
+            "duration_seconds": time.monotonic() - started,
+            "returncode": result.returncode,
+            "stdout": result.stdout,
+            "stderr": result.stderr,
+        }
         if check and result.returncode:
             self.fail(result.stdout + result.stderr)
         return json.loads(result.stdout.splitlines()[-1])
+
+    def write_timeout_diagnostic(self, vendor, trial, response, phase):
+        workspace = Path(trial["workspace"])
+        marker = workspace / "native.pid"
+        diagnostic = {
+            "vendor": vendor,
+            "phase": phase,
+            "response": response,
+            "workspace_exists": workspace.is_dir(),
+            "pid_file_exists": marker.is_file(),
+            "pid": marker.read_text().strip() if marker.is_file() else None,
+            "raw_output_exists": Path(trial["raw"]).exists(),
+            "adapter_call": getattr(self, "last_call", None),
+        }
+        path = self.root / f"{vendor}-{phase}-timeout-diagnostic.json"
+        path.write_text(json.dumps(diagnostic, sort_keys=True, indent=2) + "\n")
+        return diagnostic
 
     def trial(self, vendor, treatment="candidate", prompt="fixture prompt"):
         trial_root = self.root / f"{vendor}-{treatment}-{prompt.lower()}"
@@ -739,9 +769,17 @@ else:
             trial, _, _, response = self.prepare_and_run(
                 vendor, prompt="TIMEOUT", adapter_timeout=1
             )
+            diagnostic = self.write_timeout_diagnostic(
+                vendor, trial, response, "adapter-cancelled"
+            )
             self.assertEqual(response["error"]["code"], "executor-timeout")
             self.assertFalse(Path(trial["raw"]).exists())
-            pid = int((Path(trial["workspace"]) / "native.pid").read_text())
+            self.assertTrue(
+                diagnostic["pid_file_exists"],
+                "native process did not publish its PID before cancellation: "
+                + json.dumps(diagnostic, sort_keys=True),
+            )
+            pid = int(diagnostic["pid"])
             with self.assertRaises(ProcessLookupError):
                 os.kill(pid, 0)
 
@@ -785,13 +823,38 @@ else:
             stderr=subprocess.PIPE,
         )
         marker = Path(trial["workspace"]) / "native.pid"
+        launch_started = time.monotonic()
         deadline = time.monotonic() + 5
         while not marker.exists() and time.monotonic() < deadline:
             time.sleep(0.05)
-        self.assertTrue(marker.exists())
+        before_cancel = {
+            "adapter_pid": process.pid,
+            "elapsed_seconds": time.monotonic() - launch_started,
+            "workspace_exists": Path(trial["workspace"]).is_dir(),
+            "pid_file_exists": marker.is_file(),
+            "raw_output_exists": Path(trial["raw"]).exists(),
+        }
+        self.assertTrue(
+            marker.exists(),
+            "native process did not publish its PID before explicit cancellation: "
+            + json.dumps(before_cancel, sort_keys=True),
+        )
         native_pid = int(marker.read_text())
         os.kill(process.pid, 15)
-        process.communicate(timeout=10)
+        stdout, stderr = process.communicate(timeout=10)
+        after_cancel = {
+            **before_cancel,
+            "native_pid": native_pid,
+            "cancel_elapsed_seconds": time.monotonic() - launch_started,
+            "returncode": process.returncode,
+            "stdout": stdout,
+            "stderr": stderr,
+            "pid_file_exists_after_cancel": marker.is_file(),
+            "raw_output_exists_after_cancel": Path(trial["raw"]).exists(),
+        }
+        (self.root / "copilot-explicit-cancel-timeout-diagnostic.json").write_text(
+            json.dumps(after_cancel, sort_keys=True, indent=2) + "\n"
+        )
         self.assertNotEqual(process.returncode, 0)
         with self.assertRaises(ProcessLookupError):
             os.kill(native_pid, 0)

@@ -7,7 +7,17 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
 TEST_ROOT="$REPO_ROOT/.test-work"
 mkdir -p "$TEST_ROOT"
 TMP="$(mktemp -d "$TEST_ROOT/dreaming-certification.XXXXXX")"
-trap 'rm -rf "$TMP"' EXIT
+cleanup() {
+  local rc=$?
+  trap - EXIT
+  if [[ $rc -eq 0 ]]; then
+    rm -rf "$TMP"
+  else
+    echo "DIAGNOSTIC retained failed certification evidence: $TMP" >&2
+  fi
+  exit "$rc"
+}
+trap cleanup EXIT
 EVAL="$SCRIPT_DIR/skill-evaluation.py"
 HARNESS="$SCRIPT_DIR/skill-evaluation-harness.py"
 ADAPTER="$SCRIPT_DIR/fake-skill-evaluation-adapter.py"
@@ -18,6 +28,68 @@ passes=0
 
 pass() { echo "PASS  $*"; passes=$((passes + 1)); }
 fail() { echo "FAIL  $*" >&2; exit 1; }
+
+dump_certification_diagnostics() {
+  local label="$1" root="$2" certification_path="$3"
+  python3 - "$label" "$root" "$certification_path" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+label, root_arg, certification_arg = sys.argv[1:]
+root = Path(root_arg)
+certification_path = Path(certification_arg)
+print(f"DIAGNOSTIC {label}: fixture={root}", file=sys.stderr)
+if certification_path.is_file():
+    certification = json.loads(certification_path.read_text())
+    summary = {
+        key: certification.get(key)
+        for key in ("status", "authoritative", "aggregate")
+    }
+    print(
+        "DIAGNOSTIC certification="
+        + json.dumps(summary, sort_keys=True, separators=(",", ":")),
+        file=sys.stderr,
+    )
+manifest_path = root / "result" / "manifest.json"
+if not manifest_path.is_file():
+    print("DIAGNOSTIC result manifest missing", file=sys.stderr)
+    raise SystemExit
+manifest = json.loads(manifest_path.read_text())
+summary = {
+    key: manifest.get(key)
+    for key in ("state", "collection_state", "executor_states")
+}
+print(
+    "DIAGNOSTIC manifest=" + json.dumps(summary, sort_keys=True, separators=(",", ":")),
+    file=sys.stderr,
+)
+for result_path in sorted((root / "result" / "trials").glob("*/result.json")):
+    result = json.loads(result_path.read_text())
+    if result.get("case_class") not in {"activation_positive", "activation_negative"}:
+        continue
+    trial = {
+        key: result.get(key)
+        for key in (
+            "executor",
+            "case_id",
+            "case_class",
+            "treatment",
+            "status",
+            "skill_load_proved",
+            "errors",
+            "infrastructure_error",
+            "cleanup_failed",
+            "shared_safety_failure",
+        )
+    }
+    print(
+        "DIAGNOSTIC activation_trial="
+        + json.dumps(trial, sort_keys=True, separators=(",", ":")),
+        file=sys.stderr,
+    )
+PY
+}
 
 expect_refusal() {
   local name="$1" expected="$2"
@@ -312,8 +384,18 @@ pass "one-trial iterate evidence remains visibly non-authoritative"
 REGRESSION="$TMP/regression"
 make_fixture "$REGRESSION" gate capability_uplift false-trigger
 regression="$(run_fixture "$REGRESSION" regression-nonce)"
+printf '%s\n' "$regression" >"$REGRESSION/certification.json"
 [[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$regression")" == "regression" ]] ||
-  fail "activation regression did not block certification"
+  {
+    aggregate="$(python3 -c 'import json,sys; print(json.load(sys.stdin).get("aggregate", ""))' <<<"$regression")"
+    if [[ -n "$aggregate" ]]; then
+      "$EVAL" v2-authority-write "$REGRESSION/skill" --aggregate "$aggregate" \
+        >"$REGRESSION/authority-attempt.out" 2>"$REGRESSION/authority-attempt.err" || true
+    fi
+    dump_certification_diagnostics \
+      "activation regression" "$REGRESSION" "$REGRESSION/certification.json"
+    fail "activation regression did not block certification"
+  }
 pass "activation and related regression policy fails closed"
 
 INFRA="$TMP/infrastructure"

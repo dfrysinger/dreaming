@@ -46,7 +46,7 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Harness contract:** `docs/skill-evaluation-trial-harness-design.md`.
 - **Current phase:** M5.5, rollout and live proof.
 - **Landed baseline:** `af92f812164dcdccfee4957b382560a4f981d896`.
-- **Installed candidate:** `e592b02ffd212762fae474766406e6f4ebf2e907`.
+- **Installed candidate:** `635a581b0499f5a218f1b858289cff757ce7729d`.
 - **Completed locally:** M5.1 policy and schemas at `7cab64a`; M5.2 sealed
   trial harness core at `745f32e`; M5.3 native adapters at `8002c9c`; M5.4
   Dreaming certification integration in the current candidate. The
@@ -55,14 +55,19 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   infrastructure state, separates `policy_id` from `observation_plan_id`,
   derives `required_certificate_set_id` from required evidence only, and
   preserves required authority across advisory-only policy changes.
-- **Installed runtime:** `e592b02ffd212762fae474766406e6f4ebf2e907` with
-  generation `20260806T165955Z-install-82942`, behind the active halt switch.
+- **Installed runtime:** `635a581b0499f5a218f1b858289cff757ce7729d`
+  with generation `20260806T183040Z-install-29428`, behind the active halt
+  switch.
 - **Live-proof receipt:**
   `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/cross-cli-m5-live-proof.txt`;
   the existing receipt covers older candidate `cc5fe2e` and is stale. Rollout
   remains halted pending exact-tree installed self-test and refreshed live
   proof.
-- **Current live status:** The new required/advisory candidate passes the
+- **Historical live evidence:** The evidence below established the
+  required/advisory behavior on earlier generations. It remains useful as
+  regression and rollback evidence, but it does not satisfy exact-tree rollout
+  gates for installed generation `20260806T183040Z-install-29428`. The
+  required/advisory candidate passes the
   deterministic harness, policy, certification, native-adapter, daemon, and
   installer suites. Deterministic end-to-end certification proves advisory
   regression and advisory collection failure remain visible without changing
@@ -84,8 +89,9 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   executable-identity rejection. The selected policy now makes Copilot the
   installed required default and treats configured Claude and Codex routes as
   advisory. Advisory unavailability remains visible but does not block
-  Copilot-backed authority. The current generation-bound installed self-test
-  now passes.
+  Copilot-backed authority. A generation-bound installed self-test passed for
+  an older candidate; the exact-tree generation has not yet produced a passing
+  receipt.
   The first attempt was infrastructure-invalid under sustained load between 38
   and 70. A retry entered under two compliant load samples and passed the
   subprocess probe plus every previously failed targeted suite, but load had
@@ -160,29 +166,38 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   validation-fixture finding: its detached worktree path was correctly rejected
   by the reviewed-harness trust boundary, while the reviewed checkout proved
   advisory regression and unavailability do not change Copilot authority.
-  SC-025 remains honestly recorded as flaky after its permitted retry.
+  SC-025 remains honestly recorded as flaky after its permitted retry. This
+  behavior-validation evidence must be refreshed or explicitly bound to the
+  exact final candidate before rollout.
 - **Review closure:** dual review, critical ensemble review, remediation, and
   fix-delta review are complete. Final reviewed commit
-  `e592b02ffd212762fae474766406e6f4ebf2e907` is installed locally. The first
-  generation-bound self-test failed only while preparing a Codex timeout
-  fixture after host load surged; a strict-admission retry of all nine vendor
-  adapter checks passed without code changes.
-- **Current checkpoint:** the complete generation-bound installed self-test
-  entered after admission samples `14.99` and `12.44`, a `0.086`-second Python
-  probe, and immediate pre-run load `12.44`. One standalone-core fixture
-  failed: a `1.2`-second synthetic executor crossed its `2`-second configured
-  run timeout under scheduler pressure. Every other installed check,
-  including all nine vendor-adapter tests, passed. The fixture now retains the
-  `1`-second normal timeout but uses a `10`-second run timeout, preserving the
-  regression contract without changing production behavior. All 27 targeted
-  standalone-core tests pass. Claude Opus 5 and GPT-5.6 Terra independently
-  completed the finding-scoped fix-delta review with no findings and confirmed
-  that the test remains discriminating. The active generation remains
-  `20260806T165955Z-install-82942`; no passing-generation receipt exists. The
-  halt is active, and the Dreaming and watchdog daemons are stopped.
-- **Next checkpoint:** commit and reinstall the exact reviewed test-only tree
-  behind the halt, then require a complete zero-failure generation-bound
-  self-test and matching receipt. Refresh exact-tree live proof, audit every
-  Definition-of-Done criterion, and enable only if all gates pass.
+  `635a581b0499f5a218f1b858289cff757ce7729d` is installed locally. Its final
+  delta changes only the synthetic standalone-core timeout regression and this
+  charter; Claude Opus 5 and GPT-5.6 Terra independently reported no findings
+  and confirmed the test remains discriminating.
+- **Current checkpoint:** the exact reviewed tree is installed as generation
+  `20260806T183040Z-install-29428`. The direct representative-load,
+  generation-bound self-test exited normally with
+  `== result: 3 failure(s) ==`; launchd recorded exit code 1 and no
+  `selftest-passed-generation` receipt was written. The failed groups reported
+  `valid result was not complete`, a vendor-adapter timeout test that could not
+  read `copilot-candidate-timeout/workspace/native.pid`, and
+  `activation regression did not block certification`. The run continued
+  through all later groups, so this was not a deadlock. The original temporary
+  evidence was deleted by unconditional test cleanup. Three subsequent
+  complete 31-check trial-harness runs passed while load ranged from roughly 37
+  to 72, reinforcing that low host load is neither required nor a sufficient
+  release contract. The halt remains active; Dreaming and its watchdog remain
+  stopped.
+- **Next checkpoint:** retain evidence only when the trial-harness,
+  vendor-adapter, or certification checks fail, while preserving normal cleanup
+  on success. Reproduce under representative load and trace the earliest
+  verified divergence from sealed manifest, trial, grader, process, and
+  activation evidence before changing production behavior or timeouts. Review
+  and commit that diagnostics-only delta locally, reinstall the exact tree
+  behind the halt, and rerun the complete generation-bound installed self-test.
+  Require `== result: 0 failure(s) ==`, an unchanged activation generation, and
+  a matching passing-generation receipt. Then refresh exact-tree live proof,
+  audit every Definition-of-Done criterion, and enable only if all gates pass.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.
