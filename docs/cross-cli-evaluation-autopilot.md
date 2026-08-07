@@ -46,7 +46,7 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Harness contract:** `docs/skill-evaluation-trial-harness-design.md`.
 - **Current phase:** M5.5, rollout and live proof.
 - **Landed baseline:** `af92f812164dcdccfee4957b382560a4f981d896`.
-- **Installed candidate:** `635a581b0499f5a218f1b858289cff757ce7729d`.
+- **Installed candidate:** `8644e91420154f561093849233196556388b10dc`.
 - **Completed locally:** M5.1 policy and schemas at `7cab64a`; M5.2 sealed
   trial harness core at `745f32e`; M5.3 native adapters at `8002c9c`; M5.4
   Dreaming certification integration in the current candidate. The
@@ -55,8 +55,8 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   infrastructure state, separates `policy_id` from `observation_plan_id`,
   derives `required_certificate_set_id` from required evidence only, and
   preserves required authority across advisory-only policy changes.
-- **Installed runtime:** `635a581b0499f5a218f1b858289cff757ce7729d`
-  with generation `20260806T183040Z-install-29428`, behind the active halt
+- **Installed runtime:** `8644e91420154f561093849233196556388b10dc`
+  with generation `20260807T041405Z-install-74824`, behind the active halt
   switch.
 - **Live-proof receipt:**
   `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/cross-cli-m5-live-proof.txt`;
@@ -66,7 +66,7 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Historical live evidence:** The evidence below established the
   required/advisory behavior on earlier generations. It remains useful as
   regression and rollback evidence, but it does not satisfy exact-tree rollout
-  gates for installed generation `20260806T183040Z-install-29428`. The
+  gates for installed generation `20260807T041405Z-install-74824`. The
   required/advisory candidate passes the
   deterministic harness, policy, certification, native-adapter, daemon, and
   installer suites. Deterministic end-to-end certification proves advisory
@@ -170,36 +170,27 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   behavior-validation evidence must be refreshed or explicitly bound to the
   exact final candidate before rollout.
 - **Review closure:** dual review, critical ensemble review, remediation, and
-  fix-delta review are complete. Final reviewed commit
-  `635a581b0499f5a218f1b858289cff757ce7729d` is installed locally. Its final
-  delta changes only the synthetic standalone-core timeout regression and this
-  charter; Claude Opus 5 and GPT-5.6 Terra independently reported no findings
-  and confirmed the test remains discriminating.
+  fix-delta review are complete through commit
+  `71ac85d7a63b2a6de45a946dc339e1b3456367c0`. The focused fixture-budget
+  correction at `8644e91420154f561093849233196556388b10dc` passed static diff
+  review and a rubber-duck challenge. Final implementation review remains
+  gated on exact-tree live proof under the governing development loop.
 - **Current checkpoint:** commit
-  `71ac85d7a63b2a6de45a946dc339e1b3456367c0` is installed as generation
-  `20260807T002657Z-install-27227`. Its representative-load,
-  generation-bound self-test ran to completion with
-  `== result: 5 failure(s) ==`; the activation generation remained unchanged
-  and no `selftest-passed-generation` receipt was written. The failed groups
-  were standalone core, native adapter matrix, trial harness, skill-evaluation
-  vendor adapters, and Dreaming certification. Retained evidence identifies
-  several fixture processes that timed out before producing their expected
-  deterministic result. The short-timeout vendor test also reported the
-  correct `executor-timeout` response with no raw output, but incorrectly
-  required the native child to publish a PID before cancellation. The
-  correction preserves the intentional one- and three-second timeout
-  regressions, gives non-timeout fixtures a 120-second test budget, and checks
-  confirmed-start process-group cleanup in the explicit-cancellation phase.
-  All five implicated suites pass serially under representative host load:
-  standalone core, native adapter matrix, trial harness, skill-evaluation
-  vendor adapters, and Dreaming certification. No production timeout, load
-  gate, or arbitrary sleep changed. The halt remains active; Dreaming and its
-  watchdog remain stopped.
-- **Next checkpoint:** commit the focused correction locally, reinstall the
-  exact tree behind the halt, and rerun the complete generation-bound installed
-  self-test. Require `== result: 0 failure(s) ==`, an unchanged activation
-  generation, and a matching passing-generation receipt. Then refresh
-  exact-tree live proof, audit every Definition-of-Done criterion, and enable
+  `8644e91420154f561093849233196556388b10dc` is installed as generation
+  `20260807T041405Z-install-74824`. The complete generation-bound installed
+  self-test passed with `== result: 0 failure(s) ==`; activation remained
+  unchanged and `selftest-passed-generation` exactly matches the installed
+  generation. The five suites implicated by the preceding failed generation
+  also pass serially under representative load. The correction preserves the
+  intentional one- and three-second timeout regressions, gives non-timeout
+  fixtures a 120-second test budget, and checks confirmed-start process-group
+  cleanup in the explicit-cancellation phase. No production timeout, load gate,
+  or arbitrary sleep changed. The halt remains active; Dreaming and its
+  watchdog remain stopped outside proof activity.
+- **Next checkpoint:** refresh exact-tree real Copilot CLI proof, binding this
+  documentation-only delta to installed commit `8644e91420154f561093849233196556388b10dc`
+  and generation `20260807T041405Z-install-74824`. Then complete final
+  implementation review, audit every Definition-of-Done criterion, and enable
   only if all gates pass.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.
