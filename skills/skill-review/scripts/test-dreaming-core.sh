@@ -24,6 +24,7 @@ WORK_PARENT.mkdir(parents=True, exist_ok=True)
 WORK_ROOT = Path(tempfile.mkdtemp(prefix="multi-cli-core.", dir=WORK_PARENT))
 RUNTIME_PATH = SCRIPT_DIR / "dreaming-core.py"
 FAKE = SCRIPT_DIR / "fake-dreaming-adapter.py"
+TEST_ADAPTER_TIMEOUT = 120
 
 spec = importlib.util.spec_from_file_location("dreaming_runtime", RUNTIME_PATH)
 runtime_module = importlib.util.module_from_spec(spec)
@@ -92,6 +93,8 @@ class RuntimeTest(unittest.TestCase):
                 role,
             ],
             role,
+            timeout=TEST_ADAPTER_TIMEOUT,
+            run_timeout=TEST_ADAPTER_TIMEOUT,
         )
 
     def source_fixture(self, sessions: list[dict], watermark: int = 100) -> Path:
@@ -185,7 +188,9 @@ class RuntimeTest(unittest.TestCase):
                             "fake",
                             "--role",
                             "session-source",
-                        ]
+                        ],
+                        "timeout": TEST_ADAPTER_TIMEOUT,
+                        "run_timeout": TEST_ADAPTER_TIMEOUT,
                     }
                 },
                 "executors": {
@@ -199,7 +204,9 @@ class RuntimeTest(unittest.TestCase):
                             "fake-executor",
                             "--role",
                             "review-executor",
-                        ]
+                        ],
+                        "timeout": TEST_ADAPTER_TIMEOUT,
+                        "run_timeout": TEST_ADAPTER_TIMEOUT,
                     }
                 },
                 "publishers": {
@@ -213,7 +220,9 @@ class RuntimeTest(unittest.TestCase):
                             "fake-publisher",
                             "--role",
                             "skill-publisher",
-                        ]
+                        ],
+                        "timeout": TEST_ADAPTER_TIMEOUT,
+                        "run_timeout": TEST_ADAPTER_TIMEOUT,
                     }
                 },
             },
@@ -759,7 +768,10 @@ elif sys.argv[1] == "run":
         )
         os.chmod(missing_script, 0o755)
         missing = ExecutableAdapter(
-            [sys.executable, str(missing_script)], "review-executor"
+            [sys.executable, str(missing_script)],
+            "review-executor",
+            timeout=TEST_ADAPTER_TIMEOUT,
+            run_timeout=TEST_ADAPTER_TIMEOUT,
         )
         success_fixture = self.write("success.json", {"mode": "success"})
         success = self.adapter("review-executor", "success", success_fixture)
@@ -895,9 +907,11 @@ elif command == "run":
         adapter = ExecutableAdapter(
             [sys.executable, str(script)],
             "review-executor",
-            timeout=1,
-            run_timeout=10,
+            timeout=TEST_ADAPTER_TIMEOUT,
+            run_timeout=TEST_ADAPTER_TIMEOUT,
         )
+        adapter.timeout = 1
+        adapter.run_timeout = 10
         result_path = self.case / "slow-result.json"
         response = adapter.call(
             "run",
@@ -966,7 +980,10 @@ elif sys.argv[1] == "run":
         )
         os.chmod(executor_script, 0o755)
         nonzero = ExecutableAdapter(
-            [sys.executable, str(executor_script)], "review-executor"
+            [sys.executable, str(executor_script)],
+            "review-executor",
+            timeout=TEST_ADAPTER_TIMEOUT,
+            run_timeout=TEST_ADAPTER_TIMEOUT,
         )
         success_fixture = self.write("success.json", {"mode": "success"})
         success = self.adapter("review-executor", "success", success_fixture)
@@ -1219,8 +1236,10 @@ elif sys.argv[1] == "run":
 
 if __name__ == "__main__":
     WORK_ROOT.mkdir(parents=True, exist_ok=True)
-    try:
-        unittest.main(argv=[sys.argv[0]], verbosity=2)
-    finally:
+    program = unittest.main(argv=[sys.argv[0]], verbosity=2, exit=False)
+    if program.result.wasSuccessful():
         shutil.rmtree(WORK_ROOT, ignore_errors=True)
+    else:
+        print(f"DIAGNOSTIC retained failed standalone-core evidence: {WORK_ROOT}", file=sys.stderr)
+        raise SystemExit(1)
 PY

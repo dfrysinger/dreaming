@@ -111,7 +111,7 @@ PY
 
 make_run() {
   local root="$1" fixture="${2:-correct}" profile="${3:-gate}" executors="${4:-1}"
-  local timeout="${5:-5}" command_grader="${6:-none}" behavior_cases="${7:-1}"
+  local timeout="${5:-120}" command_grader="${6:-none}" behavior_cases="${7:-1}"
   local required_count="${8:-$executors}"
   local output_bytes="${9:-100000}"
   mkdir -p "$root/candidate" "$root/fixtures" "$root/graders"
@@ -194,7 +194,7 @@ for number in range(int(executors)):
     if fixture == "mutate-input":
         argv += ["--mutate", str(root/"fixtures"/"input.txt")]
     routing_executors.append({"name":name,"adapter_id":adapter_id,"adapter_executable_sha256":adapter_sha,"argv":argv})
-comparator={"route":"fixture-route","model":"judge-1","adapter_id":adapter_id,"adapter_version":1,"adapter_executable_sha256":adapter_sha,"timeout_seconds":5,"token_budget":100,"rubric_id":sha(rubric)}
+comparator={"route":"fixture-route","model":"judge-1","adapter_id":adapter_id,"adapter_version":1,"adapter_executable_sha256":adapter_sha,"timeout_seconds":int(timeout),"token_budget":100,"rubric_id":sha(rubric)}
 comparator_path=root.parent/"comparator-identity.json"
 comparator_path.write_bytes(canonical(comparator)+b"\n")
 routing={"schema_version":1,"kind":"skill_evaluation_routing",
@@ -216,7 +216,7 @@ PY
 
 run_case() {
   local name="$1" fixture="${2:-correct}" profile="${3:-gate}" executors="${4:-1}"
-  local timeout="${5:-5}" command_grader="${6:-none}" behavior_cases="${7:-1}"
+  local timeout="${5:-120}" command_grader="${6:-none}" behavior_cases="${7:-1}"
   local required_count="${8:-$executors}" output_bytes="${9:-100000}"
   local input="$TMP/$name-input" output="$TMP/$name-output"
   mkdir -p "$output"
@@ -398,7 +398,7 @@ for pair in manifest["pairs"]:
 PY
 pass "comparator argv, cwd, and home reveal no pair identity or treatment"
 
-command_pass="$(run_case command-pass correct iterate 1 5 pass)"
+command_pass="$(run_case command-pass correct iterate 1 120 pass)"
 harness_verify "$command_pass" >/dev/null
 if ! python3 - "$command_pass" <<'PY'
 import json, sys
@@ -417,7 +417,7 @@ then
 fi
 pass "sealed command graders run, seal their program bytes, and replay under verification"
 
-command_fail="$(run_case command-fail correct iterate 1 5 fail)"
+command_fail="$(run_case command-fail correct iterate 1 120 fail)"
 if ! python3 - "$command_fail" <<'PY'
 import json, sys
 records=[json.load(open(p)) for p in __import__("pathlib").Path(sys.argv[1],"trials").glob("*/result.json")]
@@ -489,7 +489,7 @@ if harness_verify "$missing_trial" >/dev/null 2>&1; then
 fi
 pass "a deleted trial fails the regenerated trial matrix even after resealing"
 
-mutate="$(run_case mutate-input mutate-input iterate 1 5 pass)"
+mutate="$(run_case mutate-input mutate-input iterate 1 120 pass)"
 python3 - "$mutate" <<'PY'
 import json, sys
 from pathlib import Path
@@ -502,7 +502,7 @@ PY
 [[ "$(state_of "$mutate")" == "incomplete" ]] || fail "mutated sealed input produced a complete result"
 pass "input mutation is rechecked before command graders and before sealing"
 
-flood="$(run_case flood output-flood iterate 1 5 none 1 1 4096)"
+flood="$(run_case flood output-flood iterate 1 120 none 1 1 4096)"
 python3 - "$flood" <<'PY'
 import json, sys
 records=[json.load(open(p)) for p in __import__("pathlib").Path(sys.argv[1],"trials").glob("*/result.json")]
@@ -556,7 +556,7 @@ done < <(find "$timeout/trials" -name child.pid -exec cat {} \;)
 pass "timeout cancels owned process group and leaves incomplete evidence"
 
 oversized_input="$TMP/oversized-input"; oversized_output="$TMP/oversized-output"
-mkdir -p "$oversized_output"; make_run "$oversized_input" correct gate 3 5 none 60
+mkdir -p "$oversized_output"; make_run "$oversized_input" correct gate 3 120 none 60
 if harness_run "$oversized_input" "$oversized_output" >/dev/null 2>&1; then
   fail "oversized projected matrix ran"
 fi
@@ -565,7 +565,7 @@ pass "an oversized projected matrix is refused before any trial process"
 
 advisory_input="$TMP/advisory-input"; advisory_output="$TMP/advisory-output"
 mkdir -p "$advisory_output"
-make_run "$advisory_input" correct iterate 2 5 none 1 1
+make_run "$advisory_input" correct iterate 2 120 none 1 1
 python3 - "$TMP/routing.json" <<'PY'
 import json, sys
 path=sys.argv[1]
@@ -592,7 +592,7 @@ pass "advisory infrastructure failure leaves required evidence complete"
 
 no_required_input="$TMP/no-required-input"; no_required_output="$TMP/no-required-output"
 mkdir -p "$no_required_output"
-make_run "$no_required_input" correct iterate 1 5 none 1 0
+make_run "$no_required_input" correct iterate 1 120 none 1 0
 if harness_run "$no_required_input" "$no_required_output" >/dev/null 2>&1; then
   fail "empty required executor set ran"
 fi
@@ -600,7 +600,7 @@ fi
   fail "empty required executor set created evidence"
 pass "an empty required executor set refuses before execution"
 
-realistic="$(run_case realistic correct gate 3 30 none 2)"
+realistic="$(run_case realistic correct gate 3 120 none 2)"
 harness_verify "$realistic" >/dev/null
 [[ "$(state_of "$realistic")" == "complete" ]] || fail "realistic three-executor gate suite did not complete"
 python3 - "$realistic" <<'PY'

@@ -175,29 +175,31 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   delta changes only the synthetic standalone-core timeout regression and this
   charter; Claude Opus 5 and GPT-5.6 Terra independently reported no findings
   and confirmed the test remains discriminating.
-- **Current checkpoint:** the exact reviewed tree is installed as generation
-  `20260806T183040Z-install-29428`. The direct representative-load,
-  generation-bound self-test exited normally with
-  `== result: 3 failure(s) ==`; launchd recorded exit code 1 and no
-  `selftest-passed-generation` receipt was written. The failed groups reported
-  `valid result was not complete`, a vendor-adapter timeout test that could not
-  read `copilot-candidate-timeout/workspace/native.pid`, and
-  `activation regression did not block certification`. The run continued
-  through all later groups, so this was not a deadlock. The original temporary
-  evidence was deleted by unconditional test cleanup. Three subsequent
-  complete 31-check trial-harness runs passed while load ranged from roughly 37
-  to 72, reinforcing that low host load is neither required nor a sufficient
-  release contract. The halt remains active; Dreaming and its watchdog remain
-  stopped.
-- **Next checkpoint:** retain evidence only when the trial-harness,
-  vendor-adapter, or certification checks fail, while preserving normal cleanup
-  on success. Reproduce under representative load and trace the earliest
-  verified divergence from sealed manifest, trial, grader, process, and
-  activation evidence before changing production behavior or timeouts. Review
-  and commit that diagnostics-only delta locally, reinstall the exact tree
-  behind the halt, and rerun the complete generation-bound installed self-test.
-  Require `== result: 0 failure(s) ==`, an unchanged activation generation, and
-  a matching passing-generation receipt. Then refresh exact-tree live proof,
-  audit every Definition-of-Done criterion, and enable only if all gates pass.
+- **Current checkpoint:** commit
+  `71ac85d7a63b2a6de45a946dc339e1b3456367c0` is installed as generation
+  `20260807T002657Z-install-27227`. Its representative-load,
+  generation-bound self-test ran to completion with
+  `== result: 5 failure(s) ==`; the activation generation remained unchanged
+  and no `selftest-passed-generation` receipt was written. The failed groups
+  were standalone core, native adapter matrix, trial harness, skill-evaluation
+  vendor adapters, and Dreaming certification. Retained evidence identifies
+  several fixture processes that timed out before producing their expected
+  deterministic result. The short-timeout vendor test also reported the
+  correct `executor-timeout` response with no raw output, but incorrectly
+  required the native child to publish a PID before cancellation. The
+  correction preserves the intentional one- and three-second timeout
+  regressions, gives non-timeout fixtures a 120-second test budget, and checks
+  confirmed-start process-group cleanup in the explicit-cancellation phase.
+  All five implicated suites pass serially under representative host load:
+  standalone core, native adapter matrix, trial harness, skill-evaluation
+  vendor adapters, and Dreaming certification. No production timeout, load
+  gate, or arbitrary sleep changed. The halt remains active; Dreaming and its
+  watchdog remain stopped.
+- **Next checkpoint:** commit the focused correction locally, reinstall the
+  exact tree behind the halt, and rerun the complete generation-bound installed
+  self-test. Require `== result: 0 failure(s) ==`, an unchanged activation
+  generation, and a matching passing-generation receipt. Then refresh
+  exact-tree live proof, audit every Definition-of-Done criterion, and enable
+  only if all gates pass.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.

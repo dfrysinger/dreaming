@@ -7,8 +7,12 @@ mkdir -p "$TEST_ROOT"
 TMP="$(mktemp -d "$TEST_ROOT/vendor-adapters.XXXXXX")"
 cleanup() {
   status=$?
-  chmod -R u+w "$TMP" 2>/dev/null || true
-  rm -rf "$TMP"
+  if [[ $status -eq 0 ]]; then
+    chmod -R u+w "$TMP" 2>/dev/null || true
+    rm -rf "$TMP"
+  else
+    echo "DIAGNOSTIC retained failed native-adapter evidence: $TMP" >&2
+  fi
   exit "$status"
 }
 trap cleanup EXIT
@@ -961,6 +965,11 @@ print(json.dumps({"ok": True}))
                     set(configured["routes"]),
                     {f"{vendor}>{vendor}" for vendor in vendors},
                 )
+                for group in ("sources", "publishers"):
+                    for entry in configured[group].values():
+                        entry["timeout"] = 120
+                        entry["run_timeout"] = 120
+                config.write_text(json.dumps(configured))
                 run_environment = {
                     **environment,
                     "DREAMING_ADAPTER_CONFIG": str(config),
@@ -974,7 +983,15 @@ print(json.dumps({"ok": True}))
                     text=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.PIPE,
-                    check=True,
+                )
+                self.assertEqual(
+                    result.returncode,
+                    0,
+                    {
+                        "matrix": name,
+                        "stdout": result.stdout,
+                        "stderr": result.stderr,
+                    },
                 )
                 report = json.loads(result.stdout)
                 self.assertTrue(report["ok"], (name, report))

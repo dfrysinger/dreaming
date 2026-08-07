@@ -151,7 +151,7 @@ adapter_sha=file_sha(adapter); adapter_id="sha256:"+"2"*64
 tool="sha256:"+"1"*64
 rubric={"id":"quality","instruction":"Choose the better response only by task quality."}
 comparator={"route":"fixture-route","model":"judge-1","adapter_id":adapter_id,
- "adapter_version":1,"adapter_executable_sha256":adapter_sha,"timeout_seconds":30,
+ "adapter_version":1,"adapter_executable_sha256":adapter_sha,"timeout_seconds":120,
  "token_budget":100,"rubric_id":sha(rubric)}
 required_executors=[]; advisory_executors=[]; compiled_executors=[]; routes=[]
 for number, name in enumerate(("copilot","claude","codex"), 1):
@@ -159,7 +159,7 @@ for number, name in enumerate(("copilot","claude","codex"), 1):
           "adapter_executable_sha256":adapter_sha,"cli_executable_sha256":"sha256:"+str(number+2)*64}
     requirement="required" if name == "copilot" else "advisory"
     full={**base,"requirement":requirement,"cli_version":f"{name}-cli-1","tool_policy_id":tool,
-          "limits":{"timeout_seconds":30,"token_budget":100,"output_bytes":100000},
+          "limits":{"timeout_seconds":120,"token_budget":100,"output_bytes":100000},
           "sandbox_id":"sha256:"+str(number+5)*64}
     identity={key:value for key,value in full.items() if key not in {"name","requirement"}}
     identity_path=config_root/f"{name}-identity.json"
@@ -188,7 +188,7 @@ for case in cases:
 config={"schema_version":1,"kind":"dreaming_evaluation_compilation",
  "harness_executable_sha256":file_sha(harness),"tool_policy_id":tool,
  "retention_policy_id":"sha256:"+"b"*64,
- "limits":{"timeout_seconds":30,"output_bytes":100000,"file_bytes":100000,
+ "limits":{"timeout_seconds":120,"output_bytes":100000,"file_bytes":100000,
            "global_concurrency":1,"per_executor_concurrency":1},
  "identity_markers":["candidate-marker","fixture-skill"],"graders":graders,
  "case_runtime":runtime,"rubric":rubric,"executors":compiled_executors,
