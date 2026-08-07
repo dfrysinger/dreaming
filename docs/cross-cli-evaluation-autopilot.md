@@ -46,7 +46,7 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Harness contract:** `docs/skill-evaluation-trial-harness-design.md`.
 - **Current phase:** M5.5, rollout and live proof.
 - **Landed baseline:** `af92f812164dcdccfee4957b382560a4f981d896`.
-- **Installed candidate:** `8644e91420154f561093849233196556388b10dc`.
+- **Installed candidate:** `0d5a05a696716bf57390a6624e4b6b72ec3252b3`.
 - **Completed locally:** M5.1 policy and schemas at `7cab64a`; M5.2 sealed
   trial harness core at `745f32e`; M5.3 native adapters at `8002c9c`; M5.4
   Dreaming certification integration in the current candidate. The
@@ -55,8 +55,8 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   infrastructure state, separates `policy_id` from `observation_plan_id`,
   derives `required_certificate_set_id` from required evidence only, and
   preserves required authority across advisory-only policy changes.
-- **Installed runtime:** `8644e91420154f561093849233196556388b10dc`
-  with generation `20260807T041405Z-install-74824`, behind the active halt
+- **Installed runtime:** `0d5a05a696716bf57390a6624e4b6b72ec3252b3`
+  with generation `20260807T214612Z-install-15685`, behind the active halt
   switch.
 - **Live-proof receipt:**
   `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/cross-cli-m5-live-proof.txt`;
@@ -166,30 +166,37 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   validation-fixture finding: its detached worktree path was correctly rejected
   by the reviewed-harness trust boundary, while the reviewed checkout proved
   advisory regression and unavailability do not change Copilot authority.
-  SC-025 remains honestly recorded as flaky after its permitted retry. This
-  behavior-validation evidence must be refreshed or explicitly bound to the
-  exact final candidate before rollout.
+  SC-025 remains honestly recorded as flaky after its permitted retry. The
+  exact-generation acceptance proof preserved the fail-closed executable
+  substitution scenario and replaced two scenarios that incorrectly treated
+  Dreaming's full candidate inventory identity as equal to the harness's
+  projected candidate identity. The corrected scenarios prove both identities
+  in their documented domains and link them through the projected inventory
+  and `SKILL.md` digest. A corrected live run then exposed authority validation
+  comparing canonical `/private/tmp` paths with stored `/tmp` aliases. Commit
+  `0d5a05a696716bf57390a6624e4b6b72ec3252b3` canonicalizes both the expected
+  authority path and the latest pointer before comparison. Fresh exact-runtime
+  behavior validation remains required after installation.
 - **Review closure:** dual review, critical ensemble review, remediation, and
   fix-delta review are complete through commit
   `71ac85d7a63b2a6de45a946dc339e1b3456367c0`. The focused fixture-budget
   correction at `8644e91420154f561093849233196556388b10dc` passed static diff
-  review and a rubber-duck challenge. Final implementation review remains
-  gated on exact-tree live proof under the governing development loop.
+  review and a rubber-duck challenge. The canonical authority-path fix at
+  `0d5a05a696716bf57390a6624e4b6b72ec3252b3` passes the focused 21-check
+  certification suite. Final implementation review remains gated on exact-tree
+  live proof under the governing development loop.
 - **Current checkpoint:** commit
-  `8644e91420154f561093849233196556388b10dc` is installed as generation
-  `20260807T041405Z-install-74824`. The complete generation-bound installed
+  `0d5a05a696716bf57390a6624e4b6b72ec3252b3` is installed as generation
+  `20260807T214612Z-install-15685`. The complete generation-bound installed
   self-test passed with `== result: 0 failure(s) ==`; activation remained
   unchanged and `selftest-passed-generation` exactly matches the installed
-  generation. The five suites implicated by the preceding failed generation
-  also pass serially under representative load. The correction preserves the
-  intentional one- and three-second timeout regressions, gives non-timeout
-  fixtures a 120-second test budget, and checks confirmed-start process-group
-  cleanup in the explicit-cancellation phase. No production timeout, load gate,
-  or arbitrary sleep changed. The halt remains active; Dreaming and its
-  watchdog remain stopped outside proof activity.
+  generation. Authority validation now accepts canonical aliases only when they
+  resolve to the expected skill-and-candidate path, and the regression covers a
+  symlinked state root. The halt remains active; Dreaming and its watchdog
+  remain stopped outside proof activity.
 - **Next checkpoint:** refresh exact-tree real Copilot CLI proof, binding this
-  documentation-only delta to installed commit `8644e91420154f561093849233196556388b10dc`
-  and generation `20260807T041405Z-install-74824`. Then complete final
+  documentation-only delta to installed commit `0d5a05a696716bf57390a6624e4b6b72ec3252b3`
+  and generation `20260807T214612Z-install-15685`. Then complete final
   implementation review, audit every Definition-of-Done criterion, and enable
   only if all gates pass.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
