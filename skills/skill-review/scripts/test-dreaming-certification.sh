@@ -282,10 +282,14 @@ pass "nested verifier failures emit one public REFUSED line first"
 aggregate="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["aggregate"])' <<<"$certification")"
 authority="$("$EVAL" v2-authority-write "$BASE/skill" --aggregate "$aggregate")"
 "$EVAL" v2-authority-validate "$BASE/skill" >/dev/null
+authority_path="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["authority"])' <<<"$authority")"
+ln -s "$SKILLS_STATE_DIR" "$TMP/state-alias"
+SKILLS_STATE_DIR="$TMP/state-alias" \
+  "$EVAL" v2-authority-validate "$BASE/skill" --authority "$authority_path" >/dev/null
 "$EVAL" current-gate "$BASE/skill" >/dev/null
 [[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["authoritative"])' <<<"$certification")" == "True" ]] ||
   fail "passing gate result was not marked authoritative"
-pass "compile, execute, independent verify, certificates, aggregate, and authority pass end to end"
+pass "compile, execute, independent verify, certificates, aggregate, and canonical authority paths pass end to end"
 
 policy_before="$("$EVAL" v2-policy-validate "$BASE/skill/.skill-evaluation-policy.json")"
 cp "$BASE/skill/.skill-evaluation-policy.json" "$BASE/policy.advisory-saved"

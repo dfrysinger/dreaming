@@ -2708,15 +2708,19 @@ def v2_authority_write(args: argparse.Namespace) -> dict[str, Any]:
 def v2_authority_validate(args: argparse.Namespace) -> dict[str, Any]:
     skill_dir = Path(args.skill_dir).resolve()
     candidate, _, suite, suite_id, policy, policy_id = load_v2_inputs(skill_dir, args.suite, args.policy)
-    path = Path(args.authority).resolve() if args.authority else v2_authority_path(skill_dir, candidate)
+    expected_path = v2_authority_path(skill_dir, candidate).resolve()
+    path = Path(args.authority).resolve() if args.authority else expected_path
     authority = load_json(path)
-    expected_path = v2_authority_path(skill_dir, candidate)
     if path != expected_path:
         raise EvaluationError("authority document path does not match skill and candidate identity")
     validate_authority(authority, skill_dir, candidate, suite, suite_id, policy, policy_id)
     authority_sha = digest(canonical(authority))
     latest = load_json(v2_evaluation_dir() / "latest" / f"{latest_key(str(skill_dir))}.json")
-    if latest != {
+    latest_authority_path = Path(
+        require_text(latest.get("authority_path"), "latest authority path")
+    ).resolve()
+    normalized_latest = {**latest, "authority_path": str(latest_authority_path)}
+    if normalized_latest != {
         "schema_version": 2,
         "skill_path": str(skill_dir),
         "candidate_id": candidate,
