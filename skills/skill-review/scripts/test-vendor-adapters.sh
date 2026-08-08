@@ -28,6 +28,7 @@ import sys
 import unittest
 from itertools import combinations
 from pathlib import Path
+from unittest import mock
 
 root = Path(sys.argv[1])
 temp = Path(sys.argv[2])
@@ -106,6 +107,19 @@ class VendorAdapterTest(unittest.TestCase):
             check=check,
         )
         return json.loads(result.stdout.splitlines()[-1])
+
+    def test_copilot_executor_ignores_ambient_copilot_home(self):
+        work = self.case / "executor"
+        work.mkdir()
+        ambient_home = self.case / "ambient-copilot-home"
+        with mock.patch.dict(
+            os.environ,
+            {"COPILOT_HOME": str(ambient_home)},
+            clear=False,
+        ):
+            environment = vendor_module.executor_environment("copilot", work)
+        self.assertNotIn("COPILOT_HOME", environment)
+        self.assertEqual(environment["HOME"], str(work / "home"))
 
     def _write_sources(self):
         copilot = self.case / "copilot/session"

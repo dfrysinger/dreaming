@@ -64,6 +64,17 @@ def adapter(
                     f"DREAMING_{vendor.upper()}_QUIET_SECONDS must be an integer"
                 )
             argv.extend(["--quiet-seconds", quiet])
+        timeout = os.environ.get(
+            f"DREAMING_{vendor.upper()}_SOURCE_TIMEOUT",
+            os.environ.get("DREAMING_SOURCE_TIMEOUT", "180"),
+        )
+        if not timeout.isdigit() or int(timeout) < 1:
+            raise ConfigError("source timeout must be a positive integer")
+        return {
+            "argv": argv,
+            "timeout": int(timeout),
+            "run_timeout": int(timeout),
+        }
     if role == "skill-publisher":
         argv.extend(
             [
@@ -105,6 +116,13 @@ def source_root(vendor: str) -> Path:
         "codex": Path(os.environ.get("CODEX_HOME", home / ".codex")),
     }
     return defaults[vendor].expanduser().resolve()
+
+
+def positive_integer(name: str, default: str) -> int:
+    value = os.environ.get(name, default)
+    if not value.isdigit() or int(value) < 1:
+        raise ConfigError(f"{name} must be a positive integer")
+    return int(value)
 
 
 def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, object]:
@@ -184,6 +202,9 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
         "retired_publishers": retired_publishers,
         "routes": valid_routes,
         "executor_order": executors,
+        "max_reviews_per_run": positive_integer(
+            "DREAMING_MAX_REVIEWS_PER_RUN", "25"
+        ),
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.parent / f".{output.name}.{uuid.uuid4().hex}"

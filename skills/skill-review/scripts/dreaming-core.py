@@ -2054,6 +2054,7 @@ def configured_runtime_settings(config: dict[str, Any]) -> dict[str, int]:
         "quiet_retry_seconds": 300,
         "page_size": 100,
         "max_pages_per_run": 100,
+        "max_reviews_per_run": 25,
         "max_snapshot_bytes": 1_000_000,
         "max_events": 2_000,
         "max_field_bytes": 64_000,
@@ -2164,6 +2165,7 @@ def scheduled_run() -> dict[str, Any]:
         "adapters": adapter_reports,
         "discovery": {},
         "reviews": [],
+        "deferred_reviews": 0,
         "publication": [],
         "errors": adapter_errors,
         "legacy_records_imported": imported_legacy,
@@ -2199,8 +2201,12 @@ def scheduled_run() -> dict[str, Any]:
         return report
 
     queue = read_json(paths.queue, [])
+    review_attempts = 0
     for item in queue:
         if item.get("status") != "queued":
+            continue
+        if review_attempts >= settings["max_reviews_per_run"]:
+            report["deferred_reviews"] += 1
             continue
         source_name = item.get("source")
         source = sources.get(source_name)
@@ -2213,6 +2219,7 @@ def scheduled_run() -> dict[str, Any]:
                 }
             )
             continue
+        review_attempts += 1
         try:
             result = core.review(
                 source_name,

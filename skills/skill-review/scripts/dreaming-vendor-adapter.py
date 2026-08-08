@@ -1101,6 +1101,7 @@ def executor_environment(vendor: str, work: Path) -> dict[str, str]:
         }
     )
     if vendor == "copilot":
+        environment.pop("COPILOT_HOME", None)
         copy_auth_file(
             real_home / ".config/gh/hosts.yml",
             synthetic_home / ".config/gh/hosts.yml",

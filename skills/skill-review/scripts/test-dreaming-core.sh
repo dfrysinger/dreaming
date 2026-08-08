@@ -185,13 +185,16 @@ class RuntimeTest(unittest.TestCase):
             source.call("inspect", session="fake:missing")
 
     def test_core_selftest_and_doctor_use_neutral_environment(self) -> None:
-        source_fixture = self.source_fixture([self.session("one", 10)])
+        source_fixture = self.source_fixture(
+            [self.session("one", 10), self.session("two", 20)]
+        )
         executor_fixture = self.write("executor.json", {"mode": "success"})
         publisher_fixture = self.write("publisher.json", {"owned_bundle_ids": []})
         config = self.write(
             "adapters.json",
             {
                 "contract_version": 1,
+                "max_reviews_per_run": 1,
                 "routes": ["fake>fake-executor"],
                 "executor_order": ["fake-executor"],
                 "sources": {
@@ -279,8 +282,15 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(report["reviews"][0]["executor"], "fake-executor")
         self.assertEqual(report["reviews"][0]["status"], "accepted")
         self.assertEqual(report["reviews"][0]["terminal_route"], "discard")
+        self.assertEqual(report["deferred_reviews"], 1)
         ledger = Path(environment["DREAMING_STATE_DIR"]) / "review-ledger.json"
         self.assertEqual(json.loads(ledger.read_text())[0]["session_id"], "fake:one")
+        queue = Path(environment["DREAMING_STATE_DIR"]) / "queue.json"
+        queued = json.loads(queue.read_text())
+        self.assertEqual(
+            [item["qualified_session_id"] for item in queued if item["status"] == "queued"],
+            ["fake:two"],
+        )
 
         config.unlink()
         result = subprocess.run(
@@ -489,6 +499,7 @@ class RuntimeTest(unittest.TestCase):
             "partial-adapters.json",
             {
                 "contract_version": 1,
+                "max_reviews_per_run": 1,
                 "routes": [
                     "fake>fake-executor",
                     "offline>fake-executor",
@@ -524,6 +535,19 @@ class RuntimeTest(unittest.TestCase):
                     }
                 },
             },
+        )
+        self.paths.state.mkdir(parents=True)
+        self.paths.queue.write_text(
+            json.dumps(
+                [
+                    {
+                        "source": "offline",
+                        "qualified_session_id": "offline:old",
+                        "source_revision": "sha256:offline",
+                        "status": "queued",
+                    }
+                ]
+            )
         )
         result = subprocess.run(
             [sys.executable, str(RUNTIME_PATH), "run"],
