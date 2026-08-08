@@ -186,14 +186,15 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   certification suite. Final implementation review remains gated on exact-tree
   live proof under the governing development loop.
 - **Current checkpoint:** commit
-  `0d5a05a696716bf57390a6624e4b6b72ec3252b3` is installed as generation
-  `20260807T214612Z-install-15685`. The complete generation-bound installed
-  self-test passed with `== result: 0 failure(s) ==`; activation remained
-  unchanged and `selftest-passed-generation` exactly matches the installed
-  generation. Authority validation now accepts canonical aliases only when they
-  resolve to the expected skill-and-candidate path, and the regression covers a
-  symlinked state root. The halt remains active; Dreaming and its watchdog
-  remain stopped outside proof activity.
+  `4b1a1ad2e0095c8ed0d4ed341b9211a879f9fa39` is installed as generation
+  `20260808T011449Z-install-60924`. Its complete generation-bound installed
+  self-test passed with `== result: 0 failure(s) ==` after 24 minutes 37
+  seconds. The installer stopped observing after its former 20-minute default,
+  so no passing receipt was written for that attempt; the runtime itself did
+  not fail. The default observation budget is now one hour. This budget applies
+  only to explicit install/upgrade certification, not to normal Dreaming runs.
+  The halt remains active; Dreaming and its watchdog remain stopped outside
+  proof activity.
 - **Next checkpoint:** refresh exact-tree real Copilot CLI proof, binding this
   documentation-only delta to installed commit `0d5a05a696716bf57390a6624e4b6b72ec3252b3`
   and generation `20260807T214612Z-install-15685`. Then complete final

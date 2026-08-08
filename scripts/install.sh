@@ -450,7 +450,7 @@ cmd_selftest() {
   }
   label="$(<"$SELFTEST_LABEL_FILE")"
   result="${DREAMING_SELFTEST_RESULT_FILE:-$STATE_DIR/daemon-selftest.out}"
-  wait_secs="${DREAMING_SELFTEST_WAIT_SECS:-1200}"
+  wait_secs="${DREAMING_SELFTEST_WAIT_SECS:-3600}"
   [[ -f "$GENERATION_FILE" ]] || {
     echo "no activation generation; run install or rollback first" >&2
     return 1
