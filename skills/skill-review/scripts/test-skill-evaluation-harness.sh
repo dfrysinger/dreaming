@@ -6,15 +6,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
 TEST_ROOT="$REPO_ROOT/.test-work"
 mkdir -p "$TEST_ROOT"
+# shellcheck source=lib-test-work.sh
+source "$SCRIPT_DIR/lib-test-work.sh"
+prune_test_work "$TEST_ROOT" "skill-evaluation-harness" 2
 TMP="$(mktemp -d "$TEST_ROOT/skill-evaluation-harness.XXXXXX")"
 cleanup() {
   local rc=$?
   trap - EXIT
-  if [[ $rc -eq 0 ]]; then
-    rm -rf "$TMP"
-  else
-    echo "DIAGNOSTIC retained failed harness evidence: $TMP" >&2
-  fi
+  finish_test_work "$rc" "$TMP" "harness"
   exit "$rc"
 }
 trap cleanup EXIT
@@ -83,7 +82,7 @@ PY
 
 fail_result() {
   local label="$1" root="$2" message="$3"
-  dump_result_diagnostics "$label" "$root"
+  dump_result_diagnostics "$label" "$root" || true
   fail "$message"
 }
 
@@ -114,6 +113,7 @@ make_run() {
   local timeout="${5:-120}" command_grader="${6:-none}" behavior_cases="${7:-1}"
   local required_count="${8:-$executors}"
   local output_bytes="${9:-100000}"
+  local comparator_timeout="${10:-5}"
   mkdir -p "$root/candidate" "$root/fixtures" "$root/graders"
   cat > "$root/candidate/SKILL.md" <<'EOF'
 ---
@@ -123,10 +123,11 @@ Return the deterministic fixture result.
 EOF
   printf 'fixture\n' > "$root/fixtures/input.txt"
   python3 - "$root" "$fixture" "$profile" "$executors" "$timeout" "$HARNESS" "$ADAPTER" \
-      "$command_grader" "$behavior_cases" "$required_count" "$output_bytes" <<'PY'
+      "$command_grader" "$behavior_cases" "$required_count" "$output_bytes" \
+      "$comparator_timeout" <<'PY'
 import hashlib, json, os, sys
 from pathlib import Path
-root, fixture, profile, executors, timeout, harness, adapter, command_grader, behavior_cases, required_count, output_bytes = map(str, sys.argv[1:])
+root, fixture, profile, executors, timeout, harness, adapter, command_grader, behavior_cases, required_count, output_bytes, comparator_timeout = map(str, sys.argv[1:])
 root = Path(root)
 def canonical(x): return json.dumps(x, sort_keys=True, separators=(",", ":")).encode()
 def sha(x): return "sha256:" + hashlib.sha256(canonical(x)).hexdigest()
@@ -194,7 +195,7 @@ for number in range(int(executors)):
     if fixture == "mutate-input":
         argv += ["--mutate", str(root/"fixtures"/"input.txt")]
     routing_executors.append({"name":name,"adapter_id":adapter_id,"adapter_executable_sha256":adapter_sha,"argv":argv})
-comparator={"route":"fixture-route","model":"judge-1","adapter_id":adapter_id,"adapter_version":1,"adapter_executable_sha256":adapter_sha,"timeout_seconds":int(timeout),"token_budget":100,"rubric_id":sha(rubric)}
+comparator={"route":"fixture-route","model":"judge-1","adapter_id":adapter_id,"adapter_version":1,"adapter_executable_sha256":adapter_sha,"timeout_seconds":int(comparator_timeout),"token_budget":100,"rubric_id":sha(rubric)}
 comparator_path=root.parent/"comparator-identity.json"
 comparator_path.write_bytes(canonical(comparator)+b"\n")
 routing={"schema_version":1,"kind":"skill_evaluation_routing",

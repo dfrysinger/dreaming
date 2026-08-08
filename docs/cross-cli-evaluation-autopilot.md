@@ -61,12 +61,12 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Live-proof receipt:**
   `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/cross-cli-m5-live-proof.txt`;
   the existing receipt covers older candidate `cc5fe2e` and is stale. Rollout
-  remains halted pending exact-tree installed self-test and refreshed live
-  proof.
+  remains halted pending final-review remediation, refreshed installed proof,
+  and Definition-of-Done closure.
 - **Historical live evidence:** The evidence below established the
   required/advisory behavior on earlier generations. It remains useful as
   regression and rollback evidence, but it does not satisfy exact-tree rollout
-  gates for installed generation `20260807T041405Z-install-74824`. The
+  gates for installed generation `20260807T214612Z-install-15685`. The
   required/advisory candidate passes the
   deterministic harness, policy, certification, native-adapter, daemon, and
   installer suites. Deterministic end-to-end certification proves advisory
@@ -90,8 +90,8 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   installed required default and treats configured Claude and Codex routes as
   advisory. Advisory unavailability remains visible but does not block
   Copilot-backed authority. A generation-bound installed self-test passed for
-  an older candidate; the exact-tree generation has not yet produced a passing
-  receipt.
+  an older candidate. The exact-tree generation subsequently passed its
+  generation-bound installed self-test and exact-generation behavior proof.
   The first attempt was infrastructure-invalid under sustained load between 38
   and 70. A retry entered under two compliant load samples and passed the
   subprocess probe plus every previously failed targeted suite, but load had

@@ -6,15 +6,14 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
 TEST_ROOT="$REPO_ROOT/.test-work"
 mkdir -p "$TEST_ROOT"
+# shellcheck source=lib-test-work.sh
+source "$SCRIPT_DIR/lib-test-work.sh"
+prune_test_work "$TEST_ROOT" "dreaming-certification" 2
 TMP="$(mktemp -d "$TEST_ROOT/dreaming-certification.XXXXXX")"
 cleanup() {
   local rc=$?
   trap - EXIT
-  if [[ $rc -eq 0 ]]; then
-    rm -rf "$TMP"
-  else
-    echo "DIAGNOSTIC retained failed certification evidence: $TMP" >&2
-  fi
+  finish_test_work "$rc" "$TMP" "certification"
   exit "$rc"
 }
 trap cleanup EXIT
@@ -252,11 +251,11 @@ expect_refusal suite-no-authority "must retain cross-executor authority" \
   "$EVAL" v2-suite-validate "$BASE/suite-no-authority.json"
 expect_refusal suite-half-marked "suite has missing keys.*cross_executor_authority" \
   "$EVAL" v2-suite-validate "$BASE/suite-half-marked.json"
-expect_refusal suite-float-version "suite schema_version must be 1 or 2" \
+expect_refusal suite-float-version "normalized suite schema_version must be integer 2" \
   "$EVAL" v2-suite-validate "$BASE/suite-float-version.json"
-expect_refusal suite-legacy-markers "suite schema_version must be 1 or 2" \
+expect_refusal suite-legacy-markers "normalized suite schema_version must be integer 2" \
   "$EVAL" v2-suite-validate "$BASE/suite-legacy-markers.json"
-expect_refusal suite-bool-version "suite schema_version must be 1 or 2" \
+expect_refusal suite-bool-version "normalized suite schema_version must be integer 2" \
   "$EVAL" v2-suite-validate "$BASE/suite-bool-version.json"
 expect_refusal policy-wrong-trials "profile-derived integer" \
   "$EVAL" v2-policy-validate "$BASE/policy-wrong-trials.json"
@@ -286,6 +285,25 @@ authority_path="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["autho
 ln -s "$SKILLS_STATE_DIR" "$TMP/state-alias"
 SKILLS_STATE_DIR="$TMP/state-alias" \
   "$EVAL" v2-authority-validate "$BASE/skill" --authority "$authority_path" >/dev/null
+aliased_authority="$(
+  SKILLS_STATE_DIR="$TMP/state-alias" \
+    "$EVAL" v2-authority-write "$BASE/skill" --aggregate "$aggregate"
+)"
+aliased_authority_path="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["authority"])' <<<"$aliased_authority"
+)"
+canonical_authority_path="$(
+  python3 -c 'import pathlib,sys; print(pathlib.Path(sys.argv[1]).resolve())' \
+    "$aliased_authority_path"
+)"
+"$EVAL" v2-authority-validate "$BASE/skill" \
+  --authority "$canonical_authority_path" >/dev/null
+ln -s authority-loop "$TMP/authority-loop"
+expect_refusal authority-symlink-loop "cannot" \
+  "$EVAL" v2-authority-validate "$BASE/skill" \
+  --authority "$TMP/authority-loop/authority.json"
+[[ "$(grep -c '^REFUSED:' "$TMP/authority-symlink-loop.err")" == "1" ]] ||
+  fail "authority symlink loop did not emit one public REFUSED line"
 "$EVAL" current-gate "$BASE/skill" >/dev/null
 [[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["authoritative"])' <<<"$certification")" == "True" ]] ||
   fail "passing gate result was not marked authoritative"

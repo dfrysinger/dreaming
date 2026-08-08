@@ -4,16 +4,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 TEST_ROOT="$ROOT/.test-work"
 mkdir -p "$TEST_ROOT"
+# shellcheck source=lib-test-work.sh
+source "$ROOT/skills/skill-review/scripts/lib-test-work.sh"
+prune_test_work "$TEST_ROOT" "skill-evaluation-vendor-adapters" 2
 WORK="$(mktemp -d "$TEST_ROOT/skill-evaluation-vendor-adapters.XXXXXX")"
 cleanup() {
   local status=$?
   trap - EXIT
-  if [[ $status -eq 0 ]]; then
-    chmod -R u+w "$WORK" 2>/dev/null || true
-    rm -rf "$WORK"
-  else
-    echo "DIAGNOSTIC retained failed vendor-adapter evidence: $WORK" >&2
-  fi
+  finish_test_work "$status" "$WORK" "vendor-adapter" 1
   exit "$status"
 }
 trap cleanup EXIT
@@ -774,10 +772,10 @@ else:
             )
             self.assertEqual(response["error"]["code"], "executor-timeout")
             self.assertFalse(Path(trial["raw"]).exists())
-            if diagnostic["pid_file_exists"]:
-                pid = int(diagnostic["pid"])
-                with self.assertRaises(ProcessLookupError):
-                    os.kill(pid, 0)
+            self.assertTrue(diagnostic["pid_file_exists"])
+            pid = int(diagnostic["pid"])
+            with self.assertRaises(ProcessLookupError):
+                os.kill(pid, 0)
 
         vendor = "copilot"
         shutil.rmtree(self.root / "copilot-candidate-timeout")

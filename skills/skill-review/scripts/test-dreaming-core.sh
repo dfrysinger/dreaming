@@ -72,7 +72,18 @@ class RuntimeTest(unittest.TestCase):
         )
 
     def tearDown(self) -> None:
-        self.clean_case()
+        result = self._outcome.result
+        failed = any(
+            test is self
+            for test, _ in [*result.failures, *result.errors]
+        )
+        if failed:
+            print(
+                f"DIAGNOSTIC retained failed standalone-core case: {self.case}",
+                file=sys.stderr,
+            )
+        else:
+            self.clean_case()
 
     def write(self, name: str, value: object) -> Path:
         path = self.case / name
@@ -907,11 +918,9 @@ elif command == "run":
         adapter = ExecutableAdapter(
             [sys.executable, str(script)],
             "review-executor",
-            timeout=TEST_ADAPTER_TIMEOUT,
-            run_timeout=TEST_ADAPTER_TIMEOUT,
+            timeout=1,
+            run_timeout=10,
         )
-        adapter.timeout = 1
-        adapter.run_timeout = 10
         result_path = self.case / "slow-result.json"
         response = adapter.call(
             "run",
@@ -1236,7 +1245,14 @@ elif sys.argv[1] == "run":
 
 if __name__ == "__main__":
     WORK_ROOT.mkdir(parents=True, exist_ok=True)
-    program = unittest.main(argv=[sys.argv[0]], verbosity=2, exit=False)
+    try:
+        program = unittest.main(argv=[sys.argv[0]], verbosity=2, exit=False)
+    except BaseException:
+        print(
+            f"DIAGNOSTIC retained interrupted standalone-core evidence: {WORK_ROOT}",
+            file=sys.stderr,
+        )
+        raise
     if program.result.wasSuccessful():
         shutil.rmtree(WORK_ROOT, ignore_errors=True)
     else:

@@ -96,6 +96,13 @@ def require_text(value: Any, field: str) -> str:
     return value
 
 
+def resolve_path(path: Path, field: str) -> Path:
+    try:
+        return path.resolve()
+    except (OSError, RuntimeError) as exc:
+        raise EvaluationError(f"cannot resolve {field} {path}: {exc}") from exc
+
+
 def load_json(path: Path) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -401,10 +408,9 @@ def load_suite(path: Path) -> tuple[dict[str, Any], str]:
     normalized = "compiled_from_schema_version" in raw or "cross_executor_authority" in raw
     if normalized and (
         not isinstance(schema_version, int)
-        or isinstance(schema_version, bool)
         or schema_version != SUITE_SCHEMA_VERSION
     ):
-        raise EvaluationError("suite schema_version must be 1 or 2")
+        raise EvaluationError("normalized suite schema_version must be integer 2")
     if schema_version == 1:
         suite = compile_legacy_cases(raw)
         return suite, f"sha256:{digest(canonical(suite))}"
@@ -510,11 +516,7 @@ def load_policy(path: Path) -> tuple[dict[str, Any], str]:
     }
     if normalized:
         keys.add("trials_per_arm")
-    require_exact_keys(
-        raw,
-        "policy",
-        keys,
-    )
+    require_exact_keys(raw, "policy", keys)
     profile = raw.get("profile")
     if profile not in PROFILES:
         raise EvaluationError("policy.profile must be gate or iterate")
@@ -2706,19 +2708,26 @@ def v2_authority_write(args: argparse.Namespace) -> dict[str, Any]:
 
 
 def v2_authority_validate(args: argparse.Namespace) -> dict[str, Any]:
-    skill_dir = Path(args.skill_dir).resolve()
+    skill_dir = resolve_path(Path(args.skill_dir), "skill directory")
     candidate, _, suite, suite_id, policy, policy_id = load_v2_inputs(skill_dir, args.suite, args.policy)
-    expected_path = v2_authority_path(skill_dir, candidate).resolve()
-    path = Path(args.authority).resolve() if args.authority else expected_path
+    expected_path = resolve_path(
+        v2_authority_path(skill_dir, candidate), "expected authority path"
+    )
+    path = (
+        resolve_path(Path(args.authority), "authority path")
+        if args.authority
+        else expected_path
+    )
     authority = load_json(path)
     if path != expected_path:
         raise EvaluationError("authority document path does not match skill and candidate identity")
     validate_authority(authority, skill_dir, candidate, suite, suite_id, policy, policy_id)
     authority_sha = digest(canonical(authority))
     latest = load_json(v2_evaluation_dir() / "latest" / f"{latest_key(str(skill_dir))}.json")
-    latest_authority_path = Path(
-        require_text(latest.get("authority_path"), "latest authority path")
-    ).resolve()
+    latest_authority_path = resolve_path(
+        Path(require_text(latest.get("authority_path"), "latest authority path")),
+        "latest authority path",
+    )
     normalized_latest = {**latest, "authority_path": str(latest_authority_path)}
     if normalized_latest != {
         "schema_version": 2,

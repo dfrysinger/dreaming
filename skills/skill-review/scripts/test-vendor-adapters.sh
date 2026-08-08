@@ -4,15 +4,14 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd -P)"
 TEST_ROOT="$ROOT/.test-work"
 mkdir -p "$TEST_ROOT"
+# shellcheck source=lib-test-work.sh
+source "$ROOT/skills/skill-review/scripts/lib-test-work.sh"
+prune_test_work "$TEST_ROOT" "vendor-adapters" 2
 TMP="$(mktemp -d "$TEST_ROOT/vendor-adapters.XXXXXX")"
 cleanup() {
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    chmod -R u+w "$TMP" 2>/dev/null || true
-    rm -rf "$TMP"
-  else
-    echo "DIAGNOSTIC retained failed native-adapter evidence: $TMP" >&2
-  fi
+  local status=$?
+  trap - EXIT
+  finish_test_work "$status" "$TMP" "native-adapter" 1
   exit "$status"
 }
 trap cleanup EXIT
