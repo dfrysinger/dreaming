@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
+TEST_ROOT="$REPO_ROOT/.test-work"
+mkdir -p "$TEST_ROOT"
+# shellcheck source=lib-test-work.sh
+source "$SCRIPT_DIR/lib-test-work.sh"
+prune_test_work "$TEST_ROOT" "multi-cli-core" 2
 export PYTHONDONTWRITEBYTECODE=1
 exec /usr/bin/env python3 - "$SCRIPT_DIR" <<'PY'
 """Standalone deterministic tests for the vendor-neutral Dreaming core."""

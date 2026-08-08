@@ -5,6 +5,7 @@ prune_test_work() {
   python3 - "$root" "$prefix" "$keep" <<'PY'
 import shutil
 import sys
+import os
 from pathlib import Path
 
 root = Path(sys.argv[1]).resolve()
@@ -20,6 +21,11 @@ paths = sorted(
     reverse=True,
 )
 for path in paths[keep:]:
+    for current, directories, files in os.walk(path):
+        for name in directories:
+            os.chmod(Path(current) / name, 0o755)
+        for name in files:
+            os.chmod(Path(current) / name, 0o644)
     shutil.rmtree(path)
 PY
 }
