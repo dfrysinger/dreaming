@@ -46,7 +46,7 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Harness contract:** `docs/skill-evaluation-trial-harness-design.md`.
 - **Current phase:** M5.5, rollout and live proof.
 - **Landed baseline:** `af92f812164dcdccfee4957b382560a4f981d896`.
-- **Installed candidate:** `0d5a05a696716bf57390a6624e4b6b72ec3252b3`.
+- **Installed candidate:** `09449965d8746fcc970b454c1601c39422cf481d`.
 - **Completed locally:** M5.1 policy and schemas at `7cab64a`; M5.2 sealed
   trial harness core at `745f32e`; M5.3 native adapters at `8002c9c`; M5.4
   Dreaming certification integration in the current candidate. The
@@ -55,8 +55,8 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   infrastructure state, separates `policy_id` from `observation_plan_id`,
   derives `required_certificate_set_id` from required evidence only, and
   preserves required authority across advisory-only policy changes.
-- **Installed runtime:** `0d5a05a696716bf57390a6624e4b6b72ec3252b3`
-  with generation `20260807T214612Z-install-15685`, behind the active halt
+- **Installed runtime:** `09449965d8746fcc970b454c1601c39422cf481d`
+  with generation `20260808T014044Z-install-31394`, behind the active halt
   switch.
 - **Live-proof receipt:**
   `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/cross-cli-m5-live-proof.txt`;
@@ -179,26 +179,24 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   behavior validation remains required after installation.
 - **Review closure:** dual review, critical ensemble review, remediation, and
   fix-delta review are complete through commit
-  `71ac85d7a63b2a6de45a946dc339e1b3456367c0`. The focused fixture-budget
-  correction at `8644e91420154f561093849233196556388b10dc` passed static diff
-  review and a rubber-duck challenge. The canonical authority-path fix at
-  `0d5a05a696716bf57390a6624e4b6b72ec3252b3` passes the focused 21-check
-  certification suite. Final implementation review remains gated on exact-tree
-  live proof under the governing development loop.
+  `09449965d8746fcc970b454c1601c39422cf481d`. The final ensemble adjudicated
+  22 candidates: 18 valid findings were remediated and 4 were rejected. The
+  affected deterministic suites pass 21 certification checks, 31 harness
+  checks, 9 evaluation-adapter tests, 14 native-adapter tests, 27 standalone
+  core tests, and the installer suite. Final exact-tree live proof remains
+  required under the governing development loop.
 - **Current checkpoint:** commit
-  `4b1a1ad2e0095c8ed0d4ed341b9211a879f9fa39` is installed as generation
-  `20260808T011449Z-install-60924`. Its complete generation-bound installed
-  self-test passed with `== result: 0 failure(s) ==` after 24 minutes 37
-  seconds. The installer stopped observing after its former 20-minute default,
-  so no passing receipt was written for that attempt; the runtime itself did
-  not fail. The default observation budget is now one hour. This budget applies
-  only to explicit install/upgrade certification, not to normal Dreaming runs.
-  The halt remains active; Dreaming and its watchdog remain stopped outside
-  proof activity.
+  `09449965d8746fcc970b454c1601c39422cf481d` is installed as generation
+  `20260808T014044Z-install-31394`. Its complete generation-bound installed
+  self-test passed with `== result: 0 failure(s) ==`, and
+  `selftest-passed-generation` exactly matches the active generation. The
+  one-hour observation budget applies only to explicit install/upgrade
+  certification, not to normal Dreaming runs. The halt remains active;
+  Dreaming and its watchdog remain stopped outside proof activity.
 - **Next checkpoint:** refresh exact-tree real Copilot CLI proof, binding this
-  documentation-only delta to installed commit `0d5a05a696716bf57390a6624e4b6b72ec3252b3`
-  and generation `20260807T214612Z-install-15685`. Then complete final
-  implementation review, audit every Definition-of-Done criterion, and enable
-  only if all gates pass.
+  documentation-only delta to installed commit
+  `09449965d8746fcc970b454c1601c39422cf481d` and generation
+  `20260808T014044Z-install-31394`. Then audit every Definition-of-Done
+  criterion and enable only if all gates pass.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.
