@@ -1240,40 +1240,40 @@ rollback without deleting evaluation evidence or enabling promotion.
 - [x] M3 scheduled dependency protection and run rollback are implemented.
 - [x] M4 is either implemented against a real platform boundary or explicitly
       closed as unnecessary.
-- [ ] M5 cross-CLI certification is implemented and enforces the selected
+- [x] M5 cross-CLI certification is implemented and enforces the selected
       executor policy.
 
 ### Cross-CLI skill certification Definition of Done
 
-- [ ] Dreaming owns suite policy, candidate identity, certification decisions,
+- [x] Dreaming owns suite policy, candidate identity, certification decisions,
       receipts, authority documents, promotion gates, and rollback authority.
-- [ ] The trial harness is replaceable and cannot write Dreaming state or
+- [x] The trial harness is replaceable and cannot write Dreaming state or
       decide policy.
-- [ ] Copilot, Claude, and Codex implement the same versioned
+- [x] Copilot, Claude, and Codex implement the same versioned
       `skill-evaluation-executor` contract.
-- [ ] Gate-profile evidence uses three matched trials per arm and records exact
+- [x] Gate-profile evidence uses three matched trials per arm and records exact
       executor, model, CLI, adapter, harness, grader, comparator, tool, and
       budget identity.
-- [ ] Capability, encoded-preference, related-task, and activation policies
+- [x] Capability, encoded-preference, related-task, and activation policies
       have deterministic pass, regression, and inconclusive fixtures.
-- [ ] Every required executor has an independent certificate; results are not
+- [x] Every required executor has an independent certificate; results are not
       pooled across providers.
-- [ ] Copilot is the installed required default; Claude and Codex are explicit
+- [x] Copilot is the installed required default; Claude and Codex are explicit
       advisory options that can be promoted to required by policy.
-- [ ] Advisory pass, regression, inconclusive, and unavailable results remain
+- [x] Advisory pass, regression, inconclusive, and unavailable results remain
       independently visible but cannot grant, satisfy, or block required
       authority.
-- [ ] Promotion and consolidation reject partial, stale, regressing,
+- [x] Promotion and consolidation reject partial, stale, regressing,
       unauthorized, or legacy-only evidence.
-- [ ] Schema-v2 cases and envelopes remain readable; schema-v3 authority in
+- [x] Schema-v2 cases and envelopes remain readable; schema-v3 authority in
       version-2 evaluation state cannot be read, relabeled, or authorized by an
       older gate.
-- [ ] Unauthorized routes, inherited instructions, unrelated skills, and
+- [x] Unauthorized routes, inherited instructions, unrelated skills, and
       native session roots are absent from trial packets and traces.
-- [ ] The real Copilot gate-profile acceptance suite passes on the reviewed
+- [x] The real Copilot gate-profile acceptance suite passes on the reviewed
       tree; configured advisory executors run best effort and unavailable
       advisory providers do not block completion.
-- [ ] Rollback preserves evidence, restores the prior gate, and keeps promotion
+- [x] Rollback preserves evidence, restores the prior gate, and keeps promotion
       halted until self-test passes.
 
 ### All phases Definition of Done

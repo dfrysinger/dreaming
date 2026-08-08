@@ -46,7 +46,7 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Harness contract:** `docs/skill-evaluation-trial-harness-design.md`.
 - **Current phase:** M5.5, rollout and live proof.
 - **Landed baseline:** `af92f812164dcdccfee4957b382560a4f981d896`.
-- **Installed candidate:** `09449965d8746fcc970b454c1601c39422cf481d`.
+- **Installed candidate:** `26d17d1c91e5b7bb6a06c83f483c0eb0d8d00cc4`.
 - **Completed locally:** M5.1 policy and schemas at `7cab64a`; M5.2 sealed
   trial harness core at `745f32e`; M5.3 native adapters at `8002c9c`; M5.4
   Dreaming certification integration in the current candidate. The
@@ -55,14 +55,13 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   infrastructure state, separates `policy_id` from `observation_plan_id`,
   derives `required_certificate_set_id` from required evidence only, and
   preserves required authority across advisory-only policy changes.
-- **Installed runtime:** `09449965d8746fcc970b454c1601c39422cf481d`
-  with generation `20260808T014044Z-install-31394`, behind the active halt
+- **Installed runtime:** `26d17d1c91e5b7bb6a06c83f483c0eb0d8d00cc4`
+  with generation `20260808T051913Z-install-49018`, behind the active halt
   switch.
 - **Live-proof receipt:**
   `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/cross-cli-m5-live-proof.txt`;
-  the existing receipt covers older candidate `cc5fe2e` and is stale. Rollout
-  remains halted pending final-review remediation, refreshed installed proof,
-  and Definition-of-Done closure.
+  the receipt covers installed runtime `26d17d1c91e5b7bb6a06c83f483c0eb0d8d00cc4`
+  and generation `20260808T051913Z-install-49018` and is current.
 - **Historical live evidence:** The evidence below established the
   required/advisory behavior on earlier generations. It remains useful as
   regression and rollback evidence, but it does not satisfy exact-tree rollout
@@ -183,20 +182,38 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   22 candidates: 18 valid findings were remediated and 4 were rejected. The
   affected deterministic suites pass 21 certification checks, 31 harness
   checks, 9 evaluation-adapter tests, 14 native-adapter tests, 27 standalone
-  core tests, and the installer suite. Final exact-tree live proof remains
-  required under the governing development loop.
+  core tests, and the installer suite. The final exact-tree live proof is now
+  complete and independently adjudicated.
 - **Current checkpoint:** commit
-  `09449965d8746fcc970b454c1601c39422cf481d` is installed as generation
-  `20260808T014044Z-install-31394`. Its complete generation-bound installed
+  `26d17d1c91e5b7bb6a06c83f483c0eb0d8d00cc4` is installed as generation
+  `20260808T051913Z-install-49018`. Its complete generation-bound installed
   self-test passed with `== result: 0 failure(s) ==`, and
-  `selftest-passed-generation` exactly matches the active generation. The
-  one-hour observation budget applies only to explicit install/upgrade
-  certification, not to normal Dreaming runs. The halt remains active;
-  Dreaming and its watchdog remain stopped outside proof activity.
-- **Next checkpoint:** refresh exact-tree real Copilot CLI proof, binding this
-  documentation-only delta to installed commit
-  `09449965d8746fcc970b454c1601c39422cf481d` and generation
-  `20260808T014044Z-install-31394`. Then audit every Definition-of-Done
-  criterion and enable only if all gates pass.
+  `selftest-passed-generation` exactly matches the active generation. Enabled
+  canaries established three earlier operational divergences and their fixes:
+  current Copilot metadata events are explicitly accepted; the review executor
+  removes ambient `COPILOT_HOME` before entering its synthetic home; and source
+  calls use a bounded 180-second timeout. Scheduled review work is capped and
+  retains deferred queue entries. The apparent queue duplication was disproved:
+  all 410 inspected `(qualified_session_id, source_revision)` pairs were unique,
+  and growth was continued historical discovery. A bounded enabled run then
+  completed discovery under normal machine load, reviewed a Claude session
+  through Copilot, committed a controlled learned artifact, advanced the queue,
+  and published successfully to Copilot, Claude, and Codex. Personal runtime
+  routing now configures Copilot as the only review executor for all three
+  sources, avoiding optional-provider health from failing consolidation. The
+  halt was restored before exact-generation proof.
+- **Final live proof:** behavior-validation run
+  `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/behavior-validation-m5-runtime-26d17d1`
+  completed the final 54-trial exact-generation authority scenario against
+  frozen runtime `26d17d1c91e5b7bb6a06c83f483c0eb0d8d00cc4` and generation
+  `20260808T051913Z-install-49018`. Copilot passed as the sole required
+  provider; Claude and Codex remained visible advisory/inconclusive providers.
+  Public authority validation passed. Blind advocates reviewed the retained
+  traces and the independent judge ruled `SUPPORTED`, including explicit
+  adjudication of the disclosed post-run auditor correction.
+- **Next checkpoint:** commit the completed audit and documentation-only proof
+  delta, restore the normal bounded review budget with Copilot-only execution,
+  enable and confirm responsive operation, stop schedule #11, and complete
+  `m5-live-rollout`.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.
