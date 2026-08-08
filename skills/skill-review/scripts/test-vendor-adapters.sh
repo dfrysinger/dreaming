@@ -464,6 +464,11 @@ print(json.dumps({"ok": True}))
                 "session.workspace_file_changed",
                 "session.schedule_created",
                 "session.schedule_cancelled",
+                "session.canvas.recorded",
+                "session.context_changed",
+                "session.remote_steerable_changed",
+                "session.truncation",
+                "subagent.failed",
             ),
             10,
         ):
