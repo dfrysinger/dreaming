@@ -44,7 +44,7 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
 - **Push policy:** local only.
 - **Plan:** `docs/evidence-backed-learning-plan.md`.
 - **Harness contract:** `docs/skill-evaluation-trial-harness-design.md`.
-- **Current phase:** M5.5, rollout and live proof.
+- **Current phase:** M5 complete; rollout enabled.
 - **Landed baseline:** `af92f812164dcdccfee4957b382560a4f981d896`.
 - **Installed candidate:** `26d17d1c91e5b7bb6a06c83f483c0eb0d8d00cc4`.
 - **Completed locally:** M5.1 policy and schemas at `7cab64a`; M5.2 sealed
@@ -201,7 +201,8 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   and published successfully to Copilot, Claude, and Codex. Personal runtime
   routing now configures Copilot as the only review executor for all three
   sources, avoiding optional-provider health from failing consolidation. The
-  halt was restored before exact-generation proof.
+  halt was restored before exact-generation proof and removed only after every
+  completion gate passed.
 - **Final live proof:** behavior-validation run
   `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/behavior-validation-m5-runtime-26d17d1`
   completed the final 54-trial exact-generation authority scenario against
@@ -211,9 +212,12 @@ Done, the "Cross-CLI skill certification Definition of Done" section, is met.
   Public authority validation passed. Blind advocates reviewed the retained
   traces and the independent judge ruled `SUPPORTED`, including explicit
   adjudication of the disclosed post-run auditor correction.
-- **Next checkpoint:** commit the completed audit and documentation-only proof
-  delta, restore the normal bounded review budget with Copilot-only execution,
-  enable and confirm responsive operation, stop schedule #11, and complete
-  `m5-live-rollout`.
+- **Rollout state:** the normal bounded review budget is restored with Copilot
+  as the only review executor, Dreaming is enabled, publication is current for
+  all three CLIs, and the LaunchAgent starts responsively. The unattended
+  charter schedule is stopped because the referenced Definition of Done is
+  complete.
+- **Next checkpoint:** normal scheduled operation; no M5 completion work
+  remains.
 - **Completion authority:** the "Cross-CLI skill certification Definition of
   Done" section in the plan.
