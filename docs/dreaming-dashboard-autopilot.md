@@ -39,7 +39,7 @@ Definition of Done" section, is met.
 
 ## Execution baton
 
-- **Phase:** Definition of Done met; local landing in progress.
+- **Phase:** Complete.
 - **Reviewed work order:** `docs/dreaming-dashboard-design.md`
 - **Lane:** Critical.
 - **Base design commit:** `e7e380a`
@@ -47,8 +47,8 @@ Definition of Done" section, is met.
 - **Push policy:** Local commits only; do not push.
 - **Live-proof receipt:**
   `dashboard-live-proof-receipt.md` in the session evidence directory.
-- **Landed implementation:** The reviewed implementation is ready for its
-  local-only commit on `feature/multi-cli-dreaming`.
+- **Landed implementation:** `771f6a8` (`Add private Dreaming monitoring
+  dashboard`) on `feature/multi-cli-dreaming`.
 - **Implemented candidate:** Data contracts, authenticated read-only server,
   five-section frontend, exact evidence and transcript views, evaluation
   portfolio aggregation, and installer lifecycle ownership.
@@ -70,8 +70,7 @@ Definition of Done" section, is met.
   in the behavior-validation proof. Authenticated health returned the matching
   activation generation, unauthorized requests failed closed, and the 427-file
   before-and-after manifests matched.
-- **Next action:** Commit the reviewed implementation locally, record the
-  landing commit here, and stop schedule `#12`.
+- **Next action:** None. Schedule `#12` may be stopped.
 
 ## Planned phases
 
