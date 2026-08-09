@@ -96,6 +96,42 @@ def validate_envelope(data: Any) -> dict[str, Any]:
         if item.get("evidence_kind") not in EVIDENCE_KINDS:
             raise EnvelopeError(f"evidence[{index}].evidence_kind is invalid")
         require_text(item.get("summary"), f"evidence[{index}].summary")
+        context = item.get("transcript_context")
+        if context is not None:
+            if not isinstance(context, dict) or set(context) != {
+                "schema_version",
+                "snapshot_sha256",
+                "source_revision",
+                "event_ids",
+            }:
+                raise EnvelopeError(
+                    f"evidence[{index}].transcript_context is invalid"
+                )
+            if context.get("schema_version") != 1:
+                raise EnvelopeError(
+                    f"evidence[{index}].transcript_context schema is invalid"
+                )
+            snapshot_sha = context.get("snapshot_sha256")
+            if not isinstance(snapshot_sha, str) or not SHA256_RE.fullmatch(
+                snapshot_sha
+            ):
+                raise EnvelopeError(
+                    f"evidence[{index}].transcript_context snapshot is invalid"
+                )
+            require_text(
+                context.get("source_revision"),
+                f"evidence[{index}].transcript_context.source_revision",
+            )
+            event_ids = context.get("event_ids")
+            if (
+                not isinstance(event_ids, list)
+                or not 1 <= len(event_ids) <= 20
+                or len(event_ids) != len(set(event_ids))
+                or any(not isinstance(value, str) or not value for value in event_ids)
+            ):
+                raise EnvelopeError(
+                    f"evidence[{index}].transcript_context event_ids are invalid"
+                )
         route_fields = {
             "source",
             "source_revision",
@@ -299,6 +335,24 @@ def upsert(args: argparse.Namespace) -> dict[str, Any]:
                 "routing_reason": args.reason,
             }
         )
+    anchor_values = (
+        args.snapshot_sha256,
+        args.anchor_source_revision,
+        args.event_id,
+    )
+    if any(value not in (None, []) for value in anchor_values):
+        if (
+            args.snapshot_sha256 is None
+            or args.anchor_source_revision is None
+            or not args.event_id
+        ):
+            raise EnvelopeError("transcript context fields are incomplete")
+        item["transcript_context"] = {
+            "schema_version": 1,
+            "snapshot_sha256": args.snapshot_sha256,
+            "source_revision": args.anchor_source_revision,
+            "event_ids": args.event_id,
+        }
     path.parent.mkdir(parents=True, exist_ok=True)
     directory_fd = os.open(path.parent, os.O_RDONLY)
     try:
@@ -433,6 +487,9 @@ def build_parser() -> argparse.ArgumentParser:
     upsert_parser.add_argument("--transfer-route")
     upsert_parser.add_argument("--policy-version", type=int)
     upsert_parser.add_argument("--observed-at")
+    upsert_parser.add_argument("--snapshot-sha256")
+    upsert_parser.add_argument("--anchor-source-revision")
+    upsert_parser.add_argument("--event-id", action="append", default=[])
     evaluation_parser = subparsers.add_parser("set-evaluation")
     evaluation_parser.add_argument("file")
     evaluation_parser.add_argument("receipt")

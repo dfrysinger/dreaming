@@ -204,6 +204,7 @@ run_install() {
   SKILLS_STATE_DIR="$STATE" \
   SKILLS_LOCAL_ROOT="$SKILLS" \
   LAUNCHCTL_BIN="$FAKE_LAUNCHCTL" \
+  DREAMING_SKIP_DASHBOARD_HEALTH_CHECK=1 \
   DREAMING_SELFTEST_WAIT_SECS=10 \
     "$ROOT/scripts/install.sh" "$@"
 }
@@ -267,7 +268,9 @@ for plist in "$DEST"/com.fixture.dreaming.*.plist; do
     echo "standalone plist contains a vendor home" >&2
     exit 1
   }
-  grep -q "<key>DREAMING_ADAPTER_CONFIG</key><string>$ADAPTER_CONFIG</string>" "$plist"
+  if [[ "$plist" != *.dashboard.plist ]]; then
+    grep -q "<key>DREAMING_ADAPTER_CONFIG</key><string>$ADAPTER_CONFIG</string>" "$plist"
+  fi
 done
 [[ ! -e "$HOME_DIR/.copilot" && ! -e "$HOME_DIR/.claude" &&
    ! -e "$HOME_DIR/.codex" ]] || {

@@ -39,17 +39,39 @@ Definition of Done" section, is met.
 
 ## Execution baton
 
-- **Phase:** Implementing critical schema and boundary guards.
+- **Phase:** Definition of Done met; local landing in progress.
 - **Reviewed work order:** `docs/dreaming-dashboard-design.md`
 - **Lane:** Critical.
 - **Base design commit:** `e7e380a`
 - **Prototype:** `docs/prototypes/dreaming-dashboard.html`
 - **Push policy:** Local commits only; do not push.
-- **Live-proof receipt:** Not created.
-- **Landed implementation:** None.
-- **Next action:** Implement the pre-frontend security, read-only, snapshot
-  containment, display-name, evidence-anchor, and evaluation-history contracts
-  with their targeted tests before connecting the frontend to real state.
+- **Live-proof receipt:**
+  `dashboard-live-proof-receipt.md` in the session evidence directory.
+- **Landed implementation:** The reviewed implementation is ready for its
+  local-only commit on `feature/multi-cli-dreaming`.
+- **Implemented candidate:** Data contracts, authenticated read-only server,
+  five-section frontend, exact evidence and transcript views, evaluation
+  portfolio aggregation, and installer lifecycle ownership.
+- **Proof completed:** LaunchAgent health, every live browser route,
+  large-list pagination, historical evidence labels, exact anchored evidence,
+  transcript opening and Back restoration, negative authentication boundary,
+  hostile-content containment, stale-authority invalidation, protected-token
+  reinstall, visual captures, targeted closure suites, and the final
+  before-and-after read-only manifest.
+- **Activation:** Generation `20260809T060553Z-install-10475` passed the full
+  installed self-test with zero failures, verified publication to Claude,
+  Codex, and Copilot, and is enabled with one dashboard process listening only
+  on `127.0.0.1:47673`.
+- **Review:** Both reviewer families completed bounded closure with no
+  unresolved in-scope finding.
+- **Final systemic proof:** The installed reviewed tree served all five primary
+  sections plus skill detail and evidence with zero console errors; exact
+  evidence highlighting, transcript opening, and Back restoration are retained
+  in the behavior-validation proof. Authenticated health returned the matching
+  activation generation, unauthorized requests failed closed, and the 427-file
+  before-and-after manifests matched.
+- **Next action:** Commit the reviewed implementation locally, record the
+  landing commit here, and stop schedule `#12`.
 
 ## Planned phases
 

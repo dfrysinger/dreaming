@@ -22,10 +22,18 @@ paths = sorted(
 )
 for path in paths[keep:]:
     for current, directories, files in os.walk(path):
+        retained = []
         for name in directories:
-            os.chmod(Path(current) / name, 0o755)
+            child = Path(current) / name
+            if child.is_symlink():
+                continue
+            os.chmod(child, 0o755)
+            retained.append(name)
+        directories[:] = retained
         for name in files:
-            os.chmod(Path(current) / name, 0o644)
+            child = Path(current) / name
+            if not child.is_symlink():
+                os.chmod(child, 0o644)
     shutil.rmtree(path)
 PY
 }

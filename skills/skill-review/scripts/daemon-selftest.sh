@@ -116,7 +116,8 @@ fi
 for script in daemon-pass.sh daemon-run.sh daemon-lock.sh daemon-lock.py \
   dreaming-run.sh dreaming-state.py test-dreaming-daemon.sh \
   dreaming-core.py test-dreaming-core.sh dreaming-vendor-adapter.py \
-  test-vendor-adapters.sh \
+  test-vendor-adapters.sh dreaming-dashboard.py test-dreaming-dashboard.sh \
+  test-dreaming-dashboard-contracts.sh \
   evidence-envelope.py append-skill-evidence.sh mark-agent-created.sh \
   test-evidence-envelope.sh skill-evaluation.py run-skill-evaluation.sh \
   test-skill-evaluation.sh test-cross-cli-evaluation.sh \
@@ -167,6 +168,16 @@ if run_isolated_test "$SCRIPT_DIR/test-dreaming-core.sh" >>"$RESULT" 2>&1; then
   ok "deterministic standalone core checks"
 else
   bad "deterministic standalone core checks"
+fi
+if run_isolated_test "$SCRIPT_DIR/test-dreaming-dashboard-contracts.sh" >>"$RESULT" 2>&1; then
+  ok "deterministic dashboard contract checks"
+else
+  bad "deterministic dashboard contract checks"
+fi
+if run_isolated_test "$SCRIPT_DIR/test-dreaming-dashboard.sh" >>"$RESULT" 2>&1; then
+  ok "deterministic dashboard boundary and scale checks"
+else
+  bad "deterministic dashboard boundary and scale checks"
 fi
 if run_isolated_test "$SCRIPT_DIR/test-vendor-adapters.sh" >>"$RESULT" 2>&1; then
   ok "deterministic native adapter and CLI matrix checks"

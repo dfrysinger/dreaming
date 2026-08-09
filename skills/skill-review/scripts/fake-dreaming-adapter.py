@@ -196,6 +196,12 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
             )
             save(source_fixture, source_state)
         mode = state.get("mode", "success")
+        default_evidence = (
+            [snapshot["events"][0]["source_event_id"]]
+            if state.get("terminal_route", "discard") in {"skill", "support_file"}
+            and snapshot.get("events")
+            else []
+        )
         result = {
             "status": "ok" if mode == "success" else "failed",
             "mutation_started": state.get(
@@ -210,6 +216,10 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                 "routing_reason", "The bounded session contains no reusable lesson"
             ),
             "artifact": state.get("artifact"),
+            "evidence_event_ids": state.get(
+                "evidence_event_ids",
+                default_evidence,
+            ),
         }
         save(Path(args.result), result)
         emit({"ok": True, **result})

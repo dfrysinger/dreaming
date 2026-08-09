@@ -26,6 +26,8 @@ scripts/install.sh install    # materialize dependencies and load halted jobs
 scripts/install.sh selftest   # kickstart the loaded self-test job
 scripts/install.sh enable     # enable only after the current self-test passes
 scripts/install.sh status
+scripts/install.sh dashboard-url   # print the private fragment-token URL
+scripts/install.sh dashboard-open  # open the dashboard in the default browser
 scripts/install.sh uninstall
 scripts/install.sh rollback [backup-directory]  # restore backed-up jobs/hooks
 scripts/install.sh rollback-migration           # separately remove unchanged migrated copies
@@ -72,6 +74,12 @@ configured. A supported Claude or Codex hook can call
 - `DREAMING_ADAPTER_CONFIG`: generated complete desired-set configuration
 - `DREAMING_DEPS_DIR`: content-addressed shared dependency bundles
 - `DREAMING_CONFIG_FILE`: persisted selected-root configuration
+- `DREAMING_DASHBOARD_PORT`: private dashboard port; defaults to `47673`
+- `DREAMING_DASHBOARD_TOKEN_FILE`: protected dashboard bearer token
+
+The dashboard binds only to `127.0.0.1`. Its API requires the generated
+mode-`0600` bearer token; the browser receives the token through a URL fragment
+and removes it from the address after exact-origin session bootstrap.
 
 Set `DREAMING_MIGRATE_COPILOT=1` during installation to copy a clean existing
 Copilot-scoped skills repository and supported Dreaming state into neutral

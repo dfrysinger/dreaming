@@ -1,0 +1,40 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>__LABEL__</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/usr/bin/python3</string>
+    <string>__DREAMING_REPO_ROOT__/skills/skill-review/scripts/dreaming-dashboard.py</string>
+    <string>--host</string>
+    <string>__DREAMING_DASHBOARD_HOST__</string>
+    <string>--port</string>
+    <string>__DREAMING_DASHBOARD_PORT__</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+  <key>StandardOutPath</key>
+  <string>__HOME__/Library/Logs/Dreaming/dashboard.log</string>
+  <key>StandardErrorPath</key>
+  <string>__HOME__/Library/Logs/Dreaming/dashboard.log</string>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key><string>__HOME__</string>
+    <key>PATH</key><string>__HOME__/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+    <key>DREAMING_REPO_ROOT</key><string>__DREAMING_REPO_ROOT__</string>
+    <key>DREAMING_DATA_DIR</key><string>__DREAMING_DATA_DIR__</string>
+    <key>DREAMING_STATE_DIR</key><string>__DREAMING_STATE_DIR__</string>
+    <key>DREAMING_ORCHESTRATOR_STATE_DIR</key><string>__DREAMING_ORCHESTRATOR_STATE_DIR__</string>
+    <key>DREAMING_SKILLS_ROOT</key><string>__DREAMING_SKILLS_ROOT__</string>
+    <key>DREAMING_DASHBOARD_ASSETS</key><string>__DREAMING_DASHBOARD_ASSETS__</string>
+    <key>DREAMING_DASHBOARD_TOKEN_FILE</key><string>__DREAMING_DASHBOARD_TOKEN_FILE__</string>
+    <key>SKILLS_STATE_DIR</key><string>__SKILLS_STATE_DIR__</string>
+  </dict>
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>

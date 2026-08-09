@@ -284,7 +284,8 @@ if vendor == "codex" and "--output-last-message" in args:
         {"decision":"approve","summary":"independent fixture approval"}
         if "draft_review" in prompt
         else {"terminal_route":"discard","summary":"fixture",
-            "routing_reason":"no durable procedure","artifact":None}
+            "routing_reason":"no durable procedure","artifact":None,
+            "evidence_event_ids":[]}
     )
     target.write_text(json.dumps(payload))
     raise SystemExit()
@@ -294,7 +295,8 @@ if ("-p" in args or "--print" in args) and "plugin" not in args:
         {"decision":"approve","summary":"independent fixture approval"}
         if "draft_review" in prompt
         else {"terminal_route":"discard","summary":"fixture",
-            "routing_reason":"no durable procedure","artifact":None}
+            "routing_reason":"no durable procedure","artifact":None,
+            "evidence_event_ids":[]}
     )
     print(json.dumps({"result":payload}))
     raise SystemExit()
@@ -305,15 +307,24 @@ if "plugin" in args and ("marketplace" in args and "add" in args):
     values[:] = [value for value in values if value["name"] != manifest["name"]]
     values.append({"name": manifest["name"], "bundle": str(Path(bundle).resolve())})
 elif "skill" in args and "add" in args:
+    fail_bundle = os.environ.get("FAKE_COPILOT_FAIL_ADD_BUNDLE")
+    if args[-1] == fail_bundle and not state.get("copilot_fail_add_once"):
+        state["copilot_fail_add_once"] = True
+        state_path.write_text(json.dumps(state))
+        print("fixture Copilot add failure", file=sys.stderr)
+        raise SystemExit(1)
     values = state.setdefault("copilot_bundles", [])
     if args[-1] not in values:
         values.append(args[-1])
 elif "skill" in args and "list" in args:
-    print(json.dumps([
-      {"name": p.name, "path": str(p)}
-      for raw in state.get("copilot_bundles", [])
-      for p in Path(raw).iterdir() if (p/"SKILL.md").is_file()
-    ]))
+    rows = []
+    names = set()
+    for raw in state.get("copilot_bundles", []):
+        for path in Path(raw).iterdir():
+            if (path / "SKILL.md").is_file() and path.name not in names:
+                rows.append({"name": path.name, "path": str(path)})
+                names.add(path.name)
+    print(json.dumps(rows))
     raise SystemExit()
 elif "plugin" in args and ("install" in args or ("add" in args and "marketplace" not in args)):
     name = next(a.split("@")[0] for a in args if a.startswith("dreaming-learned-"))
@@ -444,6 +455,60 @@ print(json.dumps({"ok": True}))
                 [kind for kind in row if kind != "session_end"],
                 ["user_message", "assistant_message", "tool_call"],
             )
+
+    def test_claude_title_scan_is_bounded_and_malformed_lines_fall_back(self):
+        source = self.case / "claude/project"
+        transcript = source / "session.jsonl"
+        original = transcript.read_text()
+        transcript.write_text(
+            "".join(
+                json.dumps({
+                    "type": "system",
+                    "subtype": "fixture",
+                    "sessionId": "session",
+                    "uuid": f"padding-{index}",
+                    "text": "x" * 2048,
+                }) + "\n"
+                for index in range(256)
+            )
+            + json.dumps({"type": "ai-title", "title": "Too late"}) + "\n"
+            + original
+        )
+        page = self.run_adapter(
+            "claude",
+            "session-source",
+            "list",
+            "--floor",
+            "null",
+            "--ceiling",
+            "9999999999",
+            "--cursor",
+            "",
+            "--page-size",
+            "10",
+        )
+        self.assertEqual(len(page["items"]), 1)
+        self.assertNotIn("display_name", page["items"][0])
+        (source / "zzzz-malformed.jsonl").write_text("{malformed\n")
+        page = self.run_adapter(
+            "claude",
+            "session-source",
+            "list",
+            "--floor",
+            "null",
+            "--ceiling",
+            "9999999999",
+            "--cursor",
+            "",
+            "--page-size",
+            "10",
+        )
+        self.assertEqual(
+            [item["qualified_session_id"] for item in page["items"]],
+            ["claude:session"],
+        )
+        doctor = self.run_adapter("claude", "session-source", "doctor")
+        self.assertTrue(doctor["healthy"])
 
     def test_source_root_symlink_fails_closed(self):
         target = self.case / "real"
@@ -799,6 +864,124 @@ print(json.dumps({"ok": True}))
         repaired = json.loads(state_path.read_text())
         self.assertIn(str(final_bundle), repaired["copilot_bundles"])
 
+    def test_copilot_publication_restores_prior_bundle_when_replacement_fails(self):
+        paths = module.RuntimePaths(
+            state=self.case / "state",
+            data=self.case / "data",
+            skills=self.case / "skills",
+        )
+        skill = paths.skills / "learned"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: learned\ndescription: original\n---\n"
+        )
+        runtime = module.DreamingRuntime(paths, set())
+        original, original_id = runtime.materialize_bundle(paths.skills)
+        (skill / "SKILL.md").write_text(
+            "---\nname: learned\ndescription: replacement\n---\n"
+        )
+        replacement, replacement_id = runtime.materialize_bundle(paths.skills)
+        journal = self.case / "copilot-rollback-journal.json"
+        common = [
+            sys.executable,
+            str(adapter),
+            "--vendor",
+            "copilot",
+            "--role",
+            "skill-publisher",
+            "--ownership-journal",
+            str(journal),
+        ]
+        subprocess.run(
+            common
+            + [
+                "install",
+                "--bundle",
+                str(original),
+                "--bundle-id",
+                original_id,
+            ],
+            env=self.env,
+            check=True,
+            stdout=subprocess.PIPE,
+        )
+        failed_env = dict(self.env)
+        failed_env["FAKE_COPILOT_FAIL_ADD_BUNDLE"] = str(replacement)
+        result = subprocess.run(
+            common
+            + [
+                "install",
+                "--bundle",
+                str(replacement),
+                "--bundle-id",
+                replacement_id,
+            ],
+            env=failed_env,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        owned = json.loads(journal.read_text())["copilot"]
+        self.assertEqual(owned["bundle_id"], original_id)
+        state = json.loads(Path(self.env["FAKE_CLI_STATE"]).read_text())
+        self.assertEqual(state["copilot_bundles"], [str(original)])
+
+    def test_copilot_failed_replacement_does_not_restore_absent_superseded_bundles(self):
+        paths = module.RuntimePaths(
+            state=self.case / "state",
+            data=self.case / "data",
+            skills=self.case / "skills",
+        )
+        skill = paths.skills / "learned"
+        skill.mkdir(parents=True)
+        runtime = module.DreamingRuntime(paths, set())
+        bundles = []
+        for description in ("one", "two", "three", "four"):
+            (skill / "SKILL.md").write_text(
+                f"---\nname: learned\ndescription: {description}\n---\n"
+            )
+            bundles.append(runtime.materialize_bundle(paths.skills))
+        journal = self.case / "copilot-multigeneration-rollback.json"
+        common = [
+            sys.executable,
+            str(adapter),
+            "--vendor",
+            "copilot",
+            "--role",
+            "skill-publisher",
+            "--ownership-journal",
+            str(journal),
+        ]
+        for bundle, bundle_id in bundles[:3]:
+            subprocess.run(
+                common
+                + ["install", "--bundle", str(bundle), "--bundle-id", bundle_id],
+                env=self.env,
+                check=True,
+                stdout=subprocess.PIPE,
+            )
+        before = json.loads(Path(self.env["FAKE_CLI_STATE"]).read_text())
+        self.assertEqual(before["copilot_bundles"], [str(bundles[2][0])])
+        failed_env = dict(self.env)
+        failed_env["FAKE_COPILOT_FAIL_ADD_BUNDLE"] = str(bundles[3][0])
+        result = subprocess.run(
+            common
+            + [
+                "install",
+                "--bundle",
+                str(bundles[3][0]),
+                "--bundle-id",
+                bundles[3][1],
+            ],
+            env=failed_env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        after = json.loads(Path(self.env["FAKE_CLI_STATE"]).read_text())
+        self.assertEqual(after["copilot_bundles"], [str(bundles[2][0])])
+
     def test_non_copilot_publishers_require_exact_native_identity(self):
         paths = module.RuntimePaths(
             state=self.case / "state",
@@ -951,6 +1134,7 @@ print(json.dumps({"ok": True}))
                 selected = " ".join(vendors)
                 environment = {
                     **self.env,
+                    "FAKE_CLI_STATE": str(case / "cli-state.json"),
                     "DREAMING_SESSION_SOURCES": selected,
                     "DREAMING_REVIEW_EXECUTORS": selected,
                     "DREAMING_SKILL_TARGETS": selected,

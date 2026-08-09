@@ -1132,6 +1132,28 @@ def v2_latest_waiver_path(skill_dir: Path) -> Path:
     return v2_evaluation_dir() / "latest-waiver" / f"{latest_key(str(skill_dir))}.json"
 
 
+def v2_portfolio_receipt_path(receipt_sha256: str) -> Path:
+    return v2_evaluation_dir() / "dashboard-v1" / "portfolio" / f"{receipt_sha256}.json"
+
+
+def v2_portfolio_pointer_path(aggregate_sha256: str) -> Path:
+    return (
+        v2_evaluation_dir()
+        / "dashboard-v1"
+        / "portfolio-by-aggregate"
+        / f"{aggregate_sha256}.json"
+    )
+
+
+def v2_transition_dir(skill_dir: Path) -> Path:
+    return (
+        v2_evaluation_dir()
+        / "dashboard-v1"
+        / "authority-transitions"
+        / latest_key(str(skill_dir))
+    )
+
+
 def identity_with(field: str, value: dict[str, Any]) -> str:
     return f"sha256:{digest(canonical({key: item for key, item in value.items() if key != field}))}"
 
@@ -2338,6 +2360,159 @@ def write_certification_aggregate(
     return validated, path, receipt_sha
 
 
+def write_portfolio_receipt(
+    skill_dir: Path,
+    verified: dict[str, Any],
+    suite: dict[str, Any],
+    aggregate: dict[str, Any],
+    aggregate_sha: str,
+) -> tuple[dict[str, Any], str]:
+    cases: list[dict[str, Any]] = []
+    intended = {
+        item["id"]
+        for item in suite["cases"]
+        if item.get("class") == "intended"
+    }
+    executor_names = [
+        item["name"]
+        for item in (
+            verified["policy"]["required_executors"]
+            + verified["policy"]["advisory_executors"]
+        )
+    ]
+    for executor in executor_names:
+        for case_id in sorted(intended):
+            rows = [
+                item
+                for item in verified["records"]
+                if item.get("executor") == executor
+                and item.get("case_id") == case_id
+            ]
+            candidate = [
+                item for item in rows if item.get("treatment") == "candidate"
+            ]
+            control = [item for item in rows if item.get("treatment") == "control"]
+            invalid = any(
+                item.get("status") in {"invalid", "inconclusive"}
+                or item.get("infrastructure_error")
+                or item.get("cleanup_failed")
+                for item in rows
+            )
+            comparable = len(candidate) == 3 and len(control) == 3 and not invalid
+            cases.append(
+                {
+                    "executor": executor,
+                    "case_id": case_id,
+                    "evaluation_class": verified["policy"]["policy_kind"],
+                    "candidate_valid_trials": sum(
+                        item.get("status") in {"pass", "regression"}
+                        for item in candidate
+                    ),
+                    "candidate_successful_trials": sum(
+                        item.get("status") == "pass" for item in candidate
+                    ),
+                    "control_valid_trials": sum(
+                        item.get("status") in {"pass", "regression"}
+                        for item in control
+                    ),
+                    "control_successful_trials": sum(
+                        item.get("status") == "pass" for item in control
+                    ),
+                    "comparable": comparable,
+                    "exclusion_reason": None if comparable else "incomplete_pair",
+                }
+            )
+    receipt = {
+        "schema_version": 1,
+        "kind": "dashboard_portfolio_receipt",
+        "skill_key": latest_key(str(skill_dir)),
+        "candidate_id": verified["candidate_id"],
+        "suite_id": verified["suite_id"],
+        "policy_id": verified["policy_id"],
+        "status": aggregate["status"],
+        "aggregate_receipt_sha256": aggregate_sha,
+        "aggregate_id": aggregate["aggregate_id"],
+        "cases": cases,
+    }
+    receipt["portfolio_id"] = identity_with("portfolio_id", receipt)
+    receipt_sha = digest(canonical(receipt))
+    path = v2_portfolio_receipt_path(receipt_sha)
+    if path.exists() and canonical(load_json(path)) != canonical(receipt):
+        raise EvaluationError("dashboard portfolio receipt collision")
+    if not path.exists():
+        atomic_write(path, receipt)
+    pointer = {
+        "schema_version": 1,
+        "aggregate_receipt_sha256": aggregate_sha,
+        "portfolio_receipt_sha256": receipt_sha,
+        "portfolio_id": receipt["portfolio_id"],
+    }
+    pointer_path = v2_portfolio_pointer_path(aggregate_sha)
+    if pointer_path.exists() and load_json(pointer_path) != pointer:
+        raise EvaluationError("dashboard portfolio pointer collision")
+    if not pointer_path.exists():
+        atomic_write(pointer_path, pointer)
+    return receipt, receipt_sha
+
+
+def load_portfolio_for_aggregate(aggregate_sha: str) -> tuple[dict[str, Any], str]:
+    pointer = load_json(v2_portfolio_pointer_path(aggregate_sha))
+    if pointer.get("aggregate_receipt_sha256") != aggregate_sha:
+        raise EvaluationError("portfolio pointer aggregate does not match")
+    receipt_sha = require_text(
+        pointer.get("portfolio_receipt_sha256"),
+        "portfolio pointer receipt digest",
+    )
+    receipt = load_json(v2_portfolio_receipt_path(receipt_sha))
+    if digest(canonical(receipt)) != receipt_sha:
+        raise EvaluationError("portfolio receipt digest does not match")
+    if (
+        receipt.get("aggregate_receipt_sha256") != aggregate_sha
+        or receipt.get("portfolio_id") != identity_with("portfolio_id", receipt)
+        or pointer.get("portfolio_id") != receipt.get("portfolio_id")
+    ):
+        raise EvaluationError("portfolio receipt identity does not match")
+    return receipt, receipt_sha
+
+
+def write_authority_transition(
+    skill_dir: Path,
+    candidate_id: str,
+    status: str,
+    authority_sha: str | None,
+    aggregate_sha: str | None,
+    portfolio_sha: str | None,
+) -> dict[str, Any]:
+    if status not in {"pass", "regression", "inconclusive", "revoked"}:
+        raise EvaluationError("authority transition status is invalid")
+    if status == "pass" and not all((authority_sha, aggregate_sha, portfolio_sha)):
+        raise EvaluationError("pass transition requires complete authority evidence")
+    if status in {"regression", "inconclusive"} and (
+        authority_sha is not None or not aggregate_sha or not portfolio_sha
+    ):
+        raise EvaluationError("non-passing transition evidence is invalid")
+    if status == "revoked" and authority_sha is not None:
+        raise EvaluationError("revoked transition cannot retain authority")
+    transition = {
+        "schema_version": 1,
+        "kind": "dashboard_authority_transition",
+        "effective_at": now_iso(),
+        "skill_key": latest_key(str(skill_dir)),
+        "candidate_id": candidate_id,
+        "status": status,
+        "authority_sha256": authority_sha,
+        "aggregate_receipt_sha256": aggregate_sha,
+        "portfolio_receipt_sha256": portfolio_sha,
+    }
+    transition["transition_id"] = identity_with("transition_id", transition)
+    path = v2_transition_dir(skill_dir) / f"{transition['transition_id'].removeprefix('sha256:')}.json"
+    if path.exists() and canonical(load_json(path)) != canonical(transition):
+        raise EvaluationError("authority transition collision")
+    if not path.exists():
+        atomic_write(path, transition)
+    return transition
+
+
 def v2_result_certify(args: argparse.Namespace) -> dict[str, Any]:
     skill_dir = Path(args.skill_dir).resolve()
     verified = verify_result_independently(
@@ -2382,16 +2557,38 @@ def v2_result_certify(args: argparse.Namespace) -> dict[str, Any]:
                     verified["run_id"],
                 )
             )
+    suite = load_suite(
+        Path(args.suite).resolve() if args.suite else skill_dir / CASE_FILE
+    )[0]
     aggregate, path, receipt_sha = write_certification_aggregate(
         skill_dir,
         verified["candidate_id"],
         verified["candidate_inventory"],
-        load_suite(Path(args.suite).resolve() if args.suite else skill_dir / CASE_FILE)[0],
+        suite,
         verified["suite_id"],
         verified["policy_id"],
         policy,
         certificates,
     )
+    _, portfolio_sha = write_portfolio_receipt(
+        skill_dir,
+        verified,
+        suite,
+        aggregate,
+        receipt_sha,
+    )
+    if policy["profile"] == "gate" and aggregate["status"] in {
+        "regression",
+        "inconclusive",
+    }:
+        write_authority_transition(
+            skill_dir,
+            verified["candidate_id"],
+            aggregate["status"],
+            None,
+            receipt_sha,
+            portfolio_sha,
+        )
     if policy["profile"] == "gate" and aggregate["status"] == "pass":
         certification = {
             "schema_version": 1,
@@ -2688,6 +2885,15 @@ def v2_authority_write(args: argparse.Namespace) -> dict[str, Any]:
     authority_path = v2_authority_path(skill_dir, candidate)
     atomic_write(authority_path, authority)
     authority_sha = digest(canonical(authority))
+    _, portfolio_sha = load_portfolio_for_aggregate(aggregate_sha)
+    write_authority_transition(
+        skill_dir,
+        candidate,
+        "pass",
+        authority_sha,
+        aggregate_sha,
+        portfolio_sha,
+    )
     atomic_write(
         v2_evaluation_dir() / "latest" / f"{latest_key(str(skill_dir))}.json",
         {
@@ -2704,6 +2910,7 @@ def v2_authority_write(args: argparse.Namespace) -> dict[str, Any]:
         "authority_sha256": authority_sha,
         "aggregate_receipt": str(aggregate_path),
         "aggregate_receipt_sha256": aggregate_sha,
+        "portfolio_receipt_sha256": portfolio_sha,
     }
 
 

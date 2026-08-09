@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import unicodedata
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -253,6 +254,21 @@ def bounded_text(value: Any, limit: int) -> tuple[str, bool]:
     return encoded[:limit].decode("utf-8", errors="ignore"), True
 
 
+def display_name(value: Any, limit: int = 160) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = unicodedata.normalize("NFC", value)
+    cleaned = " ".join(
+        "".join(" " if unicodedata.category(char).startswith("C") else char for char in normalized).split()
+    )
+    if not cleaned:
+        return None
+    encoded = cleaned.encode("utf-8")
+    if len(encoded) > limit:
+        cleaned = encoded[:limit].decode("utf-8", errors="ignore").rstrip()
+    return cleaned or None
+
+
 def normalized_event(
     source: str,
     native_id: str,
@@ -355,7 +371,7 @@ class NativeSource:
             }
         )
         native_id = record["native_session_id"]
-        return {
+        identity = {
             "source": self.vendor,
             "native_session_id": native_id,
             "qualified_session_id": f"{self.vendor}:{native_id}",
@@ -369,6 +385,10 @@ class NativeSource:
             "adapter_version": SUPPORTED_SOURCE_VERSIONS[self.vendor],
             "features": self._features(events),
         }
+        name = display_name(record.get("display_name"))
+        if name is not None:
+            identity["display_name"] = name
+        return identity
 
     def find(self, qualified_id: str) -> dict[str, Any]:
         prefix = f"{self.vendor}:"
@@ -425,6 +445,7 @@ class NativeSource:
             if not events_path.is_file():
                 continue
             cwd = ""
+            title = None
             workspace = directory / "workspace.yaml"
             if workspace.is_symlink():
                 raise AdapterError("source-path-symlink", str(workspace))
@@ -433,7 +454,8 @@ class NativeSource:
                     for line in workspace.read_text(encoding="utf-8").splitlines():
                         if line.startswith("cwd:"):
                             cwd = line.split(":", 1)[1].strip()
-                            break
+                        elif line.startswith(("title:", "summary:")) and title is None:
+                            title = line.split(":", 1)[1].strip().strip("'\"")
                 except OSError as error:
                     raise AdapterError("source-unavailable", str(workspace)) from error
             stat = events_path.stat()
@@ -442,6 +464,7 @@ class NativeSource:
                     "native_session_id": directory.name,
                     "path": str(events_path),
                     "cwd": cwd,
+                    "display_name": title,
                     "started_at": stat.st_ctime,
                     "updated_at": stat.st_mtime,
                     "order_time": stat.st_mtime,
@@ -507,11 +530,29 @@ class NativeSource:
             strict_file(path, self.root)
             native_id = path.stem
             stat = path.stat()
+            title = None
+            try:
+                with path.open(encoding="utf-8") as handle:
+                    scanned_bytes = 0
+                    for index, raw in enumerate(handle):
+                        scanned_bytes += len(raw.encode("utf-8"))
+                        if index >= 255 or scanned_bytes > 256 * 1024:
+                            break
+                        try:
+                            item = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        if isinstance(item, dict) and item.get("type") == "ai-title":
+                            title = item.get("title", item.get("text"))
+                            break
+            except OSError:
+                title = None
             records.append(
                 {
                     "native_session_id": native_id,
                     "path": str(path),
                     "cwd": path.parent.name,
+                    "display_name": title,
                     "started_at": stat.st_ctime,
                     "updated_at": stat.st_mtime,
                     "order_time": stat.st_mtime,
@@ -654,14 +695,20 @@ class NativeSource:
     def _codex_records(self) -> list[dict[str, Any]]:
         connection = self._codex_connection()
         try:
+            columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(threads)")
+            }
+            title_select = ", title" if "title" in columns else ", NULL"
             rows = connection.execute(
-                "SELECT id, rollout_path, created_at, updated_at, cwd FROM threads "
+                "SELECT id, rollout_path, created_at, updated_at, cwd"
+                + title_select
+                + " FROM threads "
                 "WHERE has_user_event = 1 ORDER BY updated_at, id"
             ).fetchall()
         finally:
             connection.close()
         records: list[dict[str, Any]] = []
-        for native_id, rollout, created, updated, cwd in rows:
+        for native_id, rollout, created, updated, cwd, title in rows:
             path = Path(rollout).expanduser()
             if path.is_symlink() or not path.is_file():
                 raise AdapterError("session-missing", str(path))
@@ -676,6 +723,7 @@ class NativeSource:
                     "native_session_id": str(native_id),
                     "path": str(resolved),
                     "cwd": str(cwd),
+                    "display_name": title,
                     "started_at": int(created),
                     "updated_at": int(updated),
                     "order_time": int(updated),
@@ -777,8 +825,20 @@ def source_command(args: argparse.Namespace) -> None:
     )
     if args.command == "doctor":
         records = source.records()
-        if records:
-            source.identity(records[-1])
+        last_error = None
+        for record in reversed(records):
+            try:
+                source.identity(record)
+                last_error = None
+                break
+            except AdapterError as error:
+                last_error = error
+            except json.JSONDecodeError as error:
+                last_error = AdapterError(
+                    "unsupported-source-schema", str(record.get("path", ""))
+                )
+        if records and last_error is not None:
+            raise last_error
         emit({"ok": True, "healthy": True, "source": args.vendor})
     records = source.records()
     if args.command == "watermark":
@@ -804,7 +864,11 @@ def source_command(args: argparse.Namespace) -> None:
         page: list[dict[str, Any]] = []
         next_index = start
         while next_index < len(eligible) and len(page) < args.page_size:
-            identity = source.identity(eligible[next_index])
+            try:
+                identity = source.identity(eligible[next_index])
+            except (AdapterError, json.JSONDecodeError):
+                next_index += 1
+                continue
             next_index += 1
             if not identity["features"]["daemon_origin"]:
                 page.append(identity)
@@ -1498,12 +1562,18 @@ def review_result_schema() -> dict[str, Any]:
             "summary": {"type": "string"},
             "routing_reason": {"type": "string"},
             "artifact": artifact,
+            "evidence_event_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 20,
+            },
         },
         "required": [
             "terminal_route",
             "summary",
             "routing_reason",
             "artifact",
+            "evidence_event_ids",
         ],
         "additionalProperties": False,
     }
@@ -1543,6 +1613,9 @@ def review_prompt(snapshot: dict[str, Any]) -> str:
             "source-specific paths in durable content. Scope guarantees to what "
             "the snapshot actually proves; do not turn a precondition check "
             "into an unsupported atomicity or recovery claim."
+            " For skill and support-file outcomes, cite the exact supporting "
+            "snapshot source_event_id values in evidence_event_ids. For every "
+            "other outcome, return an empty evidence_event_ids array."
         ),
         "policy": {
             "reuse_order": [
@@ -1749,6 +1822,8 @@ def executor_run(args: argparse.Namespace) -> None:
             raise AdapterError("malformed-executor-result", field)
     if "artifact" not in model_result:
         raise AdapterError("malformed-executor-result", "artifact")
+    if not isinstance(model_result.get("evidence_event_ids"), list):
+        raise AdapterError("malformed-executor-result", "evidence_event_ids")
     final = {
         "status": "ok",
         "mutation_started": False,
@@ -1757,6 +1832,7 @@ def executor_run(args: argparse.Namespace) -> None:
         "summary": model_result["summary"],
         "routing_reason": model_result["routing_reason"],
         "artifact": model_result["artifact"],
+        "evidence_event_ids": model_result["evidence_event_ids"],
     }
     atomic_json(Path(args.result), final)
     emit({"ok": True, **final})
@@ -3374,9 +3450,23 @@ def superseded_descriptors(row: dict[str, Any]) -> list[dict[str, Any]]:
     return result
 
 
-def remove_if_present(vendor: str, descriptor: dict[str, Any]) -> None:
-    if inventory_contains(vendor, inventory_json(vendor), descriptor):
+def remove_if_present(vendor: str, descriptor: dict[str, Any]) -> bool:
+    inventory = inventory_json(vendor)
+    if vendor == "copilot":
+        bundle = str(Path(descriptor["bundle"]).resolve())
+        present = any(
+            isinstance(item, dict)
+            and str(Path(item.get("path", "")).resolve()).startswith(
+                bundle + os.sep
+            )
+            for item in inventory
+        )
+    else:
+        present = inventory_contains(vendor, inventory, descriptor)
+    if present:
         remove_native_registration(vendor, descriptor)
+        return True
+    return False
 
 
 def publisher_install(args: argparse.Namespace) -> None:
@@ -3392,7 +3482,20 @@ def publisher_install(args: argparse.Namespace) -> None:
     descriptor = publication_descriptor(args.vendor, bundle, args.bundle_id)
     binary = executable(args.vendor)
     if args.vendor == "copilot":
-        run_native([binary, "skill", "add", str(bundle)])
+        prior = (
+            [*superseded_descriptors(existing), dict(existing)]
+            if isinstance(existing, dict)
+            else []
+        )
+        removed = [
+            item for item in prior if remove_if_present(args.vendor, item)
+        ]
+        try:
+            run_native([binary, "skill", "add", str(bundle)])
+        except AdapterError:
+            for item in removed:
+                run_native([binary, "skill", "add", item["bundle"]])
+            raise
     elif args.vendor == "claude":
         run_native([binary, "plugin", "marketplace", "add", str(bundle)])
         run_native(

@@ -690,9 +690,12 @@ class DreamingRuntime:
         calculated = digest(events)
         if calculated != inspected["snapshot_digest"]:
             raise RuntimeFailure("snapshot-digest-mismatch", qualified_session_id)
+        snapshot_identity = {
+            key: value for key, value in inspected.items() if key != "display_name"
+        }
         snapshot = {
             "contract_version": CONTRACT_VERSION,
-            "identity": inspected,
+            "identity": snapshot_identity,
             "events": events,
             "truncated": bool(rendered.get("truncated", False)),
             "route": {
@@ -731,11 +734,17 @@ class DreamingRuntime:
                     "malformed-executor-result", f"{field} is too large"
                 )
         artifact = result.get("artifact")
+        evidence_event_ids = result.get("evidence_event_ids")
         if destination in {"discard", "instruction", "factual_memory"}:
             if artifact is not None:
                 raise RuntimeFailure(
                     "malformed-executor-result",
                     f"{destination} must not include an artifact",
+                )
+            if evidence_event_ids not in (None, []):
+                raise RuntimeFailure(
+                    "malformed-executor-result",
+                    f"{destination} must not cite evidence events",
                 )
             return result
         if not isinstance(artifact, dict):
@@ -858,7 +867,69 @@ class DreamingRuntime:
                 "malformed-executor-result",
                 "support_file operation requires at least one support file",
             )
+        if not isinstance(evidence_event_ids, list):
+            raise RuntimeFailure(
+                "evidence-anchor-invalid", "evidence_event_ids must be a list"
+            )
+        if any(not isinstance(item, str) or not item for item in evidence_event_ids):
+            raise RuntimeFailure(
+                "evidence-anchor-invalid",
+                "evidence_event_ids must contain strings",
+            )
+        if (
+            not evidence_event_ids
+            or len(evidence_event_ids) > 20
+            or len(evidence_event_ids) != len(set(evidence_event_ids))
+        ):
+            raise RuntimeFailure(
+                "evidence-anchor-invalid",
+                "artifact outcomes require 1 to 20 unique evidence event IDs",
+            )
         return result
+
+    def _validated_evidence_context(
+        self,
+        result: dict[str, Any],
+        snapshot_path: Path,
+        reviewed_identity: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if result["terminal_route"] not in {"skill", "support_file"}:
+            return None
+        snapshot = read_json(snapshot_path, {})
+        events = snapshot.get("events")
+        if not isinstance(events, list):
+            raise RuntimeFailure("evidence-anchor-invalid", "snapshot events missing")
+        available = {
+            item.get("source_event_id"): index
+            for index, item in enumerate(events)
+            if isinstance(item, dict)
+            and isinstance(item.get("source_event_id"), str)
+        }
+        requested = result["evidence_event_ids"]
+        if any(item not in available for item in requested):
+            raise RuntimeFailure(
+                "evidence-anchor-invalid", "cited event is absent from snapshot"
+            )
+        ordered = sorted(requested, key=lambda item: available[item])
+        if ordered != requested:
+            raise RuntimeFailure(
+                "evidence-anchor-invalid", "cited events are not in snapshot order"
+            )
+        snapshot_sha256 = snapshot_path.stem
+        if not re.fullmatch(r"[0-9a-f]{64}", snapshot_sha256):
+            raise RuntimeFailure(
+                "evidence-anchor-invalid", "snapshot filename is not content addressed"
+            )
+        if digest(snapshot).removeprefix("sha256:") != snapshot_sha256:
+            raise RuntimeFailure(
+                "evidence-anchor-invalid", "snapshot object digest does not match path"
+            )
+        return {
+            "schema_version": 1,
+            "snapshot_sha256": snapshot_sha256,
+            "source_revision": reviewed_identity["source_revision"],
+            "event_ids": requested,
+        }
 
     def _validated_draft_review(self, result: dict[str, Any]) -> dict[str, Any]:
         if result.get("status") != "ok":
@@ -898,6 +969,7 @@ class DreamingRuntime:
                 "summary": result["summary"],
                 "routing_reason": result["routing_reason"],
                 "artifact": result["artifact"],
+                "evidence_event_ids": result["evidence_event_ids"],
             },
         }
         packet_digest = digest(packet)
@@ -965,22 +1037,25 @@ class DreamingRuntime:
             raise RuntimeFailure(
                 "review-evidence-invalid", str(self.paths.review_evidence)
             )
-        records.append(
-            {
-                "session_id": reviewed_identity["qualified_session_id"],
-                "source": source_name,
-                "source_revision": reviewed_identity["source_revision"],
-                "review_executor": executor_id,
-                "transfer_route": f"{source_name}>{executor_id}",
-                "policy_version": self.policy_version,
-                "destination": result["terminal_route"],
-                "summary": result["summary"],
-                "routing_reason": result["routing_reason"],
-                "draft_reviews": result.get("draft_reviews", []),
-                "artifact_commit": artifact_commit,
-                "observed_at": self.now(),
-            }
-        )
+        record = {
+            "session_id": reviewed_identity["qualified_session_id"],
+            "source": source_name,
+            "source_revision": reviewed_identity["source_revision"],
+            "review_executor": executor_id,
+            "transfer_route": f"{source_name}>{executor_id}",
+            "policy_version": self.policy_version,
+            "destination": result["terminal_route"],
+            "summary": result["summary"],
+            "routing_reason": result["routing_reason"],
+            "draft_reviews": result.get("draft_reviews", []),
+            "artifact_commit": artifact_commit,
+            "observed_at": self.now(),
+        }
+        if isinstance(reviewed_identity.get("display_name"), str):
+            record["display_name"] = reviewed_identity["display_name"]
+        if isinstance(result.get("transcript_context"), dict):
+            record["transcript_context"] = result["transcript_context"]
+        records.append(record)
         self._write(self.paths.review_evidence, records)
 
     def _git(self, *arguments: str, check: bool = True) -> subprocess.CompletedProcess[str]:
@@ -1122,6 +1197,18 @@ class DreamingRuntime:
                 "--policy-version",
                 str(self.policy_version),
             ]
+            context = result.get("transcript_context")
+            if isinstance(context, dict):
+                command.extend(
+                    [
+                        "--snapshot-sha256",
+                        context["snapshot_sha256"],
+                        "--anchor-source-revision",
+                        context["source_revision"],
+                    ]
+                )
+                for event_id in context["event_ids"]:
+                    command.extend(["--event-id", event_id])
             try:
                 subprocess.run(
                     command,
@@ -1254,6 +1341,7 @@ class DreamingRuntime:
         last_failure: RuntimeFailure | None = None
         for executor_id, executor in allowed:
             mutation_started = False
+            attempt_started_at = self.now()
             try:
                 doctor = executor.call("doctor")
                 if not doctor.get("healthy") or not doctor.get("boundary_ready"):
@@ -1289,7 +1377,7 @@ class DreamingRuntime:
                         "source_revision": reviewed_identity["source_revision"],
                         "executor": executor_id,
                         "result_path": str(result_path),
-                        "started_at": self.now(),
+                        "started_at": attempt_started_at,
                     },
                 )
                 try:
@@ -1316,6 +1404,11 @@ class DreamingRuntime:
                     )
                     raise RuntimeFailure("result-channel-mismatch", executor_id)
                 result = self._validated_review_result(result)
+                result["transcript_context"] = self._validated_evidence_context(
+                    result,
+                    snapshot_path,
+                    reviewed_identity,
+                )
                 attempt = {
                     "session_id": qualified_session_id,
                     "source": source_name,
@@ -1325,6 +1418,7 @@ class DreamingRuntime:
                     "status": result.get("status"),
                     "terminal_route": result.get("terminal_route"),
                     "mutation_started": False,
+                    "started_at": attempt_started_at,
                 }
                 attempts.append(attempt)
                 self._write(self.paths.attempts, attempts)
@@ -1399,6 +1493,11 @@ class DreamingRuntime:
                         "draft_reviews": result.get("draft_reviews", []),
                         "artifact_commit": artifact_commit,
                         "reviewed_at": self.now(),
+                        **(
+                            {"display_name": reviewed_identity["display_name"]}
+                            if isinstance(reviewed_identity.get("display_name"), str)
+                            else {}
+                        ),
                     }
                 )
                 self._write(self.paths.ledger, ledger)
@@ -1438,6 +1537,7 @@ class DreamingRuntime:
                             "status": "mutation-recovery-required",
                             "error": error.code,
                             "mutation_started": True,
+                            "started_at": attempt_started_at,
                         }
                     )
                     self._write(self.paths.attempts, attempts)
@@ -1456,9 +1556,28 @@ class DreamingRuntime:
                         "status": "failed-before-mutation",
                         "error": error.code,
                         "mutation_started": False,
+                        "source_revision": current["source_revision"],
+                        "started_at": attempt_started_at,
                     }
                 )
                 self._write(self.paths.attempts, attempts)
+                if error.code == "evidence-anchor-invalid":
+                    failures = sum(
+                        item.get("session_id") == qualified_session_id
+                        and item.get("source_revision") == current["source_revision"]
+                        and item.get("error") == "evidence-anchor-invalid"
+                        for item in attempts
+                    )
+                    if failures >= 3:
+                        self._mark_queue(
+                            qualified_session_id,
+                            current["source_revision"],
+                            "recovery-required",
+                        )
+                        raise RuntimeFailure(
+                            "evidence-anchor-recovery-required",
+                            qualified_session_id,
+                        )
         raise last_failure or RuntimeFailure("executor-failed", "all executors failed")
 
     def migrate_legacy(

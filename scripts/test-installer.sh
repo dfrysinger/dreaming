@@ -1,6 +1,12 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# The fixture owns its desired state; ambient installed-runtime values must not
+# turn generated adapter selections into an explicit external configuration.
+unset DREAMING_ADAPTER_CONFIG
+unset DREAMING_INSTALLER_CALLER_ADAPTER_CONFIG_EXPLICIT
+unset DREAMING_INSTALLER_CALLER_ADAPTER_DESIRED_STATE
+
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
 TEST_ROOT="$ROOT/.test-work"
 mkdir -p "$TEST_ROOT"
@@ -85,6 +91,7 @@ run_install() {
   SKILLS_LOCAL_ROOT="$LOCAL" \
   SKILLS_REPO_ROOT="$PUBLIC" \
   LAUNCHCTL_BIN="$FAKE" \
+  DREAMING_SKIP_DASHBOARD_HEALTH_CHECK="${DREAMING_SKIP_DASHBOARD_HEALTH_CHECK:-1}" \
   DREAMING_SELFTEST_WAIT_SECS=2 \
     "$INSTALLER" "$@"
 }
@@ -100,6 +107,7 @@ run_persisted() {
   SKILLS_STATE_DIR="$STATE" \
   SKILLS_LOCAL_ROOT="$LOCAL" \
   LAUNCHCTL_BIN="$FAKE" \
+  DREAMING_SKIP_DASHBOARD_HEALTH_CHECK="${DREAMING_SKIP_DASHBOARD_HEALTH_CHECK:-1}" \
   DREAMING_SELFTEST_WAIT_SECS=2 \
     "$INSTALLER" "$@"
 }
@@ -225,6 +233,16 @@ for kind in dreaming selftest watchdog; do
   grep -q "<key>DREAMING_ORCHESTRATOR_STATE_DIR</key><string>$STATE/dreaming</string>" "$plist"
   grep -q "<key>COPILOT_HOME</key><string>$TMP/copilot-home</string>" "$plist"
 done
+dashboard_plist="$DEST/com.fixture.dreaming.dashboard.plist"
+[[ -f "$dashboard_plist" ]] ||
+  { echo "install missed dashboard" >&2; exit 1; }
+grep -q "$ROOT/skills/skill-review/scripts/dreaming-dashboard.py" "$dashboard_plist"
+grep -q "<key>SKILLS_STATE_DIR</key><string>$STATE</string>" "$dashboard_plist"
+grep -q "<key>DREAMING_DASHBOARD_TOKEN_FILE</key>" "$dashboard_plist"
+dashboard_token="$TMP/dreaming-state/dashboard/access-token"
+[[ -f "$dashboard_token" && "$(stat -f '%Lp' "$dashboard_token")" == "600" ]] ||
+  { echo "install did not create a protected dashboard token" >&2; exit 1; }
+token_before="$(<"$dashboard_token")"
 [[ -d "$TMP/dreaming-skills/.git" ]] ||
   { echo "install did not initialize the neutral learned-skills root" >&2; exit 1; }
 [[ -z "$(git -C "$TMP/dreaming-skills" remote)" ]] ||
@@ -233,6 +251,24 @@ first_bootstrap="$(grep -n '^bootstrap ' "$LAUNCHCTL_LOG" | head -1 | cut -d: -f
 last_bootout="$(grep -n '^bootout ' "$LAUNCHCTL_LOG" | tail -1 | cut -d: -f1)"
 (( first_bootstrap > last_bootout )) ||
   { echo "install bootstrapped before prepare bootouts completed" >&2; exit 1; }
+run_install install >/dev/null
+[[ "$(<"$dashboard_token")" == "$token_before" ]] ||
+  { echo "reinstall rotated the dashboard token" >&2; exit 1; }
+dashboard_url="$(run_install dashboard-url)"
+[[ "$dashboard_url" == "http://127.0.0.1:47673/#access_token=$token_before" ]] ||
+  { echo "dashboard URL does not use fragment bootstrap" >&2; exit 1; }
+if DREAMING_DASHBOARD_HOST=localhost run_install status \
+    >"$TMP/non-loopback.out" 2>"$TMP/non-loopback.err"; then
+  echo "installer accepted a non-loopback dashboard host" >&2
+  exit 1
+fi
+grep -q "DREAMING_DASHBOARD_HOST must be 127.0.0.1" "$TMP/non-loopback.err"
+[[ "$(<"$dashboard_token")" == "$token_before" ]] ||
+  { echo "invalid dashboard host changed the dashboard token" >&2; exit 1; }
+status_output="$(run_install status)"
+grep -q '^dashboard_url=http://127.0.0.1:47673/$' <<<"$status_output"
+grep -q '^dashboard_token=ready$' <<<"$status_output"
+echo "PASS  installer owns one dashboard job and preserves its protected fragment token"
 [[ "$(<"$STATE/dreaming/latest-migration-backup")" == "$BACKUP" ]] ||
   { echo "install changed exact rollback pointer" >&2; exit 1; }
 if run_install enable >"$TMP/enable.out" 2>"$TMP/enable.err"; then
@@ -250,6 +286,15 @@ grep -q "activation generation changed while selftest was running" \
 [[ ! -e "$STATE/dreaming/selftest-passed-generation" ]] ||
   { echo "raced selftest recorded a passing generation" >&2; exit 1; }
 printf '%s\n' "$generation" > "$STATE/dreaming/activation-generation"
+if DREAMING_SKIP_DASHBOARD_HEALTH_CHECK=0 \
+    DREAMING_DASHBOARD_HEALTH_WAIT_SECS=0.1 \
+    DREAMING_DASHBOARD_PORT=1 \
+    run_install selftest >"$TMP/failed-health.out" 2>"$TMP/failed-health.err"; then
+  echo "selftest accepted a failed dashboard health check" >&2
+  exit 1
+fi
+[[ ! -e "$STATE/dreaming/selftest-passed-generation" ]] ||
+  { echo "failed dashboard health recorded a passing generation" >&2; exit 1; }
 run_install selftest >/dev/null
 run_install enable >/dev/null
 [[ ! -e "$STATE/skill-review/disable-daemon" ]] ||
@@ -481,7 +526,9 @@ if run_install enable >"$TMP/enable.out" 2>"$TMP/enable.err"; then
   echo "rollback enabled before restored selftest" >&2
   exit 1
 fi
-run_install selftest >/dev/null
+[[ ! -e "$DEST/com.fixture.dreaming.dashboard.plist" ]] ||
+  { echo "rollback restored a dashboard absent from its backup" >&2; exit 1; }
+DREAMING_SKIP_DASHBOARD_HEALTH_CHECK=0 run_install selftest >/dev/null
 run_install enable >/dev/null
 [[ ! -e "$INSTRUCTIONS" ]] ||
   { echo "rollback retained the managed Copilot instruction" >&2; exit 1; }
@@ -562,7 +609,7 @@ grep -q '"ok": false' "$TMP/uninstall.err"
 grep -q "publication residuals remain" "$TMP/uninstall.out"
 grep -q "post-install user edit" "$INSTRUCTIONS" ||
   { echo "full uninstall removed a modified managed instruction" >&2; exit 1; }
-for kind in dreaming selftest watchdog; do
+for kind in dreaming selftest watchdog dashboard; do
   [[ ! -e "$DEST/com.fixture.dreaming.$kind.plist" ]] ||
     { echo "full uninstall retained LaunchAgent $kind" >&2; exit 1; }
 done

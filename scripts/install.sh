@@ -82,6 +82,18 @@ DREAMING_ADAPTER_CONFIG="${REQUESTED_ADAPTER_CONFIG:-${DREAMING_ADAPTER_CONFIG:-
 DREAMING_ENABLE_COPILOT_COMPAT="${REQUESTED_COPILOT_COMPAT:-${DREAMING_ENABLE_COPILOT_COMPAT:-1}}"
 DREAMING_REPO_ROOT="${REQUESTED_REPO_ROOT:-${DREAMING_REPO_ROOT:-$DEFAULT_REPO_ROOT}}"
 DREAMING_RECEIPT_FILE="${REQUESTED_RECEIPT_FILE:-${DREAMING_RECEIPT_FILE:-}}"
+DREAMING_DASHBOARD_HOST="${DREAMING_DASHBOARD_HOST:-127.0.0.1}"
+DREAMING_DASHBOARD_PORT="${DREAMING_DASHBOARD_PORT:-47673}"
+[[ "$DREAMING_DASHBOARD_HOST" == "127.0.0.1" ]] || {
+  echo "DREAMING_DASHBOARD_HOST must be 127.0.0.1" >&2
+  exit 2
+}
+[[ "$DREAMING_DASHBOARD_PORT" =~ ^[0-9]+$ ]] &&
+  (( 10#$DREAMING_DASHBOARD_PORT >= 1 &&
+     10#$DREAMING_DASHBOARD_PORT <= 65535 )) || {
+  echo "DREAMING_DASHBOARD_PORT must be an integer from 1 through 65535" >&2
+  exit 2
+}
 if [[ -n "${DREAMING_RECEIPT_FILE:-}" ]]; then
   export DREAMING_RECEIPT_FILE
 else
@@ -116,6 +128,7 @@ export_runtime_env() {
   export DREAMING_SHARED_BUNDLE_ID DREAMING_SHARED_SOURCE_KIND
   export DREAMING_SHARED_PROTOCOL DREAMING_SHARED_REVISION
   export DREAMING_ORCHESTRATOR_STATE_DIR
+  export DREAMING_DASHBOARD_HOST DREAMING_DASHBOARD_PORT
   export SKILLS_REPO_ROOT="${SKILLS_REPO_ROOT:-}"
 }
 
@@ -134,8 +147,10 @@ GENERATION_FILE="$STATE_DIR/dreaming/activation-generation"
 SELFTEST_GENERATION_FILE="$STATE_DIR/dreaming/selftest-passed-generation"
 SELFTEST_LABEL_FILE="$STATE_DIR/dreaming/active-selftest-label"
 LIFECYCLE_LOCK_FILE="$STATE_DIR/dreaming/lifecycle.lock"
-NEW_KINDS=(dreaming selftest watchdog)
-LEGACY_KINDS=(sweep curator memory selftest watchdog dreaming)
+DASHBOARD_TOKEN_FILE="${DREAMING_DASHBOARD_TOKEN_FILE:-$DREAMING_STATE_DIR/dashboard/access-token}"
+DASHBOARD_ASSETS="$DREAMING_REPO_ROOT/skills/skill-review/assets/dashboard"
+NEW_KINDS=(dreaming selftest watchdog dashboard)
+LEGACY_KINDS=(sweep curator memory selftest watchdog dreaming dashboard)
 
 [[ "$NEW_PREFIX" =~ ^[A-Za-z0-9._-]+$ &&
    "$LEGACY_PREFIX" =~ ^[A-Za-z0-9._-]+$ ]] || {
@@ -256,6 +271,43 @@ ensure_neutral_roots() {
   fi
 }
 
+ensure_dashboard_token() {
+  mkdir -p "$(dirname "$DASHBOARD_TOKEN_FILE")" "$HOME/Library/Logs/Dreaming"
+  chmod 700 "$(dirname "$DASHBOARD_TOKEN_FILE")"
+  if [[ -L "$DASHBOARD_TOKEN_FILE" ]]; then
+    echo "dashboard token must not be a symlink: $DASHBOARD_TOKEN_FILE" >&2
+    return 1
+  fi
+  if [[ ! -e "$DASHBOARD_TOKEN_FILE" ]]; then
+    /usr/bin/python3 - "$DASHBOARD_TOKEN_FILE" <<'PY'
+import os
+import secrets
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+temporary = path.parent / f".{path.name}.{os.getpid()}"
+temporary.write_text(secrets.token_urlsafe(32) + "\n", encoding="ascii")
+os.chmod(temporary, 0o600)
+os.replace(temporary, path)
+PY
+  fi
+  /usr/bin/python3 - "$DASHBOARD_TOKEN_FILE" <<'PY'
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+info = path.stat()
+if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+    raise SystemExit("dashboard token must be a mode-0600 regular file")
+if not re.fullmatch(r"[A-Za-z0-9_-]{43}\n?", path.read_text(encoding="ascii")):
+    raise SystemExit("dashboard token is malformed")
+PY
+}
+
 render() {
   local kind="$1" label destination template
   label="$(label_for "$NEW_PREFIX" "$kind")"
@@ -266,7 +318,9 @@ render() {
     "${SKILLS_REPO_ROOT:-}" "$STATE_DIR" "$LOCAL_ROOT" "$COPILOT_ROOT" \
     "$DREAMING_DATA_DIR" "$DREAMING_STATE_DIR" "$DREAMING_SKILLS_ROOT" \
     "$DREAMING_ADAPTER_CONFIG" "$DREAMING_ENABLE_COPILOT_COMPAT" \
-    "$DREAMING_ORCHESTRATOR_STATE_DIR" "$DREAMING_RECEIPT_FILE" <<'PY'
+    "$DREAMING_ORCHESTRATOR_STATE_DIR" "$DREAMING_RECEIPT_FILE" \
+    "$DREAMING_DASHBOARD_HOST" "$DREAMING_DASHBOARD_PORT" \
+    "$DASHBOARD_TOKEN_FILE" "$DASHBOARD_ASSETS" <<'PY'
 import html
 import sys
 
@@ -288,6 +342,10 @@ import sys
     copilot_compat,
     orchestrator_state,
     receipt_file,
+    dashboard_host,
+    dashboard_port,
+    dashboard_token_file,
+    dashboard_assets,
 ) = sys.argv[1:]
 text = open(template, encoding="utf-8").read()
 replacements = {
@@ -304,6 +362,10 @@ replacements = {
     "__DREAMING_ENABLE_COPILOT_COMPAT__": copilot_compat,
     "__DREAMING_ORCHESTRATOR_STATE_DIR__": orchestrator_state,
     "__DREAMING_RECEIPT_FILE__": receipt_file,
+    "__DREAMING_DASHBOARD_HOST__": dashboard_host,
+    "__DREAMING_DASHBOARD_PORT__": dashboard_port,
+    "__DREAMING_DASHBOARD_TOKEN_FILE__": dashboard_token_file,
+    "__DREAMING_DASHBOARD_ASSETS__": dashboard_assets,
 }
 for key, value in replacements.items():
     text = text.replace(key, html.escape(value))
@@ -414,6 +476,7 @@ cmd_install() {
   load_config
   persist_config_pointer
   ensure_neutral_roots
+  ensure_dashboard_token
   sync_plugin
   chmod +x "$DREAMING_REPO_ROOT/scripts/"*.sh \
     "$DREAMING_REPO_ROOT/scripts/"*.py \
@@ -480,8 +543,45 @@ cmd_selftest() {
     echo "activation generation changed while selftest was running" >&2
     return 1
   }
+  dashboard_health_check
   atomic_pointer "$expected_generation" "$SELFTEST_GENERATION_FILE"
   echo "selftest passed for activation generation $expected_generation"
+}
+
+dashboard_health_check() {
+  [[ "${DREAMING_SKIP_DASHBOARD_HEALTH_CHECK:-0}" == "1" ]] && return 0
+  [[ -f "$DEST_DIR/$(label_for "$NEW_PREFIX" dashboard).plist" ]] || return 0
+  /usr/bin/python3 - "$DREAMING_DASHBOARD_HOST" "$DREAMING_DASHBOARD_PORT" \
+    "$DASHBOARD_TOKEN_FILE" "${DREAMING_DASHBOARD_HEALTH_WAIT_SECS:-60}" \
+    "$expected_generation" <<'PY'
+import json
+import sys
+import time
+import urllib.request
+
+host, port, token_file, wait_seconds, expected_generation = sys.argv[1:]
+token = open(token_file, encoding="ascii").read().strip()
+deadline = time.monotonic() + float(wait_seconds)
+while True:
+    request = urllib.request.Request(
+        f"http://{host}:{port}/api/v1/health",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.load(response)
+        break
+    except OSError:
+        if time.monotonic() >= deadline:
+            raise
+        time.sleep(0.5)
+if (
+    payload.get("schema_version") != 1
+    or not isinstance(payload.get("data"), dict)
+    or payload["data"].get("activation_generation") != expected_generation
+):
+    raise SystemExit("dashboard health response is invalid")
+PY
 }
 
 cmd_enable() {
@@ -513,6 +613,8 @@ cmd_status() {
   echo "state_root=$DREAMING_STATE_DIR"
   echo "skills_root=$DREAMING_SKILLS_ROOT"
   echo "copilot_compat=$DREAMING_ENABLE_COPILOT_COMPAT"
+  echo "dashboard_url=http://$DREAMING_DASHBOARD_HOST:$DREAMING_DASHBOARD_PORT/"
+  echo "dashboard_token=$([[ -f "$DASHBOARD_TOKEN_FILE" ]] && echo ready || echo missing)"
   [[ -n "$DREAMING_ADAPTER_CONFIG" ]] &&
     echo "adapter_config=$DREAMING_ADAPTER_CONFIG"
   if [[ "$DREAMING_ENABLE_COPILOT_COMPAT" == "1" ]]; then
@@ -523,6 +625,19 @@ cmd_status() {
     "$LAUNCHCTL" print "$DOMAIN/$label" 2>/dev/null |
       grep -E 'state|runs|last exit|program =' || echo "  (not loaded)"
   done < <(all_labels | awk '!seen[$0]++')
+}
+
+cmd_dashboard_url() {
+  ensure_dashboard_token
+  printf 'http://%s:%s/#access_token=%s\n' \
+    "$DREAMING_DASHBOARD_HOST" "$DREAMING_DASHBOARD_PORT" \
+    "$(<"$DASHBOARD_TOKEN_FILE")"
+}
+
+cmd_dashboard_open() {
+  local url
+  url="$(cmd_dashboard_url)"
+  "${DREAMING_OPEN_BIN:-/usr/bin/open}" "$url"
 }
 
 cmd_uninstall() {
@@ -690,11 +805,13 @@ case "${1:-}" in
   selftest) cmd_selftest ;;
   enable) cmd_enable ;;
   status) cmd_status ;;
+  dashboard-url) cmd_dashboard_url ;;
+  dashboard-open) cmd_dashboard_open ;;
   uninstall) cmd_uninstall ;;
   rollback) shift; cmd_rollback "${1:-}" ;;
   rollback-migration) cmd_rollback_migration ;;
   *)
-    echo "usage: scripts/install.sh {prepare|install|selftest|enable|status|uninstall|rollback [backup]|rollback-migration}" >&2
+    echo "usage: scripts/install.sh {prepare|install|selftest|enable|status|dashboard-url|dashboard-open|uninstall|rollback [backup]|rollback-migration}" >&2
     exit 2
     ;;
 esac
