@@ -1,0 +1,698 @@
+<!doctype html>
+<!-- decisions
+round: 4
+settled: local read-only dashboard; desktop-first shell; five primary sections; overview prioritizes runtime reliability, backlog burn-down, skill-library growth, latest learned skills, evaluation coverage, and candidate-versus-control capability trends; dark operational style; session review is called a dream; evaluations belong to skill candidate versions; evaluation runs live in activity; scalable skill catalog with nested skill details; skill text is reviewable; dream names replace visible session IDs when available; evidence previews link to anchored cards; evidence names its source CLI; each evidence card shows the bounded transcript context inline with supporting turns highlighted; the dreams catalog supports search, filters, sorting, and pagination across 1,000+ sessions
+open: none; approved for implementation
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Dreaming Dashboard</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      background: #090b10;
+      color: #f3f5f7;
+      --panel: #11151d;
+      --panel-2: #151b25;
+      --line: #252d3a;
+      --muted: #8b96a7;
+      --blue: #70a5ff;
+      --violet: #a98bff;
+      --green: #66d9a6;
+      --amber: #f2c66d;
+      --red: #ff7c8b;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; background: radial-gradient(circle at 60% -20%, #17233a 0, #090b10 35%); }
+    button { font: inherit; }
+    .app { display: grid; grid-template-columns: 236px minmax(0, 1fr); min-height: 100vh; }
+    aside {
+      position: sticky; top: 0; height: 100vh; padding: 24px 18px;
+      border-right: 1px solid var(--line); background: rgba(10, 13, 19, .88);
+      backdrop-filter: blur(18px);
+    }
+    .brand { display: flex; gap: 11px; align-items: center; padding: 0 8px 24px; font-weight: 760; letter-spacing: .02em; }
+    .moon {
+      width: 30px; height: 30px; border-radius: 50%;
+      background: linear-gradient(135deg, var(--violet), var(--blue));
+      box-shadow: 0 0 30px rgba(112, 165, 255, .25);
+      position: relative;
+    }
+    .moon::after { content: ""; position: absolute; width: 24px; height: 24px; border-radius: 50%; background: #0c1017; left: 9px; top: -2px; }
+    nav { display: grid; gap: 4px; }
+    nav a {
+      display: flex; gap: 11px; align-items: center; padding: 10px 12px; border-radius: 9px;
+      color: var(--muted); text-decoration: none; font-size: 14px;
+    }
+    nav a.active { color: white; background: #1b2230; box-shadow: inset 0 0 0 1px #2b3545; }
+    nav a span { width: 19px; text-align: center; }
+    .runtime {
+      position: absolute; left: 18px; right: 18px; bottom: 20px; padding: 12px;
+      border: 1px solid var(--line); background: var(--panel); border-radius: 10px; font-size: 11px; color: var(--muted);
+    }
+    .runtime strong { display: block; color: #d9dee7; font-size: 12px; margin-bottom: 5px; }
+    main { min-width: 0; padding: 28px 34px 50px; }
+    .topbar { display: flex; justify-content: space-between; align-items: start; gap: 20px; margin-bottom: 23px; }
+    h1 { font-size: 28px; line-height: 1.1; margin: 0 0 7px; letter-spacing: -.025em; }
+    .subtitle { color: var(--muted); margin: 0; font-size: 14px; }
+    .status-pill {
+      display: flex; align-items: center; gap: 9px; border: 1px solid #224d3c; background: #10251d;
+      color: #b8f6da; padding: 9px 13px; border-radius: 999px; font-size: 13px;
+    }
+    .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--green); box-shadow: 0 0 12px var(--green); }
+    .grid { display: grid; gap: 15px; }
+    .summary { grid-template-columns: repeat(4, minmax(150px, 1fr)); margin-bottom: 15px; }
+    .card, .panel {
+      border: 1px solid var(--line); background: linear-gradient(180deg, rgba(21,27,37,.96), rgba(15,19,27,.96));
+      border-radius: 13px; box-shadow: 0 15px 45px rgba(0,0,0,.12);
+    }
+    .card { padding: 17px; min-height: 116px; }
+    .label { color: var(--muted); font-size: 12px; font-weight: 650; }
+    .metric { display: flex; align-items: end; gap: 8px; margin-top: 16px; }
+    .metric strong { font-size: 30px; line-height: 1; letter-spacing: -.03em; }
+    .delta { color: var(--green); font-size: 11px; padding-bottom: 3px; }
+    .spark { height: 24px; margin-top: 10px; opacity: .9; }
+    .spark svg { width: 100%; height: 100%; overflow: visible; }
+    .columns { grid-template-columns: minmax(0, 1.55fr) minmax(300px, .85fr); align-items: start; }
+    .chart-columns { grid-template-columns: repeat(2, minmax(0, 1fr)); align-items: start; }
+    .panel { padding: 18px; min-width: 0; }
+    .panel h2 { font-size: 14px; margin: 0; }
+    .panel-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 18px; }
+    .tabs { display: flex; gap: 3px; border: 1px solid var(--line); padding: 3px; border-radius: 8px; }
+    .tabs button { border: 0; color: var(--muted); background: transparent; padding: 5px 8px; border-radius: 5px; font-size: 11px; }
+    .tabs button.active { background: #242c3a; color: white; }
+    .chart { height: 212px; display: grid; grid-template-rows: 1fr 26px; }
+    .plot { position: relative; border-bottom: 1px solid var(--line); }
+    .gridline { position: absolute; left: 0; right: 0; border-top: 1px solid #202735; }
+    .gridline:nth-child(1) { top: 20%; } .gridline:nth-child(2) { top: 50%; } .gridline:nth-child(3) { top: 80%; }
+    .bars { position: absolute; inset: 12px 5px 0; display: flex; align-items: end; justify-content: space-between; gap: 8px; }
+    .bar-group { height: 100%; flex: 1; display: flex; align-items: end; gap: 3px; }
+    .bar { flex: 1; min-width: 4px; border-radius: 3px 3px 0 0; }
+    .bar.run { background: linear-gradient(var(--blue), #477ccf); }
+    .bar.review { background: linear-gradient(var(--violet), #7054c7); opacity: .8; }
+    .xaxis { display: flex; justify-content: space-between; color: #657084; font-size: 10px; padding-top: 8px; }
+    .legend { display: flex; gap: 14px; color: var(--muted); font-size: 11px; margin-top: 11px; }
+    .legend i { width: 7px; height: 7px; border-radius: 2px; display: inline-block; margin-right: 5px; }
+    .pipeline { display: grid; gap: 12px; }
+    .stage { display: grid; grid-template-columns: 32px 1fr auto; gap: 10px; align-items: center; }
+    .stage-icon { width: 32px; height: 32px; border-radius: 9px; display: grid; place-items: center; background: #1e2735; color: var(--blue); font-size: 13px; }
+    .stage-name { font-size: 12px; font-weight: 650; }
+    .stage-sub { font-size: 10px; color: var(--muted); margin-top: 2px; }
+    .stage-value { font-size: 12px; color: #dce3ed; }
+    .lower { margin-top: 15px; }
+    table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+    th { color: #6f7a8d; font-size: 10px; text-transform: uppercase; letter-spacing: .06em; text-align: left; padding: 0 9px 10px; }
+    td { font-size: 12px; color: #c9d0db; border-top: 1px solid var(--line); padding: 11px 9px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+    td:first-child { color: var(--muted); }
+    .badge { display: inline-block; border-radius: 999px; padding: 4px 7px; font-size: 10px; border: 1px solid; }
+    .ok { color: #a8ebcd; background: #10271e; border-color: #245440; }
+    .skill { color: #cfbeff; background: #201936; border-color: #493b70; }
+    .warn { color: #f8dda4; background: #2a2212; border-color: #594922; }
+    .attention { display: grid; gap: 9px; }
+    .attention-row {
+      display: grid; grid-template-columns: 9px 1fr auto; align-items: center; gap: 10px;
+      padding: 11px; background: #10151d; border: 1px solid var(--line); border-radius: 9px;
+    }
+    .attention-row .signal { width: 7px; height: 7px; border-radius: 50%; background: var(--amber); }
+    .attention-row.good .signal { background: var(--green); }
+    .attention-row strong { font-size: 12px; }
+    .attention-row small { display: block; color: var(--muted); margin-top: 2px; }
+    .attention-row .count { font-weight: 760; }
+    .state-strip { margin-top: 15px; display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; }
+    .state {
+      border: 1px dashed #343d4d; border-radius: 10px; padding: 11px; color: var(--muted); min-height: 72px;
+    }
+    .state strong { color: #d9e0ea; display: block; font-size: 11px; margin-bottom: 7px; }
+    .screen[hidden] { display: none; }
+    .screen-title { margin-bottom: 22px; }
+    .screen-title h1 { margin-bottom: 8px; }
+    .toolbar { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 15px; }
+    .control { color: #c8d0dc; background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 11px; }
+    .control.grow { flex: 1; min-width: 220px; text-align: left; }
+    .detail-grid { grid-template-columns: 1fr 1fr; }
+    .wide { grid-column: 1 / -1; }
+    .list { display: grid; gap: 9px; }
+    .list-row {
+      display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; align-items: center;
+      padding: 12px; border: 1px solid var(--line); background: #10151d; border-radius: 9px;
+    }
+    .list-row strong { display: block; font-size: 12px; margin-bottom: 3px; }
+    .list-row small { color: var(--muted); }
+    .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace; }
+    .progress { height: 7px; background: #242c39; border-radius: 999px; overflow: hidden; margin-top: 9px; }
+    .progress i { display: block; height: 100%; background: linear-gradient(90deg, var(--blue), var(--violet)); }
+    .definition { display: grid; grid-template-columns: 145px 1fr; gap: 8px 14px; font-size: 12px; }
+    .definition dt { color: var(--muted); }
+    .definition dd { margin: 0; color: #d9e0e9; overflow-wrap: anywhere; }
+    .skill-link { color: #dce5ff; background: none; border: 0; padding: 0; cursor: pointer; text-align: left; font-weight: 700; }
+    .skill-link:hover { color: var(--blue); }
+    .pager { display: flex; justify-content: space-between; align-items: center; margin-top: 14px; color: var(--muted); font-size: 11px; }
+    .pager-controls { display: flex; gap: 5px; }
+    .pager-controls button { min-width: 30px; }
+    .back-link { color: var(--blue); border: 0; background: none; padding: 0; margin-bottom: 14px; cursor: pointer; font-size: 12px; }
+    .evidence-preview { color: #c9d0db; line-height: 1.45; white-space: normal; }
+    .evidence-stack { display: grid; gap: 14px; }
+    .evidence-card { padding: 18px; border: 1px solid var(--line); background: #10151d; border-radius: 11px; }
+    .evidence-card header { display: flex; justify-content: space-between; gap: 18px; align-items: start; margin-bottom: 13px; }
+    .evidence-card h2 { font-size: 15px; margin: 0 0 5px; }
+    .evidence-meta { color: var(--muted); font-size: 11px; }
+    .evidence-text { color: #d9e0e9; font-size: 13px; line-height: 1.6; margin: 0; max-width: 860px; }
+    .secondary-id { color: #657084; font-size: 10px; margin-top: 12px; }
+    .card-actions { display: flex; gap: 12px; align-items: center; margin-top: 14px; }
+    .context-note { padding: 12px 14px; margin-bottom: 15px; border: 1px solid #315071; background: #101d2d; border-radius: 9px; color: #bfd8ff; font-size: 12px; }
+    .transcript { display: grid; gap: 10px; }
+    .event { border: 1px solid var(--line); border-radius: 10px; padding: 13px 15px; background: #10151d; }
+    .event.focus { border-color: #5a4d8f; background: #18152a; box-shadow: inset 3px 0 0 var(--violet); }
+    .event-head { display: flex; justify-content: space-between; gap: 12px; margin-bottom: 7px; color: var(--muted); font-size: 10px; text-transform: uppercase; letter-spacing: .05em; }
+    .event p { color: #d6dde7; font-size: 12px; line-height: 1.55; margin: 0; white-space: pre-wrap; }
+    .run-stack { display: grid; gap: 14px; }
+    .run-card { border: 1px solid var(--line); background: linear-gradient(180deg, rgba(21,27,37,.96), rgba(15,19,27,.96)); border-radius: 13px; overflow: hidden; }
+    .run-head { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 20px; align-items: start; padding: 17px 18px; border-bottom: 1px solid var(--line); }
+    .run-head h2 { font-size: 15px; margin: 0 0 5px; }
+    .run-title-line { display: flex; gap: 10px; align-items: baseline; flex-wrap: wrap; margin-bottom: 5px; }
+    .run-title-line h2 { margin: 0; }
+    .run-time { color: #cbd3de; font-size: 15px; }
+    .run-summary { color: var(--muted); font-size: 11px; }
+    .run-result { text-align: right; }
+    .run-result small { display: block; color: var(--muted); margin-top: 6px; }
+    .run-steps { padding: 8px 18px 15px; }
+    .run-step { display: grid; grid-template-columns: 28px 116px minmax(0, 1fr) auto; gap: 10px; align-items: start; padding: 11px 0; border-bottom: 1px solid #202735; }
+    .run-step:last-child { border-bottom: 0; }
+    .step-number { width: 24px; height: 24px; border-radius: 7px; display: grid; place-items: center; background: #1e2735; color: var(--blue); font-size: 10px; font-weight: 750; }
+    .step-name { font-size: 12px; font-weight: 700; padding-top: 4px; }
+    .step-detail { color: #cbd3de; font-size: 12px; line-height: 1.45; padding-top: 3px; }
+    .step-detail small { display: block; color: var(--muted); margin-top: 4px; }
+    .step-state { padding-top: 2px; }
+    .trend-chart { height: 220px; display: grid; grid-template-rows: 1fr 25px; }
+    .trend-chart svg { width: 100%; height: 100%; overflow: visible; }
+    .chart-note { color: var(--muted); font-size: 10px; line-height: 1.45; margin-top: 9px; }
+    .metric-detail { color: var(--muted); font-size: 10px; line-height: 1.45; margin-top: 9px; }
+    .metric-detail strong { color: #dce3ed; font-size: inherit; letter-spacing: 0; }
+    .health-grid { display: grid; gap: 10px; }
+    .health-line { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 14px; padding: 10px 0; border-bottom: 1px solid var(--line); }
+    .health-line:last-child { border-bottom: 0; }
+    .health-line strong { display: block; font-size: 12px; }
+    .health-line small { color: var(--muted); }
+    @media (max-width: 1000px) {
+      .summary { grid-template-columns: repeat(2, 1fr); }
+      .columns { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 720px) {
+      .app { grid-template-columns: 1fr; }
+      aside { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line); }
+      nav { display: flex; overflow-x: auto; }
+      nav a span { display: none; }
+      .runtime { position: static; margin-top: 14px; }
+      main { padding: 22px 16px 36px; }
+    }
+    @media (max-width: 520px) {
+      .summary, .state-strip { grid-template-columns: 1fr; }
+      .topbar { display: block; }
+      .status-pill { margin-top: 15px; width: fit-content; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <div class="brand"><span class="moon"></span><span>Dreaming</span></div>
+      <nav aria-label="Dashboard sections">
+        <a class="active" href="#overview" data-screen="overview"><span>◫</span>Overview</a>
+        <a href="#activity" data-screen="activity"><span>⌁</span>Activity</a>
+        <a href="#queue" data-screen="queue"><span>≡</span>Dreams</a>
+        <a href="#skills" data-screen="skills"><span>✦</span>Learned skills</a>
+        <a href="#system" data-screen="system"><span>⚙</span>System</a>
+      </nav>
+      <div class="runtime">
+        <strong>Runtime 26d17d1</strong>
+        Generation 20260808T051913Z<br>
+        Read-only · localhost
+      </div>
+    </aside>
+
+    <main>
+      <section class="screen" id="overview">
+      <header class="topbar">
+        <div>
+          <h1>Dreaming overview</h1>
+          <p class="subtitle">Runtime reliability, backlog progress, learned skills, and measured evaluation results.</p>
+        </div>
+        <div class="status-pill"><span class="dot"></span>Healthy · 30 of 30 scheduled runs succeeded</div>
+      </header>
+
+      <section class="grid summary" aria-label="Summary metrics">
+        <article class="card">
+          <div class="label">Scheduled reliability · 30d</div>
+          <div class="metric"><strong>100%</strong><span class="delta">30 / 30</span></div>
+          <div class="metric-detail">Last success <strong>Saturday, August 8 at 12:49pm</strong><br>Next run Sunday at 9:15am</div>
+        </article>
+        <article class="card">
+          <div class="label">Dreams remaining</div>
+          <div class="metric"><strong>1,698</strong><span class="delta">−402 · 30d</span></div>
+          <div class="metric-detail"><strong>25 reviewed/day</strong> · 11.6 discovered/day<br>Estimated 127 days at current net rate</div>
+        </article>
+        <article class="card">
+          <div class="label">Learned skills</div>
+          <div class="metric"><strong>137</strong><span class="delta">+6 · 90d</span></div>
+          <div class="metric-detail">8 created · 2 retired<br><strong>5 new skills</strong> awaiting current evaluation</div>
+        </article>
+        <article class="card">
+          <div class="label">Capability improvement</div>
+          <div class="metric"><strong>+19pp</strong><span class="delta">current</span></div>
+          <div class="metric-detail">Candidate completion <strong>78%</strong> vs control <strong>59%</strong><br>62 current capability evaluations</div>
+        </article>
+      </section>
+
+      <div class="grid chart-columns">
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Skill count and evaluation performance</h2>
+            <div class="tabs"><button>30d</button><button class="active">90d</button><button>1y</button></div>
+          </div>
+          <div class="trend-chart">
+            <svg viewBox="0 0 640 180" preserveAspectRatio="none" aria-label="Skill count on the left axis and candidate and control completion percentages on the right axis">
+              <line x1="32" y1="30" x2="608" y2="30" stroke="#202735"/><line x1="32" y1="90" x2="608" y2="90" stroke="#202735"/><line x1="32" y1="150" x2="608" y2="150" stroke="#202735"/>
+              <text x="2" y="34" fill="#8b96a7" font-size="10">140</text><text x="2" y="94" fill="#8b96a7" font-size="10">135</text><text x="2" y="154" fill="#8b96a7" font-size="10">130</text>
+              <text x="614" y="34" fill="#8b96a7" font-size="10">100%</text><text x="614" y="94" fill="#8b96a7" font-size="10">75%</text><text x="614" y="154" fill="#8b96a7" font-size="10">50%</text>
+              <polyline points="32,138 125,138 125,126 218,126 218,114 311,102 404,90 497,102 497,66 608,54" fill="none" stroke="#66d9a6" stroke-width="3"/>
+              <polyline points="32,116 125,107 218,92 311,83 404,68 497,56 608,48" fill="none" stroke="#70a5ff" stroke-width="3"/>
+              <polyline points="32,131 125,128 218,126 311,131 404,124 497,126 608,124" fill="none" stroke="#6f7a8d" stroke-width="2"/>
+              <circle cx="608" cy="54" r="4" fill="#66d9a6"/><circle cx="608" cy="48" r="4" fill="#70a5ff"/><circle cx="608" cy="124" r="4" fill="#6f7a8d"/>
+            </svg>
+            <div class="xaxis"><span>May 10</span><span>Jun 1</span><span>Jun 23</span><span>Jul 16</span><span>Aug 8</span></div>
+          </div>
+          <div class="legend"><span><i style="background:#66d9a6"></i>Skills 137 · left axis</span><span><i style="background:#70a5ff"></i>Candidate 78% · right axis</span><span><i style="background:#6f7a8d"></i>Control 59% · right axis</span></div>
+          <p class="chart-note">Evaluation lines are macro-average task completion across current capability evaluations; every skill counts equally. Preference-retention results are excluded.</p>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head">
+            <h2>Dream backlog burn-down</h2>
+            <div class="tabs"><button>30d</button><button class="active">90d</button><button>1y</button></div>
+          </div>
+          <div class="trend-chart">
+            <svg viewBox="0 0 640 180" preserveAspectRatio="none" aria-label="Dream backlog declined from 2430 to 1698">
+              <line x1="32" y1="30" x2="620" y2="30" stroke="#202735"/><line x1="32" y1="90" x2="620" y2="90" stroke="#202735"/><line x1="32" y1="150" x2="620" y2="150" stroke="#202735"/>
+              <text x="0" y="34" fill="#8b96a7" font-size="10">2,500</text><text x="0" y="94" fill="#8b96a7" font-size="10">2,000</text><text x="0" y="154" fill="#8b96a7" font-size="10">1,500</text>
+              <polyline points="32,39 85,46 138,52 191,63 244,71 297,83 350,96 403,108 456,121 509,133 562,144 620,153" fill="none" stroke="#a98bff" stroke-width="3"/>
+              <circle cx="620" cy="153" r="4" fill="#a98bff"/>
+              <text x="560" y="171" fill="#cfbeff" font-size="11">1,698</text>
+            </svg>
+            <div class="xaxis"><span>May 10</span><span>Jun 1</span><span>Jun 23</span><span>Jul 16</span><span>Aug 8</span></div>
+          </div>
+          <div class="legend"><span><i style="background:#a98bff"></i>Dreams remaining</span><span>2,250 reviewed · 1,518 newly discovered · net −732</span></div>
+          <p class="chart-note">The backlog reaches zero only when reviews continue to exceed newly discovered completed sessions. The current 30-day net reduction is 13.4 dreams per day.</p>
+        </section>
+      </div>
+
+      <div class="grid columns lower">
+        <section class="panel">
+          <div class="panel-head"><h2>Latest learned skills</h2><button class="skill-link" data-screen-target="skills">View all 137 →</button></div>
+          <table>
+            <thead><tr><th>Created</th><th style="width:32%">Skill</th><th>Evidence</th><th>Evaluation</th><th>Measured result</th></tr></thead>
+            <tbody>
+              <tr><td>Today</td><td><button class="skill-link" data-screen-target="skill-detail">bounded-deep-research</button></td><td>3 dreams</td><td><span class="badge warn">pending</span></td><td>Not measured</td></tr>
+              <tr><td>Aug 6</td><td><button class="skill-link" data-screen-target="skill-detail">github-billing-cost-attribution</button></td><td>4 dreams</td><td><span class="badge ok">pass</span></td><td>+12pp capability</td></tr>
+              <tr><td>Aug 2</td><td><button class="skill-link" data-screen-target="skill-detail">vendored-provenance-audit</button></td><td>5 dreams</td><td><span class="badge ok">pass</span></td><td>Preference retained</td></tr>
+              <tr><td>Jul 29</td><td><button class="skill-link" data-screen-target="skill-detail">workplace-message-tracing</button></td><td>3 dreams</td><td><span class="badge ok">pass</span></td><td>+17pp capability</td></tr>
+              <tr><td>Jul 24</td><td><button class="skill-link" data-screen-target="skill-detail">advisory-repo-preflight</button></td><td>4 dreams</td><td><span class="badge warn">regression</span></td><td>Sibling task −8pp</td></tr>
+            </tbody>
+          </table>
+        </section>
+
+        <section class="panel">
+          <div class="panel-head"><h2>Evaluation portfolio</h2><span class="label">current candidate versions</span></div>
+          <div class="attention">
+            <div class="attention-row good"><span class="signal"></span><span><strong>Current evaluations passed</strong><small>60 capability · 24 preference-retention</small></span><span class="count">84</span></div>
+            <div class="attention-row"><span class="signal"></span><span><strong>Current regressions</strong><small>Authority refused until the candidate changes</small></span><span class="count">2</span></div>
+            <div class="attention-row"><span class="signal"></span><span><strong>Current inconclusive results</strong><small>The completed evaluation did not establish pass or regression</small></span><span class="count">11</span></div>
+            <div class="attention-row good"><span class="signal"></span><span><strong>Evaluation coverage</strong><small>97 of 137 current skills have a current result</small></span><span class="count">71%</span></div>
+            <div class="attention-row"><span class="signal"></span><span><strong>Not currently evaluated</strong><small>New, changed, stale, waived, or no compatible suite</small></span><span class="count">40</span></div>
+          </div>
+        </section>
+      </div>
+
+      <section class="state-strip" aria-label="Alternative states">
+        <div class="state"><strong>Empty state</strong>No activity yet. The first scheduled run will appear here.</div>
+        <div class="state"><strong>Loading state</strong>Refreshing local state… existing values remain visible.</div>
+        <div class="state"><strong>Error state</strong>One source could not be read. Last good snapshot shown with timestamp.</div>
+      </section>
+      </section>
+
+      <section class="screen" id="activity" hidden>
+        <header class="screen-title">
+          <h1>Activity</h1>
+          <p class="subtitle">Each card is one execution. Scheduled runs use the same pass order; their nested work and weekly passes vary.</p>
+        </header>
+        <div class="toolbar">
+          <button class="control">All executions</button><button class="control">Last 30 days</button>
+          <button class="control">Scheduled only</button><button class="control">All outcomes</button>
+        </div>
+        <div class="run-stack">
+          <article class="run-card">
+            <header class="run-head">
+              <div><div class="run-title-line"><h2>Scheduled Dreaming run</h2><span class="run-time">Saturday, August 8 at 12:49pm</span></div><div class="run-summary">Daily launch · 4m 18s · Copilot reviewed all sources</div></div>
+              <div class="run-result"><span class="badge ok">completed</span><small>25 dreams attempted</small></div>
+            </header>
+            <div class="run-steps">
+              <div class="run-step"><span class="step-number">1</span><span class="step-name">Consolidate</span><span class="step-detail">Scanned Copilot, Claude, and Codex, then reviewed 25 queued dreams.<small>1 skill created · 1 skill patched · 6 evidence entries added · 23 publications current</small></span><span class="step-state"><span class="badge ok">complete</span></span></div>
+              <div class="run-step"><span class="step-number">2</span><span class="step-name">Roll memories</span><span class="step-detail">Weekly maintenance is not due for 5 days.<small>Last successful weekly run: Thursday, August 6 at 9:15am</small></span><span class="step-state"><span class="badge">not scheduled</span></span></div>
+              <div class="run-step"><span class="step-number">3</span><span class="step-name">Prune skills</span><span class="step-detail">Weekly maintenance is not due for 5 days.<small>Last successful weekly run: Thursday, August 6 at 9:15am</small></span><span class="step-state"><span class="badge">not scheduled</span></span></div>
+            </div>
+          </article>
+
+          <article class="run-card">
+            <header class="run-head">
+              <div><div class="run-title-line"><h2>Scheduled Dreaming run</h2><span class="run-time">Friday, August 7 at 9:15am</span></div><div class="run-summary">Daily launch · 3m 41s · Copilot reviewed all sources</div></div>
+              <div class="run-result"><span class="badge ok">completed</span><small>25 dreams attempted</small></div>
+            </header>
+            <div class="run-steps">
+              <div class="run-step"><span class="step-number">1</span><span class="step-name">Consolidate</span><span class="step-detail">Scanned all three CLIs and reviewed 25 queued dreams.<small>No durable lessons · no skill changes · publications already current</small></span><span class="step-state"><span class="badge ok">complete</span></span></div>
+              <div class="run-step"><span class="step-number">2</span><span class="step-name">Roll memories</span><span class="step-detail">Weekly maintenance is not due for 6 days.<small>Last successful weekly run: Thursday, August 6 at 9:15am</small></span><span class="step-state"><span class="badge">not scheduled</span></span></div>
+              <div class="run-step"><span class="step-number">3</span><span class="step-name">Prune skills</span><span class="step-detail">Weekly maintenance is not due for 6 days.<small>Last successful weekly run: Thursday, August 6 at 9:15am</small></span><span class="step-state"><span class="badge">not scheduled</span></span></div>
+            </div>
+          </article>
+
+          <article class="run-card">
+            <header class="run-head">
+              <div><div class="run-title-line"><h2>Scheduled Dreaming run</h2><span class="run-time">Thursday, August 6 at 9:15am</span></div><div class="run-summary">Weekly maintenance due · 18m 09s · all passes completed</div></div>
+              <div class="run-result"><span class="badge ok">completed</span><small>full weekly run</small></div>
+            </header>
+            <div class="run-steps">
+              <div class="run-step"><span class="step-number">1</span><span class="step-name">Consolidate</span><span class="step-detail">Scanned all three CLIs and reviewed 25 queued dreams.<small>2 skills patched · 1 candidate evaluated · required provider passed</small></span><span class="step-state"><span class="badge ok">complete</span></span></div>
+              <div class="run-step"><span class="step-number">2</span><span class="step-name">Roll memories</span><span class="step-detail">Checked durable memories for procedures that belonged in skills.<small>3 recommendations · no direct memory deletion</small></span><span class="step-state"><span class="badge ok">complete</span></span></div>
+              <div class="run-step"><span class="step-number">3</span><span class="step-name">Prune skills</span><span class="step-detail">Reviewed the settled skill library for consolidation or retirement.<small>Dry run · 2 proposals · no automatic archive</small></span><span class="step-state"><span class="badge ok">complete</span></span></div>
+            </div>
+          </article>
+
+          <article class="run-card">
+            <header class="run-head">
+              <div><div class="run-title-line"><h2>On-demand skill review</h2><span class="run-time">Thursday, July 30 at 3:42pm</span></div><div class="run-summary">Triggered at the end of an interactive task · 1m 12s</div></div>
+              <div class="run-result"><span class="badge ok">completed</span><small>outside scheduled run</small></div>
+            </header>
+            <div class="run-steps">
+              <div class="run-step"><span class="step-number">1</span><span class="step-name">Review task</span><span class="step-detail">Reviewed one completed task while its context was still available.<small>1 evidence entry added · no skill rewrite</small></span><span class="step-state"><span class="badge ok">complete</span></span></div>
+            </div>
+          </article>
+        </div>
+      </section>
+
+      <section class="screen" id="queue" hidden>
+        <header class="screen-title">
+          <h1>Dreams</h1>
+          <p class="subtitle">Each dream is one completed agent session waiting to be reviewed. Conversation text is never displayed.</p>
+        </header>
+        <div class="grid summary">
+          <article class="card"><div class="label">Dreams remaining</div><div class="metric"><strong>1,698</strong></div></article>
+          <article class="card"><div class="label">Dreams completed</div><div class="metric"><strong>42</strong></div></article>
+          <article class="card"><div class="label">Recovery required</div><div class="metric"><strong>0</strong></div></article>
+          <article class="card"><div class="label">Superseded</div><div class="metric"><strong>7</strong></div></article>
+        </div>
+        <div class="toolbar">
+          <button class="control grow">⌕ Search 1,747 dreams…</button>
+          <button class="control">Status: all</button>
+          <button class="control">CLI: all</button>
+          <button class="control">Has learning: all</button>
+          <button class="control">Sort: recently updated</button>
+        </div>
+        <section class="panel">
+          <div class="panel-head"><h2>1,747 dreams</h2><span class="label">Showing 1–20 · 25 queued dreams attempted per run</span></div>
+          <table>
+            <thead><tr><th>Status</th><th>CLI</th><th style="width:31%">Dream</th><th>Updated</th><th>Activity</th><th>Learning result</th></tr></thead>
+            <tbody>
+              <tr><td><span class="badge warn">queued</span></td><td>Copilot</td><td>Designing Dreaming dashboard</td><td>Now</td><td>31 turns · 12 tools</td><td>Awaiting review</td></tr>
+              <tr><td><span class="badge ok">reviewed</span></td><td>Claude</td><td>Debugging Copilot plugin installation</td><td>18m</td><td>18 turns · 3 tools</td><td><span class="badge skill">skill evidence</span></td></tr>
+              <tr><td><span class="badge warn">queued</span></td><td>Claude</td><td>Fixing terminal scrollback over SSH</td><td>47m</td><td>24 turns · 7 tools</td><td>Awaiting review</td></tr>
+              <tr><td><span class="badge ok">reviewed</span></td><td>Copilot</td><td>Certifying the enabled Dreaming runtime</td><td>2h</td><td>86 turns · 29 tools</td><td><span class="badge skill">skill patched</span></td></tr>
+              <tr><td><span class="badge ok">reviewed</span></td><td>Codex</td><td>Comparing extension types across agents</td><td>4h</td><td>12 turns · 2 tools</td><td><span class="badge skill">skill evidence</span></td></tr>
+              <tr><td><span class="badge warn">queued</span></td><td>Copilot</td><td>Tuning a Bambu bridge failure</td><td>7h</td><td>16 turns · 4 tools</td><td>Awaiting review</td></tr>
+              <tr><td><span class="badge ok">reviewed</span></td><td>Claude</td><td>Recovering a local MCP server</td><td>11h</td><td>21 turns · 8 tools</td><td><span class="badge skill">skill evidence</span></td></tr>
+              <tr><td><span class="badge warn">queued</span></td><td>Codex</td><td>Auditing vendored provenance</td><td>18h</td><td>37 turns · 14 tools</td><td>Awaiting review</td></tr>
+              <tr><td><span class="badge ok">reviewed</span></td><td>Copilot</td><td>Recovering a stuck merge queue entry</td><td>23h</td><td>15 turns · 6 tools</td><td><span class="badge skill">new skill</span></td></tr>
+              <tr><td><span class="badge warn">queued</span></td><td>Claude</td><td>Tracing a workplace support message</td><td>2d</td><td>28 turns · 11 tools</td><td>Awaiting review</td></tr>
+              <tr><td><span class="badge ok">reviewed</span></td><td>Copilot</td><td>Attributing GitHub billing costs</td><td>2d</td><td>42 turns · 17 tools</td><td>No durable lesson</td></tr>
+              <tr><td><span class="badge warn">queued</span></td><td>Copilot</td><td>Synchronizing a downstream fork</td><td>3d</td><td>33 turns · 13 tools</td><td>Awaiting review</td></tr>
+              <tr><td><span class="badge ok">reviewed</span></td><td>Codex</td><td>Testing a Tauri WebView</td><td>3d</td><td>19 turns · 5 tools</td><td>No durable lesson</td></tr>
+              <tr><td><span class="badge warn">queued</span></td><td>Claude</td><td>Diagnosing Tailscale connectivity</td><td>4d</td><td>22 turns · 9 tools</td><td>Awaiting review</td></tr>
+              <tr><td>superseded</td><td>Copilot</td><td>Untitled dream <span class="mono">7c3a09e1…</span></td><td>4d</td><td>Session continued</td><td>Replaced by newer version</td></tr>
+              <tr><td><span class="badge ok">reviewed</span></td><td>Copilot</td><td>Building an architecture call-flow map</td><td>5d</td><td>48 turns · 20 tools</td><td><span class="badge skill">skill patched</span></td></tr>
+              <tr><td><span class="badge warn">queued</span></td><td>Codex</td><td>Reviewing an entitlement change</td><td>6d</td><td>9 turns · 3 tools</td><td>Awaiting review</td></tr>
+              <tr><td><span class="badge ok">reviewed</span></td><td>Claude</td><td>Handling special characters in filenames</td><td>6d</td><td>14 turns · 4 tools</td><td><span class="badge skill">new skill</span></td></tr>
+              <tr><td><span class="badge warn">queued</span></td><td>Copilot</td><td>Designing a fail-closed egress boundary</td><td>7d</td><td>64 turns · 26 tools</td><td>Awaiting review</td></tr>
+              <tr><td><span class="badge ok">reviewed</span></td><td>Copilot</td><td>Preparing a cross-team platform proposal</td><td>7d</td><td>31 turns · 8 tools</td><td>No durable lesson</td></tr>
+            </tbody>
+          </table>
+          <div class="pager"><span>1–20 of 1,747 dreams</span><span class="pager-controls"><button class="control">‹</button><button class="control">1</button><button class="control">2</button><button class="control">3</button><button class="control">…</button><button class="control">88</button><button class="control">›</button></span></div>
+        </section>
+      </section>
+
+      <section class="screen" id="skills" hidden>
+        <header class="screen-title">
+          <h1>Learned skills</h1>
+          <p class="subtitle">Search and compare every learned skill. Select one to inspect its text, evidence, usage, and evaluations.</p>
+        </header>
+        <div class="toolbar">
+          <button class="control grow">⌕ Search 137 skills…</button>
+          <button class="control">Status: all</button>
+          <button class="control">Evaluation: all</button>
+          <button class="control">Published: all</button>
+          <button class="control">Sort: recently used</button>
+        </div>
+        <section class="panel">
+          <div class="panel-head"><h2>137 skills</h2><span class="label">Showing 1–20</span></div>
+          <table>
+            <thead><tr><th style="width:23%">Skill</th><th>Status</th><th>Created</th><th>Prompt</th><th>Usage</th><th>Measured impact</th><th>Evidence</th><th>Published</th></tr></thead>
+            <tbody>
+              <tr><td><button class="skill-link" data-screen-target="skill-detail">copilot-cli-plugins</button></td><td><span class="badge ok">current</span></td><td>May 18</td><td>1,482 words</td><td>18 · today</td><td>+21% capability</td><td>7 dreams</td><td>3 targets</td></tr>
+              <tr><td><button class="skill-link" data-screen-target="skill-detail">bounded-deep-research</button></td><td><span class="badge ok">current</span></td><td>Today</td><td>612 words</td><td>3 · today</td><td>Not evaluated</td><td>1 dream</td><td>3 targets</td></tr>
+              <tr><td><button class="skill-link" data-screen-target="skill-detail">agent-cli-terminal-tmux</button></td><td><span class="badge ok">current</span></td><td>Apr 29</td><td>2,106 words</td><td>11 · yesterday</td><td>+14% capability</td><td>5 dreams</td><td>3 targets</td></tr>
+              <tr><td><button class="skill-link" data-screen-target="skill-detail">macos-agent-shell</button></td><td><span class="badge warn">evaluation due</span></td><td>Apr 22</td><td>1,793 words</td><td>7 · 3d ago</td><td>Stale candidate</td><td>4 dreams</td><td>3 targets</td></tr>
+              <tr><td><button class="skill-link" data-screen-target="skill-detail">fork-upstream-sync</button></td><td><span class="badge ok">current</span></td><td>Mar 17</td><td>1,126 words</td><td>9 · 4d ago</td><td>+9% preference</td><td>6 dreams</td><td>3 targets</td></tr>
+              <tr><td><button class="skill-link" data-screen-target="skill-detail">github-merge-queue-operations</button></td><td><span class="badge ok">current</span></td><td>Mar 09</td><td>984 words</td><td>14 · 5d ago</td><td>+18% capability</td><td>8 dreams</td><td>3 targets</td></tr>
+              <tr><td><button class="skill-link" data-screen-target="skill-detail">tailscale-macos-connectivity</button></td><td><span class="badge ok">current</span></td><td>Feb 26</td><td>1,347 words</td><td>5 · 6d ago</td><td>Not evaluated</td><td>3 dreams</td><td>3 targets</td></tr>
+              <tr><td><button class="skill-link" data-screen-target="skill-detail">github-billing-cost-attribution</button></td><td><span class="badge ok">current</span></td><td>Feb 14</td><td>2,324 words</td><td>6 · 8d ago</td><td>+12% capability</td><td>4 dreams</td><td>3 targets</td></tr>
+              <tr><td><button class="skill-link" data-screen-target="skill-detail">architecture-call-flow-docs</button></td><td><span class="badge ok">current</span></td><td>Jan 30</td><td>1,018 words</td><td>12 · 9d ago</td><td>+16% capability</td><td>7 dreams</td><td>3 targets</td></tr>
+              <tr><td><button class="skill-link" data-screen-target="skill-detail">bambu-3d-printing</button></td><td><span class="badge warn">needs evidence</span></td><td>Jan 18</td><td>2,817 words</td><td>2 · 12d ago</td><td>Not evaluated</td><td>1 dream</td><td>3 targets</td></tr>
+              <tr><td><button class="skill-link" data-screen-target="skill-detail">nexus-testing</button></td><td><span class="badge ok">current</span></td><td>Jan 04</td><td>1,559 words</td><td>21 · 13d ago</td><td>+25% capability</td><td>9 dreams</td><td>3 targets</td></tr>
+              <tr><td><button class="skill-link" data-screen-target="skill-detail">expense-report</button></td><td><span class="badge ok">current</span></td><td>Dec 21</td><td>1,406 words</td><td>8 · 16d ago</td><td>+11% preference</td><td>5 dreams</td><td>3 targets</td></tr>
+            </tbody>
+          </table>
+          <div class="pager"><span>12 representative rows shown · catalog supports 100+</span><span class="pager-controls"><button class="control">‹</button><button class="control">1</button><button class="control">2</button><button class="control">3</button><button class="control">…</button><button class="control">7</button><button class="control">›</button></span></div>
+        </section>
+      </section>
+
+      <section class="screen" id="skill-detail" hidden>
+        <button class="back-link" data-screen-target="skills">← Back to all skills</button>
+        <header class="screen-title">
+          <h1>copilot-cli-plugins</h1>
+          <p class="subtitle">Read the skill, inspect its observed usage and evidence, and review evaluations for each candidate version.</p>
+        </header>
+        <div class="grid summary">
+          <article class="card"><div class="label">Prompt length</div><div class="metric"><strong>1,482</strong><span class="delta">words</span></div></article>
+          <article class="card"><div class="label">Observed usage</div><div class="metric"><strong>18</strong><span class="delta">last used today</span></div></article>
+          <article class="card"><div class="label">Evidence</div><div class="metric"><strong>7</strong><span class="delta">dreams</span></div></article>
+          <article class="card"><div class="label">Measured impact</div><div class="metric"><strong>+21%</strong><span class="delta">capability</span></div></article>
+        </div>
+        <div class="grid detail-grid">
+          <section class="panel">
+            <div class="panel-head"><h2>Skill details</h2><span class="badge ok">current</span></div>
+            <dl class="definition">
+              <dt>Created</dt><dd>May 18, 2026</dd>
+              <dt>Last changed</dt><dd>August 4, 2026</dd>
+              <dt>Current candidate</dt><dd class="mono">sha256:92f31df4…</dd>
+              <dt>Source route</dt><dd>Copilot → Copilot</dd>
+              <dt>Publication</dt><dd>Copilot, Claude, Codex</dd>
+              <dt>Evaluation status</dt><dd>Current authority valid</dd>
+            </dl>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>Current evaluation</h2><span class="badge ok">pass</span></div>
+            <div class="list">
+              <div class="list-row"><span><strong>Capability uplift</strong><small>Candidate success versus control</small></span><span class="badge ok">+21%</span></div>
+              <div class="list-row"><span><strong>Related-task check</strong><small>No measured sibling regression</small></span><span class="badge ok">pass</span></div>
+              <div class="list-row"><span><strong>Activation check</strong><small>Loads only when relevant</small></span><span class="badge ok">pass</span></div>
+              <div class="list-row"><span><strong>Required provider</strong><small>Copilot independent certificate</small></span><span class="badge ok">pass</span></div>
+            </div>
+          </section>
+          <section class="panel wide">
+            <div class="panel-head"><h2>Skill text</h2><div class="tabs"><button class="active">Rendered</button><button>Source</button></div></div>
+            <article style="max-width:820px;color:#d9e0e9;font-size:13px;line-height:1.65">
+              <h3 style="font-size:20px;margin:0 0 10px">Copilot CLI plugins</h3>
+              <p>Install, troubleshoot, and reason about GitHub Copilot CLI extensibility, including plugins, marketplaces, and MCP servers.</p>
+              <h3 style="font-size:14px;margin:18px 0 7px">When to use</h3>
+              <p>Use when a plugin install fails, an MCP server will not start, or someone asks whether an extension from another agent works in Copilot CLI.</p>
+              <h3 style="font-size:14px;margin:18px 0 7px">Procedure</h3>
+              <p>Identify the extension type, inspect the authoritative Copilot CLI configuration, reproduce the failure at the native boundary, and distinguish portable MCP protocol behavior from agent-specific packaging.</p>
+              <p class="label">Full read-only SKILL.md continues below</p>
+            </article>
+          </section>
+          <section class="panel wide">
+            <div class="panel-head"><h2>Evidence</h2><button class="skill-link" data-screen-target="skill-evidence">View all 7 summaries →</button></div>
+            <table>
+              <thead><tr><th>Observed</th><th style="width:21%">Dream</th><th>CLI</th><th>Evidence kind</th><th style="width:34%">Saved summary preview</th><th>Independence</th></tr></thead>
+              <tbody>
+                <tr><td>Today</td><td>Debugging Copilot plugin installation</td><td>Copilot</td><td>successful procedure</td><td class="evidence-preview"><button class="skill-link" data-screen-target="skill-evidence" data-evidence-target="evidence-plugin-reference">Diagnosed a plugin marketplace reference failure by separating Git ref resolution from Copilot CLI packaging…</button></td><td>verified</td></tr>
+                <tr><td>Jul 29</td><td>Checking Claude plugin portability</td><td>Copilot</td><td>owner correction</td><td class="evidence-preview"><button class="skill-link" data-screen-target="skill-evidence" data-evidence-target="evidence-portability">Distinguished portable MCP server behavior from agent-specific plugin packaging before recommending installation steps…</button></td><td>verified</td></tr>
+                <tr><td>Jul 17</td><td>Recovering a local MCP server</td><td>Claude</td><td>successful procedure</td><td class="evidence-preview"><button class="skill-link" data-screen-target="skill-evidence" data-evidence-target="evidence-runtime">Recovered a stdio MCP runtime on macOS by checking the executable, inherited environment, and native client logs…</button></td><td>unverified</td></tr>
+              </tbody>
+            </table>
+          </section>
+          <section class="panel wide">
+            <div class="panel-head"><h2>Evaluation history</h2><span class="label">each row is one candidate version</span></div>
+            <table>
+              <thead><tr><th>Date</th><th>Candidate</th><th>Measured impact</th><th>Required result</th><th>Advisers</th><th>Authority</th><th></th></tr></thead>
+              <tbody>
+                <tr><td>Today</td><td class="mono">92f31df4…</td><td>+21% capability · no sibling regression</td><td><span class="badge ok">pass</span></td><td>2 inconclusive</td><td><span class="badge ok">valid</span></td><td><button class="skill-link" data-screen-target="activity">View run</button></td></tr>
+                <tr><td>Jul 28</td><td class="mono">77d0c21a…</td><td>+17% capability · activation pass</td><td><span class="badge ok">pass</span></td><td>1 pass · 1 unavailable</td><td>superseded</td><td><button class="skill-link" data-screen-target="activity">View run</button></td></tr>
+                <tr><td>Jul 09</td><td class="mono">4ab88f02…</td><td>related-task regression</td><td><span class="badge warn">regression</span></td><td>not run</td><td>refused</td><td><button class="skill-link" data-screen-target="activity">View run</button></td></tr>
+              </tbody>
+            </table>
+          </section>
+        </div>
+      </section>
+
+      <section class="screen" id="skill-evidence" hidden>
+        <button class="back-link" data-screen-target="skill-detail">← Back to copilot-cli-plugins</button>
+        <header class="screen-title">
+          <h1>Evidence for copilot-cli-plugins</h1>
+          <p class="subtitle">Each saved finding with the surrounding transcript events Dreaming reviewed. Highlighted turns are the exact evidence cited for the finding.</p>
+        </header>
+        <div class="toolbar">
+          <button class="control">All evidence kinds</button>
+          <button class="control">All independence states</button>
+          <button class="control">Newest first</button>
+        </div>
+        <div class="evidence-stack">
+          <article class="evidence-card" id="evidence-plugin-reference">
+            <header><div><h2>Diagnosed a plugin marketplace reference failure by separating Git ref resolution from Copilot CLI packaging</h2><div class="evidence-meta">Dream: Debugging Copilot plugin installation · Today · successful procedure</div></div><span><span class="badge skill">Copilot CLI</span> <span class="badge ok">verified task</span></span></header>
+            <div class="context-note">Exact cited range · events 41–42 · three surrounding events included</div>
+            <section class="transcript" aria-label="Transcript excerpt">
+              <article class="event"><div class="event-head"><span>User · event 38</span><span>14:02:11</span></div><p>Can I install this Claude Code plugin directly in Copilot CLI?</p></article>
+              <article class="event"><div class="event-head"><span>Assistant · event 39</span><span>14:02:19</span></div><p>I’ll first separate the reusable MCP server from the agent-specific plugin package and inspect how the marketplace reference resolves.</p></article>
+              <article class="event focus"><div class="event-head"><span>Assistant · cited event 41</span><span>14:02:38</span></div><p>The server speaks a portable protocol, but the plugin manifest and installation command belong to Claude Code. Copilot CLI can use the server through its own MCP configuration; it cannot consume the Claude plugin package directly.</p></article>
+              <article class="event focus"><div class="event-head"><span>User · cited event 42</span><span>14:03:02</span></div><p>That makes sense. The failed install was trying to resolve the plugin tag as though it were a Copilot marketplace reference.</p></article>
+              <article class="event"><div class="event-head"><span>Assistant · event 43</span><span>14:03:14</span></div><p>Right. The durable procedure is to identify the extension type first, then use the native installation boundary for that agent.</p></article>
+            </section>
+            <div class="card-actions"><button class="control">Open transcript</button></div>
+            <div class="secondary-id mono">Fallback identity: copilot:c8b94df9…</div>
+          </article>
+          <article class="evidence-card" id="evidence-portability">
+            <header><div><h2>Distinguished portable MCP behavior from agent-specific plugin packaging</h2><div class="evidence-meta">Dream: Checking Claude plugin portability · July 29 · owner correction</div></div><span><span class="badge skill">Copilot CLI</span> <span class="badge ok">verified task</span></span></header>
+            <div class="context-note">Exact cited range · events 18–19 · two surrounding events included</div>
+            <section class="transcript" aria-label="Transcript excerpt">
+              <article class="event"><div class="event-head"><span>Assistant · event 17</span><span>10:41:08</span></div><p>The marketplace package itself is agent-specific, although it may contain a server that uses the shared MCP protocol.</p></article>
+              <article class="event focus"><div class="event-head"><span>User · cited event 18</span><span>10:41:31</span></div><p>Please don’t say the plugin works in Copilot just because the MCP server inside it is portable. Those are different things.</p></article>
+              <article class="event focus"><div class="event-head"><span>Assistant · cited event 19</span><span>10:41:46</span></div><p>Correct. I should describe the server protocol as portable and the plugin packaging and installation flow as specific to its host agent.</p></article>
+              <article class="event"><div class="event-head"><span>Assistant · event 20</span><span>10:42:03</span></div><p>I’ll verify Copilot CLI’s own MCP configuration path before giving installation instructions.</p></article>
+            </section>
+            <div class="card-actions"><button class="control">Open transcript</button></div>
+            <div class="secondary-id mono">Fallback identity: copilot:0ad8f22c…</div>
+          </article>
+          <article class="evidence-card" id="evidence-runtime">
+            <header><div><h2>Recovered a stdio MCP runtime by checking the executable, inherited environment, and native logs</h2><div class="evidence-meta">Dream: Recovering a local MCP server · July 17 · successful procedure</div></div><span><span class="badge skill">Claude Code</span> <span class="badge warn">unverified task</span></span></header>
+            <div class="context-note">Historical evidence · no exact event anchor. Showing the closest retained context without claiming which turns established the finding.</div>
+            <section class="transcript" aria-label="Transcript excerpt">
+              <article class="event"><div class="event-head"><span>User · event 22</span><span>16:18:04</span></div><p>The MCP server runs in my terminal but Claude Code says it cannot start.</p></article>
+              <article class="event"><div class="event-head"><span>Assistant · event 23</span><span>16:18:18</span></div><p>I’m checking the configured executable and the environment inherited by Claude Code before changing the server.</p></article>
+              <article class="event"><div class="event-head"><span>Tool result · event 25</span><span>16:18:39</span></div><p>The configured runtime is not present on the application’s PATH.</p></article>
+              <article class="event"><div class="event-head"><span>Assistant · event 26</span><span>16:18:51</span></div><p>The server is healthy. Its runtime path is only available in the interactive shell, so the native application cannot launch it.</p></article>
+            </section>
+            <div class="card-actions"><button class="control">Open transcript</button></div>
+            <div class="secondary-id mono">Fallback identity: claude:229ac41e…</div>
+          </article>
+          <article class="evidence-card" id="evidence-path">
+            <header><div><h2>Traced a startup failure to a runtime available in the shell but absent from the application environment</h2><div class="evidence-meta">Dream: Resolving a missing runtime dependency · July 2 · failure recovery</div></div><span><span class="badge skill">Copilot CLI</span> <span class="badge ok">verified task</span></span></header>
+            <div class="context-note">Exact cited range · events 31–33 · one surrounding event included</div>
+            <section class="transcript" aria-label="Transcript excerpt">
+              <article class="event"><div class="event-head"><span>User · event 30</span><span>09:07:14</span></div><p>The command exists in my shell, but the MCP server still exits immediately.</p></article>
+              <article class="event focus"><div class="event-head"><span>Tool result · cited event 31</span><span>09:07:28</span></div><p>Application environment PATH does not include the runtime installation directory.</p></article>
+              <article class="event focus"><div class="event-head"><span>Assistant · cited event 32</span><span>09:07:41</span></div><p>The failure is at the application launch boundary, not inside the MCP server. I’ll configure the resolved executable path explicitly.</p></article>
+              <article class="event focus"><div class="event-head"><span>Tool result · cited event 33</span><span>09:08:03</span></div><p>Server initialized successfully using the absolute runtime path.</p></article>
+            </section>
+            <div class="card-actions"><button class="control">Open transcript</button></div>
+            <div class="secondary-id mono">Fallback identity: copilot:813d4c70…</div>
+          </article>
+          <article class="evidence-card" id="evidence-extension-types">
+            <header><div><h2>Classified shared protocols separately from packaging owned by a particular agent</h2><div class="evidence-meta">Dream: Comparing extension types across agents · June 21 · independent recurrence</div></div><span><span class="badge skill">Codex CLI</span> <span class="badge ok">verified task</span></span></header>
+            <div class="context-note">Transcript snapshot is no longer retained, so this card can show the saved finding but cannot independently expose its original context.</div>
+            <div class="secondary-id mono">Fallback identity: codex:54c212ac…</div>
+          </article>
+        </div>
+      </section>
+
+      <section class="screen" id="system" hidden>
+        <header class="screen-title">
+          <h1>System</h1>
+          <p class="subtitle">Runtime health, generations, storage, sources, targets, and rollback readiness.</p>
+        </header>
+        <div class="grid detail-grid">
+          <section class="panel">
+            <div class="panel-head"><h2>Health</h2><span class="badge ok">healthy</span></div>
+            <div class="attention">
+              <div class="attention-row good"><span class="signal"></span><span><strong>Dreaming daemon</strong><small>Last run 4h ago</small></span><span class="count">ok</span></div>
+              <div class="attention-row good"><span class="signal"></span><span><strong>Watchdog</strong><small>Fresh and within cadence</small></span><span class="count">ok</span></div>
+              <div class="attention-row good"><span class="signal"></span><span><strong>Self-test receipt</strong><small>Matches activation generation</small></span><span class="count">match</span></div>
+              <div class="attention-row good"><span class="signal"></span><span><strong>Halt switch</strong><small>Normal operation enabled</small></span><span class="count">inactive</span></div>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>Runtime</h2><span class="label">read-only</span></div>
+            <dl class="definition">
+              <dt>Commit</dt><dd class="mono">26d17d1c91e5…</dd>
+              <dt>Generation</dt><dd class="mono">20260808T051913Z-install-49018</dd>
+              <dt>Review executor</dt><dd>Copilot</dd>
+              <dt>Sources</dt><dd>Copilot, Claude, Codex</dd>
+              <dt>Targets</dt><dd>Copilot, Claude, Codex</dd>
+              <dt>Review budget</dt><dd>25 per run</dd>
+              <dt>Source timeout</dt><dd>180 seconds</dd>
+            </dl>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>Storage</h2><span class="label">162.4 MB · no Dreaming quota</span></div>
+            <div class="list">
+              <div class="list-row"><span><strong>Runtime state</strong><small>Queue, ledger, attempts, transactions, and receipts · 8,416 records</small></span><span>18 MB</span></div>
+              <div class="list-row"><span><strong>Transcript snapshots</strong><small>1,747 immutable reviewed snapshots · maximum 1 MB each</small></span><span>142 MB</span></div>
+              <div class="list-row"><span><strong>Learned skills</strong><small>137 Git-backed skills, private evidence, and history</small></span><span>2.4 MB</span></div>
+              <div class="list-row"><span><strong>Disk capacity</strong><small>Dreaming has no separate storage ceiling<div class="progress"><i style="width:32%"></i></div></small></span><span>312 GB free</span></div>
+            </div>
+          </section>
+          <section class="panel">
+            <div class="panel-head"><h2>Rollback readiness</h2><span class="badge ok">ready</span></div>
+            <dl class="definition">
+              <dt>Latest backup</dt><dd class="mono">20260808T051908Z-49018</dd>
+              <dt>Evidence</dt><dd>Preserved across rollback</dd>
+              <dt>LaunchAgents</dt><dd>Exact-byte backup available</dd>
+              <dt>Enablement rule</dt><dd>Matching self-test receipt required</dd>
+            </dl>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script>
+    const links = [...document.querySelectorAll("[data-screen]")];
+    const screens = [...document.querySelectorAll(".screen")];
+    function showScreen(id) {
+      screens.forEach(screen => screen.hidden = screen.id !== id);
+      links.forEach(link => link.classList.toggle("active", link.dataset.screen === id));
+      history.replaceState(null, "", "#" + id);
+      window.scrollTo(0, 0);
+    }
+    links.forEach(link => link.addEventListener("click", event => {
+      event.preventDefault();
+      showScreen(link.dataset.screen);
+    }));
+    document.querySelectorAll("[data-screen-target]").forEach(control => control.addEventListener("click", () => {
+      showScreen(control.dataset.screenTarget);
+      if (control.dataset.evidenceTarget) {
+        requestAnimationFrame(() => document.getElementById(control.dataset.evidenceTarget)?.scrollIntoView({ behavior: "smooth", block: "start" }));
+      }
+    }));
+    const initial = location.hash.slice(1);
+    if (screens.some(screen => screen.id === initial)) showScreen(initial);
+  </script>
+</body>
+</html>
