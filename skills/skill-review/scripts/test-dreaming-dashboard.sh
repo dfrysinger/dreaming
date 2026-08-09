@@ -150,7 +150,28 @@ for index in range(1750):
 (state / "queue.json").write_text(json.dumps(queue), encoding="utf-8")
 (state / "unsettled.json").write_text("{}", encoding="utf-8")
 (state / "review-ledger.json").write_text("[]", encoding="utf-8")
-(state / "review-attempts.json").write_text("[]", encoding="utf-8")
+(state / "review-attempts.json").write_text(json.dumps([
+    {
+        "session_id": "copilot:scheduled-session",
+        "source": "copilot",
+        "status": "ok",
+        "started_at": "2026-01-02T19:30:15Z",
+        "parent_run_id": "run-1",
+    },
+    {
+        "session_id": "claude:legacy-session",
+        "source": "claude",
+        "status": "ok",
+        "started_at": "2026-01-01T19:30:15Z",
+    },
+    {
+        "session_id": "codex:in-flight-session",
+        "source": "codex",
+        "status": "ok",
+        "started_at": "2026-01-03T19:30:15Z",
+        "parent_run_id": "run-not-yet-recorded",
+    },
+]), encoding="utf-8")
 (control / "dreaming").mkdir(parents=True)
 (control / "dreaming/activation-generation").write_text(
     "20260101T000000Z-install-fixture\n",
@@ -431,6 +452,31 @@ try:
 
     for route in ("/api/v1/overview", "/api/v1/activity", "/api/v1/system", "/api/v1/health"):
         check(request(route)[0] == 200, f"{route} returns schema-v1 data")
+    _, _, activity_body = request("/api/v1/activity")
+    activity = json.loads(activity_body)["data"]["items"]
+    scheduled = next(item for item in activity if item["id"] == "run-1")
+    check(
+        scheduled["reviews"][0]["session_id"] == "copilot:scheduled-session",
+        "scheduled reviews are nested by exact parent run ID",
+    )
+    check(
+        any(
+            item["kind"] == "dream-review"
+            and item["session_id"] == "claude:legacy-session"
+            and "parent_run_id" not in item
+            for item in activity
+        ),
+        "unparented historical reviews remain explicit",
+    )
+    check(
+        any(
+            item["kind"] == "dream-review"
+            and item["session_id"] == "codex:in-flight-session"
+            and item["parent_run_id"] == "run-not-yet-recorded"
+            for item in activity
+        ),
+        "scheduled reviews retain unresolved parent run IDs",
+    )
     status, _, body = request("/api/v1/health")
     health = json.loads(body)["data"]
     check(

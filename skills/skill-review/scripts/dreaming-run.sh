@@ -176,7 +176,8 @@ for index in 0 1 2; do
   pass_started="$(date -u -r "$pass_started_epoch" +%Y-%m-%dT%H:%M:%S+00:00)"
   pass_log="$LOG_DIR/${RUN_ID}-${pass}.log"
   log "starting $pass"
-  if DREAMING_ORCHESTRATED=1 SKILLS_LOCK_HELD_BY_PARENT=1 "$PASS_RUNNER" \
+  if DREAMING_ORCHESTRATED=1 DREAMING_PARENT_RUN_ID="$RUN_ID" \
+      SKILLS_LOCK_HELD_BY_PARENT=1 "$PASS_RUNNER" \
       --prompt "${PROMPTS[$index]}" --name "${NAMES[$index]}" --log "$pass_log"; then
     pass_ended_epoch="${DREAMING_NOW_EPOCH:-$(date +%s)}"
     pass_ended="$(date -u -r "$pass_ended_epoch" +%Y-%m-%dT%H:%M:%S+00:00)"

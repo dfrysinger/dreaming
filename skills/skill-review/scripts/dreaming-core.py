@@ -378,6 +378,7 @@ class DreamingRuntime:
         max_snapshot_bytes: int = 1_000_000,
         max_events: int = 2_000,
         max_field_bytes: int = 64_000,
+        parent_run_id: str | None = None,
         now: Callable[[], int] | None = None,
     ):
         self.paths = paths
@@ -388,6 +389,7 @@ class DreamingRuntime:
         self.max_snapshot_bytes = max_snapshot_bytes
         self.max_events = max_events
         self.max_field_bytes = max_field_bytes
+        self.parent_run_id = parent_run_id
         self.now = now or (lambda: int(datetime.now(timezone.utc).timestamp()))
 
     def _state(self, path: Path, default: Any) -> Any:
@@ -1419,6 +1421,11 @@ class DreamingRuntime:
                     "terminal_route": result.get("terminal_route"),
                     "mutation_started": False,
                     "started_at": attempt_started_at,
+                    **(
+                        {"parent_run_id": self.parent_run_id}
+                        if self.parent_run_id
+                        else {}
+                    ),
                 }
                 attempts.append(attempt)
                 self._write(self.paths.attempts, attempts)
@@ -1538,6 +1545,11 @@ class DreamingRuntime:
                             "error": error.code,
                             "mutation_started": True,
                             "started_at": attempt_started_at,
+                            **(
+                                {"parent_run_id": self.parent_run_id}
+                                if self.parent_run_id
+                                else {}
+                            ),
                         }
                     )
                     self._write(self.paths.attempts, attempts)
@@ -1558,6 +1570,11 @@ class DreamingRuntime:
                         "mutation_started": False,
                         "source_revision": current["source_revision"],
                         "started_at": attempt_started_at,
+                        **(
+                            {"parent_run_id": self.parent_run_id}
+                            if self.parent_run_id
+                            else {}
+                        ),
                     }
                 )
                 self._write(self.paths.attempts, attempts)
@@ -2267,6 +2284,7 @@ def scheduled_run() -> dict[str, Any]:
         max_snapshot_bytes=settings["max_snapshot_bytes"],
         max_events=settings["max_events"],
         max_field_bytes=settings["max_field_bytes"],
+        parent_run_id=os.environ.get("DREAMING_PARENT_RUN_ID") or None,
     )
     legacy_ledger = config.get("legacy_ledger_path") or os.environ.get(
         "DREAMING_LEGACY_LEDGER"

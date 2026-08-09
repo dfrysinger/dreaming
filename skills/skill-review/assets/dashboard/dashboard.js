@@ -192,13 +192,13 @@ function skillTable(items) {
 
 async function renderActivity() {
   const data = await api("/api/v1/activity?limit=50");
-  view.innerHTML = `${header("Activity", "Scheduled executions contain their ordered passes; on-demand work remains separate.")}
+  view.innerHTML = `${header("Activity", "Scheduled executions contain their ordered passes and attributed reviews; older unlinked work remains separate.")}
     <div class="run-stack">${data.items.length ? data.items.map(run => `
-      <article class="run"><header><div><div class="run-title"><h2>${run.kind === "scheduled" ? "Scheduled Dreaming run" : run.kind === "evaluation" ? "Skill evaluation" : "On-demand dream review"}</h2><time>${fullTime(run.started_at)}</time></div><div class="muted">${esc(run.id)}</div></div>${badge(run.status)}</header>
+      <article class="run"><header><div><div class="run-title"><h2>${run.kind === "scheduled" ? "Scheduled Dreaming run" : run.kind === "evaluation" ? "Skill evaluation" : run.parent_run_id ? "Scheduled dream review" : "Unattributed dream review"}</h2><time>${fullTime(run.started_at)}</time></div><div class="muted">${esc(run.id)}${run.parent_run_id ? ` · Parent ${esc(run.parent_run_id)}` : ""}</div></div>${badge(run.status)}</header>
       ${run.kind === "scheduled" ? `<div class="steps">${["consolidate","roll","prune"].map((name,index) => {
         const step = (run.passes || []).find(item => item.name === name) || {status:"not recorded"};
         return `<div class="step"><span>${index + 1}</span><strong>${name[0].toUpperCase() + name.slice(1)}</strong><span>${esc(step.reason || "")}</span>${badge(step.status)}</div>`;
-      }).join("")}${run.maintenance ? `<div class="notice">${run.maintenance.days_until_due === null ? "Weekly maintenance is not due; the last successful run is unavailable." : `Weekly maintenance not due for ${run.maintenance.days_until_due} days (Last run ${fullTime(run.maintenance.last_run_at)})`}</div>` : ""}</div>` : ""}</article>`).join("") : `<div class="empty">No retained activity.</div>`}</div>`;
+      }).join("")}${(run.reviews || []).map(review => `<div class="step"><span>↳</span><strong>Dream review</strong><span>${esc(review.source || "Unknown CLI")} · ${esc(review.session_id || "Unknown dream")}</span>${badge(review.status)}</div>`).join("")}${run.maintenance ? `<div class="notice">${run.maintenance.days_until_due === null ? "Weekly maintenance is not due; the last successful run is unavailable." : `Weekly maintenance not due for ${run.maintenance.days_until_due} days (Last run ${fullTime(run.maintenance.last_run_at)})`}</div>` : ""}</div>` : ""}</article>`).join("") : `<div class="empty">No retained activity.</div>`}</div>`;
 }
 
 function toolbar(kind) {

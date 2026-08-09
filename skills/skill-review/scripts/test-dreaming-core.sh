@@ -252,6 +252,7 @@ class RuntimeTest(unittest.TestCase):
             "DREAMING_ADAPTER_CONFIG": str(config),
             "DREAMING_DATA_DIR": str(self.case / "neutral-data"),
             "DREAMING_STATE_DIR": str(self.case / "neutral-state"),
+            "DREAMING_PARENT_RUN_ID": "scheduled-run-123",
         }
         result = subprocess.run(
             [sys.executable, str(RUNTIME_PATH), "doctor"],
@@ -285,6 +286,11 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(report["deferred_reviews"], 1)
         ledger = Path(environment["DREAMING_STATE_DIR"]) / "review-ledger.json"
         self.assertEqual(json.loads(ledger.read_text())[0]["session_id"], "fake:one")
+        attempts = Path(environment["DREAMING_STATE_DIR"]) / "review-attempts.json"
+        self.assertEqual(
+            json.loads(attempts.read_text())[0]["parent_run_id"],
+            "scheduled-run-123",
+        )
         queue = Path(environment["DREAMING_STATE_DIR"]) / "queue.json"
         queued = json.loads(queue.read_text())
         self.assertEqual(

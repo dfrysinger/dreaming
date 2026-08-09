@@ -57,6 +57,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 echo "$name" >> "$ORDER_FILE"
+echo "${DREAMING_PARENT_RUN_ID:-}" >> "$PARENT_FILE"
 echo "DREAM_PASS_RESULT: ok fake=$name" > "$log"
 if [[ "${FAKE_HALT_AFTER:-}" == "$name" ]]; then
   mkdir -p "$SKILLS_STATE_DIR/skill-review"
@@ -81,7 +82,9 @@ new_case() {
   export DREAMING_NOW_EPOCH="$NOW"
   export SKILLS_NOW_EPOCH="$NOW"
   export ORDER_FILE="$CASE/order"
+  export PARENT_FILE="$CASE/parents"
   : > "$ORDER_FILE"
+  : > "$PARENT_FILE"
   unset FAKE_FAIL_PASS FAKE_HALT_AFTER DREAMING_FORCE_DUE
 }
 
@@ -178,8 +181,15 @@ export DREAMING_FORCE_DUE=1
 "$SCRIPT_DIR/dreaming-run.sh"
 assert_eq "$(paste -sd, "$ORDER_FILE")" "skills-consolidate,skills-roll,skills-prune" "successful order"
 assert_eq "$(wc -l < "$DREAMING_STATE_DIR/ledger.jsonl" | tr -d ' ')" "1" "success ledger count"
+run_id="$(/usr/bin/python3 - "$DREAMING_STATE_DIR/runs" <<'PY'
+import json, pathlib, sys
+paths = list(pathlib.Path(sys.argv[1]).glob("*.json"))
+print(json.loads(paths[0].read_text())["run_id"])
+PY
+)"
+assert_eq "$(sort -u "$PARENT_FILE")" "$run_id" "scheduled parent run propagation"
 [[ -f "$DREAMING_MEMORY_STATE" ]] || fail "fresh memory state was not initialized"
-pass "successful pipeline is ordered and ledgered once"
+pass "successful pipeline is ordered, parented, and ledgered once"
 
 new_case daily-consolidate
 current_bucket="$("$SCRIPT_DIR/dreaming-state.py" bucket)"

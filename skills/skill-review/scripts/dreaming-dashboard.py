@@ -915,6 +915,7 @@ class DashboardData:
     def activity(self, params: dict[str, list[str]]) -> dict[str, Any]:
         runs_dir = self.paths.orchestrator_state / "runs"
         rows = []
+        scheduled = {}
         if runs_dir.is_dir():
             for path in runs_dir.glob("*.json"):
                 if path.is_symlink():
@@ -922,10 +923,10 @@ class DashboardData:
                 run = self._json(path, {}, f"run:{path.name}")
                 if not isinstance(run, dict):
                     continue
-                rows.append(
-                    {
+                run_id = run.get("run_id", path.stem)
+                row = {
                         "kind": "scheduled",
-                        "id": run.get("run_id", path.stem),
+                        "id": run_id,
                         "started_at": run.get("started_at"),
                         "ended_at": run.get("ended_at"),
                         "status": run.get("status"),
@@ -933,20 +934,28 @@ class DashboardData:
                         "passes": run.get("passes", []),
                         "last_success_at_before": run.get("last_success_at_before"),
                         "maintenance": maintenance_status(run),
+                        "reviews": [],
                     }
-                )
+                rows.append(row)
+                scheduled[run_id] = row
         for item in self._list("review-attempts.json"):
-            if isinstance(item, dict) and not item.get("parent_run_id"):
-                rows.append(
-                    {
-                        "kind": "dream-review",
-                        "id": sha(item),
-                        "started_at": item.get("started_at"),
-                        "status": item.get("status"),
-                        "source": item.get("source"),
-                        "session_id": item.get("session_id"),
-                    }
-                )
+            if not isinstance(item, dict):
+                continue
+            review = {
+                "kind": "dream-review",
+                "id": sha(item),
+                "started_at": item.get("started_at"),
+                "status": item.get("status"),
+                "source": item.get("source"),
+                "session_id": item.get("session_id"),
+            }
+            parent_run_id = item.get("parent_run_id")
+            if parent_run_id in scheduled:
+                scheduled[parent_run_id]["reviews"].append(review)
+            else:
+                if isinstance(parent_run_id, str) and parent_run_id:
+                    review["parent_run_id"] = parent_run_id
+                rows.append(review)
         transition_root = (
             self.paths.control_state
             / "skill-review/evaluations/v2/dashboard-v1/authority-transitions"
