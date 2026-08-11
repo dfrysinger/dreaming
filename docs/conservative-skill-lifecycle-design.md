@@ -106,9 +106,14 @@ This slice does not:
 - enable automatic consolidation or archive;
 - change the cross-CLI evaluation suite.
 
-Both temporary transformations are removed when the candidate registry becomes
-authoritative. Fresh create results then enter `collecting`, while old results
-become historical support that cannot independently open or admit a candidate.
+Both temporary transformations remain active throughout the shadow milestone.
+Shadow candidate collection is additive to the deferred-discard result and
+ledger row; it does not grant create authority or relax
+`allow_autonomous_skill_creation`. A later enforcement milestone may supersede
+IC-02 and IC-CHK-02 only after the candidate registry becomes authoritative.
+Fresh create results may then enter `collecting` as their terminal policy
+outcome, while old results become historical support that cannot independently
+open or admit a candidate.
 
 #### Immediate containment acceptance
 
@@ -165,6 +170,160 @@ become historical support that cannot independently open or admit a candidate.
 - [ ] Installed instructions pause direct autonomous end-of-task mutation, and
       configured settings cannot relax the containment invariants.
 - [ ] Implementation review has no verified in-scope material finding.
+
+### Shadow candidate admission and evaluation milestone
+
+This milestone can proceed while production activation remains gated. It
+builds and proves the next three layers in dependency order without granting
+publication, mutation, retirement, or scheduled-production authority:
+
+1. **Candidate and lifecycle state.** Add the authoritative record and package
+   storage, legal state transitions, stable lifecycle identity, exact revision
+   identity, duplicate decisions, expiration, and read-only dashboard views.
+2. **Recurrence-based admission.** Route fresh autonomous create findings into
+   candidate collection, join matching independent observations, and compute
+   `ready_for_draft` eligibility. Every decision remains shadow-only.
+3. **Routing and task-value evaluation.** Extend the existing cross-CLI trial
+   harness with positive, close-negative, unrelated, and conflict routing
+   cases plus paired task-success and efficiency treatments. Evaluation may
+   record evidence and recommendations but cannot authorize publication.
+
+The first layer must land before recurrence because recurrence decisions need
+a stable record and legal transition owner. Recurrence must land before
+candidate evaluation because the evaluator needs an exact, admitted-for-test
+revision tied to one lifecycle record. Throughout this milestone, candidate
+collection is an additive shadow side effect of the existing fresh-create
+deferred-discard path. IC-02 and IC-CHK-02 remain live regression checks, the
+deferred ledger row remains the terminal scheduled-core outcome, and configured
+attempts to enable `allow_autonomous_skill_creation` remain rejected.
+
+Production activation is a separate operational gate. The installed
+generation remains halted and uncertified until the supported generation-bound
+self-test reports exactly `== result: 0 failure(s) ==`. Shadow development
+uses deterministic fixtures and focused model trials only. It does not run the
+six-hour installed self-test, enable LaunchAgents, or change publisher state.
+
+This milestone does not:
+
+- create zero-skill or production portfolio baselines;
+- run weekly complete-library benchmarks or model-proxy calibration;
+- import the existing installed skill library;
+- publish, withdraw, quarantine, consolidate, archive, or restore a skill;
+- remove the halt switch or certify the installed generation;
+- permit a candidate recommendation to become mutation authority.
+
+#### Shadow milestone acceptance
+
+- **SH-AC-01:** A valid fresh autonomous create finding creates or updates one
+  candidate lifecycle record and immutable draft package outside every skill
+  discovery and publisher root, while managed-skill Git state and publisher
+  bundle identities remain unchanged.
+- **SH-AC-02:** Candidate records reject malformed content, unknown states,
+  illegal transitions, mismatched exact revision identities, and writes
+  without the shared writer lease.
+- **SH-AC-03:** Matching independent fresh observations append to one stable
+  lifecycle record and produce a shadow `ready_for_draft` recommendation only
+  when every recurrence condition passes.
+- **SH-AC-04:** One observation, repeated evidence from one task or session,
+  old-only evidence, uncertain matching, an existing covering lifecycle, or a
+  tombstone cannot produce a ready recommendation.
+- **SH-AC-05:** Expiration, reopening, duplicate, supersession, and absorption
+  decisions retain append-only evidence and transition history without
+  changing a published inventory.
+- **SH-AC-06:** The dashboard truthfully distinguishes collecting,
+  `ready_for_draft`, expired, rejected, and evaluation states; separately
+  exposes duplicate, same, uncertain, supersession, and absorption decisions;
+  and labels every decision as shadow-only.
+- **SH-AC-07:** Routing trials report positive recall, close-negative and
+  unrelated false-load rates, conflict selection, and critical-case failures
+  for the exact candidate and environment identity.
+- **SH-AC-08:** Paired task-value trials report success, turns, tokens, and tool
+  use for candidate and control treatments, reject incomplete or mismatched
+  arms, and preserve separate gate results rather than one composite score.
+- **SH-AC-09:** Candidate or environment drift makes routing and task-value
+  evidence stale. Missing real-backend evidence remains `inconclusive`, not a
+  pass.
+- **SH-AC-10:** No shadow state, recommendation, or evaluation receipt can
+  change managed skills, approved inventories, publishers, scheduled
+  activation, quarantine, or retirement state.
+
+#### Shadow milestone check contract
+
+- **SH-CHK-01: Candidate authority and isolation.** Feed the core a fresh
+  structured create result. Pass requires one valid record and package under
+  the configured candidate roots, unchanged managed-skill `HEAD`, unchanged
+  approved bundle pointers, and no native discovery. Any skill-root write or
+  publisher change proves shadow authority escaped.
+- **SH-CHK-02: State-machine fail closure.** Exercise every declared transition
+  plus malformed records, unknown states, stale writes, identity mismatch, and
+  missing lease ownership. Pass requires legal transitions to retain their
+  complete history and every invalid operation to leave the prior record byte
+  identity unchanged.
+- **SH-CHK-03: Recurrence matrix.** Exercise two independent recent tasks, one
+  repeated task, one repeated session, old-only support, a mixed old and fresh
+  pair no more than 45 days apart, another qualifying pair more than 45 days
+  apart, uncertain matching, a covering active record, and a tombstone. Pass
+  requires only the two-independent-recent case and the mixed pair within the
+  45-day spread to recommend `ready_for_draft`.
+- **SH-CHK-04: Lifecycle retention.** Expire and reopen a candidate, then model
+  duplicate, supersession, and absorption decisions. Pass requires all evidence
+  and transition reasons to remain reachable and no publication mutation.
+- **SH-CHK-05: Dashboard reader.** Render fixture records for each declared
+  shadow lifecycle state and separate fixtures for same, duplicate, uncertain,
+  supersession, and absorption decisions. Pass requires truthful labels,
+  reasons, evidence counts, freshness, and an explicit non-authoritative
+  marker. Missing or malformed state must be shown as unavailable or invalid
+  rather than inferred as healthy.
+- **SH-CHK-06: Routing matrix.** Run sealed positive, close-negative, unrelated,
+  and conflict fixtures through the existing trial harness with a sealed
+  snapshot of the relevant approved target catalog plus the candidate.
+  Candidate-only routing remains diagnostic and cannot certify this check.
+  Pass requires exact load evidence, per-case results, critical-case fail
+  closure, and candidate, catalog, and environment binding.
+- **SH-CHK-07: Paired task value.** Run complete candidate and control arms plus
+  missing-arm, mismatched-scenario, over-budget, stale-identity, and
+  missing-real-backend fixtures. Pass requires every complete receipt to bind
+  backend execution identity and report separate success, turns, tokens, and
+  tool-use measures for both treatments. Missing real-backend evidence is
+  `inconclusive`; other invalid evidence is `inconclusive`, stale, or a
+  regression according to its failure class.
+- **SH-CHK-08: Mutation boundary.** Snapshot managed-skill Git state, approved
+  inventory pointers, publisher state, LaunchAgent state, halt state, and
+  production quarantine and retirement state before the complete shadow flow.
+  Pass requires every snapshot to remain unchanged after candidate collection,
+  recurrence, and evaluation, including an evaluation failure that attempts
+  but cannot invoke a production quarantine transition.
+
+#### Definition of Done: Shadow candidate admission and evaluation
+
+- [ ] Candidate records and isolated immutable packages implement stable
+      lifecycle identity, exact revision identity, legal transitions,
+      expiration, duplicate decisions, supersession, and absorption.
+- [ ] Fresh autonomous create findings enter candidate collection without
+      skill, Git, approved-inventory, publisher, LaunchAgent, or retirement
+      mutation.
+- [ ] Recent independent recurrence produces only a shadow
+      `ready_for_draft` recommendation, and every insufficient-evidence case
+      remains `collecting`, `expired`, or `rejected` while any same, duplicate,
+      uncertain, supersession, or absorption outcome remains a separate
+      recorded decision rather than an undeclared lifecycle state.
+- [ ] Read-only dashboard views expose candidate, recurrence, lifecycle, and
+      evaluation state with explicit shadow-only authority.
+- [ ] The existing cross-CLI harness records exact-identity routing and paired
+      task-value evidence, including success, turns, tokens, and tool use.
+- [ ] Missing, incomplete, mismatched, stale, or over-budget evidence fails
+      closed as `inconclusive`, stale, or regression.
+- [ ] Deterministic checks prove the full shadow flow cannot change managed
+      skills, approved inventories, publishers, activation, quarantine, or
+      retirement state.
+- [ ] Focused real-model trials cover representative positive, close-negative,
+      unrelated, conflict, candidate, and control cases without running the
+      complete portfolio matrix.
+- [ ] The implementation passes its targeted deterministic suites, critical
+      live proof, and required implementation review.
+- [ ] The installed generation remains halted throughout this milestone; this
+      run does not certify the generation, write an activation receipt, remove
+      the halt switch, or enable a LaunchAgent.
 
 ## Reuse contract
 
