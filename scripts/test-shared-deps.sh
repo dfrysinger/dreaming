@@ -40,6 +40,7 @@ printf -- '---\nname: unrelated-skill\ndescription: Must never enter the shared 
 git -C "$SOURCE" init -q
 git -C "$SOURCE" config user.email test@example.com
 git -C "$SOURCE" config user.name Test
+git -C "$SOURCE" config core.hooksPath /dev/null
 git -C "$SOURCE" add .
 git -C "$SOURCE" commit -qm fixture
 REVISION="$(git -C "$SOURCE" rev-parse HEAD)"

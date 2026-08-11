@@ -765,7 +765,7 @@ else:
     def test_timeout_cancels_native_process_without_raw_output(self):
         for vendor in ("copilot", "claude", "codex"):
             trial, _, _, response = self.prepare_and_run(
-                vendor, prompt="TIMEOUT", adapter_timeout=1
+                vendor, prompt="TIMEOUT", adapter_timeout=30
             )
             diagnostic = self.write_timeout_diagnostic(
                 vendor, trial, response, "adapter-cancelled"

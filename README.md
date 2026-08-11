@@ -34,7 +34,7 @@ scripts/install.sh rollback-migration           # separately remove unchanged mi
 ```
 
 The compatibility installation syncs `dfrysinger/dreaming` through Copilot CLI
-and atomically installs the repository-managed end-of-task trigger at
+and atomically installs the repository-managed Dreaming instructions at
 `${COPILOT_HOME:-$HOME/.copilot}/instructions/dreaming.instructions.md`. A tracked
 SHA-256 prevents overwriting user edits; uninstall removes only the unchanged
 copy Dreaming installed. Ownership is recorded under

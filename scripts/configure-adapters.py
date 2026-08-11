@@ -202,9 +202,12 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
         "retired_publishers": retired_publishers,
         "routes": valid_routes,
         "executor_order": executors,
+        "policy_version": 2,
         "max_reviews_per_run": positive_integer(
             "DREAMING_MAX_REVIEWS_PER_RUN", "25"
         ),
+        "max_autonomous_session_age_days": 30,
+        "allow_autonomous_skill_creation": False,
     }
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.parent / f".{output.name}.{uuid.uuid4().hex}"

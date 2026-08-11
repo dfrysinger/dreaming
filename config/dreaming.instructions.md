@@ -16,17 +16,13 @@ After a task, propose `/skill-create` only when all of these are true:
 Ask before creating a skill in the foreground. Offer one concise proposal; do
 not create it unilaterally.
 
-## Tier 2 — autonomous end-of-task review
+## Tier 2 — autonomous end-of-task review paused
 
-At the end of a qualifying heavy task, dispatch `skill-review` as an
-end-of-task subagent in `dispatch` mode without asking when both are true:
-
-1. the task required roughly ten or more substantive tool calls; and
-2. it produced a reusable procedure with at least three steps.
-
-Skip dispatch when the task is not heavy, the learning is not reusable, or an
-equivalent skill already exists. The review workflow is git-reversible,
-provenance-marked, ledger-deduplicated, and tombstone-guarded.
+Do not dispatch `skill-review` as an autonomous end-of-task subagent. Direct
+agent mutation is paused until every autonomous entry point uses the
+recurrence-based candidate admission boundary. Scheduled Dreaming may still
+review sessions through `dreaming-core.py`, where fresh create proposals and
+all historical mutations are retained as non-mutating deferred evidence.
 
 ## Patch trigger
 

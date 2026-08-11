@@ -150,8 +150,50 @@ class RuntimeTest(unittest.TestCase):
             routes,
             overlap_seconds=10,
             quiet_retry_seconds=5,
+            allow_autonomous_skill_creation=True,
             now=lambda: self.clock,
         )
+
+    def initialize_git_repo(self) -> None:
+        subprocess.run(
+            ["git", "-C", str(self.paths.skills), "init", "-q"],
+            check=True,
+        )
+        subprocess.run(
+            ["git", "-C", str(self.paths.skills), "config", "core.hooksPath", "/dev/null"],
+            check=True,
+        )
+
+    def init_skills_repo(self) -> str:
+        self.paths.skills.mkdir(parents=True, exist_ok=True)
+        self.initialize_git_repo()
+        (self.paths.skills / ".gitignore").write_text(".DS_Store\n")
+        subprocess.run(
+            ["git", "-C", str(self.paths.skills), "add", ".gitignore"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.paths.skills),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "initial",
+            ],
+            check=True,
+        )
+        return subprocess.run(
+            ["git", "-C", str(self.paths.skills), "rev-parse", "HEAD"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
 
     def test_contract_identity_and_structured_failure(self) -> None:
         fixture = self.source_fixture([self.session("same-id", 10)])
@@ -353,10 +395,7 @@ class RuntimeTest(unittest.TestCase):
 
     def test_support_file_ancestors_are_validated_before_mutation(self) -> None:
         self.paths.skills.mkdir(parents=True)
-        subprocess.run(
-            ["git", "-C", str(self.paths.skills), "init", "-q"],
-            check=True,
-        )
+        self.initialize_git_repo()
         target = self.paths.skills / "fixture-skill"
         target.mkdir()
         skill_markdown = (
@@ -440,7 +479,9 @@ class RuntimeTest(unittest.TestCase):
                             "fake",
                             "--role",
                             "session-source",
-                        ]
+                        ],
+                        "timeout": TEST_ADAPTER_TIMEOUT,
+                        "run_timeout": TEST_ADAPTER_TIMEOUT,
                     }
                 },
                 "executors": {
@@ -454,7 +495,9 @@ class RuntimeTest(unittest.TestCase):
                             "fake-executor",
                             "--role",
                             "review-executor",
-                        ]
+                        ],
+                        "timeout": TEST_ADAPTER_TIMEOUT,
+                        "run_timeout": TEST_ADAPTER_TIMEOUT,
                     }
                 },
             },
@@ -479,6 +522,66 @@ class RuntimeTest(unittest.TestCase):
         invalid = json.loads(config.read_text())
         invalid["routes"] = ["fake>fake-executor"]
         invalid["overlap_seconds"] = "five"
+        config.write_text(json.dumps(invalid))
+        result = subprocess.run(
+            [sys.executable, str(RUNTIME_PATH), "doctor"],
+            env={
+                **os.environ,
+                "DREAMING_ADAPTER_CONFIG": str(config),
+                "DREAMING_DATA_DIR": str(self.paths.data),
+                "DREAMING_STATE_DIR": str(self.paths.state),
+            },
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            json.loads(result.stdout)["error"]["code"], "invalid-adapter-config"
+        )
+        invalid["overlap_seconds"] = 5
+        invalid["allow_autonomous_skill_creation"] = True
+        config.write_text(json.dumps(invalid))
+        result = subprocess.run(
+            [sys.executable, str(RUNTIME_PATH), "doctor"],
+            env={
+                **os.environ,
+                "DREAMING_ADAPTER_CONFIG": str(config),
+                "DREAMING_DATA_DIR": str(self.paths.data),
+                "DREAMING_STATE_DIR": str(self.paths.state),
+            },
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            json.loads(result.stdout)["error"]["code"], "invalid-adapter-config"
+        )
+        invalid["allow_autonomous_skill_creation"] = False
+        invalid["max_autonomous_session_age_days"] = 31
+        config.write_text(json.dumps(invalid))
+        result = subprocess.run(
+            [sys.executable, str(RUNTIME_PATH), "doctor"],
+            env={
+                **os.environ,
+                "DREAMING_ADAPTER_CONFIG": str(config),
+                "DREAMING_DATA_DIR": str(self.paths.data),
+                "DREAMING_STATE_DIR": str(self.paths.state),
+            },
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=False,
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            json.loads(result.stdout)["error"]["code"], "invalid-adapter-config"
+        )
+        invalid["max_autonomous_session_age_days"] = 30
+        invalid["allow_autonomous_skill_creation"] = "false"
         config.write_text(json.dumps(invalid))
         result = subprocess.run(
             [sys.executable, str(RUNTIME_PATH), "doctor"],
@@ -833,14 +936,257 @@ elif sys.argv[1] == "run":
         self.assertEqual(accepted["executor"], "success")
         self.assertEqual(json.loads(self.paths.transactions.read_text()), {})
 
+    def test_autonomous_create_is_deferred_without_mutation(self) -> None:
+        fixture = self.source_fixture([self.session("one", 10)])
+        source = self.adapter("session-source", "fake", fixture)
+        starting_head = self.init_skills_repo()
+        executor_fixture = self.write(
+            "deferred-create.json",
+            {
+                "mode": "success",
+                "terminal_route": "skill",
+                "summary": "A reusable fixture procedure was demonstrated",
+                "routing_reason": "The procedure has ordered reusable steps",
+                "artifact": {
+                    "operation": "create",
+                    "skill_name": "deferred-procedure",
+                    "skill_markdown": (
+                        "---\nname: deferred-procedure\n"
+                        "description: Run the deferred fixture procedure\n---\n"
+                        "# Deferred procedure\n"
+                    ),
+                    "support_files": [],
+                },
+            },
+        )
+        executor = self.adapter("review-executor", "exec", executor_fixture)
+        core = DreamingRuntime(
+            self.paths,
+            {("fake", "exec")},
+            allow_autonomous_skill_creation=False,
+            now=lambda: self.clock,
+        )
+        result = core.review(
+            "fake", source, "fake:one", [("exec", executor)]
+        )
+        self.assertEqual(result["status"], "deferred")
+        self.assertEqual(result["terminal_route"], "discard")
+        self.assertFalse(result["artifact_mutated"])
+        self.assertEqual(
+            result["policy_deferred"]["reason"],
+            "autonomous-create-requires-recurrence",
+        )
+        self.assertFalse((self.paths.skills / "deferred-procedure").exists())
+        self.assertEqual(
+            subprocess.run(
+                ["git", "-C", str(self.paths.skills), "rev-parse", "HEAD"],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.strip(),
+            starting_head,
+        )
+        retained = list((self.paths.state / "results").glob("*.json"))
+        self.assertEqual(len(retained), 1)
+        original = json.loads(retained[0].read_text())
+        self.assertEqual(original["terminal_route"], "skill")
+        self.assertEqual(original["artifact"]["operation"], "create")
+        self.assertFalse((self.paths.state / "draft-reviews").exists())
+        ledger = json.loads(self.paths.ledger.read_text())[0]
+        self.assertEqual(ledger["terminal_route"], "discard")
+        self.assertEqual(
+            ledger["policy_deferred"]["skill_name"], "deferred-procedure"
+        )
+
+    def test_historical_artifacts_are_retained_but_never_mutate(self) -> None:
+        self.clock = 30 * 24 * 60 * 60 + 100
+        fixture = self.source_fixture(
+            [self.session("patch", 10), self.session("support", 20)]
+        )
+        source = self.adapter("session-source", "fake", fixture)
+        self.init_skills_repo()
+        skill = self.paths.skills / "existing-procedure"
+        skill.mkdir()
+        original_markdown = (
+            "---\nname: existing-procedure\n"
+            "description: Run the existing fixture procedure\n---\n"
+            "# Existing procedure\n"
+        )
+        (skill / "SKILL.md").write_text(original_markdown)
+        subprocess.run(
+            ["git", "-C", str(self.paths.skills), "add", "existing-procedure"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.paths.skills),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "add existing skill",
+            ],
+            check=True,
+        )
+        starting_head = subprocess.run(
+            ["git", "-C", str(self.paths.skills), "rev-parse", "HEAD"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+        patch_fixture = self.write(
+            "historical-patch.json",
+            {
+                "mode": "success",
+                "terminal_route": "skill",
+                "artifact": {
+                    "operation": "patch",
+                    "skill_name": "existing-procedure",
+                    "skill_markdown": original_markdown + "\nHistorical patch.\n",
+                    "support_files": [],
+                },
+            },
+        )
+        support_fixture = self.write(
+            "historical-support.json",
+            {
+                "mode": "success",
+                "terminal_route": "support_file",
+                "artifact": {
+                    "operation": "support_file",
+                    "skill_name": "existing-procedure",
+                    "skill_markdown": original_markdown,
+                    "support_files": [
+                        {
+                            "path": "references/historical.md",
+                            "content": "historical detail\n",
+                        }
+                    ],
+                },
+            },
+        )
+        patcher = self.adapter("review-executor", "patcher", patch_fixture)
+        supporter = self.adapter("review-executor", "supporter", support_fixture)
+        core = DreamingRuntime(
+            self.paths,
+            {("fake", "patcher"), ("fake", "supporter")},
+            allow_autonomous_skill_creation=False,
+            now=lambda: self.clock,
+        )
+        patch_result = core.review(
+            "fake", source, "fake:patch", [("patcher", patcher)]
+        )
+        support_result = core.review(
+            "fake", source, "fake:support", [("supporter", supporter)]
+        )
+        for result, operation in (
+            (patch_result, "patch"),
+            (support_result, "support_file"),
+        ):
+            self.assertEqual(result["status"], "deferred")
+            self.assertEqual(result["terminal_route"], "discard")
+            self.assertEqual(
+                result["policy_deferred"]["reason"],
+                "historical-source-outside-mutation-window",
+            )
+            self.assertEqual(
+                result["policy_deferred"]["original_operation"], operation
+            )
+        self.assertEqual((skill / "SKILL.md").read_text(), original_markdown)
+        self.assertFalse((skill / "references").exists())
+        self.assertEqual(
+            subprocess.run(
+                ["git", "-C", str(self.paths.skills), "rev-parse", "HEAD"],
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout.strip(),
+            starting_head,
+        )
+        retained = [
+            json.loads(path.read_text())
+            for path in (self.paths.state / "results").glob("*.json")
+        ]
+        self.assertEqual(
+            sorted(item["artifact"]["operation"] for item in retained),
+            ["patch", "support_file"],
+        )
+        self.assertFalse((self.paths.state / "draft-reviews").exists())
+
+    def test_containment_allows_fresh_patch(self) -> None:
+        fixture = self.source_fixture([self.session("one", 900)])
+        source = self.adapter("session-source", "fake", fixture)
+        self.init_skills_repo()
+        skill = self.paths.skills / "existing-procedure"
+        skill.mkdir()
+        original_markdown = (
+            "---\nname: existing-procedure\n"
+            "description: Run the existing fixture procedure\n---\n"
+            "# Existing procedure\n"
+        )
+        (skill / "SKILL.md").write_text(original_markdown)
+        subprocess.run(
+            ["git", "-C", str(self.paths.skills), "add", "existing-procedure"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.paths.skills),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "add existing skill",
+            ],
+            check=True,
+        )
+        starting_head = subprocess.run(
+            ["git", "-C", str(self.paths.skills), "rev-parse", "HEAD"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        ).stdout.strip()
+        updated_markdown = original_markdown + "\nFresh patch.\n"
+        executor_fixture = self.write(
+            "fresh-patch.json",
+            {
+                "mode": "success",
+                "terminal_route": "skill",
+                "artifact": {
+                    "operation": "patch",
+                    "skill_name": "existing-procedure",
+                    "skill_markdown": updated_markdown,
+                    "support_files": [],
+                },
+            },
+        )
+        executor = self.adapter("review-executor", "exec", executor_fixture)
+        result = DreamingRuntime(
+            self.paths,
+            {("fake", "exec")},
+            allow_autonomous_skill_creation=False,
+            now=lambda: self.clock,
+        ).review("fake", source, "fake:one", [("exec", executor)])
+        self.assertEqual(result["status"], "accepted")
+        self.assertTrue(result["artifact_mutated"])
+        self.assertEqual((skill / "SKILL.md").read_text(), updated_markdown)
+        self.assertNotEqual(result["artifact_commit"], starting_head)
+
     def test_skill_result_commits_artifact_and_source_routing_evidence(self) -> None:
         fixture = self.source_fixture([self.session("one", 10)])
         source = self.adapter("session-source", "fake", fixture)
         self.paths.skills.mkdir(parents=True)
-        subprocess.run(
-            ["git", "-C", str(self.paths.skills), "init", "-q"],
-            check=True,
-        )
+        self.initialize_git_repo()
         executor_fixture = self.write(
             "skill-result.json",
             {
@@ -900,7 +1246,7 @@ elif sys.argv[1] == "run":
         fixture = self.source_fixture([self.session("one", 10)])
         source = self.adapter("session-source", "fake", fixture)
         self.paths.skills.mkdir(parents=True)
-        subprocess.run(["git", "-C", str(self.paths.skills), "init", "-q"], check=True)
+        self.initialize_git_repo()
         executor_fixture = self.write(
             "rejected-skill.json",
             {
@@ -954,7 +1300,7 @@ elif command == "run":
         adapter = ExecutableAdapter(
             [sys.executable, str(script)],
             "review-executor",
-            timeout=1,
+            timeout=30,
             run_timeout=10,
         )
         result_path = self.case / "slow-result.json"
@@ -1233,7 +1579,7 @@ elif sys.argv[1] == "run":
         skill = self.paths.skills / "learned-skill"
         skill.mkdir(parents=True)
         (skill / "SKILL.md").write_text("---\nname: learned-skill\n---\n")
-        subprocess.run(["git", "-C", str(self.paths.skills), "init", "-q"], check=True)
+        self.initialize_git_repo()
         (self.paths.skills / ".private-state").write_text("not publishable")
         publisher_fixture = self.write("publisher.json", {"owned_bundle_ids": []})
         publisher = self.adapter(

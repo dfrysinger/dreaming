@@ -26,11 +26,50 @@ RESULT="$STATE_DIR/daemon-selftest.out"
 mkdir -p "$STATE_DIR"
 : > "$RESULT"
 fails=0
+active_child_pid=""
+active_child_pgid_file="$STATE_DIR/.selftest-child-pgid.$$"
+rm -f "$active_child_pgid_file"
+export DREAMING_CHILD_PGID_FILE="$active_child_pgid_file"
 ok() { echo "PASS  $*" | tee -a "$RESULT"; }
 bad() { echo "FAIL  $*" | tee -a "$RESULT"; fails=$((fails + 1)); }
 warn() { echo "WARN  $*" | tee -a "$RESULT"; }
+interrupted() {
+  trap '' INT TERM
+  if [[ -z "$active_child_pid" ]]; then
+    active_child_pid="$(jobs -pr 2>/dev/null | head -1)"
+  fi
+  if [[ -n "$active_child_pid" ]]; then
+    skills_terminate_supervised_groups \
+      "$active_child_pid" "$active_child_pgid_file" 50
+    wait "$active_child_pid" 2>/dev/null || true
+    active_child_pid=""
+  fi
+  rm -f "$active_child_pgid_file"
+  bad "self-test interrupted before completion"
+  echo "== result: $fails failure(s) ==" | tee -a "$RESULT"
+  exit 143
+}
+trap interrupted INT TERM
+run_signal_responsive() {
+  rm -f "$active_child_pgid_file"
+  set -m 2>/dev/null || true
+  "$@" &
+  active_child_pid=$!
+  set +m 2>/dev/null || true
+  if ! skills_is_process_group_leader "$active_child_pid"; then
+    kill -TERM "$active_child_pid" 2>/dev/null || true
+    wait "$active_child_pid" 2>/dev/null || true
+    active_child_pid=""
+    return 1
+  fi
+  wait "$active_child_pid"
+  local status=$?
+  active_child_pid=""
+  rm -f "$active_child_pgid_file"
+  return "$status"
+}
 run_isolated_test() {
-  env -u DREAMING_ADAPTER_CONFIG \
+  run_signal_responsive env -u DREAMING_ADAPTER_CONFIG \
     -u DREAMING_ADAPTER_ALLOWED_ROOT \
     -u DREAMING_CONFIG_FILE \
     -u DREAMING_CONFIG_POINTER \
@@ -92,6 +131,16 @@ for prompt in "${PROMPTS[@]}"; do
     bad "prompt contract missing: $prompt"
   fi
 done
+SWEEP_PROMPT="$REPO/skills/skill-review/references/sweep-prompt.txt"
+if grep -q 'Create zero new skills' "$SWEEP_PROMPT" &&
+    grep -q 'autonomous-create-requires-recurrence' "$SWEEP_PROMPT" &&
+    grep -q 'DREAM_PASS_RESULT: ok created=0' "$SWEEP_PROMPT" &&
+    ! grep -q 'Create at most .*NEW skills' "$SWEEP_PROMPT" &&
+    ! grep -q 'mark new skills' "$SWEEP_PROMPT"; then
+  ok "sweep prompt forbids autonomous creation"
+else
+  bad "sweep prompt authorizes autonomous creation"
+fi
 
 CURATOR_PROMPT="$REPO/skills/skill-curator/references/curator-prompt.md"
 CURATOR_TICK="$REPO/skills/skill-curator/references/tick-prompt.txt"
@@ -115,6 +164,7 @@ fi
 
 for script in daemon-pass.sh daemon-run.sh daemon-lock.sh daemon-lock.py \
   dreaming-run.sh dreaming-state.py test-dreaming-daemon.sh \
+  test-process-cleanup.sh \
   dreaming-core.py test-dreaming-core.sh dreaming-vendor-adapter.py \
   test-vendor-adapters.sh dreaming-dashboard.py test-dreaming-dashboard.sh \
   test-dreaming-dashboard-contracts.sh \
@@ -163,6 +213,11 @@ if run_isolated_test "$SCRIPT_DIR/test-dreaming-daemon.sh" --quick >>"$RESULT" 2
   ok "deterministic dreaming checks"
 else
   bad "deterministic dreaming checks"
+fi
+if run_isolated_test "$SCRIPT_DIR/test-process-cleanup.sh" >>"$RESULT" 2>&1; then
+  ok "nested process cleanup checks"
+else
+  bad "nested process cleanup checks"
 fi
 if run_isolated_test "$SCRIPT_DIR/test-dreaming-core.sh" >>"$RESULT" 2>&1; then
   ok "deterministic standalone core checks"
@@ -269,7 +324,7 @@ fi
 if [[ "$COPILOT_COMPAT" == "1" ]]; then
   AUTHLOG="$STATE_DIR/.selftest-copilot.$$"
   : > "$AUTHLOG"
-  if skills_run_copilot_bounded "$AUTHLOG" "SELFTEST_OK" 150 5 -- \
+  if run_signal_responsive skills_run_copilot_bounded "$AUTHLOG" "SELFTEST_OK" 150 5 -- \
     "$COPILOT" -p "Reply with exactly: SELFTEST_OK" \
     --allow-all-tools --no-custom-instructions --no-color --no-remote \
     "${DREAMING_PLUGIN_ARGS[@]}" \
@@ -279,7 +334,7 @@ if [[ "$COPILOT_COMPAT" == "1" ]]; then
     bad "copilot headless auth"
   fi
   rm -f "$AUTHLOG"
-elif env -u DREAMING_EXECUTOR_TEST_ALLOW_ROOT \
+elif run_signal_responsive env -u DREAMING_EXECUTOR_TEST_ALLOW_ROOT \
     -u DREAMING_EXECUTOR_TEST_ALLOW_ROOTS \
     "$SCRIPT_DIR/dreaming-core.py" doctor >/dev/null 2>&1; then
   ok "standalone adapter health"
@@ -288,5 +343,6 @@ else
 fi
 
 [[ -e "$HALT_SWITCH" ]] && warn "halt switch is present" || ok "halt switch absent"
-echo "== result: $fails failure(s) ==" | tee -a "$RESULT"
+trap '' INT TERM
+printf '== result: %s failure(s) ==\n' "$fails" | tee -a "$RESULT"
 exit "$([[ $fails -eq 0 ]] && echo 0 || echo 1)"

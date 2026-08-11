@@ -24,7 +24,12 @@ and a short reason in the skill-review ledger even when no artifact is written.
 
 ## Caller boundaries
 
-- `skill-review` uses all five destinations.
+- Autonomous `skill-review` uses all five destinations for classification, but
+  creation remains a non-mutating deferred result until recent independent
+  recurrence can be enforced. Historical sessions may be analyzed for later
+  evidence but cannot mutate a skill. Direct end-of-task dispatch remains
+  paused until it uses the same deterministic admission boundary as the
+  scheduled core.
 - `skill-create` uses this contract to reject fact-only and one-off requests
   before authoring.
 - `memory-curator` keeps `roll | dup | obsolete | keep` as its deletion

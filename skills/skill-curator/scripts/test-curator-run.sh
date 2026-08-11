@@ -54,6 +54,7 @@ init_fixture() {
   for root in "$PUBLIC" "$LOCAL"; do
     git -C "$root" config user.email test@example.com
     git -C "$root" config user.name Test
+    git -C "$root" config core.hooksPath /dev/null
   done
   echo '{"name":"fixture","version":"0.1.0","skills":[]}' \
     > "$PUBLIC/.claude-plugin/plugin.json"

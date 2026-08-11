@@ -30,6 +30,7 @@ PUBLIC="$TMP/public"
 LOCAL="$TMP/local"
 mkdir -p "$DEST" "$STATE" "$PUBLIC/skills" "$LOCAL"
 git -C "$LOCAL" init -q
+git -C "$LOCAL" config core.hooksPath /dev/null
 OLD="$TMP/old-run.sh"
 printf '#!/usr/bin/env bash\n:\n' > "$OLD"
 chmod +x "$OLD"
@@ -217,6 +218,20 @@ INSTRUCTIONS="$TMP/copilot-home/instructions/dreaming.instructions.md"
 status_output="$(run_install status)"
 grep -q "managed-instructions=verified" <<<"$status_output"
 grep -q "relevance-based retrieval" "$INSTRUCTIONS"
+grep -q "autonomous end-of-task review paused" "$INSTRUCTIONS"
+if grep -q "dispatch .*skill-review.*without asking" "$INSTRUCTIONS"; then
+  echo "managed instructions retained autonomous end-of-task dispatch" >&2
+  exit 1
+fi
+SWEEP_PROMPT="$ROOT/skills/skill-review/references/sweep-prompt.txt"
+grep -q "Create zero new skills" "$SWEEP_PROMPT"
+grep -q "autonomous-create-requires-recurrence" "$SWEEP_PROMPT"
+grep -q "DREAM_PASS_RESULT: ok created=0" "$SWEEP_PROMPT"
+if grep -q "Create at most .*NEW skills" "$SWEEP_PROMPT" ||
+    grep -q "mark new skills" "$SWEEP_PROMPT"; then
+  echo "sweep prompt retained autonomous creation authority" >&2
+  exit 1
+fi
 if grep -q "all memories load every turn" "$INSTRUCTIONS"; then
   echo "managed instructions use the obsolete Memory model" >&2
   exit 1
@@ -541,6 +556,7 @@ mkdir -p "$MIGRATION_LEGACY_SKILLS/learned" "$MIGRATION_LEGACY_STATE"
 printf '%s\n' '---' 'name: learned' 'description: installer migration fixture' '---' \
   > "$MIGRATION_LEGACY_SKILLS/learned/SKILL.md"
 git -C "$MIGRATION_LEGACY_SKILLS" init -q
+git -C "$MIGRATION_LEGACY_SKILLS" config core.hooksPath /dev/null
 git -C "$MIGRATION_LEGACY_SKILLS" add learned/SKILL.md
 git -C "$MIGRATION_LEGACY_SKILLS" \
   -c user.name=fixture -c user.email=fixture@example.invalid \

@@ -257,8 +257,9 @@ well as a missing, stale, single-reviewer, or private-sentinel inventory.
   overlap. Better to extend an existing skill via `skill-manage patch` than to
   create a near-duplicate.
 - **Auto-create spam.** The auto-create trigger in `copilot-instructions.md`
-  is a *proposal* (Tier 1) or contained autonomous (Tier 2 daemon). The bar
-  is: "would I want to invoke this same procedure again next month?"
+  is a foreground proposal (Tier 1). Autonomous creation is deferred until
+  recurrence admission exists. The bar is: "would I want to invoke this same
+  procedure again next month?"
 - **Vendoring third-party skills.** When importing externally-authored skills,
   copy them verbatim, pin the source commit, preserve the license, and add a
   `NOTICE.md` (see

@@ -378,6 +378,8 @@ class DreamingRuntime:
         max_snapshot_bytes: int = 1_000_000,
         max_events: int = 2_000,
         max_field_bytes: int = 64_000,
+        max_autonomous_session_age_days: int = 30,
+        allow_autonomous_skill_creation: bool = False,
         parent_run_id: str | None = None,
         now: Callable[[], int] | None = None,
     ):
@@ -389,6 +391,10 @@ class DreamingRuntime:
         self.max_snapshot_bytes = max_snapshot_bytes
         self.max_events = max_events
         self.max_field_bytes = max_field_bytes
+        self.max_autonomous_session_age_seconds = (
+            max_autonomous_session_age_days * 24 * 60 * 60
+        )
+        self.allow_autonomous_skill_creation = allow_autonomous_skill_creation
         self.parent_run_id = parent_run_id
         self.now = now or (lambda: int(datetime.now(timezone.utc).timestamp()))
 
@@ -933,6 +939,54 @@ class DreamingRuntime:
             "event_ids": requested,
         }
 
+    def _apply_autonomous_admission_policy(
+        self,
+        result: dict[str, Any],
+        reviewed_identity: dict[str, Any],
+    ) -> dict[str, Any]:
+        artifact = result.get("artifact")
+        if not isinstance(artifact, dict):
+            return result
+        source_updated_at = parse_time(reviewed_identity.get("updated_at"))
+        if source_updated_at is None:
+            raise RuntimeFailure(
+                "source-time-invalid",
+                "reviewed source updated_at is not comparable",
+            )
+        age_seconds = max(0, self.now() - int(source_updated_at.timestamp()))
+        reason: str | None = None
+        if age_seconds > self.max_autonomous_session_age_seconds:
+            reason = "historical-source-outside-mutation-window"
+        elif (
+            artifact.get("operation") == "create"
+            and not self.allow_autonomous_skill_creation
+        ):
+            reason = "autonomous-create-requires-recurrence"
+        if reason is None:
+            return result
+        deferred = dict(result)
+        deferred_context = deferred.get("transcript_context")
+        deferred["terminal_route"] = "discard"
+        deferred["artifact"] = None
+        deferred["evidence_event_ids"] = None
+        deferred["transcript_context"] = None
+        deferred["routing_reason"] = (
+            f"Deferred by conservative autonomous admission policy: {reason}."
+        )
+        deferred["policy_deferred"] = {
+            "reason": reason,
+            "original_terminal_route": result["terminal_route"],
+            "original_operation": artifact["operation"],
+            "skill_name": artifact["skill_name"],
+            "source_updated_at": reviewed_identity["updated_at"],
+            **(
+                {"transcript_context": deferred_context}
+                if isinstance(deferred_context, dict)
+                else {}
+            ),
+        }
+        return deferred
+
     def _validated_draft_review(self, result: dict[str, Any]) -> dict[str, Any]:
         if result.get("status") != "ok":
             raise RuntimeFailure("draft-review-failed", "review status is not ok")
@@ -1057,6 +1111,8 @@ class DreamingRuntime:
             record["display_name"] = reviewed_identity["display_name"]
         if isinstance(result.get("transcript_context"), dict):
             record["transcript_context"] = result["transcript_context"]
+        if isinstance(result.get("policy_deferred"), dict):
+            record["policy_deferred"] = result["policy_deferred"]
         records.append(record)
         self._write(self.paths.review_evidence, records)
 
@@ -1411,6 +1467,10 @@ class DreamingRuntime:
                     snapshot_path,
                     reviewed_identity,
                 )
+                result = self._apply_autonomous_admission_policy(
+                    result,
+                    reviewed_identity,
+                )
                 attempt = {
                     "session_id": qualified_session_id,
                     "source": source_name,
@@ -1424,6 +1484,11 @@ class DreamingRuntime:
                     **(
                         {"parent_run_id": self.parent_run_id}
                         if self.parent_run_id
+                        else {}
+                    ),
+                    **(
+                        {"policy_deferred": result["policy_deferred"]}
+                        if isinstance(result.get("policy_deferred"), dict)
                         else {}
                     ),
                 }
@@ -1501,6 +1566,11 @@ class DreamingRuntime:
                         "artifact_commit": artifact_commit,
                         "reviewed_at": self.now(),
                         **(
+                            {"policy_deferred": result["policy_deferred"]}
+                            if isinstance(result.get("policy_deferred"), dict)
+                            else {}
+                        ),
+                        **(
                             {"display_name": reviewed_identity["display_name"]}
                             if isinstance(reviewed_identity.get("display_name"), str)
                             else {}
@@ -1518,11 +1588,20 @@ class DreamingRuntime:
                     reviewed_identity["source_revision"],
                 )
                 return {
-                    "status": "accepted",
+                    "status": (
+                        "deferred"
+                        if isinstance(result.get("policy_deferred"), dict)
+                        else "accepted"
+                    ),
                     "executor": executor_id,
                     "terminal_route": result["terminal_route"],
                     "artifact_mutated": artifact_commit is not None,
                     "artifact_commit": artifact_commit,
+                    **(
+                        {"policy_deferred": result["policy_deferred"]}
+                        if isinstance(result.get("policy_deferred"), dict)
+                        else {}
+                    ),
                 }
             except RuntimeFailure as error:
                 last_failure = error
@@ -2183,9 +2262,9 @@ def configured_routes(config: dict[str, Any]) -> set[tuple[str, str]]:
     return routes
 
 
-def configured_runtime_settings(config: dict[str, Any]) -> dict[str, int]:
+def configured_runtime_settings(config: dict[str, Any]) -> dict[str, Any]:
     defaults = {
-        "policy_version": 1,
+        "policy_version": 2,
         "overlap_seconds": 300,
         "quiet_retry_seconds": 300,
         "page_size": 100,
@@ -2194,15 +2273,35 @@ def configured_runtime_settings(config: dict[str, Any]) -> dict[str, int]:
         "max_snapshot_bytes": 1_000_000,
         "max_events": 2_000,
         "max_field_bytes": 64_000,
+        "max_autonomous_session_age_days": 30,
+        "allow_autonomous_skill_creation": False,
     }
-    settings: dict[str, int] = {}
+    settings: dict[str, Any] = {}
     for name, default in defaults.items():
         value = config.get(name, default)
+        if name == "allow_autonomous_skill_creation":
+            if not isinstance(value, bool):
+                raise RuntimeFailure(
+                    "invalid-adapter-config",
+                    f"{name} must be a boolean",
+                )
+            if value:
+                raise RuntimeFailure(
+                    "invalid-adapter-config",
+                    f"{name} must remain false until recurrence admission exists",
+                )
+            settings[name] = value
+            continue
         minimum = 0 if name == "overlap_seconds" else 1
         if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
             raise RuntimeFailure(
                 "invalid-adapter-config",
                 f"{name} must be an integer greater than or equal to {minimum}",
+            )
+        if name == "max_autonomous_session_age_days" and value != 30:
+            raise RuntimeFailure(
+                "invalid-adapter-config",
+                f"{name} must remain 30 until recurrence admission exists",
             )
         settings[name] = value
     return settings
@@ -2284,6 +2383,12 @@ def scheduled_run() -> dict[str, Any]:
         max_snapshot_bytes=settings["max_snapshot_bytes"],
         max_events=settings["max_events"],
         max_field_bytes=settings["max_field_bytes"],
+        max_autonomous_session_age_days=settings[
+            "max_autonomous_session_age_days"
+        ],
+        allow_autonomous_skill_creation=settings[
+            "allow_autonomous_skill_creation"
+        ],
         parent_run_id=os.environ.get("DREAMING_PARENT_RUN_ID") or None,
     )
     legacy_ledger = config.get("legacy_ledger_path") or os.environ.get(

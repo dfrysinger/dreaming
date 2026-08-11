@@ -1167,6 +1167,11 @@ print(json.dumps({"ok": True}))
                     set(configured["routes"]),
                     {f"{vendor}>{vendor}" for vendor in vendors},
                 )
+                self.assertEqual(configured["policy_version"], 2)
+                self.assertEqual(
+                    configured["max_autonomous_session_age_days"], 30
+                )
+                self.assertFalse(configured["allow_autonomous_skill_creation"])
                 for group in ("sources", "publishers"):
                     for entry in configured[group].values():
                         entry["timeout"] = 120

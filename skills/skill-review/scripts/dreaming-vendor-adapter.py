@@ -1880,7 +1880,12 @@ def evaluation_binary(args: argparse.Namespace) -> str:
 
 def evaluation_cli_version(args: argparse.Namespace) -> str:
     binary = evaluation_binary(args)
-    result = run_process([binary, "--version"], {"PATH": os.environ.get("PATH", "")}, 30)
+    startup_timeout = max(120, args.timeout)
+    result = run_process(
+        [binary, "--version"],
+        {"PATH": os.environ.get("PATH", "")},
+        startup_timeout,
+    )
     if result.returncode != 0:
         raise AdapterError("executor-unavailable", args.vendor)
     version = (result.stdout or result.stderr).strip()

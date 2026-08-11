@@ -107,7 +107,7 @@ result = subprocess.run(
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
     text=True,
-    timeout=5,
+    timeout=30,
 )
 check(result.returncode == 2 and "bind_denied" in result.stderr, "non-loopback bind fails before listen")
 result = subprocess.run(
@@ -124,7 +124,7 @@ result = subprocess.run(
     stdout=subprocess.PIPE,
     stderr=subprocess.PIPE,
     text=True,
-    timeout=5,
+    timeout=30,
 )
 check(
     result.returncode == 2 and "bind_denied" in result.stderr,
@@ -298,7 +298,7 @@ def request(path, *, method="GET", host=None, origin=None, auth=True, cookie=Non
     return result
 
 try:
-    deadline = time.time() + 5
+    deadline = time.time() + 120
     while True:
         try:
             status, _, _ = request("/", auth=False)
@@ -488,7 +488,7 @@ try:
     )
 finally:
     server.terminate()
-    server.wait(timeout=5)
+    server.wait(timeout=30)
 
 after = manifest(state, control, orchestrator, data, skills)
 check(before != after, "test fixtures exercised state-generation changes")

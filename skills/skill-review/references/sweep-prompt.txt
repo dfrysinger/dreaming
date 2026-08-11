@@ -25,6 +25,14 @@ TWO-ROOT MODEL (read first):
   (defaults already point there).
 
 SEQUENCE:
+0. Conservative admission. This autonomous pass MUST NOT create a new skill,
+   mark a new skill as agent-created, or commit a new skill directory. It may
+   patch an existing skill or add a support file only when the source session
+   was updated within the last 30 days. If a reusable procedure needs a new
+   umbrella, defer it without mutation and ledger it as skipped with routed
+   destination `discard` and reason
+   `autonomous-create-requires-recurrence`. The explicit foreground
+   `/skill-create` workflow is outside this daemon policy.
 1. Pre-flight. Stop if ~/.copilot/skill-state/skill-review/disable-daemon exists
    (halt switch), printing `DREAM_PASS_RESULT: aborted halt-switch` before
    exiting. Confirm the LOCAL root exists at ~/.copilot/skills. Capture the
@@ -52,11 +60,10 @@ SEQUENCE:
    Per-session ledger dedup — not a high watermark — is what prevents re-review,
    so the 3/run cap drains the backlog highest-score-first over multiple days.
 4. Review. For each high-signal unreviewed session ABOVE the skill's threshold,
-   load references/review-prompt.md and run a review pass: decide whether a NEW
-   agent-created skill or a PATCH to an existing agent-created skill is
-   warranted. Before creating, ALWAYS run check-tombstone.sh <candidate-name>
-   (honor tombstones) and search BOTH roots for an existing umbrella to patch
-   instead.
+   load references/review-prompt.md and run a review pass. Search BOTH roots for
+   an existing umbrella, then choose only PATCH, SUPPORT FILE, DEFERRED NEW
+   UMBRELLA, or SKIP. Never choose CREATE. A deferred new umbrella is a final,
+   non-mutating review outcome recorded as described in step 0.
 5. Apply (LOCAL root only). For each chosen target skill <name>:
    a. PER-TARGET cleanliness check: if `git -C ~/.copilot/skills status
       --porcelain -- <name>/` is non-empty (i.e., <name>/ ITSELF has
@@ -64,10 +71,12 @@ SEQUENCE:
       target — the user (or a prior session) may be editing it. Log the skip
       and move on. Other dirty skills in the tree are out of scope and do not
       affect this target.
-   b. Create/patch by editing files directly under ~/.copilot/skills/<name>/
-      (no slash commands in headless mode): write SKILL.md, mark new skills
-      with mark-agent-created.sh, and validate with validate-skill.sh. Do NOT
-      call registry.sh — native skills need no plugin entry.
+   b. Patch the existing skill or add its support file directly under
+      ~/.copilot/skills/<name>/ (no slash commands in headless mode), then
+      validate with validate-skill.sh. For a marker-backed agent-created skill,
+      append evidence with append-skill-evidence.sh before committing. Do NOT
+      create or mark a new skill. Do NOT call registry.sh — native skills need
+      no plugin entry.
 6. Guard. Run two guards and abort the run if either fails:
    - $DREAMING_REPO_ROOT/skills/skill-review/scripts/verify-repo-unchanged.sh check —
      the public repo must match its pre-run baseline (the daemon must never
@@ -87,7 +96,10 @@ SEQUENCE:
    NEVER push (there is no remote).
 
    Ledger semantics (ONLY ledger sessions with a FINAL outcome):
-   - created / patched: ledger as such after the commit lands.
+   - patched: ledger as such after the commit lands.
+   - deferred-new-umbrella: ledger as skipped with routed destination `discard`
+     and reason `autonomous-create-requires-recurrence`; no skill file, marker,
+     or commit may be created.
    - skipped (reviewer judged no skill opportunity): ledger as skipped.
    - blocked-by-dirty-target (step 5a): DO NOT LEDGER this session. Leave it
      un-ledgered so the next sweep retries the same session once the target
@@ -101,20 +113,21 @@ HARD CAPS (unattended safety — do not exceed without a human):
 - Review at most 3 sessions this run (highest-scoring first); leave the rest for
   tomorrow (per-session ledger dedup + the fixed 14-day window guarantee they are
   not lost — they resurface next run until reviewed or they age out of 14 days).
-- Create at most 2 NEW skills this run. Patches to existing agent-created skills
-  are not capped but must stay surgical.
-- If validate-skill.sh fails on something you created, revert that skill and skip
-  it — never commit an invalid skill.
+- Create zero new skills. Existing-skill patches are not capped but must stay
+  surgical.
+- If validate-skill.sh fails on a patch, revert the patch and skip it — never
+  commit an invalid skill.
 - When in doubt, SKIP. The bar is high: class-level umbrella skills, not
   one-session micro-skills. A no-op run is an acceptable outcome for a daemon.
 
-Finish by writing a one-paragraph summary of what was created / patched /
+Finish by writing a one-paragraph summary of what was patched / deferred /
 skipped to stdout (it is captured in the daemon log). Then, as the LAST line of
 output, print exactly one status sentinel — the daemon reads this line to decide
 whether the run succeeded, because the session footer only proves the process
-stopped, not that the work was done:
+stopped, not that the work was done. `created` is fixed at zero while
+conservative containment is active:
 
-  DREAM_PASS_RESULT: ok created=<N> patched=<M> reviewed=<K>
+  DREAM_PASS_RESULT: ok created=0 patched=<M> deferred=<D> reviewed=<K>
 
 Print `DREAM_PASS_RESULT: aborted <one-line reason>` instead whenever a guard
 fired, UNWIND ran, or you stopped early. A clean no-op run is still `ok` with

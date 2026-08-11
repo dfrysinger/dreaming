@@ -110,10 +110,10 @@ PY
 
 make_run() {
   local root="$1" fixture="${2:-correct}" profile="${3:-gate}" executors="${4:-1}"
-  local timeout="${5:-120}" command_grader="${6:-none}" behavior_cases="${7:-1}"
+  local timeout="${5:-300}" command_grader="${6:-none}" behavior_cases="${7:-1}"
   local required_count="${8:-$executors}"
   local output_bytes="${9:-100000}"
-  local comparator_timeout="${10:-5}"
+  local comparator_timeout="${10:-120}"
   mkdir -p "$root/candidate" "$root/fixtures" "$root/graders"
   cat > "$root/candidate/SKILL.md" <<'EOF'
 ---

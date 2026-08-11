@@ -22,6 +22,7 @@ mkdir -p "$LEGACY_SKILLS/learned" "$LEGACY_STATE"
 printf '%s\n' '---' 'name: learned' 'description: migration fixture' '---' \
   > "$LEGACY_SKILLS/learned/SKILL.md"
 git -C "$LEGACY_SKILLS" init -q
+git -C "$LEGACY_SKILLS" config core.hooksPath /dev/null
 git -C "$LEGACY_SKILLS" add learned/SKILL.md
 git -C "$LEGACY_SKILLS" \
   -c user.name=fixture -c user.email=fixture@example.invalid \
@@ -84,6 +85,7 @@ UNBORN_STATE="$TMP/unborn/state"
 UNBORN_JOURNAL="$TMP/unborn/migration.json"
 mkdir -p "$UNBORN_SKILLS"
 git -C "$UNBORN_SKILLS" init -q
+git -C "$UNBORN_SKILLS" config core.hooksPath /dev/null
 "$ROOT/scripts/migrate-copilot-state.py" apply \
   --legacy-skills "$LEGACY_SKILLS" \
   --legacy-state "$LEGACY_STATE" \

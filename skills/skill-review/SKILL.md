@@ -103,20 +103,21 @@ upstream loop keeps in memory.
    b. Pull that session's turns:
       `SELECT turn_index, user_message, assistant_response FROM turns WHERE session_id = '<id>' ORDER BY turn_index` (and `session_files`, `session_refs` as needed).
    c. Apply the **selection criteria** from `references/review-prompt.md`.
-   d. Decide the action via the preference order (patch-loaded → patch-umbrella
-      → add support file → create-new). Before any CREATE: run
-      `scripts/check-tombstone.sh <candidate>` (skip/patch-umbrella on match)
-      and glob existing skills for collisions.
-   e. Execute via `/skill-create` or `/skill-manage` writing into the LOCAL
-      root `~/.copilot/skills/<name>/` (each action its own git commit). On
-      CREATE, immediately run
-      `scripts/mark-agent-created.sh <name> <session_id> sweep` with an explicit
-      task key when the session carries one. Sweep-only observations whose task
-      independence cannot be proved remain `unverified`. When PATCH targets an
-      agent-created skill, run `scripts/append-skill-evidence.sh` before commit;
-      hand-made patches remain recommendation/content-only and gain no agent
-      authority. Do NOT call
-      `registry.sh` — native local skills load without a plugin entry.
+   d. Apply conservative autonomous admission before selecting an action.
+      Sessions updated more than 30 days ago may be analyzed but cannot mutate
+      any skill. For fresh sessions, prefer patch-loaded → patch-umbrella → add
+      support file. A procedure needing a new umbrella is deferred with
+      `policy_deferred:"autonomous-create-requires-recurrence"`; autonomous
+      review never selects `create-new`.
+   e. For an allowed fresh patch or support file, execute via `/skill-manage`
+      against the existing LOCAL skill in `~/.copilot/skills/<name>/` (each
+      action its own git commit). When the target is agent-created, run
+      `scripts/append-skill-evidence.sh` before commit; hand-made patches remain
+      recommendation/content-only and gain no agent authority. Deferred
+      proposals write no skill file or commit and are recorded in the ledger
+      with the source timestamp, proposed destination, and `policy_deferred`
+      reason. Do NOT call `registry.sh` — native local skills load without a
+      plugin entry.
    f. **Append a ledger entry** (always, even for "Nothing to save"):
       `scripts/review-ledger.sh append '<json>'` with `session_id`, `mode:"sweep"`,
       `created`, `patched`, `skipped`, `routed`, and `watermark_ts` = that
@@ -139,13 +140,12 @@ upstream loop keeps in memory.
    skill available in already-open sessions, the user runs `/skills reload`.
 6. Surface a one-line summary: `💾 skill-review sweep: created N, patched M, reviewed K sessions.`
 
-## Mode: `dispatch` (primary path — end-of-task subagent)
+## Mode: `dispatch` (paused autonomous path)
 
-Real-time review of the session that just happened, dispatched as a subagent so
-creation stays out of the live conversation (the isolation analog of a
-fork). This is the **primary** autonomous path: the main agent fires it after a
-qualifying heavy task per the `copilot-instructions.md` Tier-2 trigger, without
-asking. Same machinery as the sweep, scoped to a single session:
+The installed Tier-2 trigger must not launch this mode while conservative
+containment is active. If a user explicitly asks to inspect this workflow, it
+remains non-creating and follows the same 30-day mutation window as sweep.
+Same machinery as the sweep, scoped to a single session:
 
 1. The dispatcher passes the current `session_id`, the platform or baton
    `task_key` when available, and may inline the salient
@@ -161,16 +161,14 @@ asking. Same machinery as the sweep, scoped to a single session:
    root has no remote).
 
 Because the ledger is shared, whichever path runs first wins; the other skips.
-In normal operation the in-session dispatch runs first (right after the work);
-the scheduled sweep then finds the session already ledgered and skips it — the sweep
-only does real work for sessions the dispatch missed.
+During conservative containment, scheduled Dreaming is the only automatic path.
 
 ## Provenance & the curator handshake
 
-Every skill this skill creates gets a `.agent-created` marker +
-`.agent-created.json` + `author: skill-review` frontmatter (via
-`mark-agent-created.sh`). The helper writes and validates schema-v2 evidence
-before creating the authority marker; legacy schema-v1 envelopes migrate lazily.
+Every agent-created skill carries a `.agent-created` marker +
+`.agent-created.json` + `author: skill-review` frontmatter. The evidence helper
+writes and validates schema-v2 evidence before creating the authority marker;
+legacy schema-v1 envelopes migrate lazily.
 `skill-curator` reads that marker:
 - **agent-created** skills → curator may archive/consolidate autonomously, and
   on archive it writes a tombstone here so we never recreate them.

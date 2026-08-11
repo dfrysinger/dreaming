@@ -140,6 +140,8 @@ git -C "$PUBLIC" init -q
 for root in "$LOCAL" "$PUBLIC"; do
   git -C "$root" config user.email test@example.com
   git -C "$root" config user.name Test
+  mkdir -p "$root/.githooks-fixture"
+  git -C "$root" config core.hooksPath "$root/.githooks-fixture"
 done
 echo '{"name":"fixture","version":"0.1.0","skills":[]}' > "$PUBLIC/.claude-plugin/plugin.json"
 echo '{"name":"fixture","metadata":{"version":"0.1.0"},"plugins":[{"name":"fixture","version":"0.1.0"}]}' \
@@ -265,11 +267,11 @@ cached_before="$(git -C "$PUBLIC" diff --cached --binary -- \
   .claude-plugin/plugin.json \
   .claude-plugin/marketplace.json \
   .codex-plugin/plugin.json)"
-cat > "$PUBLIC/.git/hooks/pre-commit" <<'SH'
+cat > "$PUBLIC/.githooks-fixture/pre-commit" <<'SH'
 #!/usr/bin/env bash
 exit 1
 SH
-chmod +x "$PUBLIC/.git/hooks/pre-commit"
+chmod +x "$PUBLIC/.githooks-fixture/pre-commit"
 if SKILLS_LOCAL_ROOT="$LOCAL" SKILLS_REPO_ROOT="$PUBLIC" SKILLS_STATE_DIR="$TMP/state" \
   SKILLS_COAUTHOR_TRAILER="Reviewed-by: fixture" \
   "$SCRIPT_DIR/promote-skill.sh" rollback-skill >/dev/null 2>&1; then

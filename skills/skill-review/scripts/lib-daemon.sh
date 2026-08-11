@@ -62,6 +62,81 @@ skills_process_identity() {
   /bin/ps -o lstart= -p "$pid" 2>/dev/null | /usr/bin/awk '{$1=$1; print}'
 }
 
+skills_process_group_alive() {
+  local pgid="$1"
+  [[ "$pgid" =~ ^[1-9][0-9]*$ ]] || return 1
+  kill -0 "-$pgid" 2>/dev/null
+}
+
+skills_read_registered_pgid() {
+  local path="$1" pgid=""
+  [[ -n "$path" && -f "$path" ]] || return 1
+  IFS= read -r pgid < "$path" || return 1
+  [[ "$pgid" =~ ^[1-9][0-9]*$ ]] || return 1
+  printf '%s\n' "$pgid"
+}
+
+skills_is_process_group_leader() {
+  local pid="$1" pgid=""
+  [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 1
+  pgid="$(/bin/ps -o pgid= -p "$pid" 2>/dev/null | tr -d ' ')"
+  [[ "$pgid" == "$pid" ]]
+}
+
+skills_terminate_supervised_groups() {
+  local worker_pid="$1" pgid_file="$2" nested_pgid="" owned_nested_pgid=""
+  local attempts="${3:-50}"
+  local worker_group_owned=0
+
+  if skills_is_process_group_leader "$worker_pid"; then
+    worker_group_owned=1
+  fi
+
+  nested_pgid="$(skills_read_registered_pgid "$pgid_file" 2>/dev/null || true)"
+  if [[ -n "$nested_pgid" ]] &&
+      skills_is_process_group_leader "$nested_pgid"; then
+    owned_nested_pgid="$nested_pgid"
+  fi
+
+  if (( worker_group_owned )); then
+    kill -TERM "-$worker_pid" 2>/dev/null || true
+  else
+    kill -TERM "$worker_pid" 2>/dev/null || true
+  fi
+
+  for ((i = 0; i < attempts; i++)); do
+    nested_pgid="$(skills_read_registered_pgid "$pgid_file" 2>/dev/null || true)"
+    if [[ -n "$nested_pgid" && "$nested_pgid" != "$owned_nested_pgid" ]] &&
+        skills_is_process_group_leader "$nested_pgid"; then
+      owned_nested_pgid="$nested_pgid"
+    fi
+    if [[ -n "$owned_nested_pgid" ]] &&
+        skills_process_group_alive "$owned_nested_pgid"; then
+      kill -TERM "-$owned_nested_pgid" 2>/dev/null || true
+    fi
+    if ! kill -0 "$worker_pid" 2>/dev/null &&
+        { [[ -z "$owned_nested_pgid" ]] ||
+          ! skills_process_group_alive "$owned_nested_pgid"; } &&
+        { [[ -z "$nested_pgid" ]] ||
+          ! skills_process_group_alive "$nested_pgid"; }; then
+      return 0
+    fi
+    sleep 0.2
+  done
+
+  if [[ -n "$owned_nested_pgid" ]] &&
+      skills_process_group_alive "$owned_nested_pgid"; then
+    kill -KILL "-$owned_nested_pgid" 2>/dev/null || true
+  fi
+  if kill -0 "$worker_pid" 2>/dev/null; then
+    if (( worker_group_owned )); then
+      kill -KILL "-$worker_pid" 2>/dev/null || true
+    else
+      kill -KILL "$worker_pid" 2>/dev/null || true
+    fi
+  fi
+}
+
 skills_lock_tool() {
   local script_dir
   script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -183,28 +258,83 @@ dreaming_build_plugin_args() {
 }
 #
 #   skills_run_copilot_bounded LOGFILE DONE_RE ABS_MAX_SECS GRACE_SECS -- COPILOT_BIN ARGS...
-skills_run_copilot_bounded() {
+skills_run_copilot_bounded() (
   local log="$1" done_re="$2" abs_max="$3" grace="$4"; shift 4
   [[ "${1:-}" == "--" ]] && shift
+  local cpid="" cpgid="" waited=0 done_at=-1
+  local copilot_group_owned=0
+  local pgid_file="${DREAMING_CHILD_PGID_FILE:-}"
+  unregister_copilot_group() {
+    local registered=""
+    [[ -n "$pgid_file" && -n "$cpgid" ]] || return 0
+    registered="$(skills_read_registered_pgid "$pgid_file" 2>/dev/null || true)"
+    if [[ "$registered" == "$cpgid" ]] &&
+        ! skills_process_group_alive "$cpgid"; then
+      rm -f "$pgid_file"
+    fi
+  }
+  terminate_copilot_group() {
+    if [[ -z "$cpid" ]]; then
+      cpid="$(jobs -pr 2>/dev/null | head -1)"
+    fi
+    if [[ -z "$cpgid" ]]; then
+      cpgid="$cpid"
+    fi
+    if (( ! copilot_group_owned )) &&
+        skills_is_process_group_leader "$cpgid"; then
+      copilot_group_owned=1
+    fi
+    if (( copilot_group_owned )) &&
+        skills_process_group_alive "$cpgid"; then
+      kill -TERM "-$cpgid" 2>/dev/null || true
+      sleep 5
+      if skills_process_group_alive "$cpgid"; then
+        kill -KILL "-$cpgid" 2>/dev/null || true
+      fi
+    elif [[ -n "$cpid" ]] && kill -0 "$cpid" 2>/dev/null; then
+      kill -TERM "$cpid" 2>/dev/null || true
+      sleep 5
+      kill -0 "$cpid" 2>/dev/null &&
+        kill -KILL "$cpid" 2>/dev/null || true
+    fi
+    wait "$cpid" 2>/dev/null || true
+  }
+  trap 'trap "" INT TERM; terminate_copilot_group; exit 143' INT TERM
+  trap unregister_copilot_group EXIT
   # Monitor mode so the backgrounded job leads its own process group (pgid==pid),
   # enabling a whole-tree kill via the negative pid. stdin from /dev/null so a
   # stray read can never block the run.
   set -m 2>/dev/null || true
   "$@" </dev/null >>"$log" 2>&1 &
-  local cpid=$! waited=0 done_at=-1
+  cpid=$!
+  cpgid=$cpid
   set +m 2>/dev/null || true
+  if ! skills_is_process_group_leader "$cpid"; then
+    kill -TERM "$cpid" 2>/dev/null || true
+    wait "$cpid" 2>/dev/null || true
+    return 1
+  fi
+  copilot_group_owned=1
+  if [[ -n "$pgid_file" ]]; then
+    local pgid_tmp="${pgid_file}.$$"
+    umask 077
+    printf '%s\n' "$cpgid" > "$pgid_tmp"
+    mv -f "$pgid_tmp" "$pgid_file"
+  fi
   while kill -0 "$cpid" 2>/dev/null; do
     if (( done_at < 0 )) && grep -qE "$done_re" "$log" 2>/dev/null; then
       done_at=$waited
     fi
     if (( (done_at >= 0 && waited - done_at >= grace) || waited >= abs_max )); then
-      kill -TERM "-$cpid" 2>/dev/null || kill -TERM "$cpid" 2>/dev/null
-      sleep 5
-      kill -KILL "-$cpid" 2>/dev/null || kill -KILL "$cpid" 2>/dev/null
+      terminate_copilot_group
       break
     fi
     sleep 3; waited=$((waited+3))
   done
   wait "$cpid" 2>/dev/null || true
+  if (( copilot_group_owned )) &&
+      skills_process_group_alive "$cpgid"; then
+    terminate_copilot_group
+  fi
   grep -qE "$done_re" "$log" 2>/dev/null
-}
+)
