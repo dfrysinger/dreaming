@@ -311,4 +311,366 @@ if SKILLS_REPO_ROOT="$PUBLIC_ROOT" SKILLS_LOCAL_ROOT="$LOCAL_ROOT" \
 fi
 pass "consolidation replacement must remain in the source root"
 
+SHADOW_HARNESS="$SCRIPT_DIR/skill-evaluation-harness.py"
+SHADOW_ADAPTER="$SCRIPT_DIR/fake-skill-evaluation-adapter.py"
+
+make_shadow_fixture() {
+  local root="$1" fixture="${2:-correct}" target="${3:-none}" mode="${4:-catalog_plus_candidate}" backend="${5:-true}"
+  mkdir -p "$root/candidate" "$root/catalog/approved-skill"
+  cat > "$root/candidate/SKILL.md" <<'EOF'
+---
+name: fixture-candidate
+---
+Return the deterministic fixture result.
+EOF
+  cat > "$root/catalog/approved-skill/SKILL.md" <<'EOF'
+---
+name: approved-skill
+---
+Return the approved deterministic fixture result.
+EOF
+  python3 - "$root" "$fixture" "$target" "$mode" "$backend" "$SHADOW_ADAPTER" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+
+root, fixture, target, mode, backend, adapter = sys.argv[1:]
+root = Path(root)
+def digest(value):
+    return "sha256:" + hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+    ).hexdigest()
+def file_digest(path):
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
+graders = [{"id":"answer","type":"regex","safety":True,
+            "config":{"required":["SUCCESS"],"forbidden":[]}}]
+rows = [
+    ("positive", "routing_positive", True, [], True),
+    ("close", "routing_close_negative", False, [], True),
+    ("unrelated", "routing_unrelated", False, [], False),
+    ("conflict", "routing_conflict", False, [] if mode == "candidate_only" else ["approved-skill"], True),
+    ("value", "task_value", True, [], True),
+]
+cases = [
+    {"id":ident, "class":kind, "task_id":f"task:{ident}-0001", "prompt":ident,
+     "critical":critical, "routing":{"candidate_load":candidate,"catalog_loads":catalog},
+     "artifacts":["out.txt"], "graders":["answer"],
+     "fixture":fixture if target == ident else "correct"}
+    for ident, kind, candidate, catalog, critical in rows
+]
+suite = {"schema_version":2, "kind":"shadow_candidate_evaluation_suite",
+         "routing_mode":mode, "environment":{"fixture":"shadow","context":"normal"},
+         "graders":graders, "cases":cases}
+(root/"suite.json").write_text(json.dumps(suite, sort_keys=True))
+identity = {
+    "name":"fixture", "model":"fixture-model", "adapter_id":"sha256:"+"1"*64,
+    "adapter_version":1, "adapter_executable_sha256":file_digest(adapter),
+    "cli_executable_sha256":"sha256:"+"2"*64, "cli_version":"fixture-cli",
+    "tool_policy_id":"sha256:"+"3"*64,
+    "limits":{"timeout_seconds":30,"token_budget":100,"turn_budget":100,"tool_budget":100,"output_bytes":100000},
+    "sandbox_id":"sha256:"+"4"*64, "real_backend":backend == "true",
+    "real_backend_source":"deterministic-attested-fixture" if backend == "true" else "missing-real-backend-fixture",
+}
+(root/"executors.json").write_text(json.dumps(
+    {"schema_version":2,"kind":"shadow_candidate_evaluation_executors","executors":[identity]},
+    sort_keys=True,
+))
+(root/"identity.json").write_text(json.dumps(
+    {key:value for key,value in identity.items() if key != "name"}, sort_keys=True
+))
+(root/"routing.json").write_text(json.dumps(
+    {"schema_version":2,"kind":"shadow_candidate_evaluation_routing","executors":[{
+        "name":"fixture","adapter_id":identity["adapter_id"],
+        "adapter_executable_sha256":identity["adapter_executable_sha256"],
+        "argv":[str(Path(adapter).resolve()),"--identity",str((root/"identity.json").resolve())],
+    }]}, sort_keys=True,
+))
+PY
+}
+
+shadow_compile() {
+  local root="$1" mode="$2"
+  mkdir -p "$root/run"
+  if [[ "$mode" == "catalog_plus_candidate" ]]; then
+    "$SCRIPT_DIR/skill-evaluation.py" shadow-compile "$root/candidate" \
+      --suite "$root/suite.json" --catalog-dir "$root/catalog" --executors "$root/executors.json" \
+      --routing "$root/routing.json" \
+      --run-dir "$root/run" --nonce shadow-fixture-nonce --harness "$SHADOW_HARNESS" >/dev/null
+    return
+  fi
+  "$SCRIPT_DIR/skill-evaluation.py" shadow-compile "$root/candidate" \
+    --suite "$root/suite.json" --executors "$root/executors.json" \
+    --routing "$root/routing.json" \
+    --run-dir "$root/run" --nonce shadow-fixture-nonce --harness "$SHADOW_HARNESS" >/dev/null
+}
+
+shadow_execute() {
+  local root="$1"
+  mkdir -p "$root/result" "$root/execute-scratch"
+  "$SCRIPT_DIR/skill-evaluation.py" shadow-execute --run-dir "$root/run" \
+    --result-dir "$root/result" --routing "$root/routing.json" \
+    --scratch "$root/execute-scratch" --harness "$SHADOW_HARNESS" >/dev/null
+}
+
+shadow_certify() {
+  local root="$1" mode="$2" scratch="$3"
+  mkdir -p "$root/$scratch"
+  if [[ "$mode" == "catalog_plus_candidate" ]]; then
+    "$SCRIPT_DIR/skill-evaluation.py" shadow-certify "$root/candidate" \
+      --suite "$root/suite.json" --catalog-dir "$root/catalog" --executors "$root/executors.json" \
+      --routing "$root/routing.json" \
+      --run-dir "$root/run" --result-dir "$root/result" \
+      --scratch "$root/$scratch" --harness "$SHADOW_HARNESS"
+    return
+  fi
+  "$SCRIPT_DIR/skill-evaluation.py" shadow-certify "$root/candidate" \
+    --suite "$root/suite.json" --executors "$root/executors.json" \
+    --routing "$root/routing.json" \
+    --run-dir "$root/run" --result-dir "$root/result" \
+    --scratch "$root/$scratch" --harness "$SHADOW_HARNESS"
+}
+
+shadow_status() { python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])'; }
+
+shadow_root="$TMP/shadow-complete"
+make_shadow_fixture "$shadow_root"
+shadow_compile "$shadow_root" catalog_plus_candidate
+shadow_execute "$shadow_root"
+shadow_result="$(shadow_certify "$shadow_root" catalog_plus_candidate certify-scratch)"
+[[ "$(printf '%s' "$shadow_result" | shadow_status)" == "pass" ]] ||
+  fail "complete catalog-bound shadow evaluation did not pass"
+python3 - "$shadow_root/result/aggregate.json" <<'PY'
+import json, sys
+value = json.load(open(sys.argv[1]))
+assert value["routing_gate"] == "pass" and value["task_value_gate"] == "pass"
+assert value["routing"]["positive_recall"] == {"loaded": 1, "total": 1}
+assert value["routing"]["close_negative_false_load"] == {"false_loads": 0, "total": 1}
+assert value["routing"]["unrelated_false_load"] == {"false_loads": 0, "total": 1}
+assert value["routing"]["conflict_selection"] == {"selected_expected": 1, "total": 1}
+pair = value["task_value"]["pairs"][0]
+assert pair["arms"]["candidate"]["total_tokens"] == 15
+assert pair["arms"]["control"]["tool_use"] == 1
+assert value["catalog_id"] and value["candidate_id"] and value["environment_id"]
+PY
+python3 - "$shadow_result" <<'PY'
+import json, sys
+value = json.loads(sys.argv[1])
+receipt = json.load(open(value["receipt"]))
+assert receipt["result_id"].startswith("sha256:")
+assert receipt["routing_id"].startswith("sha256:")
+PY
+pass "catalog-bound routing matrix and separate task-value metrics certify exact identities"
+
+task_value_catalog="$TMP/shadow-task-value-control-catalog"
+make_shadow_fixture "$task_value_catalog" control-catalog-load value
+shadow_compile "$task_value_catalog" catalog_plus_candidate
+shadow_execute "$task_value_catalog"
+[[ "$(shadow_certify "$task_value_catalog" catalog_plus_candidate certify-scratch | shadow_status)" == "pass" ]] ||
+  fail "task-value control could not use the sealed current catalog"
+pass "task-value controls may use sealed catalog skills without candidate contamination"
+
+unicode_root="$TMP/shadow-unicode"
+make_shadow_fixture "$unicode_root"
+python3 - "$unicode_root/suite.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.load(open(path))
+value["cases"][0]["prompt"] = "Review the pull request — carefully"
+open(path, "w").write(json.dumps(value, sort_keys=True))
+PY
+shadow_compile "$unicode_root" catalog_plus_candidate
+shadow_execute "$unicode_root"
+[[ "$(shadow_certify "$unicode_root" catalog_plus_candidate certify-scratch | shadow_status)" == "pass" ]] ||
+  fail "non-ASCII shadow suite did not retain exact identity"
+pass "non-ASCII shadow inputs retain identical compiler and harness identities"
+
+routing_tamper="$TMP/shadow-routing-tamper"
+make_shadow_fixture "$routing_tamper"
+shadow_compile "$routing_tamper" catalog_plus_candidate
+python3 - "$routing_tamper/routing.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.load(open(path))
+value["executors"][0]["argv"].append("--changed-route")
+open(path, "w").write(json.dumps(value, sort_keys=True))
+PY
+mkdir -p "$routing_tamper/result" "$routing_tamper/execute-scratch"
+if "$SCRIPT_DIR/skill-evaluation.py" shadow-execute --run-dir "$routing_tamper/run" \
+  --result-dir "$routing_tamper/result" --routing "$routing_tamper/routing.json" \
+  --scratch "$routing_tamper/execute-scratch" --harness "$SHADOW_HARNESS" >/dev/null 2>&1; then
+  fail "changed executor route ran under a sealed shadow identity"
+fi
+pass "behavior-affecting executor route arguments are sealed"
+
+same_model="$TMP/shadow-same-model"
+make_shadow_fixture "$same_model"
+python3 - "$same_model/executors.json" "$same_model/routing.json" <<'PY'
+import copy, json, sys
+executors_path, routing_path = sys.argv[1:]
+executors = json.load(open(executors_path))
+second = copy.deepcopy(executors["executors"][0])
+second["name"] = "fixture-two"
+executors["executors"].append(second)
+open(executors_path, "w").write(json.dumps(executors, sort_keys=True))
+routing = json.load(open(routing_path))
+second_route = copy.deepcopy(routing["executors"][0])
+second_route["name"] = "fixture-two"
+routing["executors"].append(second_route)
+open(routing_path, "w").write(json.dumps(routing, sort_keys=True))
+PY
+shadow_compile "$same_model" catalog_plus_candidate
+shadow_execute "$same_model"
+[[ "$(shadow_certify "$same_model" catalog_plus_candidate certify-scratch | shadow_status)" == "pass" ]] ||
+  fail "same-model executors were not verified by exact executor name"
+pass "same-model executors retain distinct exact identities"
+
+candidate_only="$TMP/shadow-candidate-only"
+make_shadow_fixture "$candidate_only" correct none candidate_only
+shadow_compile "$candidate_only" candidate_only
+shadow_execute "$candidate_only"
+[[ "$(shadow_certify "$candidate_only" candidate_only certify-scratch | shadow_status)" == "inconclusive" ]] ||
+  fail "candidate-only routing certified catalog authority"
+python3 - "$candidate_only/result/aggregate.json" <<'PY'
+import json, sys
+value=json.load(open(sys.argv[1]))
+assert value["routing_diagnostic"] is True and value["routing_gate"] == "inconclusive"
+PY
+pass "candidate-only routing remains explicitly diagnostic and inconclusive"
+
+missing_catalog="$TMP/shadow-missing-catalog"
+make_shadow_fixture "$missing_catalog"
+mkdir -p "$missing_catalog/run"
+if "$SCRIPT_DIR/skill-evaluation.py" shadow-compile "$missing_catalog/candidate" \
+  --suite "$missing_catalog/suite.json" --executors "$missing_catalog/executors.json" \
+  --routing "$missing_catalog/routing.json" \
+  --run-dir "$missing_catalog/run" --nonce shadow-fixture-nonce --harness "$SHADOW_HARNESS" >/dev/null 2>&1; then
+  fail "catalog routing compiled without a sealed catalog"
+fi
+pass "missing approved catalog fails closed"
+
+run_shadow_failure() {
+  local name="$1" fixture="$2" target="$3" expected="$4" backend="${5:-true}"
+  local root="$TMP/shadow-$name"
+  make_shadow_fixture "$root" "$fixture" "$target" catalog_plus_candidate "$backend"
+  shadow_compile "$root" catalog_plus_candidate
+  shadow_execute "$root"
+  [[ "$(shadow_certify "$root" catalog_plus_candidate certify-scratch | shadow_status)" == "$expected" ]] ||
+    fail "shadow fixture $name did not produce $expected"
+}
+
+run_shadow_failure positive-missing positive-missing-load positive regression
+run_shadow_failure positive-wrong wrong-load positive regression
+run_shadow_failure positive-ambiguous ambiguous-load positive regression
+run_shadow_failure close-false close-negative-false-load close regression
+run_shadow_failure unrelated-false unrelated-false-load unrelated regression
+run_shadow_failure conflict-wrong conflict-wrong-selection conflict regression
+run_shadow_failure effective-mismatch effective-identity-mismatch value inconclusive
+run_shadow_failure token-budget over-token value regression
+run_shadow_failure turn-budget over-turn value regression
+run_shadow_failure tool-budget over-tool value regression
+run_shadow_failure usage-missing usage-missing value inconclusive
+run_shadow_failure usage-invalid usage-invalid value inconclusive
+run_shadow_failure usage-duplicate usage-duplicate value inconclusive
+run_shadow_failure missing-real-backend correct none inconclusive false
+run_shadow_failure quarantine-authority quarantine-request value inconclusive
+pass "routing errors, execution identity, budgets, usage, backend, and authority requests fail closed"
+
+for drift in candidate catalog environment scenario executor; do
+  root="$TMP/shadow-drift-$drift"
+  make_shadow_fixture "$root"
+  shadow_compile "$root" catalog_plus_candidate
+  shadow_execute "$root"
+  case "$drift" in
+    candidate) echo drift >> "$root/candidate/SKILL.md" ;;
+    catalog) echo drift >> "$root/catalog/approved-skill/SKILL.md" ;;
+    environment) python3 - "$root/suite.json" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p)); d["environment"]["context"]="drift"; open(p,"w").write(json.dumps(d))
+PY
+      ;;
+    scenario) python3 - "$root/suite.json" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p)); d["cases"][0]["prompt"]="changed"; open(p,"w").write(json.dumps(d))
+PY
+      ;;
+    executor) python3 - "$root/executors.json" <<'PY'
+import json, sys
+p=sys.argv[1]; d=json.load(open(p)); d["executors"][0]["model"]="changed-model"; open(p,"w").write(json.dumps(d))
+PY
+      ;;
+  esac
+  [[ "$(shadow_certify "$root" catalog_plus_candidate certify-scratch | shadow_status)" == "stale" ]] ||
+    fail "$drift drift did not become stale"
+done
+pass "candidate, catalog, suite, environment, and executor drift become stale"
+
+missing_arm="$TMP/shadow-missing-arm"
+cp -R "$shadow_root" "$missing_arm"
+python3 - "$missing_arm/result" <<'PY'
+import hashlib, json, shutil, sys
+from pathlib import Path
+root=Path(sys.argv[1])
+manifest=json.load(open(root/"manifest.json"))
+victim=next(item for item in manifest["trials"] if json.load(open(root/"trials"/item.removeprefix("sha256:")/"result.json"))["treatment"]=="control")
+shutil.rmtree(root/"trials"/victim.removeprefix("sha256:"))
+def inventory():
+    values=[]
+    for path in sorted(root.rglob("*")):
+        rel=path.relative_to(root).as_posix()
+        if path.is_dir() or rel=="manifest.json": continue
+        data=path.read_bytes()
+        values.append({"path":rel,"sha256":"sha256:"+hashlib.sha256(data).hexdigest(),"size":len(data)})
+    return values
+manifest["file_inventory"]=inventory()
+manifest["result_id"]="sha256:"+hashlib.sha256(json.dumps(
+    {key:value for key,value in manifest.items() if key!="result_id"},
+    sort_keys=True,separators=(",",":")).encode()).hexdigest()
+(root/"manifest.json").write_text(json.dumps(manifest,sort_keys=True,separators=(",",":")))
+PY
+[[ "$(shadow_certify "$missing_arm" catalog_plus_candidate reseal-scratch | shadow_status)" == "inconclusive" ]] ||
+  fail "resealed missing arm produced authority"
+pass "missing arms and resealed result tampering cannot forge a pass"
+
+forged_metric="$TMP/shadow-forged-routing-metric"
+cp -R "$shadow_root" "$forged_metric"
+python3 - "$forged_metric/result" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+root=Path(sys.argv[1])
+manifest=json.load(open(root/"manifest.json"))
+aggregate=json.load(open(root/"aggregate.json"))
+for trial_id in manifest["trials"]:
+    path=root/"trials"/trial_id.removeprefix("sha256:")/"result.json"
+    record=json.load(open(path))
+    if record["case_class"] != "routing_close_negative" or record["status"] != "pass":
+        continue
+    record["candidate_loaded"]=True
+    path.write_text(json.dumps(record,sort_keys=True,separators=(",",":")))
+    per_case=next(
+        item for item in aggregate["routing"]["per_case"]
+        if item["case_id"] == record["case_id"]
+        and item["executor_model"] == record["executor_identity"]["model"]
+    )
+    per_case["candidate_loaded"]=True
+    aggregate["routing"]["close_negative_false_load"]["false_loads"] += 1
+    break
+else:
+    raise SystemExit("no passing close-negative trial to forge")
+(root/"aggregate.json").write_text(json.dumps(aggregate,sort_keys=True,separators=(",",":")))
+manifest["aggregate"]=aggregate
+values=[]
+for path in sorted(root.rglob("*")):
+    rel=path.relative_to(root).as_posix()
+    if path.is_dir() or rel=="manifest.json": continue
+    data=path.read_bytes()
+    values.append({"path":rel,"sha256":"sha256:"+hashlib.sha256(data).hexdigest(),"size":len(data)})
+manifest["file_inventory"]=values
+manifest["result_id"]="sha256:"+hashlib.sha256(json.dumps(
+    {key:value for key,value in manifest.items() if key!="result_id"},
+    sort_keys=True,separators=(",",":")).encode()).hexdigest()
+(root/"manifest.json").write_text(json.dumps(manifest,sort_keys=True,separators=(",",":")))
+PY
+[[ "$(shadow_certify "$forged_metric" catalog_plus_candidate forged-metric-scratch | shadow_status)" == "inconclusive" ]] ||
+  fail "resealed candidate-loaded metric produced authority"
+pass "candidate-loaded metrics are re-derived from sealed load evidence"
+
 echo "PASS  $passes deterministic skill-evaluation checks"

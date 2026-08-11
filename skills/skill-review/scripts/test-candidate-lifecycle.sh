@@ -1,0 +1,323 @@
+#!/usr/bin/env bash
+# Focused deterministic checks for the shadow-only candidate lifecycle owner.
+
+set -euo pipefail
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd -P)"
+TEST_ROOT="$REPO_ROOT/.test-work"
+mkdir -p "$TEST_ROOT"
+# shellcheck source=lib-test-work.sh
+source "$SCRIPT_DIR/lib-test-work.sh"
+prune_test_work "$TEST_ROOT" "candidate-lifecycle" 2
+TMP="$(mktemp -d "$TEST_ROOT/candidate-lifecycle.XXXXXX")"
+cleanup() {
+  local rc=$?
+  trap - EXIT
+  finish_test_work "$rc" "$TMP" "candidate lifecycle" 1
+  exit "$rc"
+}
+trap cleanup EXIT
+
+LIFECYCLE="$SCRIPT_DIR/candidate-lifecycle.py"
+LOCK="$SCRIPT_DIR/daemon-lock.py"
+export PYTHONDONTWRITEBYTECODE=1
+export DREAMING_STATE_ROOT="$TMP/state"
+export DREAMING_DATA_ROOT="$TMP/data"
+export DREAMING_SKILLS_ROOT="$TMP/managed-skills"
+export SKILLS_STATE_DIR="$TMP/lock-state"
+export SKILLS_LOCK_DIR="$TMP/lock-state/daemon.lock"
+export DREAMING_NOW_EPOCH=1770249600 # 2026-02-05T00:00:00Z
+export SKILLS_NOW_EPOCH="$DREAMING_NOW_EPOCH"
+mkdir -p "$DREAMING_SKILLS_ROOT" "$TMP/fixtures"
+passes=0
+
+pass() { echo "PASS  $*"; passes=$((passes + 1)); }
+fail() { echo "FAIL  $*" >&2; exit 1; }
+json_get() { python3 -c "import json; print($1)" < "$2"; }
+version_of() { json_get 'json.load(open(0))["record_version"]' "$1"; }
+state_of() { json_get 'json.load(open(0))["state"]' "$1"; }
+candidate_of() { json_get 'json.load(open(0))["current_candidate_id"]' "$1"; }
+record_path() { printf '%s/skill-review/candidates/v1/records/%s.json' "$DREAMING_STATE_ROOT" "$1"; }
+run() { "$LIFECYCLE" "$@"; }
+record() { record_path "$1"; }
+snapshot_managed() {
+  python3 - "$DREAMING_SKILLS_ROOT" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+items = []
+for path in sorted(root.rglob("*")):
+    relative = path.relative_to(root).as_posix()
+    if path.is_symlink():
+        items.append(("symlink", relative, path.readlink().as_posix()))
+    elif path.is_file():
+        items.append(("file", relative, hashlib.sha256(path.read_bytes()).hexdigest()))
+    elif path.is_dir():
+        items.append(("directory", relative, ""))
+print(repr(items))
+PY
+}
+
+expect_refusal() {
+  local name="$1"
+  shift
+  if "$@" >"$TMP/$name.out" 2>"$TMP/$name.err"; then
+    fail "$name unexpectedly succeeded"
+  fi
+}
+
+make_procedure() {
+  local path="$1" fingerprint="${2:-a}"
+  python3 - "$path" "$fingerprint" <<'PY'
+import json, sys
+path, char = sys.argv[1:]
+json.dump({
+  "schema_version": 1,
+  "trigger": "A bounded recurring trigger.",
+  "outcome": "A user-observable stopping condition.",
+  "actions": ["Inspect the bounded input", "Apply the deterministic procedure"],
+  "exclusions": ["Do not cover neighboring unrelated work."],
+  "match_fingerprint": "sha256:" + char * 64,
+}, open(path, "w", encoding="utf-8"), sort_keys=True)
+PY
+}
+
+make_observation() {
+  local path="$1" task="$2" session="$3" observed="$4" independence="${5:-verified}" fingerprint="${6:-a}"
+  python3 - "$path" "$task" "$session" "$observed" "$independence" "$fingerprint" <<'PY'
+import json, sys
+path, task, session, observed, independence, char = sys.argv[1:]
+json.dump({
+  "task_key": task, "session_id": session, "observed_at": observed,
+  "independence": independence, "summary": "A deterministic observation.",
+  "procedure_fingerprint": "sha256:" + char * 64,
+}, open(path, "w", encoding="utf-8"), sort_keys=True)
+PY
+}
+
+make_package() {
+  local root="$1" revision="$2"
+  mkdir -p "$root/references"
+  cat > "$root/SKILL.md" <<EOF
+---
+name: lifecycle-fixture
+description: Deterministic candidate package.
+---
+
+# Fixture $revision
+EOF
+  printf 'revision=%s\n' "$revision" > "$root/references/proof.txt"
+}
+
+make_procedure "$TMP/fixtures/procedure.json"
+make_package "$TMP/package-one" one
+make_observation "$TMP/fixtures/one.json" task-one session-one 2026-02-01T00:00:00Z
+MANAGED_BEFORE="$(snapshot_managed)"
+export SKILLS_LOCK_TOKEN="$("$LOCK" acquire --mode session --owner candidate-lifecycle-test)"
+initial="$(run collect --procedure "$TMP/fixtures/procedure.json" --observation "$TMP/fixtures/one.json" \
+  --package "$TMP/package-one" --proposed-name lifecycle-fixture)"
+printf '%s\n' "$initial" > "$TMP/initial.out"
+LID="$(json_get 'json.load(open(0))["lifecycle_id"]' "$TMP/initial.out")"
+REC="$(record "$LID")"
+[[ -f "$REC" ]] || fail "initial candidate record missing"
+[[ -d "$DREAMING_DATA_ROOT/candidates/v1/packages/$LID/$(candidate_of "$REC")" ]] ||
+  fail "isolated immutable package missing"
+[[ "$(snapshot_managed)" == "$MANAGED_BEFORE" ]] || fail "candidate collection wrote under managed skills"
+[[ ! -e "$DREAMING_SKILLS_ROOT/lifecycle-fixture" ]] || fail "candidate entered native skill discovery"
+pass "fresh collection creates only isolated shadow record and package"
+
+cp "$REC" "$TMP/prior-record.json"
+expect_refusal missing-lease env -u SKILLS_LOCK_TOKEN SKILLS_LOCK_HELD_BY_PARENT=1 \
+  "$LIFECYCLE" evaluate "$LID" --expected-version "$(version_of "$REC")"
+cmp -s "$REC" "$TMP/prior-record.json" || fail "missing lease changed record"
+expect_refusal wrong-lease env SKILLS_LOCK_TOKEN=wrong-token "$LIFECYCLE" evaluate "$LID" --expected-version "$(version_of "$REC")"
+cmp -s "$REC" "$TMP/prior-record.json" || fail "wrong lease changed record"
+expect_refusal stale-write run evaluate "$LID" --expected-version 999
+cmp -s "$REC" "$TMP/prior-record.json" || fail "stale write changed record"
+pass "missing, wrong, and stale writer leases refuse byte-identically"
+
+mkdir -p "$TMP/symlink-package"
+ln -s "$TMP/package-one/SKILL.md" "$TMP/symlink-package/SKILL.md"
+expect_refusal package-symlink run collect --procedure "$TMP/fixtures/procedure.json" \
+  --observation "$TMP/fixtures/one.json" --package "$TMP/symlink-package" \
+  --proposed-name symlink-fixture
+pass "symlinked draft packages refuse before mutation"
+
+cp "$REC" "$TMP/malformed-record.json"
+printf '{' > "$REC"
+expect_refusal malformed-record run validate "$LID"
+mv "$TMP/malformed-record.json" "$REC"
+cp "$REC" "$TMP/unknown-state-record.json"
+python3 - "$REC" <<'PY'
+import json, sys
+path=sys.argv[1]; value=json.load(open(path)); value["state"]="invented"; json.dump(value, open(path,"w"))
+PY
+expect_refusal unknown-state run validate "$LID"
+mv "$TMP/unknown-state-record.json" "$REC"
+cp "$REC" "$TMP/pre-illegal-transition.json"
+expect_refusal production-transition run transition "$LID" --to admitted --reason test-production --expected-version "$(version_of "$REC")"
+cmp -s "$REC" "$TMP/pre-illegal-transition.json" || fail "illegal transition changed record"
+pass "malformed records, unknown states, and production transitions fail closed"
+
+make_observation "$TMP/fixtures/two.json" task-two session-two 2026-02-04T00:00:00Z
+make_package "$TMP/package-two" two
+before_candidate="$(candidate_of "$REC")"
+run collect --lifecycle-id "$LID" --expected-version "$(version_of "$REC")" \
+  --procedure "$TMP/fixtures/procedure.json" --observation "$TMP/fixtures/two.json" \
+  --package "$TMP/package-two" --proposed-name lifecycle-fixture >/dev/null
+[[ "$LID" == "$(json_get 'json.load(open(0))["lifecycle_id"]' "$REC")" ]] || fail "lifecycle id changed across revision"
+[[ "$before_candidate" != "$(candidate_of "$REC")" ]] || fail "content edit did not create exact candidate identity"
+[[ ! -w "$DREAMING_DATA_ROOT/candidates/v1/packages/$LID/$before_candidate/SKILL.md" ]] ||
+  fail "prior immutable package is writable"
+OLD_PACKAGE="$DREAMING_DATA_ROOT/candidates/v1/packages/$LID/$before_candidate"
+chmod -R u+w "$OLD_PACKAGE"
+printf 'tampered\n' > "$OLD_PACKAGE/references/proof.txt"
+chmod -R a-w "$OLD_PACKAGE"
+make_observation "$TMP/fixtures/three.json" task-three session-three 2026-02-04T00:00:00Z
+expect_refusal package-collision run collect --lifecycle-id "$LID" --expected-version "$(version_of "$REC")" \
+  --procedure "$TMP/fixtures/procedure.json" --observation "$TMP/fixtures/three.json" \
+  --package "$TMP/package-one" --proposed-name lifecycle-fixture
+chmod -R u+w "$OLD_PACKAGE"
+cp "$TMP/package-one/references/proof.txt" "$OLD_PACKAGE/references/proof.txt"
+chmod -R a-w "$OLD_PACKAGE"
+run validate "$LID" >/dev/null
+python3 - "$TMP/package-two" "$(candidate_of "$REC")" <<'PY'
+import hashlib, json, sys
+from pathlib import Path
+
+root, actual = map(Path, sys.argv[1:])
+files = []
+for path in sorted(root.rglob("*")):
+    if path.is_file():
+        content = path.read_bytes()
+        files.append({
+            "path": path.relative_to(root).as_posix(),
+            "sha256": hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+        })
+expected = "sha256:" + hashlib.sha256(
+    json.dumps(files, sort_keys=True, separators=(",", ":")).encode()
+).hexdigest()
+assert expected == str(actual)
+PY
+pass "stable lifecycle identity retains immutable content-derived revisions"
+
+run evaluate "$LID" --expected-version "$(version_of "$REC")" > "$TMP/evaluate.out"
+[[ "$(json_get 'json.load(open(0))["recommendation"]' "$TMP/evaluate.out")" == ready_for_draft ]] ||
+  fail "two independent recent observations did not recommend ready"
+[[ "$(state_of "$REC")" == ready_for_draft ]] || fail "ready recurrence did not transition state"
+run transition "$LID" --to evaluating --reason exact-draft-evaluation \
+  --candidate-id "$(candidate_of "$REC")" --expected-version "$(version_of "$REC")" >/dev/null
+[[ "$(state_of "$REC")" == evaluating ]] || fail "legal evaluating transition failed"
+run transition "$LID" --to rejected --reason evaluation-rejected \
+  --expected-version "$(version_of "$REC")" >/dev/null
+[[ "$(state_of "$REC")" == rejected ]] || fail "legal rejected transition failed"
+expect_refusal rejected-direct-reopen run transition "$LID" --to collecting --reason invalid-reopen \
+  --expected-version "$(version_of "$REC")"
+pass "declared collecting-ready-evaluating-rejected transitions retain shadow-only control"
+
+collect_fixture() {
+  local label="$1" first_task="$2" first_session="$3" first_at="$4" second_task="$5" second_session="$6" second_at="$7"
+  local outcome="${8:-different}" covering="${9:-}" tombstone="${10:-}"
+  local procedure="$TMP/fixtures/$label-procedure.json"
+  local one="$TMP/fixtures/$label-one.json"
+  local two="$TMP/fixtures/$label-two.json"
+  local package="$TMP/$label-package"
+  make_procedure "$procedure"
+  make_observation "$one" "$first_task" "$first_session" "$first_at"
+  make_observation "$two" "$second_task" "$second_session" "$second_at"
+  make_package "$package" "$label"
+  local args=(collect --procedure "$procedure" --observation "$one" --package "$package" --proposed-name "$label" --match-outcome "$outcome")
+  [[ -n "$covering" ]] && args+=(--covering-lifecycle-id "$covering")
+  [[ -n "$tombstone" ]] && args+=(--tombstone-id "$tombstone")
+  local created
+  created="$(run "${args[@]}")"
+  local id
+  id="$(printf '%s' "$created" | python3 -c 'import json,sys; print(json.load(sys.stdin)["lifecycle_id"])')"
+  local rec
+  rec="$(record "$id")"
+  run collect --lifecycle-id "$id" --expected-version "$(version_of "$rec")" \
+    --procedure "$procedure" --observation "$two" --package "$package" \
+    --proposed-name "$label" --match-outcome same >/dev/null
+  run evaluate "$id" --expected-version "$(version_of "$rec")" > "$TMP/$label-evaluate.out"
+  printf '%s\n' "$id"
+}
+
+WITHIN="$(collect_fixture within-45 task-within-a session-within-a 2025-12-25T00:00:00Z task-within-b session-within-b 2026-02-04T00:00:00Z)"
+[[ "$(state_of "$(record "$WITHIN")")" == ready_for_draft ]] || fail "mixed pair within 45 days did not pass"
+FAR="$(collect_fixture beyond-45 task-far-a session-far-a 2025-12-15T00:00:00Z task-far-b session-far-b 2026-02-04T00:00:00Z)"
+[[ "$(state_of "$(record "$FAR")")" == collecting ]] || fail "pair beyond 45 days became ready"
+REPEAT_TASK="$(collect_fixture repeat-task task-repeat session-repeat-a 2026-02-01T00:00:00Z task-repeat session-repeat-b 2026-02-04T00:00:00Z)"
+[[ "$(state_of "$(record "$REPEAT_TASK")")" == collecting ]] || fail "repeated task became ready"
+REPEAT_SESSION="$(collect_fixture repeat-session task-session-a session-repeat 2026-02-01T00:00:00Z task-session-b session-repeat 2026-02-04T00:00:00Z)"
+[[ "$(state_of "$(record "$REPEAT_SESSION")")" == collecting ]] || fail "repeated session became ready"
+OLD_ONLY="$(collect_fixture old-only task-old-a session-old-a 2025-11-01T00:00:00Z task-old-b session-old-b 2025-11-05T00:00:00Z)"
+[[ "$(state_of "$(record "$OLD_ONLY")")" == collecting ]] || fail "old-only evidence became ready"
+UNCERTAIN="$(collect_fixture uncertain-match task-uncertain-a session-uncertain-a 2026-02-01T00:00:00Z task-uncertain-b session-uncertain-b 2026-02-04T00:00:00Z uncertain)"
+[[ "$(state_of "$(record "$UNCERTAIN")")" == collecting ]] || fail "uncertain match became ready"
+COVERING_ID="$LID"
+COVERING="$(collect_fixture covering-match task-covering-a session-covering-a 2026-02-01T00:00:00Z task-covering-b session-covering-b 2026-02-04T00:00:00Z different "$COVERING_ID")"
+[[ "$(state_of "$(record "$COVERING")")" == collecting ]] || fail "covering lifecycle became ready"
+TOMBSTONE="$(collect_fixture tombstone-match task-tombstone-a session-tombstone-a 2026-02-01T00:00:00Z task-tombstone-b session-tombstone-b 2026-02-04T00:00:00Z different '' tombstone-fixture)"
+[[ "$(state_of "$(record "$TOMBSTONE")")" == collecting ]] || fail "tombstoned procedure became ready"
+pass "recurrence matrix permits only independent fresh unblocked evidence"
+
+EXPIRE_PROC="$TMP/fixtures/expire-procedure.json"
+EXPIRE_ONE="$TMP/fixtures/expire-one.json"
+EXPIRE_TWO="$TMP/fixtures/expire-two.json"
+EXPIRE_PACKAGE="$TMP/expire-package"
+make_procedure "$EXPIRE_PROC"
+make_observation "$EXPIRE_ONE" task-expire-old session-expire-old 2025-12-01T00:00:00Z
+make_observation "$EXPIRE_TWO" task-expire-new session-expire-new 2026-02-04T00:00:00Z
+make_package "$EXPIRE_PACKAGE" expire
+EXPIRE_OUT="$(run collect --procedure "$EXPIRE_PROC" --observation "$EXPIRE_ONE" --package "$EXPIRE_PACKAGE" --proposed-name expire-fixture)"
+EXPIRE_ID="$(printf '%s' "$EXPIRE_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["lifecycle_id"])')"
+EXPIRE_REC="$(record "$EXPIRE_ID")"
+run expire "$EXPIRE_ID" --expected-version "$(version_of "$EXPIRE_REC")" >/dev/null
+[[ "$(state_of "$EXPIRE_REC")" == expired ]] || fail "unsupported candidate did not expire"
+run collect --lifecycle-id "$EXPIRE_ID" --expected-version "$(version_of "$EXPIRE_REC")" \
+  --procedure "$EXPIRE_PROC" --observation "$EXPIRE_TWO" --package "$EXPIRE_PACKAGE" \
+  --proposed-name expire-fixture >/dev/null
+[[ "$(state_of "$EXPIRE_REC")" == collecting ]] || fail "fresh verified observation did not reopen expired record"
+python3 - "$EXPIRE_REC" <<'PY'
+import json, sys
+record=json.load(open(sys.argv[1]))
+assert len(record["evidence"]) == 2
+assert [x["to_state"] for x in record["lifecycle"]["transition_history"]] == ["collecting", "expired", "collecting"]
+PY
+pass "expiration and reopen preserve append-only evidence and transition history"
+
+ABSORB_PROC="$TMP/fixtures/absorbed-procedure.json"
+ABSORB_OBS="$TMP/fixtures/absorbed-observation.json"
+ABSORB_PACKAGE="$TMP/absorbed-package"
+make_procedure "$ABSORB_PROC"
+make_observation "$ABSORB_OBS" task-absorbed session-absorbed 2026-02-04T00:00:00Z
+make_package "$ABSORB_PACKAGE" absorbed
+ABSORB_OUT="$(run collect --procedure "$ABSORB_PROC" --observation "$ABSORB_OBS" --package "$ABSORB_PACKAGE" --proposed-name absorbed-fixture)"
+ABSORB_ID="$(printf '%s' "$ABSORB_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["lifecycle_id"])')"
+ABSORB_REC="$(record "$ABSORB_ID")"
+run decide "$ABSORB_ID" --outcome supersedes --reason replacement-pending \
+  --related-lifecycle-id "$LID" --expected-version "$(version_of "$ABSORB_REC")" >/dev/null
+run decide "$ABSORB_ID" --outcome duplicate --reason duplicate-recorded \
+  --related-lifecycle-id "$LID" --expected-version "$(version_of "$ABSORB_REC")" >/dev/null
+run transition "$ABSORB_ID" --to absorbed --reason absorbed-by-umbrella \
+  --related-lifecycle-id "$LID" --expected-version "$(version_of "$ABSORB_REC")" >/dev/null
+[[ "$(state_of "$ABSORB_REC")" == absorbed ]] || fail "legal absorbed transition failed"
+python3 - "$ABSORB_REC" "$LID" <<'PY'
+import json, sys
+record=json.load(open(sys.argv[1]))
+assert record["absorbed_into"] == sys.argv[2]
+assert {item["outcome"] for item in record["match_decisions"]} >= {"supersedes", "absorbs"}
+assert record["publication"] == {"status": "shadow_only"}
+PY
+pass "supersession and absorption remain recorded decisions, not publisher mutations"
+
+run validate >/dev/null
+[[ "$(snapshot_managed)" == "$MANAGED_BEFORE" ]] || fail "shadow flow changed managed skill root"
+[[ ! -e "$DREAMING_DATA_ROOT/skills" ]] || fail "shadow flow created a managed data skill root"
+pass "validation remains isolated from managed skills and publisher roots"
+
+"$LOCK" release "$SKILLS_LOCK_TOKEN" >/dev/null
+echo "PASS  $passes deterministic candidate lifecycle checks"

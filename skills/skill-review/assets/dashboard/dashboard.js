@@ -153,6 +153,7 @@ async function renderOverview() {
       <article class="card"><div class="label">Scheduled reliability</div><div class="metric">${esc(runtime)}</div><div class="submetric">${data.runtime.halted ? "Halt switch active" : "Latest retained run status"}</div></article>
       <article class="card"><div class="label">Dreams remaining</div><div class="metric">${number(data.dreams.remaining)}</div><div class="submetric">${number(data.dreams.completed)} completed</div></article>
       <article class="card"><div class="label">Learned skills</div><div class="metric">${number(data.skills.count)}</div><div class="submetric">Git-backed agent-created skills</div></article>
+      <article class="card"><div class="label">Shadow candidates</div><div class="metric">${number(data.candidates.total)}</div><div class="submetric"><a class="link" href="#candidates">${number(data.candidates.valid)} valid · ${number(data.candidates.invalid)} invalid · never active</a></div></article>
       <article class="card"><div class="label">Capability improvement</div><div class="metric">${percent(capability.candidate_percent)}</div><div class="submetric">Control ${percent(capability.control_percent)} · ${capability.comparable_skills} comparable skills</div></article>
     </div>
     <div class="grid charts">
@@ -239,6 +240,95 @@ async function renderSkills(cursor = "") {
   bindCatalog("skills", renderSkills);
 }
 
+function candidateAuthority(data) {
+  return `<div class="notice authority-banner"><strong>${esc(data.label)}</strong>${esc(data.notice)}</div>`;
+}
+
+function candidateToolbar() {
+  return `<div class="toolbar">
+    <input class="control" id="candidates-query" placeholder="Search proposed name or lifecycle ID">
+    <select class="control" id="candidates-status"><option value="">All record statuses</option><option value="shadow">Valid shadow records</option><option value="invalid">Invalid records</option></select>
+    <select class="control" id="candidates-state"><option value="">All lifecycle states</option><option value="collecting">Collecting</option><option value="ready_for_draft">Ready for draft</option><option value="evaluating">Evaluating</option><option value="expired">Expired</option><option value="rejected">Rejected</option><option value="absorbed">Absorbed</option></select>
+    <select class="control" id="candidates-sort"><option value="">Updated</option><option value="name">Name</option><option value="state">State</option></select>
+  </div>`;
+}
+
+async function renderCandidates(cursor = "") {
+  const query = state.query.candidates || {};
+  const params = new URLSearchParams({limit:"25", ...query});
+  if (cursor) params.set("cursor", cursor);
+  const data = await api(`/api/v1/candidates?${params}`);
+  view.innerHTML = `${header("Shadow candidates", "Read-only evidence packages awaiting conservative lifecycle decisions.", badge(data.authority))}
+    ${candidateAuthority(data)}
+    ${candidateToolbar()}
+    <article class="panel"><table><thead><tr><th>Candidate</th><th>Lifecycle</th><th>Recurrence</th><th>Freshness</th><th>Evaluation</th><th>Exact candidate identity</th></tr></thead><tbody>
+    ${data.items.length ? data.items.map(item => `<tr>
+      <td>${item.status === "shadow" ? `<a class="link" href="#candidate/${encodeURIComponent(item.lifecycle_id)}">${esc(item.proposed_name)}</a>` : `<strong>${esc(item.source || "Invalid record")}</strong>`}<div class="submetric">${badge(item.status)}</div></td>
+      <td>${esc(item.state_label)}<div class="submetric">${esc(item.state_reason)}</div></td>
+      <td>${item.evidence ? `${number(item.evidence.verified)} verified · ${number(item.evidence.distinct_tasks)} tasks · ${number(item.evidence.distinct_sessions)} sessions` : "Unavailable"}</td>
+      <td>${item.freshness ? `${item.freshness.fresh_evidence ? "Fresh evidence" : "No fresh evidence"} · ${item.freshness.days_until_expiry === null ? "No expiry" : `${number(item.freshness.days_until_expiry)}d to expiry`}` : "Unavailable"}</td>
+      <td>${item.evaluation ? badge(item.evaluation.status_label) : badge("unavailable")}</td>
+      <td class="mono">${esc(item.current_candidate_id)}</td>
+    </tr>`).join("") : `<tr><td colspan="6"><div class="empty">No shadow candidate records.</div></td></tr>`}
+    </tbody></table>${pager("candidates",data)}</article>`;
+  bindCandidates();
+}
+
+function bindCandidates() {
+  const apply = () => {
+    state.query.candidates = {
+      query: document.getElementById("candidates-query").value,
+      status: document.getElementById("candidates-status").value,
+      state: document.getElementById("candidates-state").value,
+      sort: document.getElementById("candidates-sort").value,
+    };
+    renderCandidates().catch(setError);
+  };
+  ["query", "status", "state", "sort"].forEach(field => document.getElementById(`candidates-${field}`).addEventListener("change", apply));
+  document.querySelectorAll('[data-page="candidates"]').forEach(button => button.addEventListener("click", () => {
+    renderCandidates(button.dataset.direction === "reset" ? "" : button.dataset.cursor).catch(setError);
+  }));
+}
+
+async function renderCandidate(lifecycleId) {
+  const data = await api(`/api/v1/candidates/${encodeURIComponent(lifecycleId)}`);
+  const freshness = data.freshness;
+  view.innerHTML = `<a class="link back" href="#candidates">← Back to shadow candidates</a>
+    ${header(data.proposed_name, "Candidate lifecycle, recurrence, freshness, and evaluation evidence.", badge(data.state_label))}
+    ${candidateAuthority(data)}
+    <div class="grid split">
+      <article class="panel"><div class="panel-head"><h2>Lifecycle and recurrence</h2></div><dl class="definition">
+        <dt>Lifecycle state</dt><dd>${esc(data.state_label)}</dd>
+        <dt>State reason</dt><dd>${esc(data.state_reason)}</dd>
+        <dt>State changed</dt><dd>${fullTime(data.state_changed_at)}</dd>
+        <dt>Verified evidence</dt><dd>${number(data.evidence.verified)} of ${number(data.evidence.total)}</dd>
+        <dt>Distinct tasks</dt><dd>${number(data.evidence.distinct_tasks)}</dd>
+        <dt>Distinct sessions</dt><dd>${number(data.evidence.distinct_sessions)}</dd>
+        <dt>Newest verified</dt><dd>${fullTime(freshness.newest_verified_evidence_at)}</dd>
+        <dt>Freshness</dt><dd>${freshness.fresh_evidence ? "Fresh evidence present" : "No fresh verified evidence"}${freshness.past_expiry ? " · past expiry" : freshness.days_until_expiry === null ? "" : ` · ${number(freshness.days_until_expiry)} days until expiry`}</dd>
+      </dl></article>
+      <article class="panel"><div class="panel-head"><h2>Identity and authority</h2></div><dl class="definition">
+        <dt>Lifecycle ID</dt><dd class="mono">${esc(data.lifecycle_id)}</dd>
+        <dt>Candidate ID</dt><dd class="mono">${esc(data.current_candidate_id)}</dd>
+        <dt>Revision</dt><dd>${number(data.candidate_revision_count)} immutable package revision(s)</dd>
+        <dt>Package</dt><dd>${number(data.candidate_revision.file_count)} files · ${bytes(data.candidate_revision.bytes)}</dd>
+        <dt>Recommendation</dt><dd>${esc(data.recommendation.label)}${data.recommendation.stale ? " · stale" : ""}</dd>
+        <dt>Publication</dt><dd>Not published</dd>
+        <dt>Activation</dt><dd>Not active</dd>
+        <dt>CLI discovery</dt><dd>Not discoverable</dd>
+      </dl></article>
+      <article class="panel full-span"><div class="panel-head"><h2>Evaluation gates</h2><span>${badge(data.evaluation.status_label)}</span></div>
+        <div class="gate-grid">${data.evaluation.gates.map(gate => `<div class="gate"><strong>${esc(gate.label || gate.name)}</strong>${badge(gate.status)}<p>${esc((gate.reasons || []).join(", ") || "No recorded gate reasons.")}</p></div>`).join("")}</div>
+      </article>
+      <article class="panel full-span"><div class="panel-head"><h2>Proposed procedure</h2></div><dl class="definition">
+        <dt>Trigger</dt><dd>${esc(data.procedure.trigger)}</dd>
+        <dt>Outcome</dt><dd>${esc(data.procedure.outcome)}</dd>
+        <dt>Actions</dt><dd>${data.procedure.actions.map(esc).join("<br>")}</dd>
+        <dt>Exclusions</dt><dd>${data.procedure.exclusions.map(esc).join("<br>")}</dd>
+      </dl></article>
+    </div>`;
+}
+
 function bindCatalog(kind, renderer) {
   const query = document.getElementById(`${kind}-query`);
   const status = document.getElementById(`${kind}-status`);
@@ -318,11 +408,13 @@ async function route() {
   const raw = location.hash.replace(/^#/, "") || "overview";
   const [name, firstPart, secondPart] = raw.split("/");
   state.route = name;
-  document.querySelectorAll("[data-route]").forEach(link => link.classList.toggle("active", link.dataset.route === name || (name === "skill" || name === "evidence" || name === "transcript") && link.dataset.route === "skills"));
+  document.querySelectorAll("[data-route]").forEach(link => link.classList.toggle("active", link.dataset.route === name || (name === "skill" || name === "evidence" || name === "transcript") && link.dataset.route === "skills" || name === "candidate" && link.dataset.route === "candidates"));
   try {
     if (name === "overview") await renderOverview();
     else if (name === "activity") await renderActivity();
     else if (name === "dreams") await renderDreams();
+    else if (name === "candidates") await renderCandidates();
+    else if (name === "candidate" && firstPart) await renderCandidate(decodeURIComponent(firstPart));
     else if (name === "skills") await renderSkills();
     else if (name === "skill" && firstPart) await renderSkill(decodeURIComponent(firstPart));
     else if (name === "evidence" && firstPart) await renderEvidence(decodeURIComponent(firstPart), secondPart);

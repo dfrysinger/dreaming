@@ -18,6 +18,7 @@ import shutil
 import stat
 import subprocess
 import sys
+import tempfile
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -100,6 +101,11 @@ def canonical(value: Any) -> bytes:
 
 def digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical(value)).hexdigest()
+
+
+def candidate_record_digest(value: Any) -> str:
+    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def path_collision_key(path: Path) -> tuple[str, ...]:
@@ -964,6 +970,12 @@ class DreamingRuntime:
             reason = "autonomous-create-requires-recurrence"
         if reason is None:
             return result
+        shadow_candidate = None
+        if reason == "autonomous-create-requires-recurrence":
+            shadow_candidate = self._collect_shadow_candidate(
+                result,
+                reviewed_identity,
+            )
         deferred = dict(result)
         deferred_context = deferred.get("transcript_context")
         deferred["terminal_route"] = "discard"
@@ -984,8 +996,207 @@ class DreamingRuntime:
                 if isinstance(deferred_context, dict)
                 else {}
             ),
+            **(
+                {"shadow_candidate": shadow_candidate}
+                if shadow_candidate is not None
+                else {}
+            ),
         }
         return deferred
+
+    def _candidate_lifecycle_call(self, *arguments: str) -> dict[str, Any]:
+        helper = Path(__file__).with_name("candidate-lifecycle.py")
+        environment = os.environ.copy()
+        environment["DREAMING_STATE_ROOT"] = str(self.paths.state)
+        environment["DREAMING_DATA_ROOT"] = str(self.paths.data)
+        environment["DREAMING_NOW_EPOCH"] = str(self.now())
+        environment["SKILLS_NOW_EPOCH"] = str(self.now())
+        environment.setdefault("SKILLS_STATE_DIR", str(self.paths.state))
+        try:
+            completed = subprocess.run(
+                [str(helper), *arguments],
+                check=False,
+                text=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                env=environment,
+            )
+        except OSError as error:
+            raise RuntimeFailure("candidate-lifecycle-failed", str(error)) from error
+        if completed.returncode != 0:
+            raise RuntimeFailure(
+                "candidate-lifecycle-failed",
+                completed.stderr.strip() or f"exit {completed.returncode}",
+            )
+        try:
+            response = json.loads(completed.stdout)
+        except json.JSONDecodeError as error:
+            raise RuntimeFailure(
+                "candidate-lifecycle-failed",
+                "helper returned malformed JSON",
+            ) from error
+        if not isinstance(response, dict) or (
+            response.get("shadow_only") is not True
+            and response.get("publication") != {"status": "shadow_only"}
+        ):
+            raise RuntimeFailure(
+                "candidate-lifecycle-failed",
+                "helper response is not shadow-only",
+            )
+        return response
+
+    def _candidate_procedure(self, artifact: dict[str, Any]) -> dict[str, Any]:
+        skill_markdown = artifact["skill_markdown"]
+        frontmatter = re.match(r"^---\n(.*?)\n---\n", skill_markdown, re.S)
+        description = re.search(
+            r"(?m)^description:\s*(\S.*)$",
+            frontmatter.group(1) if frontmatter else "",
+        )
+        if description is None:
+            raise RuntimeFailure(
+                "candidate-lifecycle-failed",
+                "validated draft description is missing",
+            )
+        trigger = description.group(1).strip()
+        descriptor = {
+            "proposed_name": artifact["skill_name"],
+            "trigger": trigger.casefold(),
+        }
+        return {
+            "schema_version": 1,
+            "trigger": trigger,
+            "outcome": f"Complete the {artifact['skill_name']} procedure.",
+            "actions": [
+                "Follow the ordered instructions in the staged draft package."
+            ],
+            "exclusions": [f"Tasks not covered by this trigger: {trigger}"],
+            "match_fingerprint": digest(descriptor),
+        }
+
+    def _collect_shadow_candidate(
+        self,
+        result: dict[str, Any],
+        reviewed_identity: dict[str, Any],
+    ) -> dict[str, Any]:
+        artifact = result["artifact"]
+        candidate_root = (self.paths.data / "candidates" / "v1").resolve()
+        skills_root = self.paths.skills.resolve()
+        if (
+            candidate_root == skills_root
+            or candidate_root in skills_root.parents
+            or skills_root in candidate_root.parents
+        ):
+            raise RuntimeFailure(
+                "candidate-lifecycle-failed",
+                "candidate storage must be isolated from the skill discovery root",
+            )
+        procedure = self._candidate_procedure(artifact)
+        observed = parse_time(reviewed_identity["updated_at"])
+        if observed is None:
+            raise RuntimeFailure(
+                "candidate-lifecycle-failed",
+                "reviewed source updated_at is invalid",
+            )
+        task_key = (
+            "task:"
+            + hashlib.sha256(
+                reviewed_identity["qualified_session_id"].encode("utf-8")
+            ).hexdigest()
+        )
+        observation = {
+            "task_key": task_key,
+            "session_id": reviewed_identity["qualified_session_id"],
+            "observed_at": observed.astimezone(timezone.utc).isoformat(),
+            "independence": "unverified",
+            "summary": result["summary"],
+            "procedure_fingerprint": procedure["match_fingerprint"],
+        }
+
+        lifecycle_id = None
+        expected_version = None
+        expected_identity = None
+        listing = self._candidate_lifecycle_call("list")
+        for item in listing.get("records", []):
+            if not isinstance(item, dict) or not isinstance(
+                item.get("lifecycle_id"), str
+            ):
+                raise RuntimeFailure(
+                    "candidate-lifecycle-failed",
+                    "candidate listing is malformed",
+                )
+            record = self._candidate_lifecycle_call(
+                "read", item["lifecycle_id"]
+            )
+            if (
+                record.get("proposed_name") == artifact["skill_name"]
+                and record.get("procedure") == procedure
+                and record.get("state")
+                in {"collecting", "ready_for_draft", "expired", "rejected"}
+            ):
+                lifecycle_id = record["lifecycle_id"]
+                expected_version = record["record_version"]
+                expected_identity = candidate_record_digest(record)
+                break
+
+        staging_parent = self.paths.data / "candidates" / "v1" / "incoming"
+        staging_parent.mkdir(parents=True, exist_ok=True)
+        with tempfile.TemporaryDirectory(
+            prefix=".candidate-", dir=staging_parent
+        ) as temporary:
+            package = Path(temporary)
+            atomic_text(package / "SKILL.md", artifact["skill_markdown"])
+            procedure_path = package.parent / f".{package.name}-procedure.json"
+            observation_path = package.parent / f".{package.name}-observation.json"
+            try:
+                atomic_json(procedure_path, procedure)
+                atomic_json(observation_path, observation)
+                command = [
+                    "collect",
+                    "--procedure",
+                    str(procedure_path),
+                    "--observation",
+                    str(observation_path),
+                    "--package",
+                    str(package),
+                    "--proposed-name",
+                    artifact["skill_name"],
+                ]
+                if lifecycle_id is not None:
+                    command.extend(
+                        [
+                            "--lifecycle-id",
+                            lifecycle_id,
+                            "--match-outcome",
+                            "same",
+                            "--expected-version",
+                            str(expected_version),
+                            "--expected-record-sha256",
+                            expected_identity,
+                        ]
+                    )
+                collected = self._candidate_lifecycle_call(*command)
+            finally:
+                procedure_path.unlink(missing_ok=True)
+                observation_path.unlink(missing_ok=True)
+
+        evaluated = self._candidate_lifecycle_call(
+            "evaluate",
+            collected["lifecycle_id"],
+            "--expected-version",
+            str(collected["record_version"]),
+            "--expected-record-sha256",
+            collected["record_sha256"],
+        )
+        return {
+            "candidate_id": evaluated["candidate_id"],
+            "lifecycle_id": evaluated["lifecycle_id"],
+            "recommendation": evaluated["recommendation"],
+            "record_sha256": evaluated["record_sha256"],
+            "record_version": evaluated["record_version"],
+            "shadow_only": True,
+            "state": evaluated["state"],
+        }
 
     def _validated_draft_review(self, result: dict[str, Any]) -> dict[str, Any]:
         if result.get("status") != "ok":

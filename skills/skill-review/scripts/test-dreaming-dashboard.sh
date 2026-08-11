@@ -20,6 +20,7 @@ import socket
 import subprocess
 import sys
 import time
+import uuid
 from pathlib import Path
 
 repo = Path(sys.argv[1])
@@ -52,6 +53,34 @@ check(
     "location.hash = `transcript/${button.dataset.transcript}`" in javascript
     and 'name === "transcript" && firstPart' in javascript,
     "transcript navigation is represented in browser history",
+)
+check(
+    'href="#candidates"' in index_text
+    and 'api(`/api/v1/candidates?${params}`)' in javascript
+    and 'api(`/api/v1/candidates/${encodeURIComponent(lifecycleId)}`)' in javascript
+    and 'name === "candidate" && firstPart' in javascript,
+    "browser routes expose candidate list and detail views",
+)
+check(
+    "Shadow candidates" in javascript
+    and "Not published" in javascript
+    and "Not active" in javascript
+    and "Not discoverable" in javascript
+    and "Evaluation gates" in javascript
+    and "Exact candidate identity" in javascript,
+    "candidate views conspicuously show shadow authority, identity, recurrence, freshness, and gates",
+)
+check(
+    not any(
+        token in javascript
+        for token in (
+            'fetch("/api/v1/candidates", {method:',
+            'fetch(`/api/v1/candidates/${encodeURIComponent(lifecycleId)}`, {method:',
+            "Activate candidate",
+            "Publish candidate",
+        )
+    ),
+    "candidate browser views expose no mutation controls",
 )
 for path in (state, control, orchestrator / "runs", data / "snapshots", skills):
     path.mkdir(parents=True, exist_ok=True)
@@ -239,6 +268,102 @@ for index in range(150):
         "created_at": f"2026-01-{1 + index % 28:02d}T00:00:00Z",
         "evidence": evidence,
     }), encoding="utf-8")
+
+candidate_records = state / "skill-review/candidates/v1/records"
+candidate_packages = data / "candidates/v1/packages"
+os.environ["DREAMING_STATE_DIR"] = str(state)
+os.environ["DREAMING_DATA_DIR"] = str(data)
+os.environ["DREAMING_NOW_EPOCH"] = str(int(time.time()))
+lifecycle_spec = importlib.util.spec_from_file_location(
+    "candidate_lifecycle", repo / "skills/skill-review/scripts/candidate-lifecycle.py"
+)
+lifecycle = importlib.util.module_from_spec(lifecycle_spec)
+sys.modules[lifecycle_spec.name] = lifecycle
+lifecycle_spec.loader.exec_module(lifecycle)
+
+candidate_procedure = lifecycle.validate_procedure({
+    "schema_version": 1,
+    "trigger": "A bounded recurring trigger.",
+    "outcome": "A user-observable stopping condition.",
+    "actions": ["Inspect the bounded input", "Apply the deterministic procedure"],
+    "exclusions": ["Do not cover neighbouring unrelated work."],
+    "match_fingerprint": "sha256:" + "a" * 64,
+})
+
+def candidate_fixture(label, target_state):
+    source = root / f"candidate-source-{label}"
+    source.mkdir(parents=True, exist_ok=True)
+    (source / "SKILL.md").write_text(
+        f"---\nname: dashboard-fixture\ndescription: Deterministic shadow candidate.\n---\n\n# {label}\n",
+        encoding="utf-8",
+    )
+    identity = str(uuid.uuid4())
+    staged, files, _ = lifecycle.make_immutable_package(identity, source)
+    observations = [
+        lifecycle.validate_observation(
+            {
+                "task_key": f"task:{label}-{index}",
+                "session_id": f"copilot:{label}-{index}",
+                "observed_at": time.strftime(
+                    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(time.time() - (index + 1) * 86400)
+                ),
+                "independence": "verified",
+                "summary": "A deterministic observation.",
+                "procedure_fingerprint": candidate_procedure["match_fingerprint"],
+            },
+            candidate_procedure,
+        )
+        for index in range(3 if target_state != "collecting" else 1)
+    ]
+    record = lifecycle.new_record(
+        identity,
+        "dashboard-fixture",
+        candidate_procedure,
+        observations[0],
+        staged,
+        files,
+        "different",
+        "new-procedure-observed",
+        None,
+        [],
+        [],
+    )
+    for observation in observations[1:]:
+        record["evidence"].append(observation)
+        lifecycle.append_decision(
+            record, "same", "same-procedure-observed", None, [observation["evidence_id"]]
+        )
+        record["lifecycle"]["last_supported_at"] = observation["observed_at"]
+    lifecycle.append_evaluation(record, lifecycle.recurrence(record))
+    if target_state != "collecting":
+        lifecycle.append_transition(
+            record,
+            "ready_for_draft",
+            "recurrence-threshold-met",
+            [item["evidence_id"] for item in observations],
+            [record["evaluation"]["history"][-1]["evaluation_id"]],
+        )
+    if target_state == "evaluating":
+        lifecycle.append_transition(
+            record, "evaluating", "shadow-evaluation-started", [], []
+        )
+    return identity, lifecycle.persist(record)
+
+collecting_candidate, _ = candidate_fixture("collecting", "collecting")
+ready_candidate, _ = candidate_fixture("ready", "ready_for_draft")
+evaluating_candidate, _ = candidate_fixture("evaluating", "evaluating")
+
+admitted_candidate, admitted_record = candidate_fixture("admitted", "ready_for_draft")
+admitted_payload = json.loads(
+    lifecycle.record_path(admitted_candidate).read_text(encoding="utf-8")
+)
+admitted_payload["state"] = "admitted"
+admitted_payload["publication"] = {"status": "published", "published_at": "2026-01-01T00:00:00Z"}
+lifecycle.record_path(admitted_candidate).write_text(
+    json.dumps(admitted_payload), encoding="utf-8"
+)
+malformed_candidate = str(uuid.uuid4())
+(candidate_records / f"{malformed_candidate}.json").write_text("{", encoding="utf-8")
 
 def manifest(*roots):
     rows = []
@@ -477,6 +602,100 @@ try:
         ),
         "scheduled reviews retain unresolved parent run IDs",
     )
+    status, _, body = request("/api/v1/candidates?limit=100")
+    candidate_page = json.loads(body)["data"]
+    candidate_rows = {item.get("lifecycle_id"): item for item in candidate_page["items"]}
+    check(
+        status == 200
+        and candidate_page["shadow_only"] is True
+        and candidate_page["active"] is False
+        and candidate_page["published"] is False
+        and candidate_page["authority"] == "shadow-only"
+        and "shadow-only" in candidate_page["notice"].casefold()
+        and "not published" in candidate_page["notice"].casefold(),
+        "the candidate route is conspicuously labeled shadow-only, not active, not published",
+    )
+    check(
+        all(
+            row["shadow_only"] is True
+            and row["active"] is False
+            and row["published"] is False
+            and row["discoverable"] is False
+            and "shadow-only" in row["label"].casefold()
+            for row in candidate_page["items"]
+        ),
+        "every served candidate row carries its own shadow-only labeling",
+    )
+    check(
+        candidate_rows[collecting_candidate]["state"] == "collecting"
+        and candidate_rows[ready_candidate]["state"] == "ready_for_draft"
+        and candidate_rows[evaluating_candidate]["state"] == "evaluating"
+        and all(
+            candidate_rows[identity]["status"] == "shadow"
+            for identity in (collecting_candidate, ready_candidate, evaluating_candidate)
+        ),
+        "trustworthy shadow candidates render their exact declared state",
+    )
+    check(
+        candidate_rows[admitted_candidate]["status"] == "invalid"
+        and candidate_rows[admitted_candidate].get("state") is None
+        and candidate_rows[admitted_candidate]["reasons"] == ["record_state_not_shadow"]
+        and candidate_rows[malformed_candidate]["status"] == "invalid"
+        and candidate_rows[malformed_candidate]["reasons"] == ["record_unreadable"]
+        and candidate_rows[admitted_candidate]["active"] is False
+        and candidate_rows[malformed_candidate]["active"] is False,
+        "production-misrepresented and malformed candidate records serve as invalid, never active",
+    )
+    check(request("/api/v1/candidates", auth=False)[0] == 401, "candidate reads require a bearer token")
+    status, _, body = request(f"/api/v1/candidates/{ready_candidate}")
+    detail = json.loads(body)["data"]
+    check(
+        status == 200
+        and detail["shadow_only"] is True
+        and detail["active"] is False
+        and detail["published"] is False
+        and detail["current_candidate_id"].startswith("sha256:")
+        and detail["recommendation"]["value"] == "ready_for_draft"
+        and detail["evaluation"]["composite_score"] is None
+        and {gate["name"] for gate in detail["evaluation"]["gates"]}
+        == {"recurrence", "routing", "task_value"},
+        "candidate detail preserves exact identity, recommendation, and separate gates",
+    )
+    check(
+        request(f"/api/v1/candidates/{admitted_candidate}")[0] == 422
+        and request(f"/api/v1/candidates/{malformed_candidate}")[0] == 422,
+        "untrustworthy candidate detail fails closed",
+    )
+    check(
+        request(f"/api/v1/candidates/{uuid.uuid4()}")[0] == 404
+        and request("/api/v1/candidates/../queue")[0] == 404,
+        "unknown candidate references are not found",
+    )
+    for method in ("POST", "PUT", "PATCH", "DELETE"):
+        check(
+            request("/api/v1/candidates", method=method)[0] == 405
+            and request(f"/api/v1/candidates/{ready_candidate}", method=method)[0] == 405,
+            f"candidate routes expose no {method} transition control",
+        )
+    _, _, overview_body = request("/api/v1/overview")
+    overview_candidates = json.loads(overview_body)["data"]["candidates"]
+    check(
+        overview_candidates["valid"] == 3
+        and overview_candidates["invalid"] == 2
+        and overview_candidates["states"]
+        == {
+            "absorbed": 0,
+            "collecting": 1,
+            "evaluating": 1,
+            "expired": 0,
+            "ready_for_draft": 1,
+            "rejected": 0,
+        }
+        and overview_candidates["active"] is False
+        and overview_candidates["published"] is False,
+        "the overview counts shadow candidates without ever claiming they are active",
+    )
+
     status, _, body = request("/api/v1/health")
     health = json.loads(body)["data"]
     check(

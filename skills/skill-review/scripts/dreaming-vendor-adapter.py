@@ -1456,6 +1456,7 @@ def review_context() -> dict[str, Any]:
             repo_root / "skills/skill-review/references/artifact-routing.md",
             32_000,
         ),
+        "native_skill_root": str(home / ".codex/skills"),
         "skills": [],
         "tombstones": [],
     }
@@ -1911,7 +1912,20 @@ def evaluation_identity(args: argparse.Namespace) -> dict[str, Any]:
         raise AdapterError("model-required", args.vendor)
     binary = Path(evaluation_binary(args))
     adapter_path = Path(__file__).resolve()
-    return {
+    cli_version = evaluation_cli_version(args)
+    limits = {
+        "timeout_seconds": args.timeout,
+        "token_budget": args.token_budget,
+        "output_bytes": args.output_bytes,
+    }
+    if args.shadow_contract:
+        limits.update(
+            {
+                "turn_budget": args.turn_budget,
+                "tool_budget": args.tool_budget,
+            }
+        )
+    identity = {
         "adapter_id": sha(
             {
                 "protocol": "dreaming.skill-evaluation-executor",
@@ -1923,13 +1937,9 @@ def evaluation_identity(args: argparse.Namespace) -> dict[str, Any]:
         "adapter_executable_sha256": sha_bytes(adapter_path.read_bytes()),
         "model": args.model,
         "cli_executable_sha256": sha_bytes(binary.read_bytes()),
-        "cli_version": evaluation_cli_version(args),
+        "cli_version": cli_version,
         "tool_policy_id": sha(evaluation_policy(args)),
-        "limits": {
-            "timeout_seconds": args.timeout,
-            "token_budget": args.token_budget,
-            "output_bytes": args.output_bytes,
-        },
+        "limits": limits,
         "sandbox_id": sha(
             {
                 "version": 1,
@@ -1945,6 +1955,16 @@ def evaluation_identity(args: argparse.Namespace) -> dict[str, Any]:
             }
         ),
     }
+    if args.shadow_contract:
+        identity.update(
+            {
+                "real_backend": True,
+                "real_backend_source": (
+                    f"native-{args.vendor}-cli model={args.model} version={cli_version}"
+                ),
+            }
+        )
+    return identity
 
 
 def evaluation_trial(path: str) -> dict[str, Any]:
@@ -1968,21 +1988,43 @@ def evaluation_trial(path: str) -> dict[str, Any]:
         "trace",
         "artifacts",
     }
-    if not isinstance(trial, dict) or set(trial) != required:
+    shadow_required = (required - {"home"}) | {
+        "catalog_id",
+        "catalog_root",
+        "catalog_skills",
+        "environment_id",
+        "suite_id",
+    }
+    if (
+        not isinstance(trial, dict)
+        or (
+            trial.get("schema_version") == 1
+            and set(trial) != required
+        )
+        or (
+            trial.get("schema_version") == 2
+            and set(trial) != shadow_required
+        )
+        or trial.get("schema_version") not in {1, 2}
+    ):
         raise AdapterError("trial-invalid", path)
-    if trial["schema_version"] != 1 or trial["treatment"] not in {
+    if trial["treatment"] not in {
         "control",
         "candidate",
     }:
         raise AdapterError("trial-invalid", path)
     root = trial_path.resolve().parent
+    if trial["schema_version"] == 2:
+        trial["home"] = str(root / "home")
     for field in ("home", "workspace", "raw", "trace", "artifacts"):
         trial_value = Path(trial[field])
         if trial_value.is_symlink() or not within(trial_value.resolve(), root):
             raise AdapterError("trial-path-escaped", field)
-    candidate_root = trial["candidate_root"]
-    if candidate_root is not None and not within(Path(candidate_root).resolve(), root):
-        raise AdapterError("trial-path-escaped", "candidate_root")
+    boundary = root if trial["schema_version"] == 1 else root.parents[2]
+    for field in ("candidate_root", "catalog_root"):
+        field_root = trial.get(field)
+        if field_root is not None and not within(Path(field_root).resolve(), boundary):
+            raise AdapterError("trial-path-escaped", field)
     return trial
 
 
@@ -2002,7 +2044,7 @@ def candidate_skill_name(skill_file: Path) -> str:
 
 def verify_candidate_projection(trial: dict[str, Any]) -> tuple[Path | None, str | None]:
     inventory = trial["candidate_inventory"]
-    if trial["treatment"] == "control":
+    if trial["schema_version"] == 1 and trial["treatment"] == "control":
         if inventory or trial["candidate_root"] is not None or trial["skill_md_sha256"] is not None:
             raise AdapterError("control-contaminated", "control has a candidate projection")
         return None, None
@@ -2042,7 +2084,97 @@ def verify_candidate_projection(trial: dict[str, Any]) -> tuple[Path | None, str
     skill = candidate_root / "SKILL.md"
     if sha_bytes(skill.read_bytes()) != trial["skill_md_sha256"]:
         raise AdapterError("candidate-drift", "SKILL.md")
+    if trial["schema_version"] == 2 and trial["treatment"] == "control":
+        return None, None
     return candidate_root, candidate_skill_name(skill)
+
+
+def directory_inventory(root: Path) -> list[dict[str, Any]]:
+    inventory: list[dict[str, Any]] = []
+    for source in sorted(root.rglob("*")):
+        relative = str(source.relative_to(root))
+        if source.is_symlink():
+            raise AdapterError("catalog-invalid", relative)
+        if source.is_file():
+            data = source.read_bytes()
+            inventory.append(
+                {"path": relative, "sha256": sha_bytes(data), "size": len(data)}
+            )
+        elif not source.is_dir():
+            raise AdapterError("catalog-invalid", relative)
+    return inventory
+
+
+def verify_catalog_projection(trial: dict[str, Any]) -> list[dict[str, Any]]:
+    if trial["schema_version"] == 1:
+        return []
+    catalog_root_value = trial["catalog_root"]
+    catalog_skills = trial["catalog_skills"]
+    if catalog_root_value is None:
+        if trial["catalog_id"] is not None or catalog_skills:
+            raise AdapterError("catalog-invalid", "missing catalog root")
+        return []
+    catalog_root = Path(catalog_root_value).resolve()
+    if catalog_root.is_symlink() or not catalog_root.is_dir():
+        raise AdapterError("catalog-invalid", "catalog root")
+    if not isinstance(catalog_skills, list):
+        raise AdapterError("catalog-invalid", "catalog skills")
+    descriptors: list[dict[str, Any]] = []
+    catalog_inventory: list[dict[str, Any]] = []
+    observed_names = {
+        path.name
+        for path in catalog_root.iterdir()
+        if path.is_dir() and not path.is_symlink()
+    }
+    expected_names: set[str] = set()
+    for entry in catalog_skills:
+        if not isinstance(entry, dict) or set(entry) != {
+            "catalog_skill_id",
+            "name",
+            "path",
+            "skill_md_sha256",
+        }:
+            raise AdapterError("catalog-invalid", "catalog skill")
+        name = entry["name"]
+        if (
+            not isinstance(name, str)
+            or not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", name)
+            or name in expected_names
+            or entry["path"] != f"catalog/{name}/SKILL.md"
+        ):
+            raise AdapterError("catalog-invalid", "catalog skill identity")
+        expected_names.add(name)
+        skill_root = catalog_root / name
+        if skill_root.is_symlink() or not skill_root.is_dir():
+            raise AdapterError("catalog-invalid", name)
+        inventory = directory_inventory(skill_root)
+        skill = skill_root / "SKILL.md"
+        if (
+            not inventory
+            or not skill.is_file()
+            or candidate_skill_name(skill) != name
+            or sha(inventory) != entry["catalog_skill_id"]
+            or sha_bytes(skill.read_bytes()) != entry["skill_md_sha256"]
+        ):
+            raise AdapterError("catalog-drift", name)
+        catalog_inventory.extend(
+            [{**item, "path": f"{name}/{item['path']}"} for item in inventory]
+        )
+        descriptors.append(
+            {
+                "name": name,
+                "source_root": str(skill_root),
+                "candidate_id": None,
+                "catalog_skill_id": entry["catalog_skill_id"],
+                "skill_md_sha256": entry["skill_md_sha256"],
+                "path": entry["path"],
+            }
+        )
+    if observed_names != expected_names or (
+        sha(catalog_inventory) if catalog_inventory else None
+    ) != trial["catalog_id"]:
+        raise AdapterError("catalog-drift", "catalog inventory")
+    return descriptors
 
 
 def evaluation_credential_root(args: argparse.Namespace) -> Path:
@@ -2116,19 +2248,64 @@ def evaluation_projection(trial: dict[str, Any]) -> dict[str, Any]:
     plugin = home / "evaluation-plugin"
     candidate_root, skill_name = verify_candidate_projection(trial)
     publication_name = "dreaming-evaluation-candidate"
-    return {
+    projection = {
         "root": str(plugin),
         "name": publication_name,
         "skill_name": skill_name,
         "candidate_id": trial["candidate_id"] if candidate_root else None,
         "skill_md_sha256": trial["skill_md_sha256"] if candidate_root else None,
-        "inventory": trial["candidate_inventory"],
+        "inventory": trial["candidate_inventory"] if candidate_root else [],
+        "native_skill_root": str(home / ".codex/skills"),
     }
+    if trial["schema_version"] == 2:
+        skills = verify_catalog_projection(trial)
+        if candidate_root is not None and skill_name is not None:
+            skills.append(
+                {
+                    "name": skill_name,
+                    "source_root": str(candidate_root),
+                    "candidate_id": trial["candidate_id"],
+                    "catalog_skill_id": None,
+                    "skill_md_sha256": trial["skill_md_sha256"],
+                    "path": "candidate/SKILL.md",
+                }
+            )
+        names = [item["name"] for item in skills]
+        if len(names) != len(set(names)):
+            raise AdapterError("projection-ambiguous", "duplicate skill name")
+        projection.update(
+            {
+                "schema_version": 2,
+                "skills": skills,
+            }
+        )
+    return projection
+
+
+def projected_skills(projection: dict[str, Any]) -> list[dict[str, Any]]:
+    skills = projection.get("skills")
+    if isinstance(skills, list):
+        return skills
+    skill_name = projection.get("skill_name")
+    if not isinstance(skill_name, str):
+        return []
+    return [
+        {
+            "name": skill_name,
+            "source_root": None,
+            "candidate_id": projection.get("candidate_id"),
+            "catalog_skill_id": None,
+            "skill_md_sha256": projection.get("skill_md_sha256"),
+            "path": "candidate/SKILL.md",
+        }
+    ]
 
 
 def evaluation_plugin_files(projection: dict[str, Any]) -> dict[str, Any]:
-    skill_name = projection["skill_name"]
-    skill_paths = [f"./skills/{skill_name}"] if skill_name else []
+    skill_paths = [
+        f"./skills/{skill['name']}"
+        for skill in projected_skills(projection)
+    ]
     publication_name = projection["name"]
     return {
         ".claude-plugin/plugin.json": {
@@ -2172,18 +2349,34 @@ def evaluation_plugin(args: argparse.Namespace, trial: dict[str, Any]) -> dict[s
     projection = evaluation_projection(trial)
     plugin = Path(projection["root"])
     plugin.mkdir(parents=True, exist_ok=True)
-    candidate_root, skill_name = verify_candidate_projection(trial)
-    if candidate_root is not None:
+    skills_to_project = projected_skills(projection)
+    if skills_to_project:
         skills = plugin / "skills"
         skills.mkdir()
-        projected = skills / skill_name
-        projected.symlink_to(candidate_root, target_is_directory=True)
+        for skill in skills_to_project:
+            source_root = skill.get("source_root")
+            if source_root is None:
+                candidate_root, _ = verify_candidate_projection(trial)
+                source_root = str(candidate_root)
+            projected = skills / skill["name"]
+            projected.symlink_to(Path(source_root).resolve(), target_is_directory=True)
     for relative, value in evaluation_plugin_files(projection).items():
         atomic_json(plugin / relative, value)
+    if args.vendor == "codex" and args.shadow_contract:
+        native_skills = Path(projection["native_skill_root"])
+        native_skills.mkdir(parents=True, exist_ok=True)
+        for skill in skills_to_project:
+            source_root = skill.get("source_root")
+            if source_root is None:
+                candidate_root, _ = verify_candidate_projection(trial)
+                source_root = str(candidate_root)
+            projected = native_skills / skill["name"]
+            shutil.copytree(Path(source_root).resolve(), projected)
     return projection
 
 
 def verify_evaluation_plugin(
+    args: argparse.Namespace,
     trial: dict[str, Any],
     projection: dict[str, Any],
 ) -> None:
@@ -2197,15 +2390,50 @@ def verify_evaluation_plugin(
         path = plugin / relative
         if path.is_symlink() or not path.is_file() or path.read_bytes() != canonical(value) + b"\n":
             raise AdapterError("prepared-drift", relative)
-    skill_name = expected["skill_name"]
+    skills_to_project = projected_skills(expected)
     skills = plugin / "skills"
-    if skill_name is None:
+    if not skills_to_project:
         if skills.exists():
             raise AdapterError("control-contaminated", "control plugin has skills")
         return
-    link = skills / skill_name
-    if not link.is_symlink() or link.resolve() != Path(trial["candidate_root"]).resolve():
-        raise AdapterError("prepared-drift", "candidate skill projection")
+    if not skills.is_dir() or skills.is_symlink():
+        raise AdapterError("prepared-drift", "skill projection root")
+    if {path.name for path in skills.iterdir()} != {
+        skill["name"] for skill in skills_to_project
+    }:
+        raise AdapterError("prepared-drift", "skill projection inventory")
+    for skill in skills_to_project:
+        link = skills / skill["name"]
+        source_root = skill.get("source_root")
+        if source_root is None:
+            source_root = trial["candidate_root"]
+        if not link.is_symlink() or link.resolve() != Path(source_root).resolve():
+            raise AdapterError("prepared-drift", f"{skill['name']} projection")
+    if args.vendor == "codex" and args.shadow_contract:
+        native_skills = Path(expected["native_skill_root"])
+        if (
+            native_skills.is_symlink()
+            or not native_skills.is_dir()
+            or {path.name for path in native_skills.iterdir()}
+            != {skill["name"] for skill in skills_to_project}
+        ):
+            raise AdapterError("prepared-drift", "native skill projection inventory")
+        for skill in skills_to_project:
+            projected = native_skills / skill["name"]
+            source_root = skill.get("source_root")
+            if source_root is None:
+                candidate_root, _ = verify_candidate_projection(trial)
+                source_root = str(candidate_root)
+            if (
+                projected.is_symlink()
+                or not projected.is_dir()
+                or directory_inventory(projected)
+                != directory_inventory(Path(source_root).resolve())
+            ):
+                raise AdapterError(
+                    "prepared-drift",
+                    f"{skill['name']} native skill projection",
+                )
 
 
 def evaluation_sandbox_profile(
@@ -2298,6 +2526,11 @@ def evaluation_sandbox_profile(
         rules.append(
             f'(deny file-write* (subpath "{sandbox_quote(Path(candidate_root).resolve())}"))'
         )
+    catalog_root = trial.get("catalog_root")
+    if catalog_root:
+        rules.append(
+            f'(deny file-write* (subpath "{sandbox_quote(Path(catalog_root).resolve())}"))'
+        )
     plugin_root = Path(environment["HOME"]) / "evaluation-plugin"
     if plugin_root.exists():
         rules.append(
@@ -2339,7 +2572,7 @@ def evaluation_command(
             "-C",
             workspace,
         ]
-        if trial["treatment"] == "candidate":
+        if projected_skills(plugin):
             command[command.index("--output-format"):command.index("--output-format")] = [
                 "--plugin-dir",
                 plugin_root,
@@ -2371,7 +2604,7 @@ def evaluation_command(
             "stream-json",
             "--verbose",
         ]
-        if trial["treatment"] == "candidate":
+        if projected_skills(plugin):
             command[command.index("--setting-sources"):command.index("--setting-sources")] = [
                 "--plugin-dir",
                 plugin_root,
@@ -2384,10 +2617,7 @@ def evaluation_command(
             "--model",
             args.model,
             "--ephemeral",
-            "--ignore-user-config",
             "--ignore-rules",
-            "--sandbox",
-            "workspace-write",
             "--skip-git-repo-check",
             "--json",
             "--color",
@@ -2397,6 +2627,24 @@ def evaluation_command(
             "-C",
             workspace,
         ]
+        if args.shadow_contract:
+            command[command.index("--skip-git-repo-check"):command.index("--skip-git-repo-check")] = [
+                "--dangerously-bypass-approvals-and-sandbox",
+                "--disable",
+                "standalone_web_search",
+                "--disable",
+                "browser_use",
+                "-c",
+                'web_search="disabled"',
+            ]
+        else:
+            command[command.index("--ignore-rules"):command.index("--ignore-rules")] = [
+                "--ignore-user-config",
+            ]
+            command[command.index("--skip-git-repo-check"):command.index("--skip-git-repo-check")] = [
+                "--sandbox",
+                "workspace-write",
+            ]
     return command
 
 
@@ -2404,7 +2652,11 @@ def evaluation_prepare(args: argparse.Namespace) -> None:
     trial = evaluation_trial(args.trial)
     environment = evaluation_environment(args, trial)
     plugin = evaluation_plugin(args, trial)
-    if args.vendor == "codex" and trial["treatment"] == "candidate":
+    if (
+        args.vendor == "codex"
+        and not args.shadow_contract
+        and projected_skills(plugin)
+    ):
         binary = evaluation_binary(args)
         for command in (
             [binary, "plugin", "marketplace", "add", plugin["root"]],
@@ -2606,19 +2858,181 @@ def native_token_usage(vendor: str, values: list[dict[str, Any]]) -> int | None:
     return max(totals) if totals else None
 
 
+def native_detailed_usage(
+    vendor: str,
+    values: list[dict[str, Any]],
+) -> dict[str, int] | None:
+    inputs: list[int] = []
+    outputs: list[int] = []
+    totals: list[int] = []
+    turns = 0
+    tool_calls: set[str] = set()
+    for value in values:
+        for item in recursive_values(value):
+            item_type = item.get("type")
+            payload = item.get("payload", item)
+            if vendor == "copilot":
+                if item_type == "model.call_start":
+                    turns += 1
+                data = item.get("data", {})
+                if isinstance(data, dict):
+                    output = data.get("outputTokens")
+                    if isinstance(output, int) and not isinstance(output, bool):
+                        outputs.append(output)
+                    requests = data.get("toolRequests")
+                    if isinstance(requests, list):
+                        for request in requests:
+                            if isinstance(request, dict):
+                                tool_calls.add(
+                                    str(request.get("toolCallId") or sha(request))
+                                )
+            elif vendor == "claude":
+                if item_type == "assistant":
+                    turns += 1
+                if item_type == "tool_use":
+                    tool_calls.add(str(item.get("id") or sha(item)))
+            else:
+                if item_type == "turn.completed":
+                    turns += 1
+                if item_type == "command_execution":
+                    tool_calls.add(str(item.get("id") or sha(item)))
+                if (
+                    item_type == "response_item"
+                    and isinstance(payload, dict)
+                    and payload.get("type") in {"function_call", "custom_tool_call"}
+                ):
+                    tool_calls.add(str(payload.get("call_id") or sha(item)))
+            for key in ("usage", "token_usage"):
+                usage = item.get(key)
+                if not isinstance(usage, dict):
+                    continue
+                input_tokens = usage.get("input_tokens", usage.get("inputTokens"))
+                cache_creation = usage.get("cache_creation_input_tokens", 0)
+                cache_read = usage.get("cache_read_input_tokens", 0)
+                if (
+                    isinstance(input_tokens, int)
+                    and not isinstance(input_tokens, bool)
+                    and isinstance(cache_creation, int)
+                    and not isinstance(cache_creation, bool)
+                    and isinstance(cache_read, int)
+                    and not isinstance(cache_read, bool)
+                ):
+                    inputs.append(input_tokens + cache_creation + cache_read)
+                output_tokens = usage.get("output_tokens", usage.get("outputTokens"))
+                if isinstance(output_tokens, int) and not isinstance(output_tokens, bool):
+                    outputs.append(output_tokens)
+                total_tokens = usage.get("total_tokens", usage.get("totalTokens"))
+                if isinstance(total_tokens, int) and not isinstance(total_tokens, bool):
+                    totals.append(total_tokens)
+    input_tokens = max(inputs) if inputs else None
+    output_tokens = sum(outputs) if vendor == "copilot" and outputs else (
+        max(outputs) if outputs else None
+    )
+    total_tokens = max(totals) if totals else None
+    if input_tokens is None and total_tokens is not None and output_tokens is not None:
+        input_tokens = total_tokens - output_tokens
+    if output_tokens is None and total_tokens is not None and input_tokens is not None:
+        output_tokens = total_tokens - input_tokens
+    if input_tokens is None or output_tokens is None or input_tokens < 0 or output_tokens < 0:
+        return None
+    if total_tokens is None:
+        total_tokens = input_tokens + output_tokens
+    if total_tokens != input_tokens + output_tokens:
+        return None
+    return {
+        "turns": turns or 1,
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+        "tool_calls": len(tool_calls),
+    }
+
+
 def native_skill_evidence(
     vendor: str,
     values: list[dict[str, Any]],
-    skill_name: str | None,
-    skill_file: Path | None,
+    skill_files: dict[str, Path],
     plugin_root: Path,
 ) -> list[dict[str, Any]]:
     evidence: list[dict[str, Any]] = []
     seen: set[str] = set()
-    claude_projection: tuple[str, str] | None = None
+    claude_projections: dict[str, tuple[str, str]] = {}
     copilot_projections: dict[str, tuple[str, str]] = {}
     copilot_successful_skill_calls: dict[str, str] = {}
-    if vendor == "copilot" and skill_name is not None and skill_file is not None:
+    resolved_skills = {
+        name: skill_file.resolve()
+        for name, skill_file in skill_files.items()
+    }
+
+    def codex_completed_read(item: dict[str, Any], skill_file: Path) -> bool:
+        command = item["command"]
+        output = item["aggregated_output"]
+        if str(skill_file) not in command:
+            return False
+        skill_text = skill_file.read_text(encoding="utf-8")
+        if skill_text in output:
+            return True
+        if "rg" not in command:
+            return False
+        numbered_lines: list[str] = []
+        for line in output.splitlines():
+            match = re.fullmatch(r"\d+:(.*)", line)
+            if match is None:
+                return False
+            numbered_lines.append(match.group(1))
+        return numbered_lines == skill_text.splitlines()
+
+    def append_evidence(
+        item: dict[str, Any],
+        name: str,
+        loaded_path: Any,
+        input_value: Any,
+        projection_digest: str | None,
+    ) -> None:
+        resolved_path: Path | None = None
+        if isinstance(loaded_path, str) and loaded_path:
+            candidate_path = Path(loaded_path)
+            if candidate_path.is_absolute():
+                resolved_path = candidate_path.resolve()
+            else:
+                resolved_path = (plugin_root / candidate_path).resolve()
+        normalized_name = name.lstrip("/")
+        if normalized_name not in resolved_skills and ":" in normalized_name:
+            normalized_name = normalized_name.rsplit(":", 1)[1]
+        projected_name = (
+            normalized_name if normalized_name in resolved_skills else None
+        )
+        exact_path = (
+            projected_name is not None
+            and resolved_path == resolved_skills[projected_name]
+        )
+        event_digest = sha(
+            {
+                "invocation": item,
+                "projection_event_sha256": projection_digest,
+                "projected_name": projected_name,
+                "resolved_path": str(resolved_path)
+                if resolved_path is not None
+                else None,
+            }
+        )
+        if event_digest in seen:
+            return
+        seen.add(event_digest)
+        evidence.append(
+            {
+                "name": normalized_name,
+                "projected_name": projected_name,
+                "resolved_path": str(resolved_path)
+                if resolved_path is not None
+                else None,
+                "exact_projected_path": exact_path,
+                "native_event_sha256": event_digest,
+                "projection_event_sha256": projection_digest,
+                "input": input_value,
+            }
+        )
+    if vendor == "copilot" and resolved_skills:
         projections: dict[str, set[tuple[str, str]]] = {}
         for value in values:
             for item in recursive_values(value):
@@ -2637,7 +3051,7 @@ def native_skill_evidence(
                         candidate_path = Path(path)
                         if (
                             candidate_path.is_absolute()
-                            and candidate_path.resolve() == skill_file.resolve()
+                            and candidate_path.resolve() in resolved_skills.values()
                         ):
                             projections.setdefault(name, set()).add((path, sha(item)))
                 elif item.get("type") == "tool.execution_complete":
@@ -2662,8 +3076,8 @@ def native_skill_evidence(
             for name, projected in projections.items()
             if len(projected) == 1
         }
-    if vendor == "claude" and skill_name is not None and skill_file is not None:
-        projections: set[tuple[str, str]] = set()
+    if vendor == "claude" and resolved_skills:
+        projections: dict[str, set[tuple[str, str]]] = {}
         for value in values:
             for item in recursive_values(value):
                 plugins = item.get("plugins")
@@ -2681,11 +3095,18 @@ def native_skill_evidence(
                     if (
                         candidate_path.is_absolute()
                         and candidate_path.resolve() == plugin_root.resolve()
-                        and f"{name}:{skill_name}" in skills
                     ):
-                        projections.add((f"{name}:{skill_name}", sha(item)))
-        if len(projections) == 1:
-            claude_projection = next(iter(projections))
+                        for skill_name in resolved_skills:
+                            qualified = f"{name}:{skill_name}"
+                            if qualified in skills:
+                                projections.setdefault(qualified, set()).add(
+                                    (skill_name, sha(item))
+                                )
+        claude_projections = {
+            qualified: next(iter(projected))
+            for qualified, projected in projections.items()
+            if len(projected) == 1
+        }
     for value in values:
         for item in recursive_values(value):
             name: Any = None
@@ -2733,40 +3154,48 @@ def native_skill_evidence(
                             input_value.get("path"),
                         )
                         if (
-                            claude_projection is not None
-                            and name == claude_projection[0]
+                            isinstance(name, str)
+                            and name in claude_projections
                             and loaded_path is None
-                            and skill_name is not None
-                            and skill_file is not None
                         ):
-                            name = skill_name
-                            loaded_path = str(skill_file)
-                            projection_digest = claude_projection[1]
+                            name, projection_digest = claude_projections[name]
+                            loaded_path = str(resolved_skills[name])
             elif vendor == "codex":
                 payload = item.get("payload", item)
-                completed_read = False
+                completed_read: str | None = None
                 if (
                     item.get("type") == "command_execution"
-                    and skill_file is not None
                     and item.get("status") == "completed"
                     and item.get("exit_code") == 0
                     and isinstance(item.get("command"), str)
+                    and isinstance(item.get("aggregated_output"), str)
                 ):
-                    try:
-                        outer = shlex.split(item["command"])
-                        inner = (
-                            shlex.split(outer[2])
-                            if len(outer) == 3
-                            and outer[0] in {"/bin/sh", "/bin/bash", "/bin/zsh"}
-                            and outer[1] == "-lc"
-                            else []
-                        )
-                    except ValueError:
-                        inner = []
-                    completed_read = inner == ["/bin/cat", str(skill_file.resolve())]
+                    matching_reads = [
+                        projected_name
+                        for projected_name, skill_file in resolved_skills.items()
+                        if codex_completed_read(item, skill_file)
+                    ]
+                    if matching_reads:
+                        for matching_read in matching_reads:
+                            skill_file = resolved_skills[matching_read]
+                            append_evidence(
+                                item,
+                                matching_read,
+                                str(skill_file),
+                                {
+                                    "command": item["command"],
+                                    "path": str(skill_file),
+                                },
+                                projection_digest,
+                            )
+                        continue
                 if completed_read:
-                    name = skill_name
-                    input_value = {"command": "/bin/cat", "path": str(skill_file)}
+                    name = completed_read
+                    skill_file = resolved_skills[completed_read]
+                    input_value = {
+                        "command": item["command"],
+                        "path": str(skill_file),
+                    }
                     loaded_path = str(skill_file)
                 native_call = item.get("type") == "response_item" and isinstance(
                     payload, dict
@@ -2791,40 +3220,12 @@ def native_skill_evidence(
                             input_value.get("path"),
                         )
             if isinstance(name, str):
-                event_digest = sha(
-                    {
-                        "invocation": item,
-                        "projection_event_sha256": projection_digest,
-                    }
-                )
-                if event_digest in seen:
-                    continue
-                seen.add(event_digest)
-                resolved_path: Path | None = None
-                if isinstance(loaded_path, str) and loaded_path:
-                    candidate_path = Path(loaded_path)
-                    if candidate_path.is_absolute():
-                        resolved_path = candidate_path.resolve()
-                    else:
-                        resolved_path = (plugin_root / candidate_path).resolve()
-                exact_path = (
-                    skill_file is not None
-                    and resolved_path is not None
-                    and resolved_path == skill_file.resolve()
-                )
-                evidence.append(
-                    {
-                        "name": name.lstrip("/"),
-                        "matches_candidate": skill_name is not None
-                        and name.lstrip("/") == skill_name,
-                        "resolved_path": str(resolved_path)
-                        if resolved_path is not None
-                        else None,
-                        "exact_candidate_path": exact_path,
-                        "native_event_sha256": event_digest,
-                        "projection_event_sha256": projection_digest,
-                        "input": input_value,
-                    }
+                append_evidence(
+                    item,
+                    name,
+                    loaded_path,
+                    input_value,
+                    projection_digest,
                 )
     return evidence
 
@@ -2885,7 +3286,7 @@ def evaluation_run(args: argparse.Namespace) -> None:
     plugin = prepared["adapter_prepared"].get("projection")
     if not isinstance(plugin, dict):
         raise AdapterError("prepared-invalid", "projection")
-    verify_evaluation_plugin(trial, plugin)
+    verify_evaluation_plugin(args, trial, plugin)
     expected_command = evaluation_command(args, trial, plugin)
     profile = Path(environment["HOME"]) / "evaluation.sb"
     if profile.is_symlink() or not profile.is_file():
@@ -2935,20 +3336,43 @@ def evaluation_run(args: argparse.Namespace) -> None:
             "exact-model-unproved",
             f"expected {args.model}, observed {observed_model or 'none'}",
         )
-    token_usage = native_token_usage(args.vendor, values)
+    detailed_usage = native_detailed_usage(args.vendor, values)
+    token_usage = (
+        detailed_usage["total_tokens"]
+        if args.shadow_contract and detailed_usage is not None
+        else native_token_usage(args.vendor, values)
+    )
     if token_usage is None:
-        raise AdapterError("token-limit-unproved", args.vendor)
+        raise AdapterError(
+            "usage-unproved" if args.shadow_contract else "token-limit-unproved",
+            args.vendor,
+        )
     if token_usage > args.token_budget:
         raise AdapterError(
             "token-limit-exceeded",
             f"{token_usage} > {args.token_budget}",
         )
-    candidate_root, skill_name = verify_candidate_projection(trial)
+    projection_skills = projected_skills(plugin)
+    skill_descriptors = {
+        skill["name"]: skill
+        for skill in projection_skills
+    }
+    if args.vendor == "codex" and args.shadow_contract:
+        native_skill_root = Path(plugin["native_skill_root"])
+        skill_files = {
+            name: native_skill_root / name / "SKILL.md"
+            for name in skill_descriptors
+        }
+    else:
+        skill_files = {
+            name: Path(skill.get("source_root") or trial["candidate_root"]).resolve()
+            / "SKILL.md"
+            for name, skill in skill_descriptors.items()
+        }
     loads = native_skill_evidence(
         args.vendor,
         values,
-        skill_name,
-        candidate_root / "SKILL.md" if candidate_root else None,
+        skill_files,
         Path(plugin["root"]),
     )
     records: list[dict[str, Any]] = [
@@ -2961,33 +3385,45 @@ def evaluation_run(args: argparse.Namespace) -> None:
         }
     ]
     records.extend({"type": "dreaming.native", "event": value} for value in values)
-    records.append(
-        {
-            "type": "dreaming.usage",
-            "total_tokens": token_usage,
-            "token_budget": args.token_budget,
-        }
-    )
+    usage_record = {
+        "type": "dreaming.usage",
+        "total_tokens": token_usage,
+        "token_budget": args.token_budget,
+    }
+    if args.shadow_contract:
+        if detailed_usage is None:
+            raise AdapterError("usage-unproved", args.vendor)
+        usage_record.update(detailed_usage)
+    records.append(usage_record)
     for load in loads:
         row = {
             "type": "dreaming.skill_load_attestation",
+            "shadow_contract": args.shadow_contract,
             "native": load,
             "non_builtin": True,
             "candidate_id": None,
+            "catalog_skill_id": None,
             "skill_md_sha256": None,
             "path": None,
         }
-        if load["matches_candidate"] and load["exact_candidate_path"]:
-            if candidate_root is None:
-                raise AdapterError("control-contaminated", "candidate skill loaded")
-            skill_file = candidate_root / "SKILL.md"
+        projected_name = load.get("projected_name")
+        descriptor = (
+            skill_descriptors.get(projected_name)
+            if load.get("exact_projected_path") is True
+            and isinstance(projected_name, str)
+            else None
+        )
+        if descriptor is not None:
             row.update(
                 {
-                    "candidate_id": trial["candidate_id"],
-                    "skill_md_sha256": sha_bytes(skill_file.read_bytes()),
-                    "path": "candidate/SKILL.md",
+                    "candidate_id": descriptor["candidate_id"],
+                    "catalog_skill_id": descriptor["catalog_skill_id"],
+                    "skill_md_sha256": descriptor["skill_md_sha256"],
+                    "path": descriptor["path"],
                 }
             )
+            if trial["treatment"] == "control" and descriptor["candidate_id"] is not None:
+                raise AdapterError("control-contaminated", "candidate skill loaded")
         records.append(row)
     records.append({"type": "dreaming.trial_end", "completed": True})
     output = Path(args.output)
@@ -3143,27 +3579,42 @@ def evaluation_normalize(args: argparse.Namespace) -> None:
                     }
                 )
         elif record_type == "dreaming.skill_load_attestation":
+            skill_data = {
+                "candidate_id": record.get("candidate_id"),
+                "skill_md_sha256": record.get("skill_md_sha256"),
+                "path": record.get("path"),
+                "non_builtin": record.get("non_builtin", True),
+            }
+            if record.get("shadow_contract") is True:
+                skill_data["catalog_skill_id"] = record.get("catalog_skill_id")
+            else:
+                skill_data["native_event_sha256"] = record.get("native", {}).get(
+                    "native_event_sha256"
+                )
             append(
                 "skill_load",
                 "",
-                {
-                    "candidate_id": record.get("candidate_id"),
-                    "skill_md_sha256": record.get("skill_md_sha256"),
-                    "path": record.get("path"),
-                    "non_builtin": record.get("non_builtin", True),
-                    "native_event_sha256": record.get("native", {}).get(
-                        "native_event_sha256"
-                    ),
-                },
+                skill_data,
             )
         elif record_type == "dreaming.usage":
+            usage_data = (
+                {
+                    "turns": record.get("turns"),
+                    "input_tokens": record.get("input_tokens"),
+                    "output_tokens": record.get("output_tokens"),
+                    "total_tokens": record.get("total_tokens"),
+                    "tool_calls": record.get("tool_calls"),
+                }
+                if record.get("turns") is not None
+                else {
+                    "total_tokens": record.get("total_tokens"),
+                    "token_budget": record.get("token_budget"),
+                }
+            )
             append(
                 "usage",
                 "",
-                {
-                    "total_tokens": record.get("total_tokens"),
-                    "token_budget": record.get("token_budget"),
-                },
+                usage_data,
             )
         elif record_type == "dreaming.trial_end" and record.get("completed") is True:
             append("trial_end")
@@ -3756,7 +4207,10 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--max-field-bytes", type=int, default=64_000)
     result.add_argument("--timeout", type=int, default=600)
     result.add_argument("--token-budget", type=int, default=100_000)
+    result.add_argument("--turn-budget", type=int, default=100_000)
+    result.add_argument("--tool-budget", type=int, default=100_000)
     result.add_argument("--output-bytes", type=int, default=1_000_000)
+    result.add_argument("--shadow-contract", action="store_true")
     result.add_argument("--model", default="default")
     result.add_argument("--binary")
     result.add_argument("--credential-root")

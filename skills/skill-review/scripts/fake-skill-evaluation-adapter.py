@@ -102,6 +102,90 @@ def main() -> int:
             child = subprocess.Popen([sys.executable, "-c", f"from pathlib import Path; Path({str(marker)!r}).write_text('started'); import time; time.sleep(30)"])
             (Path(trial["workspace"]).parent / "child.pid").write_text(str(child.pid))
             time.sleep(30)
+        if trial.get("schema_version") == 2:
+            case = trial["case"]
+            fixture = args.fixture or case["fixture"]
+            events = [event("user_message", case["prompt"])]
+            expected_candidate = (
+                trial["treatment"] == "candidate"
+                and case["routing"]["candidate_load"]
+            )
+            if fixture in {"positive-missing-load", "missing-load"}:
+                expected_candidate = False
+            if fixture in {"close-negative-false-load", "unrelated-false-load", "conflict-wrong-selection"}:
+                expected_candidate = True
+            def candidate_load(candidate_id: str | None = None) -> None:
+                events.append(event(
+                    "skill_load",
+                    "",
+                    candidate_id=candidate_id or trial["candidate_id"],
+                    catalog_skill_id=None,
+                    skill_md_sha256=next(
+                        item["sha256"] for item in prepared["adapter_prepared"].get("candidate_inventory", [])
+                    ) if prepared["adapter_prepared"].get("candidate_inventory") else trial.get("skill_md_sha256"),
+                    path="candidate/SKILL.md",
+                    non_builtin=True,
+                ))
+            if expected_candidate:
+                candidate_load("sha256:" + "0" * 64 if fixture == "wrong-load" else None)
+                if fixture == "ambiguous-load":
+                    candidate_load()
+            if trial["treatment"] == "candidate" and not expected_candidate:
+                for name in case["routing"]["catalog_loads"]:
+                    item = next(item for item in trial["catalog_skills"] if item["name"] == name)
+                    events.append(event(
+                        "skill_load",
+                        "",
+                        candidate_id=None,
+                        catalog_skill_id=item["catalog_skill_id"],
+                        skill_md_sha256=item["skill_md_sha256"],
+                        path=item["path"],
+                        non_builtin=True,
+                    ))
+            if (
+                fixture == "control-catalog-load"
+                and trial["treatment"] == "control"
+            ):
+                item = trial["catalog_skills"][0]
+                events.append(event(
+                    "skill_load",
+                    "",
+                    candidate_id=None,
+                    catalog_skill_id=item["catalog_skill_id"],
+                    skill_md_sha256=item["skill_md_sha256"],
+                    path=item["path"],
+                    non_builtin=True,
+                ))
+            usage: object = {
+                "turns": 2,
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+                "tool_calls": 1,
+            }
+            if fixture == "usage-missing":
+                usage = None
+            elif fixture == "usage-invalid":
+                usage = {"turns": -1, "input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "tool_calls": 1}
+            elif fixture == "usage-duplicate":
+                events.append(event("usage", "", **usage))
+            elif fixture == "over-token":
+                usage = {**usage, "total_tokens": 101, "output_tokens": 91}
+            elif fixture == "over-turn":
+                usage = {**usage, "turns": 101}
+            elif fixture == "over-tool":
+                usage = {**usage, "tool_calls": 101}
+            if usage is not None:
+                events.append(event("usage", "", **usage))
+            if fixture == "quarantine-request":
+                events.append(event("authority_request", "", action="quarantine"))
+            events.extend([event("final_answer", "SUCCESS"), event("trial_end", "")])
+            Path(args.output).write_text("".join(json.dumps(item) + "\n" for item in events))
+            effective = dict(execution)
+            if fixture == "effective-identity-mismatch":
+                effective["model"] = "wrong-model"
+            emit({"prepared_digest": prepared["prepared_digest"], "effective_execution": effective, "completed": True})
+            return 0
         events = [event("user_message", trial["case"]["prompt"])]
         candidate = trial["treatment"] == "candidate"
         load_skill = candidate and fixture not in {"missing-load", "activation-negative"}

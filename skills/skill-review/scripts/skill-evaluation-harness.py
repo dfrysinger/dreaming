@@ -24,6 +24,8 @@ from typing import Any
 
 CONTRACT_VERSION = 1
 HARNESS_VERSION = "skill-evaluation-harness-1"
+SHADOW_CONTRACT_VERSION = 2
+SHADOW_HARNESS_VERSION = "skill-evaluation-harness-shadow-2"
 MAX_FILE_BYTES = 1_000_000
 MAX_INPUT_FILES = 256
 MAX_RESULT_FILES = 20_000
@@ -41,6 +43,7 @@ BEHAVIOR_CLASSES = {"intended", "related"}
 EVENT_KINDS = {
     "user_message", "assistant_message", "skill_load", "tool_call",
     "tool_result", "artifact_write", "final_answer", "usage", "trial_end",
+    "authority_request",
 }
 SHA_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 RUN_ID_FIELDS = (
@@ -1439,6 +1442,968 @@ def verify_comparison(
     return comparison
 
 
+def shadow_identity(value: Any, field: str) -> str | None:
+    if value is None:
+        return None
+    return identity(value, field)
+
+
+def shadow_catalog_skills(catalog: Any) -> list[dict[str, Any]]:
+    if not isinstance(catalog, list):
+        raise HarnessError("shadow catalog_skills must be a list")
+    names: set[str] = set()
+    values: list[dict[str, Any]] = []
+    for index, item in enumerate(catalog):
+        require_keys(
+            item,
+            {"name", "catalog_skill_id", "skill_md_sha256", "path"},
+            f"shadow catalog_skills[{index}]",
+        )
+        name = text(item["name"], f"shadow catalog_skills[{index}].name")
+        if name in names:
+            raise HarnessError("shadow catalog has duplicate skill name")
+        names.add(name)
+        values.append(
+            {
+                "name": name,
+                "catalog_skill_id": identity(
+                    item["catalog_skill_id"], f"shadow catalog_skills[{index}].catalog_skill_id"
+                ),
+                "skill_md_sha256": identity(
+                    item["skill_md_sha256"], f"shadow catalog_skills[{index}].skill_md_sha256"
+                ),
+                "path": relative_component(item["path"], f"shadow catalog_skills[{index}].path"),
+            }
+        )
+    return values
+
+
+def shadow_validate_suite(suite: dict[str, Any], catalog: list[dict[str, Any]]) -> None:
+    require_keys(
+        suite,
+        {
+            "schema_version",
+            "kind",
+            "routing_mode",
+            "environment",
+            "environment_id",
+            "grader_set_id",
+            "graders",
+            "cases",
+        },
+        "shadow suite",
+    )
+    if (
+        suite["schema_version"] != SHADOW_CONTRACT_VERSION
+        or suite["kind"] != "shadow_candidate_evaluation_suite"
+        or suite["routing_mode"] not in {"catalog_plus_candidate", "candidate_only"}
+        or not isinstance(suite["environment"], dict)
+        or not suite["environment"]
+    ):
+        raise HarnessError("unsupported shadow suite")
+    if suite["routing_mode"] == "catalog_plus_candidate" and not catalog:
+        raise HarnessError("catalog routing requires a sealed approved catalog")
+    if sha(suite["environment"]) != suite.get("environment_id"):
+        raise HarnessError("shadow environment identity mismatch")
+    if not isinstance(suite["graders"], list) or not suite["graders"]:
+        raise HarnessError("shadow suite graders required")
+    if sha(suite["graders"]) != suite["grader_set_id"]:
+        raise HarnessError("shadow grader set identity mismatch")
+    grader_map: dict[str, dict[str, Any]] = {}
+    for item in suite["graders"]:
+        require_keys(item, {"id", "type", "safety", "config"}, "shadow grader")
+        grader_id = text(item["id"], "shadow grader id")
+        if grader_id in grader_map or not isinstance(item["safety"], bool):
+            raise HarnessError("invalid shadow grader")
+        grader_map[grader_id] = item
+    catalog_by_name = {item["name"]: item for item in catalog}
+    classes: set[str] = set()
+    identifiers: set[str] = set()
+    tasks: set[str] = set()
+    for index, case in enumerate(suite["cases"] if isinstance(suite["cases"], list) else []):
+        require_keys(
+            case,
+            {
+                "id",
+                "class",
+                "task_id",
+                "prompt",
+                "critical",
+                "routing",
+                "artifacts",
+                "graders",
+                "fixture",
+            },
+            f"shadow cases[{index}]",
+        )
+        case_id = text(case["id"], f"shadow cases[{index}].id")
+        task = text(case["task_id"], f"shadow cases[{index}].task_id")
+        if case_id in identifiers or task in tasks:
+            raise HarnessError("shadow case and task identifiers must be unique")
+        identifiers.add(case_id)
+        tasks.add(task)
+        case_class = text(case["class"], f"shadow cases[{index}].class")
+        if case_class not in {
+            "routing_positive",
+            "routing_close_negative",
+            "routing_unrelated",
+            "routing_conflict",
+            "task_value",
+        }:
+            raise HarnessError("unsupported shadow case class")
+        classes.add(case_class)
+        if not isinstance(case["critical"], bool):
+            raise HarnessError("shadow case critical must be boolean")
+        require_keys(case["routing"], {"candidate_load", "catalog_loads"}, "shadow case routing")
+        if not isinstance(case["routing"]["candidate_load"], bool):
+            raise HarnessError("shadow candidate_load must be boolean")
+        expected_catalog = case["routing"]["catalog_loads"]
+        if (
+            not isinstance(expected_catalog, list)
+            or len(set(expected_catalog)) != len(expected_catalog)
+            or not all(isinstance(name, str) and name in catalog_by_name for name in expected_catalog)
+        ):
+            raise HarnessError("shadow case catalog loads must name sealed catalog skills")
+        if suite["routing_mode"] == "candidate_only" and expected_catalog:
+            raise HarnessError("candidate-only routing cannot declare catalog loads")
+        if case_class == "routing_positive" and not case["routing"]["candidate_load"]:
+            raise HarnessError("routing positive must require the candidate")
+        if case_class in {"routing_close_negative", "routing_unrelated", "routing_conflict"} and case["routing"]["candidate_load"]:
+            raise HarnessError("routing negative or conflict cannot require the candidate")
+        if (
+            case_class == "routing_conflict"
+            and suite["routing_mode"] == "catalog_plus_candidate"
+            and len(expected_catalog) != 1
+        ):
+            raise HarnessError("routing conflict must name exactly one selected catalog skill")
+        if case_class == "task_value" and not case["routing"]["candidate_load"]:
+            raise HarnessError("task-value candidate arm must require the candidate")
+        if (
+            not isinstance(case["artifacts"], list)
+            or len(set(case["artifacts"])) != len(case["artifacts"])
+            or not all(isinstance(path, str) for path in case["artifacts"])
+            or not isinstance(case["graders"], list)
+            or not case["graders"]
+            or not set(case["graders"]) <= set(grader_map)
+            or not any(grader_map[item]["safety"] for item in case["graders"])
+        ):
+            raise HarnessError("shadow case artifacts or graders are invalid")
+        text(case["prompt"], "shadow case prompt")
+        text(case["fixture"], "shadow case fixture")
+    required = {
+        "routing_positive",
+        "routing_close_negative",
+        "routing_unrelated",
+        "routing_conflict",
+        "task_value",
+    }
+    if classes != required:
+        raise HarnessError("shadow suite must contain one or more of every routing and task-value class")
+
+
+def shadow_validate_executors(executors: Any) -> list[dict[str, Any]]:
+    if not isinstance(executors, list) or not executors:
+        raise HarnessError("shadow executors must be a non-empty list")
+    names: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    required = {
+        *EXECUTOR_IDENTITY_KEYS,
+        "name",
+        "real_backend",
+        "real_backend_source",
+    }
+    for index, executor in enumerate(executors):
+        require_keys(executor, required, f"shadow executors[{index}]")
+        name = text(executor["name"], f"shadow executors[{index}].name")
+        if name in names:
+            raise HarnessError("duplicate shadow executor")
+        names.add(name)
+        if not isinstance(executor["real_backend"], bool):
+            raise HarnessError("shadow real_backend must be boolean")
+        text(executor["real_backend_source"], "shadow real_backend_source")
+        base = {
+            key: executor[key]
+            for key in EXECUTOR_IDENTITY_KEYS
+            if key != "limits"
+        }
+        base["limits"] = {
+            key: executor["limits"][key]
+            for key in ("timeout_seconds", "token_budget", "output_bytes")
+            if key in executor["limits"]
+        }
+        validate_executors([{**base, "name": name, "requirement": "required"}])
+        require_keys(
+            executor["limits"],
+            {"timeout_seconds", "token_budget", "turn_budget", "tool_budget", "output_bytes"},
+            "shadow executor limits",
+        )
+        for field, maximum in (
+            ("timeout_seconds", 600),
+            ("token_budget", 1_000_000),
+            ("turn_budget", 100_000),
+            ("tool_budget", 100_000),
+            ("output_bytes", MAX_OUTPUT_BYTES),
+        ):
+            integer(executor["limits"][field], f"shadow executor {field}", 1, maximum)
+        normalized.append(executor)
+    return normalized
+
+
+def shadow_trial_id(manifest: dict[str, Any], executor: dict[str, Any], case: dict[str, Any],
+                    treatment: str) -> str:
+    return sha(
+        {
+            "run_id": manifest["run_id"],
+            "executor": executor["name"],
+            "case_id": case["id"],
+            "treatment": treatment,
+        }
+    )
+
+
+def shadow_plan(manifest: dict[str, Any], suite: dict[str, Any]) -> list[str]:
+    identifiers: list[str] = []
+    for executor in manifest["executors"]:
+        for case in suite["cases"]:
+            treatments = ("control", "candidate") if case["class"] == "task_value" else ("candidate",)
+            identifiers.extend(shadow_trial_id(manifest, executor, case, treatment) for treatment in treatments)
+    if len(identifiers) != len(set(identifiers)):
+        raise HarnessError("shadow trial matrix is ambiguous")
+    return identifiers
+
+
+def shadow_loads(events: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    result: list[dict[str, Any]] = []
+    for event in events:
+        if event["kind"] == "authority_request":
+            raise HarnessError("evaluation evidence cannot request lifecycle authority")
+        if event["kind"] != "skill_load":
+            continue
+        data = event["data"]
+        require_keys(data, {"candidate_id", "catalog_skill_id", "skill_md_sha256", "path", "non_builtin"},
+                     "shadow skill load")
+        if not isinstance(data["non_builtin"], bool):
+            raise HarnessError("shadow skill load non_builtin must be boolean")
+        result.append(dict(data))
+    return result
+
+
+def shadow_usage(events: list[dict[str, Any]], executor: dict[str, Any]) -> dict[str, int]:
+    values = [event["data"] for event in events if event["kind"] == "usage"]
+    if len(values) != 1:
+        raise HarnessError("normalized trace must contain exactly one usage event")
+    usage = values[0]
+    require_keys(
+        usage,
+        {"turns", "input_tokens", "output_tokens", "total_tokens", "tool_calls"},
+        "normalized usage",
+    )
+    result = {key: integer(usage[key], f"normalized usage.{key}", 0, 1_000_000) for key in usage}
+    if result["total_tokens"] != result["input_tokens"] + result["output_tokens"]:
+        raise HarnessError("normalized usage total_tokens must equal input plus output tokens")
+    limits = executor["limits"]
+    if (
+        result["total_tokens"] > limits["token_budget"]
+        or result["turns"] > limits["turn_budget"]
+        or result["tool_calls"] > limits["tool_budget"]
+    ):
+        raise HarnessError("normalized usage exceeds sealed executor budget")
+    return result
+
+
+def shadow_route_proof(events: list[dict[str, Any]], case: dict[str, Any], treatment: str,
+                       manifest: dict[str, Any], candidate_skill_sha: str) -> tuple[bool, str | None, list[dict[str, Any]]]:
+    loads = shadow_loads(events)
+    if treatment == "control":
+        candidate_expected = False
+    else:
+        candidate_expected = case["routing"]["candidate_load"]
+    expected_catalog = [] if manifest["routing_mode"] == "candidate_only" else case["routing"]["catalog_loads"]
+    catalog = {item["name"]: item for item in manifest["catalog_skills"]}
+    candidate = [
+        load for load in loads
+        if load["candidate_id"] == manifest["candidate_id"]
+        and load["catalog_skill_id"] is None
+        and load["skill_md_sha256"] == candidate_skill_sha
+        and load["path"] == "candidate/SKILL.md"
+        and load["non_builtin"] is True
+    ]
+    other_candidate = [
+        load for load in loads
+        if load["candidate_id"] is not None
+        and load not in candidate
+        and load["non_builtin"] is True
+    ]
+    actual_catalog: list[str] = []
+    for load in loads:
+        if not load["non_builtin"] or load in candidate:
+            continue
+        matched = next(
+            (
+                name for name, item in catalog.items()
+                if load["candidate_id"] is None
+                and load["catalog_skill_id"] == item["catalog_skill_id"]
+                and load["skill_md_sha256"] == item["skill_md_sha256"]
+                and load["path"] == item["path"]
+            ),
+            None,
+        )
+        if matched is None:
+            return False, "unsealed, wrong, or ambiguous non-built-in skill load", loads
+        actual_catalog.append(matched)
+    if other_candidate:
+        return False, "wrong candidate identity was loaded", loads
+    if candidate_expected != (len(candidate) == 1):
+        return False, "candidate exact skill-load proof is missing, unexpected, or ambiguous", loads
+    if len(candidate) > 1 or (
+        case["class"] != "task_value"
+        and sorted(actual_catalog) != sorted(expected_catalog)
+    ):
+        return False, "sealed catalog selection differs from the declared routing case", loads
+    return True, None, loads
+
+
+def shadow_attest(response: dict[str, Any], expected: dict[str, Any]) -> dict[str, Any]:
+    keys = set(EXECUTOR_IDENTITY_KEYS) | {"real_backend", "real_backend_source"}
+    if set(response) != keys:
+        raise HarnessError("shadow executor identity response has wrong keys")
+    for key in keys:
+        if response[key] != expected[key]:
+            raise HarnessError(f"shadow execution identity mismatch: {key}")
+    return response
+
+
+def shadow_run_trial(run: Path, result: Path, scratch: Scratch, manifest: dict[str, Any],
+                     suite: dict[str, Any], executor: dict[str, Any], route: dict[str, Any],
+                     case: dict[str, Any], treatment: str) -> dict[str, Any]:
+    trial = shadow_trial_id(manifest, executor, case, treatment)
+    root = result / "trials" / trial.removeprefix("sha256:")
+    home, workspace, artifacts = root / "home", root / "workspace", root / "artifacts"
+    raw, trace = root / "raw.jsonl", root / "trace.json"
+    for directory in (home, workspace, artifacts):
+        directory.mkdir(parents=True, exist_ok=True)
+    candidate_skill_sha = next(
+        item["sha256"] for item in manifest["candidate_inventory"] if item["path"] == "SKILL.md"
+    )
+    spec = {
+        "schema_version": SHADOW_CONTRACT_VERSION,
+        "trial_id": trial,
+        "case": case,
+        "treatment": treatment,
+        "candidate_id": manifest["candidate_id"],
+        "catalog_id": manifest["catalog_id"],
+        "suite_id": manifest["suite_id"],
+        "environment_id": manifest["environment_id"],
+        "executor": executor,
+        "candidate_inventory": manifest["candidate_inventory"],
+        "skill_md_sha256": candidate_skill_sha,
+        "catalog_skills": manifest["catalog_skills"],
+        "candidate_root": str(run / "candidate"),
+        "catalog_root": str(run / "catalog") if manifest["catalog_id"] else None,
+        "workspace": str(workspace),
+        "raw": str(raw),
+        "trace": str(trace),
+        "artifacts": str(artifacts),
+    }
+    write_json(root / "trial.json", spec)
+    record: dict[str, Any] = {
+        "schema_version": SHADOW_CONTRACT_VERSION,
+        "trial_id": trial,
+        "candidate_id": manifest["candidate_id"],
+        "catalog_id": manifest["catalog_id"],
+        "suite_id": manifest["suite_id"],
+        "environment_id": manifest["environment_id"],
+        "harness_executable_sha256": manifest["harness_executable_sha256"],
+        "executor_identity": {
+            key: executor[key] for key in EXECUTOR_IDENTITY_KEYS | {"real_backend", "real_backend_source"}
+        },
+        "executor": executor["name"],
+        "case_id": case["id"],
+        "case_class": case["class"],
+        "treatment": treatment,
+        "status": "inconclusive",
+        "success": False,
+        "candidate_loaded": False,
+        "skill_loads": [],
+        "usage": None,
+        "errors": [],
+    }
+    calls = scratch.fresh("shadow-trials")
+    try:
+        timeout, output_bytes = executor["limits"]["timeout_seconds"], executor["limits"]["output_bytes"]
+        prepared, _ = call(
+            [*route["argv"], "prepare", "--trial", str(root / "trial.json")],
+            harness_environment(home),
+            timeout,
+            output_bytes,
+            owned_directory(calls / "prepare"),
+        )
+        require_keys(prepared, {"prepared", "execution"}, "shadow prepared response")
+        shadow_attest(prepared["execution"], executor)
+        prepared_record = {
+            "schema_version": SHADOW_CONTRACT_VERSION,
+            "trial_id": trial,
+            "adapter_prepared": prepared["prepared"],
+            "execution": prepared["execution"],
+        }
+        prepared_record["prepared_digest"] = sha(prepared_record)
+        write_json(root / "prepared.json", prepared_record)
+        run_response, _ = call(
+            [
+                *route["argv"],
+                "run",
+                "--trial",
+                str(root / "trial.json"),
+                "--prepared",
+                str(root / "prepared.json"),
+                "--output",
+                str(raw),
+            ],
+            harness_environment(home),
+            timeout,
+            output_bytes,
+            owned_directory(calls / "run"),
+        )
+        require_keys(run_response, {"prepared_digest", "effective_execution", "completed"}, "shadow run response")
+        if run_response["prepared_digest"] != prepared_record["prepared_digest"] or run_response["completed"] is not True:
+            raise HarnessError("shadow run did not consume the sealed prepared record")
+        shadow_attest(run_response["effective_execution"], executor)
+        if not raw.is_file() or raw.is_symlink() or raw.stat().st_size > output_bytes:
+            raise HarnessError("shadow adapter raw log is missing or exceeds its bound")
+        normalized, _ = call(
+            [*route["argv"], "normalize", "--raw", str(raw), "--trace", str(trace)],
+            harness_environment(home),
+            timeout,
+            output_bytes,
+            owned_directory(calls / "normalize"),
+        )
+        require_keys(normalized, {"raw_sha256", "trace_sha256"}, "shadow normalize response")
+        if normalized["raw_sha256"] != sha_bytes(raw.read_bytes()) or normalized["trace_sha256"] != sha_bytes(trace.read_bytes()):
+            raise HarnessError("shadow normalization digest mismatch")
+        events = trace_from(trace)
+        route_ok, route_error, loads = shadow_route_proof(
+            events, case, treatment, manifest, candidate_skill_sha
+        )
+        try:
+            usage = shadow_usage(events, executor)
+        except HarnessError as error:
+            if "exceeds sealed executor budget" in str(error):
+                record["status"] = "regression"
+            else:
+                raise
+            record["errors"].append(str(error))
+            usage = None
+        collected, _ = call(
+            [*route["argv"], "collect", "--trial", str(root / "trial.json"), "--artifacts", str(artifacts)],
+            harness_environment(home),
+            timeout,
+            output_bytes,
+            owned_directory(calls / "collect"),
+        )
+        require_keys(collected, {"completed_workspace", "declared_artifacts"}, "shadow collect response")
+        if collected["completed_workspace"] is not True:
+            raise HarnessError("shadow artifact collection did not complete")
+        inventory = regular_inventory(artifacts, None, MAX_INPUT_FILES)
+        declared = {item.get("path") for item in collected["declared_artifacts"] if isinstance(item, dict)}
+        if declared != set(case["artifacts"]) or {item["path"] for item in inventory} != declared:
+            raise HarnessError("shadow artifact collection differs from the sealed declaration")
+        grader_map = {item["id"]: item for item in suite["graders"]}
+        grades = [
+            grade(grader_map[grader], final_text(events), events, artifacts, None, None)
+            for grader in case["graders"]
+        ]
+        success = all(item["passed"] for item in grades)
+        record.update(
+            {
+                "success": success,
+                "candidate_loaded": any(
+                    load["candidate_id"] == manifest["candidate_id"] for load in loads
+                ),
+                "skill_loads": loads,
+                "usage": usage,
+                "raw_sha256": sha_bytes(raw.read_bytes()),
+                "trace_sha256": sha_bytes(trace.read_bytes()),
+                "grades": grades,
+                "artifact_inventory": inventory,
+            }
+        )
+        if record["status"] != "regression":
+            if not route_ok:
+                record["status"] = "regression"
+                record["errors"].append(route_error or "shadow route proof failed")
+            elif not success:
+                record["status"] = "regression"
+                record["errors"].append("deterministic task grader failed")
+            else:
+                record["status"] = "pass"
+    except HarnessError as error:
+        record["errors"].append(str(error))
+        record["status"] = "inconclusive"
+        record["infrastructure_error"] = True
+    finally:
+        scratch.discard(calls)
+        shutil.rmtree(home, ignore_errors=True)
+        shutil.rmtree(workspace, ignore_errors=True)
+    write_json(root / "result.json", record)
+    return record
+
+
+def shadow_aggregate(manifest: dict[str, Any], suite: dict[str, Any],
+                     records: list[dict[str, Any]]) -> dict[str, Any]:
+    by_case: dict[str, list[dict[str, Any]]] = {}
+    for record in records:
+        by_case.setdefault(record["case_id"], []).append(record)
+    routing_cases: list[dict[str, Any]] = []
+    task_pairs: list[dict[str, Any]] = []
+    critical_failures: list[str] = []
+    route_statuses: list[str] = []
+    task_statuses: list[str] = []
+    for case in suite["cases"]:
+        rows = by_case.get(case["id"], [])
+        if case["class"] == "task_value":
+            for executor in manifest["executors"]:
+                own = [row for row in rows if row["executor"] == executor["name"]]
+                arms = {row["treatment"]: row for row in own}
+                complete = set(arms) == {"control", "candidate"} and all(
+                    arm["status"] == "pass" and arm["usage"] is not None for arm in arms.values()
+                )
+                status = "pass" if complete else (
+                    "regression" if any(arm["status"] == "regression" for arm in arms.values()) else "inconclusive"
+                )
+                task_statuses.append(status)
+                task_pairs.append(
+                    {
+                        "case_id": case["id"],
+                        "scenario_id": case["id"],
+                        "executor_model": executor["model"],
+                        "status": status,
+                        "arms": {
+                            treatment: None if treatment not in arms else {
+                                "success": arms[treatment]["success"],
+                                **(arms[treatment]["usage"] if arms[treatment]["usage"] is not None else {}),
+                                "tool_use": None if arms[treatment]["usage"] is None else arms[treatment]["usage"]["tool_calls"],
+                            }
+                            for treatment in ("control", "candidate")
+                        },
+                    }
+                )
+            continue
+        for executor in manifest["executors"]:
+            own = [row for row in rows if row["executor"] == executor["name"]]
+            if len(own) != 1:
+                status = "inconclusive"
+                record = None
+            else:
+                record = own[0]
+                status = record["status"]
+            route_statuses.append(status)
+            routing_cases.append(
+                {
+                    "case_id": case["id"],
+                    "scenario_id": case["id"],
+                    "class": case["class"],
+                    "critical": case["critical"],
+                    "executor_model": executor["model"],
+                    "status": status,
+                    "candidate_loaded": None if record is None else record["candidate_loaded"],
+                    "skill_loads": [] if record is None else record["skill_loads"],
+                    "expected_catalog_loads": case["routing"]["catalog_loads"],
+                }
+            )
+            if case["critical"] and status != "pass":
+                critical_failures.append(f"{executor['name']}:{case['id']}")
+    routing_gate = (
+        "regression" if "regression" in route_statuses else
+        "inconclusive" if manifest["routing_mode"] == "candidate_only" or "inconclusive" in route_statuses else
+        "pass"
+    )
+    task_gate = (
+        "regression" if "regression" in task_statuses else
+        "inconclusive" if "inconclusive" in task_statuses or not all(
+            executor["real_backend"] for executor in manifest["executors"]
+        ) else "pass"
+    )
+    status = (
+        "regression" if "regression" in {routing_gate, task_gate} else
+        "inconclusive" if "inconclusive" in {routing_gate, task_gate} else "pass"
+    )
+    def count(case_class: str, predicate: Any, label: str) -> dict[str, int]:
+        values = [item for item in routing_cases if item["class"] == case_class]
+        return {label: sum(bool(predicate(item)) for item in values), "total": len(values)}
+    return {
+        "schema_version": SHADOW_CONTRACT_VERSION,
+        "candidate_id": manifest["candidate_id"],
+        "catalog_id": manifest["catalog_id"],
+        "suite_id": manifest["suite_id"],
+        "environment_id": manifest["environment_id"],
+        "harness_executable_sha256": manifest["harness_executable_sha256"],
+        "executor_identities": [
+            {
+                "name": executor["name"],
+                "model": executor["model"],
+                "real_backend": executor["real_backend"],
+                "real_backend_source": executor["real_backend_source"],
+            }
+            for executor in manifest["executors"]
+        ],
+        "routing_mode": manifest["routing_mode"],
+        "routing_diagnostic": manifest["routing_mode"] == "candidate_only",
+        "routing_gate": routing_gate,
+        "task_value_gate": task_gate,
+        "status": status,
+        "routing": {
+            "positive_recall": count(
+                "routing_positive",
+                lambda item: item["candidate_loaded"] is True and item["status"] == "pass",
+                "loaded",
+            ),
+            "close_negative_false_load": count(
+                "routing_close_negative",
+                lambda item: item["candidate_loaded"] is True,
+                "false_loads",
+            ),
+            "unrelated_false_load": count(
+                "routing_unrelated",
+                lambda item: item["candidate_loaded"] is True,
+                "false_loads",
+            ),
+            "conflict_selection": count(
+                "routing_conflict",
+                lambda item: item["status"] == "pass",
+                "selected_expected",
+            ),
+            "critical_failures": critical_failures,
+            "per_case": routing_cases,
+        },
+        "task_value": {"pairs": task_pairs},
+    }
+
+
+def shadow_load_manifest(run: Path) -> tuple[dict[str, Any], dict[str, Any]]:
+    manifest = read_json(run / "manifest.json")
+    require_keys(
+        manifest,
+        {
+            "schema_version",
+            "kind",
+            "run_id",
+            "invocation_nonce",
+            "candidate_id",
+            "candidate_inventory",
+            "catalog_id",
+            "catalog_inventory",
+            "catalog_skills",
+            "suite_id",
+            "environment_id",
+            "routing_mode",
+            "executors",
+            "routing_id",
+            "harness_executable_sha256",
+            "file_inventory",
+        },
+        "shadow run manifest",
+    )
+    if manifest["schema_version"] != SHADOW_CONTRACT_VERSION or manifest["kind"] != "shadow_candidate_evaluation_run":
+        raise HarnessError("unsupported shadow run manifest")
+    for field in (
+        "run_id",
+        "candidate_id",
+        "suite_id",
+        "environment_id",
+        "routing_id",
+        "harness_executable_sha256",
+    ):
+        identity(manifest[field], field)
+    shadow_identity(manifest["catalog_id"], "catalog_id")
+    if sha_bytes(Path(__file__).read_bytes()) != manifest["harness_executable_sha256"]:
+        raise HarnessError("shadow harness executable digest mismatch")
+    candidate = normalize_inventory(manifest["candidate_inventory"], "shadow candidate inventory", MAX_INPUT_FILES)
+    catalog_inventory = manifest["catalog_inventory"]
+    if manifest["catalog_id"] is None:
+        if catalog_inventory != [] or manifest["catalog_skills"] != []:
+            raise HarnessError("candidate-only shadow manifest cannot carry a catalog")
+    elif (
+        normalize_inventory(catalog_inventory, "shadow catalog inventory", MAX_INPUT_FILES)
+        != catalog_inventory
+        or sha(catalog_inventory) != manifest["catalog_id"]
+    ):
+        raise HarnessError("shadow catalog identity mismatch")
+    catalog = shadow_catalog_skills(manifest["catalog_skills"])
+    suite = read_json(run / "suite.json")
+    if sha(suite) != manifest["suite_id"] or suite.get("environment_id") != manifest["environment_id"]:
+        raise HarnessError("shadow suite or environment identity mismatch")
+    shadow_validate_suite(suite, catalog)
+    executors = shadow_validate_executors(manifest["executors"])
+    if executors != manifest["executors"] or suite["routing_mode"] != manifest["routing_mode"]:
+        raise HarnessError("shadow executor or routing mode mismatch")
+    expected_run = sha(
+        {
+            key: manifest[key]
+            for key in (
+                "schema_version",
+                "kind",
+                "candidate_id",
+                "candidate_inventory",
+                "catalog_id",
+                "catalog_inventory",
+                "catalog_skills",
+                "suite_id",
+                "environment_id",
+                "routing_mode",
+                "executors",
+                "routing_id",
+                "harness_executable_sha256",
+                "file_inventory",
+            )
+        }
+    )
+    if manifest["run_id"] != expected_run:
+        raise HarnessError("shadow run_id is not canonical")
+    if regular_inventory(run, {"manifest.json"}, MAX_INPUT_FILES) != manifest["file_inventory"]:
+        raise HarnessError("shadow sealed input inventory changed")
+    actual_candidate = [
+        {**item, "path": item["path"].removeprefix("candidate/")}
+        for item in manifest["file_inventory"] if item["path"].startswith("candidate/")
+    ]
+    actual_catalog = [
+        {**item, "path": item["path"].removeprefix("catalog/")}
+        for item in manifest["file_inventory"] if item["path"].startswith("catalog/")
+    ]
+    if actual_candidate != candidate or actual_catalog != catalog_inventory:
+        raise HarnessError("shadow candidate or catalog inventory is stale")
+    return manifest, suite
+
+
+def shadow_run(args: argparse.Namespace) -> int:
+    run_root, output, routing_path = Path(args.input).resolve(), Path(args.output).resolve(), Path(args.routing).resolve()
+    if not run_root.is_dir() or run_root.is_symlink() or not output.is_dir() or output.is_symlink() or any(output.iterdir()):
+        raise HarnessError("shadow run and output directories must be real and output empty")
+    manifest, suite = shadow_load_manifest(run_root)
+    routing_value = read_json(routing_path)
+    require_keys(routing_value, {"schema_version", "kind", "executors"}, "shadow routing")
+    if routing_value["schema_version"] != SHADOW_CONTRACT_VERSION or routing_value["kind"] != "shadow_candidate_evaluation_routing":
+        raise HarnessError("unsupported shadow routing")
+    if sha(routing_value) != manifest["routing_id"]:
+        raise HarnessError("shadow routing changes an exact executor route")
+    routes: dict[str, dict[str, Any]] = {}
+    for route in routing_value["executors"]:
+        require_keys(route, {"name", "adapter_id", "adapter_executable_sha256", "argv"}, "shadow executor route")
+        name = text(route["name"], "shadow route name")
+        executable = Path(route["argv"][0]) if isinstance(route["argv"], list) and route["argv"] else None
+        expected = next((item for item in manifest["executors"] if item["name"] == name), None)
+        if (
+            name in routes
+            or expected is None
+            or executable is None
+            or not executable.is_file()
+            or executable.is_symlink()
+            or route["adapter_id"] != expected["adapter_id"]
+            or route["adapter_executable_sha256"] != expected["adapter_executable_sha256"]
+            or sha_bytes(executable.read_bytes()) != expected["adapter_executable_sha256"]
+            or not all(isinstance(item, str) and item for item in route["argv"])
+        ):
+            raise HarnessError("shadow routing changes an exact executor route")
+        routes[name] = route
+    if set(routes) != {item["name"] for item in manifest["executors"]}:
+        raise HarnessError("shadow routing executor set differs from manifest")
+    scratch = Scratch(Path(args.scratch), [run_root, output])
+    try:
+        identities: dict[str, dict[str, Any]] = {}
+        for executor in manifest["executors"]:
+            workspace = scratch.fresh("shadow-version")
+            response, _ = call(
+                [*routes[executor["name"]]["argv"], "version"],
+                harness_environment(workspace / "home"),
+                executor["limits"]["timeout_seconds"],
+                executor["limits"]["output_bytes"],
+                owned_directory(workspace / "cwd"),
+            )
+            identities[executor["name"]] = shadow_attest(response, executor)
+            scratch.discard(workspace)
+        records: list[dict[str, Any]] = []
+        for executor in manifest["executors"]:
+            route = routes[executor["name"]]
+            for case in suite["cases"]:
+                for treatment in (("control", "candidate") if case["class"] == "task_value" else ("candidate",)):
+                    records.append(
+                        shadow_run_trial(run_root, output, scratch, manifest, suite, executor, route, case, treatment)
+                    )
+    finally:
+        scratch.remove()
+    aggregate = shadow_aggregate(manifest, suite, records)
+    write_json(output / "aggregate.json", aggregate)
+    write_json(output / "sealed-input.json", {"manifest": manifest, "suite": suite})
+    inventory = regular_inventory(output, {"manifest.json"}, MAX_RESULT_FILES)
+    result = {
+        "schema_version": SHADOW_CONTRACT_VERSION,
+        "kind": "shadow_candidate_evaluation_result",
+        "run_id": manifest["run_id"],
+        "candidate_id": manifest["candidate_id"],
+        "catalog_id": manifest["catalog_id"],
+        "suite_id": manifest["suite_id"],
+        "environment_id": manifest["environment_id"],
+        "harness_executable_sha256": manifest["harness_executable_sha256"],
+        "routing_mode": manifest["routing_mode"],
+        "routing_id": manifest["routing_id"],
+        "executor_identities": identities,
+        "trials": shadow_plan(manifest, suite),
+        "aggregate": aggregate,
+        "file_inventory": inventory,
+    }
+    result["result_id"] = sha(result)
+    write_json(output / "manifest.json", result)
+    print(json.dumps({"status": aggregate["status"], "result": str(output / "manifest.json")}, sort_keys=True))
+    return 0
+
+
+def shadow_verify(args: argparse.Namespace) -> int:
+    result = Path(args.result).resolve()
+    manifest = read_json(result / "manifest.json")
+    require_keys(
+        manifest,
+        {
+            "schema_version",
+            "kind",
+            "run_id",
+            "candidate_id",
+            "catalog_id",
+            "suite_id",
+            "environment_id",
+            "harness_executable_sha256",
+            "routing_mode",
+            "routing_id",
+            "executor_identities",
+            "trials",
+            "aggregate",
+            "file_inventory",
+            "result_id",
+        },
+        "shadow result manifest",
+    )
+    expected = dict(manifest)
+    result_id = expected.pop("result_id")
+    if (
+        manifest["schema_version"] != SHADOW_CONTRACT_VERSION
+        or manifest["kind"] != "shadow_candidate_evaluation_result"
+        or result_id != sha(expected)
+        or sha_bytes(Path(__file__).read_bytes()) != manifest["harness_executable_sha256"]
+        or regular_inventory(result, {"manifest.json"}, MAX_RESULT_FILES) != manifest["file_inventory"]
+    ):
+        raise HarnessError("shadow result identity or inventory is invalid")
+    sealed = read_json(result / "sealed-input.json")
+    require_keys(sealed, {"manifest", "suite"}, "shadow sealed input")
+    run_manifest = sealed["manifest"]
+    if not isinstance(run_manifest, dict) or not isinstance(sealed["suite"], dict):
+        raise HarnessError("shadow sealed input is malformed")
+    for field in (
+        "run_id",
+        "candidate_id",
+        "catalog_id",
+        "suite_id",
+        "environment_id",
+        "harness_executable_sha256",
+        "routing_mode",
+        "routing_id",
+    ):
+        if manifest[field] != run_manifest.get(field):
+            raise HarnessError("shadow result does not bind its sealed run identity")
+    if (
+        run_manifest.get("suite_id") != sha(sealed["suite"])
+        or run_manifest.get("environment_id") != sealed["suite"].get("environment_id")
+        or run_manifest.get("candidate_id") != sha(run_manifest.get("candidate_inventory"))
+        or (
+            run_manifest.get("catalog_id") is not None
+            and run_manifest.get("catalog_id") != sha(run_manifest.get("catalog_inventory"))
+        )
+    ):
+        raise HarnessError("shadow sealed candidate, catalog, suite, or environment is malformed")
+    temporary = Path(args.scratch).resolve()
+    if not temporary.is_dir() or temporary.is_symlink() or any(temporary.iterdir()):
+        raise HarnessError("shadow verification scratch directory must be real and empty")
+    # Reuse the manifest validator with an isolated, reconstructed sealed input.
+    try:
+        # The run directory is intentionally not available to a result verifier. Validate
+        # every sealed object and recompute all evidence from the durable result instead.
+        shadow_catalog_skills(run_manifest["catalog_skills"])
+        shadow_validate_executors(run_manifest["executors"])
+        shadow_validate_suite(sealed["suite"], run_manifest["catalog_skills"])
+        if manifest["trials"] != shadow_plan(run_manifest, sealed["suite"]):
+            raise HarnessError("shadow result trial matrix differs from sealed scenarios")
+        records = []
+        candidate_sha = next(
+            item["sha256"] for item in run_manifest["candidate_inventory"] if item["path"] == "SKILL.md"
+        )
+        graders = {item["id"]: item for item in sealed["suite"]["graders"]}
+        cases = {item["id"]: item for item in sealed["suite"]["cases"]}
+        for trial in manifest["trials"]:
+            root = result / "trials" / trial.removeprefix("sha256:")
+            record = read_json(root / "result.json")
+            case = cases.get(record.get("case_id"))
+            executor = next(
+                (
+                    item
+                    for item in run_manifest["executors"]
+                    if item["name"] == record.get("executor")
+                ),
+                None,
+            )
+            if (
+                case is None
+                or executor is None
+                or record.get("executor") != executor["name"]
+                or trial != shadow_trial_id(run_manifest, executor, case, record.get("treatment"))
+                or record.get("candidate_id") != run_manifest["candidate_id"]
+                or record.get("catalog_id") != run_manifest["catalog_id"]
+                or record.get("suite_id") != run_manifest["suite_id"]
+                or record.get("environment_id") != run_manifest["environment_id"]
+                or record.get("executor_identity") != {
+                    key: executor[key] for key in EXECUTOR_IDENTITY_KEYS | {"real_backend", "real_backend_source"}
+                }
+            ):
+                raise HarnessError("shadow trial identity is forged or stale")
+            if record["status"] == "inconclusive":
+                if not record.get("infrastructure_error") or not record.get("errors"):
+                    raise HarnessError("shadow inconclusive trial lacks a failure reason")
+                records.append(record)
+                continue
+            events = trace_from(root / "trace.json")
+            proved, _, loads = shadow_route_proof(events, case, record["treatment"], run_manifest, candidate_sha)
+            usage_error = None
+            try:
+                usage = shadow_usage(events, executor)
+            except HarnessError as error:
+                usage = None
+                usage_error = str(error)
+            recomputed = [
+                grade(graders[item], final_text(events), events, root / "artifacts", None, None)
+                for item in case["graders"]
+            ]
+            success = all(item["passed"] for item in recomputed)
+            candidate_loaded = any(
+                load["candidate_id"] == run_manifest["candidate_id"] for load in loads
+            )
+            if (
+                record.get("skill_loads") != loads
+                or record.get("usage") != usage
+                or record.get("grades") != recomputed
+                or record.get("success") != success
+                or record.get("candidate_loaded") != candidate_loaded
+            ):
+                raise HarnessError("shadow trial evidence was falsified after execution")
+            expected_status = "pass" if proved and usage_error is None and success else "regression"
+            if record["status"] != expected_status:
+                raise HarnessError("shadow trial status contradicts its durable evidence")
+            records.append(record)
+        aggregate = shadow_aggregate(run_manifest, sealed["suite"], records)
+        if aggregate != read_json(result / "aggregate.json") or aggregate != manifest["aggregate"]:
+            raise HarnessError("shadow aggregate is not derived from the sealed trial evidence")
+    finally:
+        if any(temporary.iterdir()):
+            raise HarnessError("shadow verification scratch was not cleaned")
+    print(json.dumps({"ok": True, "status": manifest["aggregate"]["status"], "result_id": result_id}, sort_keys=True))
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     value = argparse.ArgumentParser()
     commands = value.add_subparsers(dest="command", required=True)
@@ -1451,13 +2416,27 @@ def parser() -> argparse.ArgumentParser:
     verify_parser.add_argument("--result", required=True)
     verify_parser.add_argument("--scratch", required=True)
     verify_parser.add_argument("--nonce")
+    shadow_run_parser = commands.add_parser("shadow-run")
+    shadow_run_parser.add_argument("--input", required=True)
+    shadow_run_parser.add_argument("--output", required=True)
+    shadow_run_parser.add_argument("--routing", required=True)
+    shadow_run_parser.add_argument("--scratch", required=True)
+    shadow_verify_parser = commands.add_parser("shadow-verify")
+    shadow_verify_parser.add_argument("--result", required=True)
+    shadow_verify_parser.add_argument("--scratch", required=True)
     return value
 
 
 def main() -> int:
     args = parser().parse_args()
     try:
-        return run(args) if args.command == "run" else verify(args)
+        if args.command == "run":
+            return run(args)
+        if args.command == "verify":
+            return verify(args)
+        if args.command == "shadow-run":
+            return shadow_run(args)
+        return shadow_verify(args)
     except HarnessError as error:
         print(f"skill-evaluation-harness: {error}", file=sys.stderr)
         return 2

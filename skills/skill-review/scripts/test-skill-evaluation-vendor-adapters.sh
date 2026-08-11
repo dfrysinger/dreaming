@@ -91,7 +91,8 @@ if "plugin" in args:
 model = args[args.index("--model") + 1]
 prompt = next((value for value in args if value in {
     "fixture prompt", "DRIFT", "NOLOAD", "WRONGLOAD", "FALSETRIGGER", "TIMEOUT",
-    "TOKENOVER", "FLOOD", "SCHEMA", "NOPATH", "NATIVEFAIL", "CURRENTCOPILOT"
+    "TOKENOVER", "FLOOD", "SCHEMA", "NOPATH", "NATIVEFAIL", "CURRENTCOPILOT",
+    "SHADOWCANDIDATE", "SHADOWCATALOG", "COMMANDLOAD", "MULTIREAD",
 }), "")
 observed = "drifted-model" if prompt == "DRIFT" else model
 workspace = Path(args[args.index("-C") + 1]) if "-C" in args else Path.cwd()
@@ -117,19 +118,40 @@ loaded_path = None
 if "--plugin-dir" in args:
     plugin = Path(args[args.index("--plugin-dir") + 1])
     matches = list((plugin / "skills").glob("*/SKILL.md"))
-    candidate = bool(matches)
-    loaded_path = str(matches[0]) if matches else None
+    desired = (
+        "fixture-skill"
+        if prompt == "SHADOWCANDIDATE"
+        else "approved-skill" if prompt == "SHADOWCATALOG" else None
+    )
+    selected = next(
+        (match for match in matches if match.parent.name == desired),
+        matches[0] if matches else None,
+    )
+    candidate = selected is not None
+    loaded_path = str(selected) if selected else None
 elif vendor == "codex":
-    candidate = (Path(os.environ["CODEX_HOME"]) / "candidate-installed").is_file()
+    native_matches = list(
+        (Path(os.environ["CODEX_HOME"]) / "skills").glob("*/SKILL.md")
+    )
+    candidate = (
+        (Path(os.environ["CODEX_HOME"]) / "candidate-installed").is_file()
+        or bool(native_matches)
+    )
     root_file = Path(os.environ["CODEX_HOME"]) / "candidate-root"
     if root_file.is_file():
         loaded_path = str(
             Path(root_file.read_text()) / "skills/fixture-skill/SKILL.md"
         )
+    elif native_matches:
+        loaded_path = str(native_matches[0])
 candidate = candidate and prompt != "NOLOAD"
-loaded_name = "other-skill" if prompt == "WRONGLOAD" else "fixture-skill"
+loaded_name = (
+    "other-skill"
+    if prompt == "WRONGLOAD"
+    else "approved-skill" if prompt == "SHADOWCATALOG" else "fixture-skill"
+)
 if vendor == "copilot":
-    if prompt == "CURRENTCOPILOT":
+    if prompt in {"CURRENTCOPILOT", "SHADOWCANDIDATE", "SHADOWCATALOG"}:
         events = [
             {"type":"session.skills_loaded","data":{"skills":[
                 {"name":loaded_name,"path":loaded_path,"enabled":True}
@@ -139,6 +161,7 @@ if vendor == "copilot":
             {"type":"assistant.message","data":{
                 "content":"",
                 "outputTokens":tokens,
+                "usage":{"input_tokens":10,"output_tokens":tokens},
                 "toolRequests":[{
                     "arguments":{"skill":loaded_name},
                     "name":"skill",
@@ -152,10 +175,10 @@ if vendor == "copilot":
                   {"type":"assistant.message","data":{"content":"answer"}},
                   {"type":"session.usage_checkpoint",
                    "usage":{"total_tokens":tokens}}]
-    if candidate and prompt != "CURRENTCOPILOT":
+    if candidate and prompt not in {"CURRENTCOPILOT", "SHADOWCANDIDATE", "SHADOWCATALOG"}:
         events.append({"type":"skill.invoked","data":{
             "skillName":loaded_name,"resolvedPath":loaded_path}})
-    if prompt == "CURRENTCOPILOT":
+    if prompt in {"CURRENTCOPILOT", "SHADOWCANDIDATE", "SHADOWCATALOG"}:
         events.extend([
             {"type":"tool.execution_complete","data":{
                 "toolCallId":"current-skill-call",
@@ -191,15 +214,40 @@ elif vendor == "claude":
                         "input":skill_input})
     print(json.dumps({"type":"assistant","message":{"content":content}}))
     print(json.dumps({"type":"result","result":"answer",
-                      "usage":{"total_tokens":tokens}}))
+                      "usage":{"total_tokens":tokens,
+                               "input_tokens":10,"output_tokens":tokens-10}}))
 else:
     print(json.dumps({"type":"turn_context","payload":{"model":observed}}))
     print(json.dumps({"type":"turn.completed",
-                      "usage":{"total_tokens":tokens}}))
+                      "usage":{"total_tokens":tokens,
+                               "input_tokens":10,"output_tokens":tokens-10}}))
     if candidate:
-        print(json.dumps({"type":"response_item","payload":{"type":"function_call",
-              "name":"skill","arguments":{
-                  "skill":loaded_name,"resolved_path":loaded_path}}}))
+        if prompt in {"COMMANDLOAD", "MULTIREAD"}:
+            skill_files = [
+                Path(os.environ["CODEX_HOME"])
+                / "skills/fixture-skill/SKILL.md"
+            ]
+            if prompt == "MULTIREAD":
+                skill_files.append(
+                    Path(os.environ["CODEX_HOME"])
+                    / "skills/approved-skill/SKILL.md"
+                )
+            print(json.dumps({"type":"item.completed","item":{
+                "id":"command-load",
+                "type":"command_execution",
+                "status":"completed",
+                "exit_code":0,
+                "command":"/bin/zsh -lc '/bin/cat " + " ".join(
+                    str(skill_file) for skill_file in skill_files
+                ) + "'",
+                "aggregated_output":"reader diagnostic\\n" + "".join(
+                    skill_file.read_text() for skill_file in skill_files
+                ),
+            }}))
+        else:
+            print(json.dumps({"type":"response_item","payload":{"type":"function_call",
+                  "name":"skill","arguments":{
+                      "skill":loaded_name,"resolved_path":loaded_path}}}))
     print(json.dumps({"type":"response_item","payload":{"type":"message",
           "role":"assistant","content":[{"type":"text","text":"answer"}]}}))
 """
@@ -342,6 +390,92 @@ else:
         path.write_bytes(canonical(spec) + b"\n")
         return spec, path
 
+    def shadow_trial(self, treatment, prompt):
+        trial_root = self.root / f"copilot-shadow-{treatment}-{prompt.lower()}"
+        home = trial_root / "home"
+        workspace = trial_root / "workspace"
+        artifacts = trial_root / "artifacts"
+        candidate = self.root / "shadow-run/candidate"
+        catalog = self.root / "shadow-run/catalog"
+        for path in (home, workspace, artifacts, candidate, catalog / "approved-skill"):
+            path.mkdir(parents=True, exist_ok=True)
+        candidate_skill = candidate / "SKILL.md"
+        if not candidate_skill.exists():
+            candidate_skill.write_text(
+                "---\nname: fixture-skill\ndescription: Fixture skill.\n---\n"
+            )
+            candidate_skill.chmod(0o400)
+        catalog_skill = catalog / "approved-skill/SKILL.md"
+        if not catalog_skill.exists():
+            catalog_skill.write_text(
+                "---\nname: approved-skill\ndescription: Approved fixture skill.\n---\n"
+            )
+            catalog_skill.chmod(0o400)
+        candidate_inventory = [{
+            "path": "SKILL.md",
+            "sha256": sha_bytes(candidate_skill.read_bytes()),
+            "size": candidate_skill.stat().st_size,
+        }]
+        catalog_inventory = [{
+            "path": "approved-skill/SKILL.md",
+            "sha256": sha_bytes(catalog_skill.read_bytes()),
+            "size": catalog_skill.stat().st_size,
+        }]
+        catalog_skill_inventory = [{
+            **catalog_inventory[0],
+            "path": "SKILL.md",
+        }]
+        identity = self.call(
+            "copilot",
+            "--shadow-contract",
+            "--turn-budget",
+            "7",
+            "--tool-budget",
+            "8",
+            "version",
+        )
+        spec = {
+            "schema_version": 2,
+            "trial_id": sha({"treatment": treatment, "prompt": prompt}),
+            "case": {
+                "id": prompt.lower(),
+                "class": "task_value",
+                "task_id": f"task:{prompt.lower()}",
+                "prompt": prompt,
+                "critical": True,
+                "routing": {
+                    "candidate_load": treatment == "candidate",
+                    "catalog_loads": ["approved-skill"] if prompt == "SHADOWCATALOG" else [],
+                },
+                "artifacts": ["out.txt"],
+                "graders": ["fixture"],
+                "fixture": "native-fixture",
+            },
+            "treatment": treatment,
+            "executor": {"name": "copilot", **identity},
+            "candidate_id": sha(candidate_inventory),
+            "candidate_inventory": candidate_inventory,
+            "skill_md_sha256": candidate_inventory[0]["sha256"],
+            "candidate_root": str(candidate),
+            "catalog_id": sha(catalog_inventory),
+            "catalog_root": str(catalog),
+            "catalog_skills": [{
+                "name": "approved-skill",
+                "catalog_skill_id": sha(catalog_skill_inventory),
+                "skill_md_sha256": catalog_inventory[0]["sha256"],
+                "path": "catalog/approved-skill/SKILL.md",
+            }],
+            "suite_id": sha({"suite": 2}),
+            "environment_id": sha({"environment": 2}),
+            "workspace": str(workspace),
+            "raw": str(trial_root / "raw.jsonl"),
+            "trace": str(trial_root / "trace.json"),
+            "artifacts": str(artifacts),
+        }
+        path = trial_root / "trial.json"
+        path.write_bytes(canonical(spec) + b"\n")
+        return spec, path, identity
+
     def prepare_and_run(
         self,
         vendor,
@@ -405,6 +539,60 @@ else:
             trial, path = self.trial(vendor)
             prepared = self.call(vendor, "prepare", "--trial", path)
             self.assertEqual(prepared["execution"], version)
+            shadow_version = self.call(
+                vendor,
+                "--shadow-contract",
+                "--turn-budget",
+                "7",
+                "--tool-budget",
+                "8",
+                "version",
+            )
+            self.assertEqual(shadow_version["real_backend"], True)
+            self.assertIn(f"native-{vendor}-cli", shadow_version["real_backend_source"])
+            self.assertEqual(shadow_version["limits"]["turn_budget"], 7)
+            self.assertEqual(shadow_version["limits"]["tool_budget"], 8)
+            self.assertEqual(
+                set(shadow_version),
+                set(version) | {"real_backend", "real_backend_source"},
+            )
+            shadow_trial, shadow_path = self.trial(vendor, prompt="shadow fixture")
+            shadow_prepared = self.call(
+                vendor,
+                "--shadow-contract",
+                "--turn-budget",
+                "7",
+                "--tool-budget",
+                "8",
+                "prepare",
+                "--trial",
+                shadow_path,
+            )
+            self.assertEqual(shadow_prepared["execution"], shadow_version)
+            if vendor == "codex":
+                shadow_command = shadow_prepared["prepared"]["command"]
+                self.assertNotIn("--ignore-user-config", shadow_command)
+                self.assertIn(
+                    "--dangerously-bypass-approvals-and-sandbox",
+                    shadow_command,
+                )
+                self.assertIn('web_search="disabled"', shadow_command)
+                shadow_projection = shadow_prepared["prepared"]["projection"]
+                native_skill = (
+                    Path(shadow_projection["native_skill_root"])
+                    / shadow_projection["skill_name"]
+                )
+                self.assertTrue(native_skill.is_dir())
+                self.assertFalse(native_skill.is_symlink())
+                self.assertEqual(
+                    native_skill.joinpath("SKILL.md").read_bytes(),
+                    Path(shadow_trial["candidate_root"]).joinpath("SKILL.md").read_bytes(),
+                )
+                self.assertFalse(
+                    Path(shadow_trial["home"])
+                    .joinpath(".codex/candidate-installed")
+                    .exists()
+                )
             commands[vendor] = prepared["prepared"]["command"]
             profile = Path(trial["home"]) / "evaluation.sb"
             self.assertLess(profile.stat().st_size, 65535)
@@ -476,6 +664,173 @@ else:
         )
         self.assertIn("--ignore-user-config", commands["codex"])
         self.assertIn("--json", commands["codex"])
+
+    def test_shadow_trial_projects_candidate_and_catalog_with_complete_usage(self):
+        for treatment, prompt, present, absent in (
+            ("candidate", "SHADOWCANDIDATE", "candidate_id", "catalog_skill_id"),
+            ("control", "SHADOWCATALOG", "catalog_skill_id", "candidate_id"),
+        ):
+            trial, path, identity = self.shadow_trial(treatment, prompt)
+            prepared = self.call(
+                "copilot",
+                "--shadow-contract",
+                "--turn-budget",
+                "7",
+                "--tool-budget",
+                "8",
+                "prepare",
+                "--trial",
+                path,
+            )
+            record = {
+                "schema_version": 2,
+                "trial_id": trial["trial_id"],
+                "adapter_prepared": prepared["prepared"],
+                "execution": prepared["execution"],
+            }
+            record["prepared_digest"] = sha(record)
+            prepared_path = path.parent / "prepared.json"
+            prepared_path.write_bytes(canonical(record) + b"\n")
+            response = self.call(
+                "copilot",
+                "--shadow-contract",
+                "--turn-budget",
+                "7",
+                "--tool-budget",
+                "8",
+                "run",
+                "--trial",
+                path,
+                "--prepared",
+                prepared_path,
+                "--output",
+                trial["raw"],
+            )
+            self.assertEqual(response["effective_execution"], identity)
+            self.call(
+                "copilot",
+                "--shadow-contract",
+                "--turn-budget",
+                "7",
+                "--tool-budget",
+                "8",
+                "normalize",
+                "--raw",
+                trial["raw"],
+                "--trace",
+                trial["trace"],
+            )
+            events = json.loads(Path(trial["trace"]).read_text())["events"]
+            loads = [event["data"] for event in events if event["kind"] == "skill_load"]
+            self.assertEqual(len(loads), 1)
+            self.assertIsNotNone(loads[0][present])
+            self.assertIsNone(loads[0][absent])
+            usage = [event["data"] for event in events if event["kind"] == "usage"]
+            self.assertEqual(
+                set(usage[0]),
+                {"turns", "input_tokens", "output_tokens", "total_tokens", "tool_calls"},
+            )
+            self.assertEqual(
+                usage[0]["total_tokens"],
+                usage[0]["input_tokens"] + usage[0]["output_tokens"],
+            )
+
+    def test_codex_shadow_command_read_proves_exact_skill_load(self):
+        trial, path = self.trial("codex", prompt="COMMANDLOAD")
+        flags = (
+            "--shadow-contract",
+            "--turn-budget",
+            "7",
+            "--tool-budget",
+            "8",
+        )
+        prepared = self.call("codex", *flags, "prepare", "--trial", path)
+        record = {
+            "schema_version": 1,
+            "trial_id": trial["trial_id"],
+            "adapter_prepared": prepared["prepared"],
+            "execution": prepared["execution"],
+        }
+        record["prepared_digest"] = sha(record)
+        prepared_path = path.parent / "prepared.json"
+        prepared_path.write_bytes(canonical(record) + b"\n")
+        self.call(
+            "codex",
+            *flags,
+            "run",
+            "--trial",
+            path,
+            "--prepared",
+            prepared_path,
+            "--output",
+            trial["raw"],
+        )
+        self.call(
+            "codex",
+            *flags,
+            "normalize",
+            "--raw",
+            trial["raw"],
+            "--trace",
+            trial["trace"],
+        )
+        events = json.loads(Path(trial["trace"]).read_text())["events"]
+        loads = [event["data"] for event in events if event["kind"] == "skill_load"]
+        self.assertEqual(len(loads), 1)
+        self.assertEqual(loads[0]["candidate_id"], trial["candidate_id"])
+        self.assertEqual(loads[0]["path"], "candidate/SKILL.md")
+        usage = next(event["data"] for event in events if event["kind"] == "usage")
+        self.assertEqual(usage["tool_calls"], 1)
+
+    def test_codex_shadow_command_read_attests_every_exact_skill(self):
+        flags = (
+            "--shadow-contract",
+            "--turn-budget",
+            "7",
+            "--tool-budget",
+            "8",
+        )
+        trial, path, _ = self.shadow_trial("candidate", "MULTIREAD")
+        identity = self.call("codex", *flags, "version")
+        trial["executor"] = {"name": "codex", **identity}
+        path.write_bytes(canonical(trial) + b"\n")
+        prepared = self.call("codex", *flags, "prepare", "--trial", path)
+        record = {
+            "schema_version": 1,
+            "trial_id": trial["trial_id"],
+            "adapter_prepared": prepared["prepared"],
+            "execution": prepared["execution"],
+        }
+        record["prepared_digest"] = sha(record)
+        prepared_path = path.parent / "prepared.json"
+        prepared_path.write_bytes(canonical(record) + b"\n")
+        self.call(
+            "codex",
+            *flags,
+            "run",
+            "--trial",
+            path,
+            "--prepared",
+            prepared_path,
+            "--output",
+            trial["raw"],
+        )
+        self.call(
+            "codex",
+            *flags,
+            "normalize",
+            "--raw",
+            trial["raw"],
+            "--trace",
+            trial["trace"],
+        )
+        events = json.loads(Path(trial["trace"]).read_text())["events"]
+        loads = [event["data"] for event in events if event["kind"] == "skill_load"]
+        self.assertEqual(len(loads), 2)
+        self.assertEqual(
+            {load["path"] for load in loads},
+            {"candidate/SKILL.md", "catalog/approved-skill/SKILL.md"},
+        )
 
     def test_candidate_control_isolation_normalization_and_collection_parity(self):
         candidate_kinds = []

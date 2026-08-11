@@ -86,6 +86,12 @@ def canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
 
 
+def shadow_canonical(value: Any) -> bytes:
+    return json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode("utf-8")
+
+
 def digest(value: bytes) -> str:
     return hashlib.sha256(value).hexdigest()
 
@@ -3179,6 +3185,533 @@ def current_gate(args: argparse.Namespace) -> dict[str, Any]:
     return {"status": "waived", "candidate_id": candidate, "receipt_sha256": waiver_sha}
 
 
+SHADOW_SUITE_VERSION = 2
+SHADOW_HARNESS_VERSION = 2
+
+
+def shadow_sha(value: Any) -> str:
+    return f"sha256:{digest(shadow_canonical(value))}"
+
+
+def shadow_inventory(root: Path) -> list[dict[str, Any]]:
+    if not root.is_dir() or root.is_symlink():
+        raise EvaluationError(f"{root} must be a real directory")
+    values: list[dict[str, Any]] = []
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_symlink():
+            raise EvaluationError(f"{relative}: shadow inputs cannot contain symlinks")
+        if path.is_dir():
+            continue
+        if not path.is_file():
+            raise EvaluationError(f"{relative}: shadow inputs must be regular files")
+        if relative in LOCAL_SIDECARS:
+            continue
+        content = path.read_bytes()
+        values.append({"path": relative, "sha256": f"sha256:{digest(content)}", "size": len(content)})
+    if not values:
+        raise EvaluationError(f"{root} has no shadow input files")
+    return values
+
+
+def shadow_catalog(source: Path) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    if not source.is_dir() or source.is_symlink():
+        raise EvaluationError("approved target catalog must be a real directory")
+    skills: list[dict[str, Any]] = []
+    inventory_value: list[dict[str, Any]] = []
+    for path in sorted(source.iterdir()):
+        if path.is_symlink() or not path.is_dir() or not (path / "SKILL.md").is_file():
+            raise EvaluationError("approved target catalog must contain only skill directories with SKILL.md")
+        files = shadow_inventory(path)
+        skill_id = shadow_sha(files)
+        skills.append(
+            {
+                "name": path.name,
+                "catalog_skill_id": skill_id,
+                "skill_md_sha256": next(item["sha256"] for item in files if item["path"] == "SKILL.md"),
+                "path": f"catalog/{path.name}/SKILL.md",
+            }
+        )
+        inventory_value.extend(
+            [{**item, "path": f"{path.name}/{item['path']}"} for item in files]
+        )
+    return inventory_value, skills
+
+
+def shadow_copy_tree(source: Path, destination: Path) -> None:
+    for path in sorted(source.rglob("*")):
+        relative = path.relative_to(source)
+        target = destination / relative
+        if path.is_symlink():
+            raise EvaluationError(f"{relative}: shadow inputs cannot contain symlinks")
+        if path.is_dir():
+            target.mkdir(parents=True, exist_ok=True)
+        elif path.is_file():
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(path.read_bytes())
+            os.chmod(target, path.stat().st_mode & 0o777)
+        else:
+            raise EvaluationError(f"{relative}: shadow inputs must be regular files")
+
+
+def shadow_suite(path: Path, catalog: list[dict[str, Any]]) -> tuple[dict[str, Any], str]:
+    raw = load_json(path)
+    require_exact_keys(
+        raw,
+        "shadow suite",
+        {"schema_version", "kind", "routing_mode", "environment", "graders", "cases"},
+    )
+    if (
+        raw.get("schema_version") != SHADOW_SUITE_VERSION
+        or raw.get("kind") != "shadow_candidate_evaluation_suite"
+        or raw.get("routing_mode") not in {"catalog_plus_candidate", "candidate_only"}
+        or not isinstance(raw.get("environment"), dict)
+        or not raw["environment"]
+        or not isinstance(raw.get("graders"), list)
+        or not raw["graders"]
+        or not isinstance(raw.get("cases"), list)
+    ):
+        raise EvaluationError("unsupported shadow candidate suite")
+    known_catalog = {item["name"] for item in catalog}
+    graders: list[dict[str, Any]] = []
+    grader_ids: set[str] = set()
+    for index, grader in enumerate(raw["graders"]):
+        if not isinstance(grader, dict):
+            raise EvaluationError(f"shadow graders[{index}] must be an object")
+        require_exact_keys(grader, f"shadow graders[{index}]", {"id", "type", "safety", "config"})
+        grader_id = require_text(grader.get("id"), f"shadow graders[{index}].id")
+        if grader_id in grader_ids or not isinstance(grader.get("safety"), bool) or not isinstance(grader.get("config"), dict):
+            raise EvaluationError("shadow grader definition is invalid")
+        grader_ids.add(grader_id)
+        graders.append(grader)
+    classes: set[str] = set()
+    case_ids: set[str] = set()
+    task_ids: set[str] = set()
+    cases: list[dict[str, Any]] = []
+    for index, case in enumerate(raw["cases"]):
+        field = f"shadow cases[{index}]"
+        if not isinstance(case, dict):
+            raise EvaluationError(f"{field} must be an object")
+        require_exact_keys(
+            case,
+            field,
+            {"id", "class", "task_id", "prompt", "critical", "routing", "artifacts", "graders", "fixture"},
+        )
+        case_id = require_text(case.get("id"), f"{field}.id")
+        task_id = require_text(case.get("task_id"), f"{field}.task_id")
+        case_class = require_text(case.get("class"), f"{field}.class")
+        if (
+            case_id in case_ids
+            or task_id in task_ids
+            or case_class not in {
+                "routing_positive", "routing_close_negative", "routing_unrelated",
+                "routing_conflict", "task_value",
+            }
+            or not isinstance(case.get("critical"), bool)
+        ):
+            raise EvaluationError("shadow case identifiers, class, or critical flag are invalid")
+        case_ids.add(case_id)
+        task_ids.add(task_id)
+        classes.add(case_class)
+        route = case.get("routing")
+        if not isinstance(route, dict):
+            raise EvaluationError(f"{field}.routing must be an object")
+        require_exact_keys(route, f"{field}.routing", {"candidate_load", "catalog_loads"})
+        names = route.get("catalog_loads")
+        if (
+            not isinstance(route.get("candidate_load"), bool)
+            or not isinstance(names, list)
+            or not all(isinstance(name, str) and name in known_catalog for name in names)
+            or len(set(names)) != len(names)
+            or (raw["routing_mode"] == "candidate_only" and names)
+        ):
+            raise EvaluationError("shadow case routing declaration is invalid")
+        if (
+            (case_class == "routing_positive" and not route["candidate_load"])
+            or (case_class in {"routing_close_negative", "routing_unrelated", "routing_conflict"} and route["candidate_load"])
+            or (
+                case_class == "routing_conflict"
+                and raw["routing_mode"] == "catalog_plus_candidate"
+                and len(names) != 1
+            )
+            or (
+                case_class == "routing_conflict"
+                and raw["routing_mode"] == "candidate_only"
+                and names
+            )
+            or (case_class == "task_value" and not route["candidate_load"])
+        ):
+            raise EvaluationError("shadow case routing does not match its class")
+        artifacts = case.get("artifacts")
+        graders_for_case = case.get("graders")
+        if (
+            not isinstance(artifacts, list)
+            or len(set(artifacts)) != len(artifacts)
+            or not all(isinstance(item, str) and item and not Path(item).is_absolute() and ".." not in Path(item).parts for item in artifacts)
+            or not isinstance(graders_for_case, list)
+            or not graders_for_case
+            or not set(graders_for_case) <= grader_ids
+        ):
+            raise EvaluationError("shadow case artifacts or graders are invalid")
+        if not any(item["id"] in graders_for_case and item["safety"] for item in graders):
+            raise EvaluationError("shadow case requires a safety grader")
+        cases.append(
+            {
+                "id": case_id,
+                "class": case_class,
+                "task_id": task_id,
+                "prompt": require_text(case.get("prompt"), f"{field}.prompt"),
+                "critical": case["critical"],
+                "routing": {"candidate_load": route["candidate_load"], "catalog_loads": names},
+                "artifacts": artifacts,
+                "graders": graders_for_case,
+                "fixture": require_text(case.get("fixture"), f"{field}.fixture"),
+            }
+        )
+    required = {
+        "routing_positive", "routing_close_negative", "routing_unrelated",
+        "routing_conflict", "task_value",
+    }
+    if classes != required:
+        raise EvaluationError("shadow suite must cover every routing case and task value")
+    suite = {
+        "schema_version": SHADOW_HARNESS_VERSION,
+        "kind": "shadow_candidate_evaluation_suite",
+        "routing_mode": raw["routing_mode"],
+        "environment": raw["environment"],
+        "environment_id": shadow_sha(raw["environment"]),
+        "grader_set_id": shadow_sha(graders),
+        "graders": graders,
+        "cases": cases,
+    }
+    return suite, shadow_sha(suite)
+
+
+def shadow_executors(path: Path) -> list[dict[str, Any]]:
+    value = load_json(path)
+    require_exact_keys(value, "shadow executors", {"schema_version", "kind", "executors"})
+    if value.get("schema_version") != SHADOW_HARNESS_VERSION or value.get("kind") != "shadow_candidate_evaluation_executors":
+        raise EvaluationError("unsupported shadow executor identity file")
+    if not isinstance(value.get("executors"), list) or not value["executors"]:
+        raise EvaluationError("shadow executor list is required")
+    names: set[str] = set()
+    executors: list[dict[str, Any]] = []
+    keys = {
+        "name", "model", "adapter_id", "adapter_version", "adapter_executable_sha256",
+        "cli_executable_sha256", "cli_version", "tool_policy_id", "limits", "sandbox_id",
+        "real_backend", "real_backend_source",
+    }
+    for index, executor in enumerate(value["executors"]):
+        if not isinstance(executor, dict):
+            raise EvaluationError(f"shadow executors[{index}] must be an object")
+        require_exact_keys(executor, f"shadow executors[{index}]", keys)
+        name = require_text(executor.get("name"), f"shadow executors[{index}].name")
+        if name in names:
+            raise EvaluationError("shadow executor names must be unique")
+        names.add(name)
+        limits = executor.get("limits")
+        if not isinstance(limits, dict):
+            raise EvaluationError("shadow executor limits must be an object")
+        require_exact_keys(limits, f"shadow executors[{index}].limits", {
+            "timeout_seconds", "token_budget", "turn_budget", "tool_budget", "output_bytes",
+        })
+        normalized = {
+            "name": name,
+            "model": require_text(executor.get("model"), f"shadow executors[{index}].model"),
+            "adapter_id": require_sha256(executor.get("adapter_id"), f"shadow executors[{index}].adapter_id"),
+            "adapter_version": require_positive_int(executor.get("adapter_version"), f"shadow executors[{index}].adapter_version"),
+            "adapter_executable_sha256": require_sha256(executor.get("adapter_executable_sha256"), f"shadow executors[{index}].adapter_executable_sha256"),
+            "cli_executable_sha256": require_sha256(executor.get("cli_executable_sha256"), f"shadow executors[{index}].cli_executable_sha256"),
+            "cli_version": require_text(executor.get("cli_version"), f"shadow executors[{index}].cli_version"),
+            "tool_policy_id": require_sha256(executor.get("tool_policy_id"), f"shadow executors[{index}].tool_policy_id"),
+            "limits": {
+                key: require_positive_int(limits.get(key), f"shadow executors[{index}].limits.{key}")
+                for key in limits
+            },
+            "sandbox_id": require_sha256(executor.get("sandbox_id"), f"shadow executors[{index}].sandbox_id"),
+            "real_backend": executor.get("real_backend"),
+            "real_backend_source": require_text(executor.get("real_backend_source"), f"shadow executors[{index}].real_backend_source"),
+        }
+        if normalized["adapter_version"] != 1 or not isinstance(normalized["real_backend"], bool):
+            raise EvaluationError("shadow executor adapter version or real backend attestation is invalid")
+        executors.append(normalized)
+    return executors
+
+
+def shadow_routing(path: Path, executors: list[dict[str, Any]]) -> dict[str, Any]:
+    value = load_json(path)
+    require_exact_keys(
+        value,
+        "shadow routing",
+        {"schema_version", "kind", "executors"},
+    )
+    if (
+        value.get("schema_version") != SHADOW_HARNESS_VERSION
+        or value.get("kind") != "shadow_candidate_evaluation_routing"
+        or not isinstance(value.get("executors"), list)
+    ):
+        raise EvaluationError("unsupported shadow routing")
+    expected = {item["name"]: item for item in executors}
+    actual: dict[str, dict[str, Any]] = {}
+    for index, route in enumerate(value["executors"]):
+        field = f"shadow routing.executors[{index}]"
+        if not isinstance(route, dict):
+            raise EvaluationError(f"{field} must be an object")
+        require_exact_keys(
+            route,
+            field,
+            {"name", "adapter_id", "adapter_executable_sha256", "argv"},
+        )
+        name = require_text(route.get("name"), f"{field}.name")
+        argv = route.get("argv")
+        executable = (
+            Path(argv[0]).resolve()
+            if isinstance(argv, list) and argv
+            else None
+        )
+        executor = expected.get(name)
+        if (
+            name in actual
+            or executor is None
+            or executable is None
+            or not all(isinstance(item, str) and item for item in argv)
+            or route.get("adapter_id") != executor["adapter_id"]
+            or route.get("adapter_executable_sha256")
+            != executor["adapter_executable_sha256"]
+            or sha256_file(executable) != executor["adapter_executable_sha256"]
+        ):
+            raise EvaluationError(f"{field} is not an authorized exact executor route")
+        actual[name] = route
+    if list(actual) != [item["name"] for item in executors]:
+        raise EvaluationError(
+            "shadow routing executor set or order differs from the sealed executors"
+        )
+    return value
+
+
+def shadow_write_receipt(receipt: dict[str, Any]) -> tuple[Path, str]:
+    receipt_sha = digest(shadow_canonical(receipt))
+    path = v2_evaluation_dir() / "shadow-receipts" / f"{receipt_sha}.json"
+    if path.exists() and shadow_canonical(load_json(path)) != shadow_canonical(receipt):
+        raise EvaluationError("shadow receipt collision")
+    if not path.exists():
+        atomic_write(path, receipt)
+    return path, receipt_sha
+
+
+def shadow_compile(args: argparse.Namespace) -> dict[str, Any]:
+    skill_dir = Path(args.skill_dir).resolve()
+    run_dir = Path(args.run_dir).resolve()
+    catalog_dir = Path(args.catalog_dir).resolve() if args.catalog_dir else None
+    if not run_dir.is_dir() or run_dir.is_symlink() or any(run_dir.iterdir()):
+        raise EvaluationError("shadow run directory must be real and empty")
+    harness = require_trusted_harness(Path(args.harness))
+    harness_sha = sha256_file(harness)
+    candidate_source = shadow_inventory(skill_dir)
+    candidate = shadow_sha(candidate_source)
+    provisional_catalog, provisional_skills = (
+        shadow_catalog(catalog_dir) if catalog_dir else ([], [])
+    )
+    suite, suite_id = shadow_suite(Path(args.suite).resolve(), provisional_skills)
+    if suite["routing_mode"] == "catalog_plus_candidate" and catalog_dir is None:
+        raise EvaluationError("catalog-plus-candidate routing requires an approved target catalog snapshot")
+    if suite["routing_mode"] == "candidate_only" and catalog_dir is not None:
+        raise EvaluationError("candidate-only routing must not claim a catalog authority")
+    executors = shadow_executors(Path(args.executors).resolve())
+    routing = shadow_routing(Path(args.routing).resolve(), executors)
+    inventory(skill_dir, run_dir / "candidate")
+    if catalog_dir:
+        shadow_copy_tree(catalog_dir, run_dir / "catalog")
+    atomic_write(run_dir / "suite.json", suite)
+    file_inventory = canonical_file_inventory(run_dir)
+    candidate_inventory = [
+        {**item, "path": item["path"].removeprefix("candidate/")}
+        for item in file_inventory if item["path"].startswith("candidate/")
+    ]
+    catalog_inventory = [
+        {**item, "path": item["path"].removeprefix("catalog/")}
+        for item in file_inventory if item["path"].startswith("catalog/")
+    ]
+    if candidate_inventory != candidate_source or shadow_sha(candidate_inventory) != candidate:
+        raise EvaluationError("shadow candidate projection changed while compiling")
+    if catalog_inventory != provisional_catalog:
+        raise EvaluationError("shadow catalog projection changed while compiling")
+    catalog_id = shadow_sha(catalog_inventory) if catalog_inventory else None
+    manifest = {
+        "schema_version": SHADOW_HARNESS_VERSION,
+        "kind": "shadow_candidate_evaluation_run",
+        "invocation_nonce": require_text(args.nonce, "shadow invocation nonce"),
+        "candidate_id": candidate,
+        "candidate_inventory": candidate_inventory,
+        "catalog_id": catalog_id,
+        "catalog_inventory": catalog_inventory,
+        "catalog_skills": provisional_skills,
+        "suite_id": suite_id,
+        "environment_id": suite["environment_id"],
+        "routing_mode": suite["routing_mode"],
+        "executors": executors,
+        "routing_id": shadow_sha(routing),
+        "harness_executable_sha256": harness_sha,
+        "file_inventory": file_inventory,
+    }
+    manifest["run_id"] = shadow_sha(
+        {
+            key: manifest[key]
+            for key in (
+                "schema_version", "kind", "candidate_id", "candidate_inventory", "catalog_id",
+                "catalog_inventory", "catalog_skills", "suite_id", "environment_id", "routing_mode",
+                "executors", "routing_id", "harness_executable_sha256", "file_inventory",
+            )
+        }
+    )
+    atomic_write(run_dir / "manifest.json", manifest)
+    return {
+        "run_dir": str(run_dir),
+        "run_id": manifest["run_id"],
+        "candidate_id": candidate,
+        "catalog_id": catalog_id,
+        "suite_id": suite_id,
+        "environment_id": suite["environment_id"],
+        "routing_mode": suite["routing_mode"],
+    }
+
+
+def shadow_execute(args: argparse.Namespace) -> dict[str, Any]:
+    run_dir = Path(args.run_dir).resolve()
+    result_dir = Path(args.result_dir).resolve()
+    scratch = Path(args.scratch).resolve()
+    harness = require_trusted_harness(Path(args.harness))
+    manifest = load_json(run_dir / "manifest.json")
+    if manifest.get("harness_executable_sha256") != sha256_file(harness):
+        raise EvaluationError("shadow harness executable differs from the sealed run")
+    if not result_dir.is_dir() or result_dir.is_symlink() or any(result_dir.iterdir()):
+        raise EvaluationError("shadow result directory must be real and empty")
+    if not scratch.is_dir() or scratch.is_symlink() or any(scratch.iterdir()):
+        raise EvaluationError("shadow scratch directory must be real and empty")
+    subprocess.run(
+        [
+            str(harness), "shadow-run", "--input", str(run_dir), "--output", str(result_dir),
+            "--routing", str(Path(args.routing).resolve()), "--scratch", str(scratch),
+        ],
+        check=True,
+    )
+    return {"result_dir": str(result_dir), "run_id": manifest["run_id"]}
+
+
+def shadow_current_identities(
+    skill_dir: Path,
+    suite_path: Path,
+    catalog_dir: Path | None,
+    executors_path: Path,
+    routing_path: Path,
+) -> tuple[str, str | None, str, str, list[dict[str, Any]], str]:
+    catalog_inventory, catalog_skills = shadow_catalog(catalog_dir) if catalog_dir else ([], [])
+    suite, suite_id = shadow_suite(suite_path, catalog_skills)
+    executors = shadow_executors(executors_path)
+    return (
+        shadow_sha(shadow_inventory(skill_dir)),
+        shadow_sha(catalog_inventory) if catalog_inventory else None,
+        suite_id,
+        suite["environment_id"],
+        executors,
+        shadow_sha(shadow_routing(routing_path, executors)),
+    )
+
+
+def shadow_certify(args: argparse.Namespace) -> dict[str, Any]:
+    skill_dir = Path(args.skill_dir).resolve()
+    run_dir = Path(args.run_dir).resolve()
+    result_dir = Path(args.result_dir).resolve()
+    suite_path = Path(args.suite).resolve()
+    catalog_dir = Path(args.catalog_dir).resolve() if args.catalog_dir else None
+    executors_path = Path(args.executors).resolve()
+    routing_path = Path(args.routing).resolve()
+    sealed = load_json(run_dir / "manifest.json")
+    result_id = None
+    try:
+        current = shadow_current_identities(
+            skill_dir, suite_path, catalog_dir, executors_path, routing_path
+        )
+        expected = (
+            sealed.get("candidate_id"), sealed.get("catalog_id"), sealed.get("suite_id"),
+            sealed.get("environment_id"), sealed.get("executors"), sealed.get("routing_id"),
+        )
+        if current != expected:
+            status = "stale"
+            aggregate = None
+            reason = "candidate, catalog, suite, environment, or executor identity drift"
+        else:
+            harness = require_trusted_harness(Path(args.harness))
+            scratch = Path(args.scratch).resolve()
+            if not scratch.is_dir() or scratch.is_symlink() or any(scratch.iterdir()):
+                raise EvaluationError("shadow certification scratch directory must be real and empty")
+            subprocess.run(
+                [str(harness), "shadow-verify", "--result", str(result_dir), "--scratch", str(scratch)],
+                check=True,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            result = load_json(result_dir / "manifest.json")
+            for field in (
+                "run_id",
+                "candidate_id",
+                "catalog_id",
+                "suite_id",
+                "environment_id",
+                "harness_executable_sha256",
+                "routing_mode",
+                "routing_id",
+            ):
+                if result.get(field) != sealed.get(field):
+                    raise EvaluationError("shadow result does not bind the exact compiled candidate, catalog, suite, and environment")
+            aggregate = result.get("aggregate")
+            result_id = require_sha256(result.get("result_id"), "shadow result.result_id")
+            if not isinstance(aggregate, dict):
+                raise EvaluationError("shadow result has no aggregate")
+            status = aggregate.get("status")
+            if status not in {"pass", "regression", "inconclusive"}:
+                raise EvaluationError("shadow aggregate status is unsupported")
+            reason = None
+    except (EvaluationError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as error:
+        status = "inconclusive"
+        aggregate = None
+        reason = f"independent evidence verification failed: {error}"
+    receipt = {
+        "schema_version": SHADOW_HARNESS_VERSION,
+        "kind": "shadow_candidate_evaluation_receipt",
+        "status": status,
+        "candidate_id": sealed.get("candidate_id"),
+        "catalog_id": sealed.get("catalog_id"),
+        "suite_id": sealed.get("suite_id"),
+        "environment_id": sealed.get("environment_id"),
+        "harness_executable_sha256": sealed.get("harness_executable_sha256"),
+        "executors": sealed.get("executors"),
+        "routing_mode": sealed.get("routing_mode"),
+        "routing_id": sealed.get("routing_id"),
+        "run_id": sealed.get("run_id"),
+        "result_dir": str(result_dir),
+        "result_id": result_id,
+        "aggregate": aggregate,
+        "reason": reason,
+        "authoritative": bool(
+            status == "pass"
+            and sealed.get("routing_mode") == "catalog_plus_candidate"
+            and all(item.get("real_backend") is True for item in sealed.get("executors", []))
+        ),
+    }
+    receipt["receipt_id"] = shadow_sha(receipt)
+    path, receipt_sha = shadow_write_receipt(receipt)
+    return {
+        "status": status,
+        "authoritative": receipt["authoritative"],
+        "receipt": str(path),
+        "receipt_sha256": receipt_sha,
+        "candidate_id": receipt["candidate_id"],
+        "catalog_id": receipt["catalog_id"],
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
@@ -3260,6 +3793,31 @@ def build_parser() -> argparse.ArgumentParser:
     v2_waiver_validate_parser.add_argument("--waiver", required=True)
     v2_waiver_validate_parser.add_argument("--suite")
     v2_waiver_validate_parser.add_argument("--policy")
+    shadow_compile_parser = commands.add_parser("shadow-compile")
+    shadow_compile_parser.add_argument("skill_dir")
+    shadow_compile_parser.add_argument("--suite", required=True)
+    shadow_compile_parser.add_argument("--catalog-dir")
+    shadow_compile_parser.add_argument("--executors", required=True)
+    shadow_compile_parser.add_argument("--routing", required=True)
+    shadow_compile_parser.add_argument("--run-dir", required=True)
+    shadow_compile_parser.add_argument("--nonce", required=True)
+    shadow_compile_parser.add_argument("--harness", required=True)
+    shadow_execute_parser = commands.add_parser("shadow-execute")
+    shadow_execute_parser.add_argument("--run-dir", required=True)
+    shadow_execute_parser.add_argument("--result-dir", required=True)
+    shadow_execute_parser.add_argument("--routing", required=True)
+    shadow_execute_parser.add_argument("--scratch", required=True)
+    shadow_execute_parser.add_argument("--harness", required=True)
+    shadow_certify_parser = commands.add_parser("shadow-certify")
+    shadow_certify_parser.add_argument("skill_dir")
+    shadow_certify_parser.add_argument("--suite", required=True)
+    shadow_certify_parser.add_argument("--catalog-dir")
+    shadow_certify_parser.add_argument("--executors", required=True)
+    shadow_certify_parser.add_argument("--routing", required=True)
+    shadow_certify_parser.add_argument("--run-dir", required=True)
+    shadow_certify_parser.add_argument("--result-dir", required=True)
+    shadow_certify_parser.add_argument("--scratch", required=True)
+    shadow_certify_parser.add_argument("--harness", required=True)
     return parser
 
 
@@ -3283,6 +3841,9 @@ def main() -> int:
             "v2-authority-validate": v2_authority_validate,
             "v2-waive": v2_waive,
             "v2-waiver-validate": v2_waiver_validate,
+            "shadow-compile": shadow_compile,
+            "shadow-execute": shadow_execute,
+            "shadow-certify": shadow_certify,
         }[args.command](args)
         print(json.dumps(result, sort_keys=True))
         return 0

@@ -21,6 +21,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(sys.argv[1]).resolve()
@@ -966,9 +967,53 @@ elif sys.argv[1] == "run":
             allow_autonomous_skill_creation=False,
             now=lambda: self.clock,
         )
-        result = core.review(
-            "fake", source, "fake:one", [("exec", executor)]
-        )
+        lock_environment = {
+            **os.environ,
+            "SKILLS_STATE_DIR": str(self.paths.state),
+            "SKILLS_NOW_EPOCH": str(self.clock),
+        }
+        acquired = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "daemon-lock.py"),
+                "acquire",
+                "--mode",
+                "session",
+                "--owner",
+                "test-shadow-candidate",
+            ],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            env=lock_environment,
+        ).stdout.strip()
+        prior_token = os.environ.get("SKILLS_LOCK_TOKEN")
+        prior_state = os.environ.get("SKILLS_STATE_DIR")
+        os.environ["SKILLS_LOCK_TOKEN"] = acquired
+        os.environ["SKILLS_STATE_DIR"] = str(self.paths.state)
+        try:
+            result = core.review(
+                "fake", source, "fake:one", [("exec", executor)]
+            )
+        finally:
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_DIR / "daemon-lock.py"),
+                    "release",
+                    acquired,
+                ],
+                check=True,
+                env=lock_environment,
+            )
+            if prior_token is None:
+                os.environ.pop("SKILLS_LOCK_TOKEN", None)
+            else:
+                os.environ["SKILLS_LOCK_TOKEN"] = prior_token
+            if prior_state is None:
+                os.environ.pop("SKILLS_STATE_DIR", None)
+            else:
+                os.environ["SKILLS_STATE_DIR"] = prior_state
         self.assertEqual(result["status"], "deferred")
         self.assertEqual(result["terminal_route"], "discard")
         self.assertFalse(result["artifact_mutated"])
@@ -997,6 +1042,171 @@ elif sys.argv[1] == "run":
         self.assertEqual(
             ledger["policy_deferred"]["skill_name"], "deferred-procedure"
         )
+        shadow = ledger["policy_deferred"]["shadow_candidate"]
+        self.assertTrue(shadow["shadow_only"])
+        self.assertEqual(shadow["state"], "collecting")
+        self.assertEqual(shadow["recommendation"], "collecting")
+        lifecycle_id = shadow["lifecycle_id"]
+        record_path = (
+            self.paths.state
+            / "skill-review"
+            / "candidates"
+            / "v1"
+            / "records"
+            / f"{lifecycle_id}.json"
+        )
+        record = json.loads(record_path.read_text())
+        self.assertEqual(record["state"], "collecting")
+        self.assertEqual(record["evidence"][0]["independence"], "unverified")
+        package = (
+            self.paths.data
+            / "candidates"
+            / "v1"
+            / "packages"
+            / lifecycle_id
+            / shadow["candidate_id"]
+        )
+        self.assertEqual(
+            (package / "SKILL.md").read_text(),
+            (
+                "---\nname: deferred-procedure\n"
+                "description: Run the deferred fixture procedure\n---\n"
+                "# Deferred procedure\n"
+            ),
+        )
+
+    def test_shadow_candidate_recurrence_accepts_non_ascii_text(self) -> None:
+        core = DreamingRuntime(
+            self.paths,
+            set(),
+            allow_autonomous_skill_creation=False,
+            now=lambda: self.clock,
+        )
+        result = {
+            "summary": "A reusable procedure — with punctuation — was demonstrated",
+            "artifact": {
+                "operation": "create",
+                "skill_name": "unicode-procedure",
+                "skill_markdown": (
+                    "---\nname: unicode-procedure\n"
+                    "description: Run the reusable procedure — carefully\n---\n"
+                    "# Unicode procedure\n"
+                ),
+                "support_files": [],
+            },
+        }
+        lock_environment = {
+            **os.environ,
+            "SKILLS_STATE_DIR": str(self.paths.state),
+            "SKILLS_NOW_EPOCH": str(self.clock),
+        }
+        token = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "daemon-lock.py"),
+                "acquire",
+                "--mode",
+                "session",
+                "--owner",
+                "test-unicode-shadow-candidate",
+            ],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            env=lock_environment,
+        ).stdout.strip()
+        prior_token = os.environ.get("SKILLS_LOCK_TOKEN")
+        prior_state = os.environ.get("SKILLS_STATE_DIR")
+        os.environ["SKILLS_LOCK_TOKEN"] = token
+        os.environ["SKILLS_STATE_DIR"] = str(self.paths.state)
+        try:
+            first = core._collect_shadow_candidate(
+                result,
+                {
+                    "qualified_session_id": "session-one",
+                    "updated_at": datetime.fromtimestamp(
+                        self.clock - 10, timezone.utc
+                    ).isoformat(),
+                },
+            )
+            second = core._collect_shadow_candidate(
+                result,
+                {
+                    "qualified_session_id": "session-two",
+                    "updated_at": datetime.fromtimestamp(
+                        self.clock - 5, timezone.utc
+                    ).isoformat(),
+                },
+            )
+        finally:
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_DIR / "daemon-lock.py"),
+                    "release",
+                    token,
+                ],
+                check=True,
+                env=lock_environment,
+            )
+            if prior_token is None:
+                os.environ.pop("SKILLS_LOCK_TOKEN", None)
+            else:
+                os.environ["SKILLS_LOCK_TOKEN"] = prior_token
+            if prior_state is None:
+                os.environ.pop("SKILLS_STATE_DIR", None)
+            else:
+                os.environ["SKILLS_STATE_DIR"] = prior_state
+        self.assertEqual(first["lifecycle_id"], second["lifecycle_id"])
+        record = json.loads(
+            (
+                self.paths.state
+                / "skill-review"
+                / "candidates"
+                / "v1"
+                / "records"
+                / f"{first['lifecycle_id']}.json"
+            ).read_text()
+        )
+        self.assertEqual(len(record["evidence"]), 2)
+
+    def test_shadow_candidate_root_cannot_overlap_skill_discovery(self) -> None:
+        paths = RuntimePaths(
+            state=self.paths.state,
+            data=self.paths.data,
+            skills=self.paths.data / "candidates",
+        )
+        core = DreamingRuntime(
+            paths,
+            set(),
+            allow_autonomous_skill_creation=False,
+            now=lambda: self.clock,
+        )
+        with self.assertRaisesRegex(
+            RuntimeFailure,
+            "candidate storage must be isolated from the skill discovery root",
+        ):
+            core._collect_shadow_candidate(
+                {
+                    "summary": "A reusable procedure was demonstrated",
+                    "artifact": {
+                        "operation": "create",
+                        "skill_name": "overlap-procedure",
+                        "skill_markdown": (
+                            "---\nname: overlap-procedure\n"
+                            "description: Run the overlap procedure\n---\n"
+                            "# Overlap procedure\n"
+                        ),
+                        "support_files": [],
+                    },
+                },
+                {
+                    "qualified_session_id": "session-overlap",
+                    "updated_at": datetime.fromtimestamp(
+                        self.clock - 1, timezone.utc
+                    ).isoformat(),
+                },
+            )
 
     def test_historical_artifacts_are_retained_but_never_mutate(self) -> None:
         self.clock = 30 * 24 * 60 * 60 + 100

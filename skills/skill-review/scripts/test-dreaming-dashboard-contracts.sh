@@ -15,9 +15,12 @@ import hashlib
 import importlib.util
 import json
 import os
+import re
 import subprocess
 import sys
+import time
 import unicodedata
+import uuid
 from pathlib import Path
 
 repo = Path(sys.argv[1])
@@ -33,6 +36,7 @@ def load(name, relative):
 adapter = load("dreaming_vendor_adapter", "skills/skill-review/scripts/dreaming-vendor-adapter.py")
 envelope = load("evidence_envelope", "skills/skill-review/scripts/evidence-envelope.py")
 evaluation = load("skill_evaluation", "skills/skill-review/scripts/skill-evaluation.py")
+lifecycle = load("candidate_lifecycle", "skills/skill-review/scripts/candidate-lifecycle.py")
 dashboard = load("dreaming_dashboard", "skills/skill-review/scripts/dreaming-dashboard.py")
 
 passes = 0
@@ -368,6 +372,558 @@ check(
     unborn_service._candidate_history_head is not None
     and len(unborn_service._candidate_history(unborn_skill)) == 1,
     "evaluation history recovers after the first learned-skill commit",
+)
+
+candidate_state = root / "candidate-state"
+candidate_data = root / "candidate-data"
+candidate_records = candidate_state / "skill-review/candidates/v1/records"
+candidate_packages = candidate_data / "candidates/v1/packages"
+os.environ["DREAMING_STATE_ROOT"] = str(candidate_state)
+os.environ["DREAMING_DATA_ROOT"] = str(candidate_data)
+now = int(time.time())
+os.environ["DREAMING_NOW_EPOCH"] = str(now)
+os.environ["SKILLS_NOW_EPOCH"] = str(now)
+
+def stamp(offset_days):
+    return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(now + int(offset_days * 86400)))
+
+candidate_procedure = lifecycle.validate_procedure({
+    "schema_version": 1,
+    "trigger": "A bounded recurring trigger.",
+    "outcome": "A user-observable stopping condition.",
+    "actions": ["Inspect the bounded input", "Apply the deterministic procedure"],
+    "exclusions": ["Do not cover neighbouring unrelated work."],
+    "match_fingerprint": "sha256:" + "a" * 64,
+})
+
+def candidate_package(label):
+    source = root / f"candidate-package-{label}"
+    (source / "references").mkdir(parents=True, exist_ok=True)
+    (source / "SKILL.md").write_text(
+        f"---\nname: lifecycle-fixture\ndescription: Deterministic candidate package.\n---\n\n# Fixture {label}\n",
+        encoding="utf-8",
+    )
+    (source / "references/proof.txt").write_text(f"revision={label}\n", encoding="utf-8")
+    return source
+
+def candidate_observation(task, session, offset_days, independence="verified"):
+    return lifecycle.validate_observation(
+        {
+            "task_key": task,
+            "session_id": session,
+            "observed_at": stamp(offset_days),
+            "independence": independence,
+            "summary": "A deterministic observation.",
+            "procedure_fingerprint": candidate_procedure["match_fingerprint"],
+        },
+        candidate_procedure,
+    )
+
+def candidate_record(label, observations):
+    identity = str(uuid.uuid4())
+    staged, files, _ = lifecycle.make_immutable_package(identity, candidate_package(label))
+    record = lifecycle.new_record(
+        identity,
+        "lifecycle-fixture",
+        candidate_procedure,
+        observations[0],
+        staged,
+        files,
+        "different",
+        "new-procedure-observed",
+        None,
+        [],
+        [],
+    )
+    for observation in observations[1:]:
+        record["evidence"].append(observation)
+        lifecycle.append_decision(
+            record, "same", "same-procedure-observed", None, [observation["evidence_id"]]
+        )
+        record["lifecycle"]["last_supported_at"] = observation["observed_at"]
+    return identity, record
+
+collecting_id, collecting = candidate_record(
+    "collecting", [candidate_observation("task:collect-1", "copilot:candidate-1", -2)]
+)
+lifecycle.append_evaluation(collecting, lifecycle.recurrence(collecting))
+collecting = lifecycle.persist(collecting)
+
+ready_id, ready = candidate_record(
+    "ready",
+    [
+        candidate_observation("task:ready-1", "copilot:candidate-2", -3),
+        candidate_observation("task:ready-2", "claude:candidate-3", -1),
+    ],
+)
+ready_decision = lifecycle.recurrence(ready)
+lifecycle.append_evaluation(ready, ready_decision)
+lifecycle.append_transition(
+    ready, "ready_for_draft", "recurrence-qualified", ready_decision["evidence_ids"], []
+)
+ready = lifecycle.persist(ready)
+
+evaluating_id, evaluating = candidate_record(
+    "evaluating",
+    [
+        candidate_observation("task:evaluating-1", "copilot:candidate-4", -4),
+        candidate_observation("task:evaluating-2", "codex:candidate-5", -2),
+    ],
+)
+evaluating_decision = lifecycle.recurrence(evaluating)
+lifecycle.append_evaluation(evaluating, evaluating_decision)
+lifecycle.append_transition(
+    evaluating,
+    "ready_for_draft",
+    "recurrence-qualified",
+    evaluating_decision["evidence_ids"],
+    [],
+)
+lifecycle.append_transition(
+    evaluating, "evaluating", "candidate-staged-for-evaluation", [], []
+)
+evaluating = lifecycle.persist(evaluating)
+
+expired_id, expired = candidate_record(
+    "expired", [candidate_observation("task:expired-1", "copilot:candidate-6", -60)]
+)
+lifecycle.append_evaluation(expired, lifecycle.recurrence(expired))
+lifecycle.append_transition(expired, "expired", "recurrence-window-elapsed", [], [])
+expired = lifecycle.persist(expired)
+
+rejected_id, rejected = candidate_record(
+    "rejected", [candidate_observation("task:rejected-1", "copilot:candidate-7", -5)]
+)
+lifecycle.append_transition(rejected, "rejected", "policy-rejected-procedure", [], [])
+rejected = lifecycle.persist(rejected)
+
+absorbed_id, absorbed = candidate_record(
+    "absorbed", [candidate_observation("task:absorbed-1", "copilot:candidate-8", -6)]
+)
+lifecycle.append_decision(absorbed, "uncertain", "uncertain-procedure-match", None, [])
+lifecycle.append_decision(
+    absorbed, "duplicate", "duplicate-of-existing-lifecycle", ready_id, []
+)
+lifecycle.append_decision(
+    absorbed, "supersedes", "supersedes-existing-lifecycle", ready_id, []
+)
+lifecycle.append_transition(
+    absorbed,
+    "absorbed",
+    "absorbed-into-existing-lifecycle",
+    [],
+    [],
+    related_lifecycle_id=ready_id,
+)
+absorbed = lifecycle.persist(absorbed)
+
+candidate_paths = dashboard.DashboardPaths(
+    state,
+    control,
+    orchestrator,
+    data,
+    skills,
+    repo,
+    assets,
+    token,
+    candidate_records,
+    candidate_packages,
+)
+candidate_service = dashboard.DashboardData(candidate_paths)
+rows, _ = candidate_service.candidate_rows()
+by_id = {item["lifecycle_id"]: item for item in rows}
+check(
+    len(rows) == 6
+    and all(item["status"] == "shadow" for item in rows)
+    and {item["state"] for item in rows}
+    == {"collecting", "ready_for_draft", "evaluating", "expired", "rejected", "absorbed"},
+    "every declared shadow candidate state renders as its own truthful state",
+)
+check(
+    all(
+        item["shadow_only"] is True
+        and item["active"] is False
+        and item["published"] is False
+        and item["discoverable"] is False
+        and item["authority"] == "shadow-only"
+        and item["publication_status"] == "shadow_only"
+        and "shadow-only, not active" in item["state_label"]
+        for item in rows
+    ),
+    "every candidate row is conspicuously labeled shadow-only, not active, not published",
+)
+ready_row = by_id[ready_id]
+check(
+    ready_row["evidence"]
+    == {
+        "total": 2,
+        "verified": 2,
+        "unverified": 0,
+        "distinct_tasks": 2,
+        "distinct_sessions": 2,
+    }
+    and ready_row["freshness"]["fresh_evidence"] is True
+    and ready_row["freshness"]["past_expiry"] is False
+    and ready_row["freshness"]["newest_verified_evidence_at"] == stamp(-1)
+    and ready_row["state_reason"] == "recurrence-qualified",
+    "ready candidates report exact recurrence evidence counts, freshness, and reason",
+)
+expired_row = by_id[expired_id]
+check(
+    expired_row["freshness"]["fresh_evidence"] is False
+    and expired_row["freshness"]["past_expiry"] is True
+    and expired_row["freshness"]["days_until_expiry"] == 0
+    and expired_row["state_reason"] == "recurrence-window-elapsed"
+    and by_id[rejected_id]["state_reason"] == "policy-rejected-procedure"
+    and by_id[evaluating_id]["state_reason"] == "candidate-staged-for-evaluation",
+    "expired, rejected, and evaluating candidates report truthful reasons and freshness",
+)
+collecting_stored = json.loads(lifecycle.record_path(collecting_id).read_text())
+collecting_row = by_id[collecting_id]
+check(
+    collecting_row["recommendation"]["value"] == "collecting"
+    and collecting_row["recommendation"]["reasons"]
+    == collecting_stored["evaluation"]["history"][-1]["reasons"]
+    and "fewer-than-two-verified-evidence" in collecting_row["recommendation"]["reasons"]
+    and collecting_row["recommendation"]["authorizes_publication"] is False
+    and collecting_row["recommendation"]["authorizes_activation"] is False
+    and collecting_row["evaluation"]["status"] == "not_ready",
+    "collecting candidates preserve the exact shadow recommendation and its reasons",
+)
+gates = {item["name"]: item for item in ready_row["evaluation"]["gates"]}
+check(
+    ready_row["recommendation"]["value"] == "ready_for_draft"
+    and ready_row["recommendation"]["reasons"] == []
+    and ready_row["evaluation"]["composite_score"] is None
+    and gates["recurrence"]["status"] == "shadow_ready"
+    and gates["routing"]["status"] == "unavailable"
+    and gates["task_value"]["status"] == "unavailable"
+    and gates["task_value"]["reasons"] == ["no-task-value-evidence-recorded"],
+    "candidate evaluation keeps separate gate results and never reports a composite pass",
+)
+ready_package = candidate_packages / ready_id / ready["current_candidate_id"]
+owner_files = lifecycle.package_inventory(ready_package, "immutable package")
+check(
+    ready_row["current_candidate_id"] == lifecycle.candidate_identity(owner_files)
+    and candidate_service._candidate_package_files(ready_package) == owner_files
+    and ready_row["candidate_revision"]["package_path"]
+    == f"candidates/v1/packages/{ready_id}/{ready_row['current_candidate_id']}"
+    and ready_row["candidate_revision"]["file_count"] == len(owner_files),
+    "dashboard candidate identity exactly matches the lifecycle owner package inventory",
+)
+absorbed_row = by_id[absorbed_id]
+check(
+    absorbed_row["decisions"]["counts"]
+    == {
+        "absorbs": 1,
+        "different": 1,
+        "duplicate": 1,
+        "same": 0,
+        "supersedes": 1,
+        "uncertain": 1,
+    }
+    and absorbed_row["absorbed_into"] == ready_id
+    and absorbed_row["blockers"]["present"] is True
+    and absorbed_row["blockers"]["reasons"]
+    == ["uncertain-match-blocker", "covering-lifecycle-blocker"]
+    and absorbed_row["blockers"]["covering_lifecycle_ids"] == [ready_id],
+    "same, duplicate, uncertain, supersession, and absorption decisions stay separate from state",
+)
+absorbed_detail = candidate_service.candidate_detail(absorbed_id)
+check(
+    [item["outcome"] for item in absorbed_detail["match_decisions"]]
+    == ["different", "uncertain", "duplicate", "supersedes", "absorbs"]
+    and [item["reason"] for item in absorbed_detail["match_decisions"]][1]
+    == "uncertain-procedure-match"
+    and absorbed_detail["transition_history"][-1]["to_state"] == "absorbed"
+    and absorbed_detail["transition_history"][-1]["reason"]
+    == "absorbed-into-existing-lifecycle"
+    and all(item["shadow_only"] is True for item in absorbed_detail["match_decisions"]),
+    "candidate detail preserves append-only decision and transition history with reasons",
+)
+drifted = copy.deepcopy(ready)
+staged_two, files_two, _ = lifecycle.make_immutable_package(
+    ready_id, candidate_package("ready-revision-two")
+)
+drifted["candidate_revisions"].append(
+    {
+        "candidate_id": staged_two,
+        "package_path": lifecycle.package_reference(ready_id, staged_two),
+        "files": files_two,
+        "staged_at": stamp(0),
+    }
+)
+drifted["current_candidate_id"] = staged_two
+drifted = lifecycle.persist(drifted)
+drift_row = {
+    item["lifecycle_id"]: item for item in candidate_service.candidate_rows()[0]
+}[ready_id]
+check(
+    drift_row["current_candidate_id"] == staged_two
+    and drift_row["candidate_revision_count"] == 2
+    and drift_row["recommendation"]["stale"] is True
+    and drift_row["recommendation"]["candidate_id"] == ready["current_candidate_id"],
+    "a new exact candidate revision preserves identity and marks the recommendation stale",
+)
+
+def tamper(label, mutate):
+    identity, record = candidate_record(
+        label, [candidate_observation(f"task:{label}", f"copilot:{label}", -1)]
+    )
+    lifecycle.append_evaluation(record, lifecycle.recurrence(record))
+    record = lifecycle.persist(record)
+    path = lifecycle.record_path(identity)
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    if mutate(identity, payload) is not False:
+        path.write_text(json.dumps(payload), encoding="utf-8")
+    return identity, payload
+
+def set_state(_identity, payload):
+    payload["state"] = "invented_state"
+
+def set_admitted(_identity, payload):
+    payload["state"] = "admitted"
+
+def set_published(_identity, payload):
+    payload["publication"] = {"status": "published"}
+
+def rewrite_evidence(_identity, payload):
+    payload["evidence"][0]["summary"] = "A fabricated observation."
+
+def rewrite_recommendation(_identity, payload):
+    payload["evaluation"]["history"][-1]["recommendation"] = "ready_for_draft"
+
+def drop_package(identity, payload):
+    lifecycle.remove_created_package(identity, payload["current_candidate_id"])
+    return False
+
+def extend_package(identity, payload):
+    directory = candidate_packages / identity / payload["current_candidate_id"]
+    os.chmod(directory, 0o755)
+    (directory / "smuggled.txt").write_text("smuggled\n", encoding="utf-8")
+    os.chmod(directory, 0o555)
+    return False
+
+unknown_state_id, unknown_state_payload = tamper("unknown-state", set_state)
+admitted_id, admitted_payload = tamper("admitted-state", set_admitted)
+published_id, published_payload = tamper("published-state", set_published)
+evidence_id, evidence_payload = tamper("evidence-tamper", rewrite_evidence)
+recommendation_id, recommendation_payload = tamper(
+    "recommendation-tamper", rewrite_recommendation
+)
+missing_package_id, _ = tamper("missing-package", drop_package)
+extra_package_id, _ = tamper("extra-package", extend_package)
+misfiled_id = str(uuid.uuid4())
+(candidate_records / f"{misfiled_id}.json").write_text(
+    lifecycle.record_path(collecting_id).read_text(encoding="utf-8"), encoding="utf-8"
+)
+malformed_id = str(uuid.uuid4())
+(candidate_records / f"{malformed_id}.json").write_text("{malformed", encoding="utf-8")
+
+owner_rejections = 0
+for tampered in (
+    unknown_state_payload,
+    admitted_payload,
+    published_payload,
+    evidence_payload,
+):
+    try:
+        lifecycle.validate_record(copy.deepcopy(tampered), verify_packages=False)
+    except lifecycle.LifecycleError:
+        owner_rejections += 1
+check(
+    owner_rejections == 4,
+    "the candidate lifecycle owner independently rejects every tampered fixture it owns",
+)
+check(
+    lifecycle.validate_record(copy.deepcopy(recommendation_payload), verify_packages=False)
+    == recommendation_payload,
+    "a forged recommendation survives the owner schema check alone",
+)
+
+rows, _ = candidate_service.candidate_rows()
+invalid_rows = {
+    item.get("source"): item for item in rows if item["status"] == "invalid"
+}
+expectations = (
+    (f"{unknown_state_id}.json", "record_state_not_shadow"),
+    (f"{admitted_id}.json", "record_state_not_shadow"),
+    (f"{published_id}.json", "record_publication_not_shadow"),
+    (f"{evidence_id}.json", "evidence_identity_mismatch"),
+    (f"{recommendation_id}.json", "evaluation_identity_mismatch"),
+    (f"{missing_package_id}.json", "package_unavailable"),
+    (f"{extra_package_id}.json", "package_inventory_mismatch"),
+    (f"{misfiled_id}.json", "record_identity_mismatch"),
+    (f"{malformed_id}.json", "record_unreadable"),
+)
+for source, reason in expectations:
+    row = invalid_rows.get(source, {})
+    check(
+        row.get("status") == "invalid"
+        and row.get("reasons") == [reason]
+        and row.get("state") is None
+        and row.get("active") is False
+        and row.get("published") is False
+        and row.get("current_candidate_id") is None
+        and row.get("label") == dashboard.CANDIDATE_INVALID_LABEL,
+        f"untrustworthy candidate data is reported invalid, never active: {reason}",
+    )
+summary = candidate_service.candidate_summary()
+check(
+    summary["valid"] == 6
+    and summary["invalid"] == len(expectations)
+    and summary["total"] == 6 + len(expectations)
+    and summary["states"]
+    == {
+        "absorbed": 1,
+        "collecting": 1,
+        "evaluating": 1,
+        "expired": 1,
+        "ready_for_draft": 1,
+        "rejected": 1,
+    }
+    and summary["recommendations"] == {"ready_for_draft": 2, "collecting": 2, "none": 2}
+    and summary["blocked"] == 1
+    and summary["past_expiry"] == 1
+    and summary["active"] is False
+    and summary["published"] is False,
+    "the candidate summary separates valid shadow states from invalid records",
+)
+try:
+    candidate_service.candidate_detail(unknown_state_id)
+    raise AssertionError("invalid candidate detail rendered")
+except dashboard.DashboardError as error:
+    check(
+        error.status == 422
+        and error.code == "candidate_invalid"
+        and error.sources == ["record_state_not_shadow"],
+        "candidate detail fails closed on an unknown or production-misrepresented state",
+    )
+for absent in ("not-a-uuid", "../queue", str(uuid.uuid4()), collecting_id.upper()):
+    try:
+        candidate_service.candidate_detail(absent)
+        raise AssertionError("absent candidate detail rendered")
+    except dashboard.DashboardError as error:
+        check(
+            error.status == 404 and error.code == "candidate_not_found",
+            f"unknown candidate reference is not found: {absent[:12]}",
+        )
+
+empty_service = dashboard.DashboardData(
+    dashboard.DashboardPaths(
+        state,
+        control,
+        orchestrator,
+        data,
+        skills,
+        repo,
+        assets,
+        token,
+        root / "absent-candidate-records",
+        root / "absent-candidate-packages",
+    )
+)
+empty_summary = empty_service.candidate_summary()
+check(
+    empty_service.candidate_rows()[0] == []
+    and empty_service.candidates({})["items"] == []
+    and empty_summary["records_root_present"] is False
+    and empty_summary["total"] == 0
+    and empty_summary["invalid"] == 0
+    and empty_summary["shadow_only"] is True,
+    "a missing candidate root is a healthy empty state rather than an inferred failure",
+)
+file_root = root / "candidate-records-file"
+file_root.write_text("{}", encoding="utf-8")
+file_service = dashboard.DashboardData(
+    dashboard.DashboardPaths(
+        state,
+        control,
+        orchestrator,
+        data,
+        skills,
+        repo,
+        assets,
+        token,
+        file_root,
+        candidate_packages,
+    )
+)
+try:
+    file_service.candidate_rows()
+    raise AssertionError("non-directory candidate root accepted")
+except dashboard.DashboardError as error:
+    check(
+        error.status == 503 and error.code == "candidate_state_invalid",
+        "a candidate record root that is not a directory fails closed",
+    )
+
+exposed_keys = set()
+exposed_labels = []
+label_fields = {
+    "label",
+    "notice",
+    "state_label",
+    "status_label",
+    "recommendation_label",
+    "from_state_label",
+    "to_state_label",
+    "authority",
+}
+
+def walk_candidate(value):
+    if isinstance(value, dict):
+        for key, item in value.items():
+            exposed_keys.add(key)
+            if key == "state_labels" and isinstance(item, dict):
+                exposed_labels.extend(item.values())
+            elif key in label_fields and isinstance(item, str):
+                exposed_labels.append(item)
+            walk_candidate(item)
+    elif isinstance(value, list):
+        for item in value:
+            walk_candidate(item)
+
+walk_candidate(
+    {
+        "rows": rows,
+        "detail": candidate_service.candidate_detail(ready_id),
+        "summary": summary,
+        "page": candidate_service.candidates({}),
+    }
+)
+activation = re.compile(
+    r"\b(activate|activated|activation|active|publish|publishes|published|promote|"
+    r"promoted|admit|admitted|install|installed|enable|enabled)\b",
+    re.IGNORECASE,
+)
+check(
+    not exposed_keys
+    & {
+        "activate",
+        "approve",
+        "buttons",
+        "commands",
+        "controls",
+        "endpoints",
+        "form",
+        "mutations",
+        "promote",
+        "publish",
+        "transition_to",
+        "write",
+    },
+    "candidate surfaces expose no production mutation control",
+)
+check(
+    len(exposed_labels) >= 20
+    and all(
+        not activation.search(item)
+        or "shadow" in item.casefold()
+        or "not " in item.casefold()
+        for item in exposed_labels
+    ),
+    "candidate labels never claim active, published, or admitted status",
 )
 
 print(f"== result: {passes} checks passed ==")

@@ -34,7 +34,7 @@ p.subtitle { color: var(--muted); margin: 8px 0 22px; font-size: 14px; }
 .warn { color: #f8dda4; border-color: #594922; background: #2a2212; }
 .bad { color: #ffc1c8; border-color: #6b2932; background: #2d1218; }
 .grid { display: grid; gap: 15px; }
-.metrics { grid-template-columns: repeat(4,minmax(150px,1fr)); margin: 22px 0 15px; }
+.metrics { grid-template-columns: repeat(auto-fit,minmax(150px,1fr)); margin: 22px 0 15px; }
 .charts { grid-template-columns: repeat(2,minmax(0,1fr)); }
 .split { grid-template-columns: minmax(0,1.5fr) minmax(280px,.8fr); }
 .card, .panel { border: 1px solid var(--line); border-radius: 13px; background: linear-gradient(180deg,rgba(22,28,38,.97),rgba(15,19,27,.97)); box-shadow: 0 15px 45px #0002; }
@@ -85,6 +85,13 @@ button.link:hover, a.link:hover { color: var(--blue); }
 .definition dd { overflow-wrap: anywhere; }
 .notice { padding: 14px 16px; border: 1px solid #315071; border-radius: 9px; background: #101d2d; color: #bfd8ff; margin-bottom: 18px; }
 .notice.error { border-color: #6b2932; background: #2d1218; color: #ffc1c8; }
+.authority-banner { border-color: #735c20; background: #2a2313; color: #ffe3a3; }
+.authority-banner strong { display: block; margin-bottom: 5px; color: #fff0c7; }
+.mono { font-family: ui-monospace,SFMono-Regular,Menlo,monospace; font-size: 11px; overflow-wrap: anywhere; }
+.gate-grid { display: grid; grid-template-columns: repeat(3,minmax(0,1fr)); gap: 10px; }
+.gate { padding: 13px; border: 1px solid var(--line); border-radius: 9px; background: #10151d; }
+.gate strong { display: block; margin-bottom: 8px; font-size: 12px; }
+.gate p { margin: 8px 0 0; color: var(--muted); font-size: 11px; line-height: 1.45; }
 .empty { color: var(--muted); padding: 28px 4px; text-align: center; }
 .muted { color: var(--muted); }
 .back { margin-bottom: 16px; }
@@ -98,5 +105,5 @@ button.link:hover, a.link:hover { color: var(--blue); }
   nav { grid-template-columns: repeat(2,1fr); }
   .runtime { position: static; margin-top: 16px; }
   main { padding: 24px 18px; }
-  .metrics, .charts, .split { grid-template-columns: 1fr; }
+  .metrics, .charts, .split, .gate-grid { grid-template-columns: 1fr; }
 }

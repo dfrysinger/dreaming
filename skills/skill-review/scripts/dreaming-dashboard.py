@@ -42,6 +42,146 @@ EVALUATION_SIDECARS = {
     ".skill-evaluation-policy.json",
     ".pinned",
 }
+CANDIDATE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+CANDIDATE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{2,63}$")
+CANDIDATE_REASON_RE = re.compile(r"^[a-z][a-z0-9_.:-]{2,127}$")
+CANDIDATE_UUID_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"
+)
+MAX_CANDIDATE_RECORD_BYTES = 1_000_000
+MAX_CANDIDATE_PACKAGE_FILES = 512
+MAX_CANDIDATE_PACKAGE_BYTES = 8 * 1024 * 1024
+CANDIDATE_FRESH_SECONDS = 30 * 86400
+CANDIDATE_AUTHORITY = "shadow-only"
+CANDIDATE_LABEL = "Shadow-only candidate — not an active skill, not published"
+CANDIDATE_NOTICE = (
+    "Shadow-only candidate record. It is not an active skill, is not published to any "
+    "target, and is not visible to any CLI. Nothing here can be activated from this "
+    "read-only dashboard."
+)
+CANDIDATE_INVALID_LABEL = (
+    "Shadow-only candidate record, unavailable or invalid — not an active skill, "
+    "not published"
+)
+CANDIDATE_RECORD_KEYS = {
+    "schema_version",
+    "lifecycle_id",
+    "state",
+    "authority",
+    "proposed_name",
+    "procedure",
+    "evidence",
+    "candidate_revisions",
+    "current_candidate_id",
+    "evaluation",
+    "publication",
+    "lifecycle",
+    "aliases",
+    "absorbed_into",
+    "match_decisions",
+    "blockers",
+    "record_version",
+}
+CANDIDATE_PROCEDURE_KEYS = {
+    "schema_version",
+    "trigger",
+    "outcome",
+    "actions",
+    "exclusions",
+    "match_fingerprint",
+}
+CANDIDATE_EVIDENCE_KEYS = {
+    "evidence_id",
+    "task_key",
+    "session_id",
+    "observed_at",
+    "independence",
+    "summary",
+    "procedure_fingerprint",
+}
+CANDIDATE_REVISION_KEYS = {"candidate_id", "package_path", "files", "staged_at"}
+CANDIDATE_FILE_KEYS = {"path", "sha256", "size"}
+CANDIDATE_LIFECYCLE_KEYS = {
+    "created_at",
+    "last_supported_at",
+    "expires_at",
+    "transition_history",
+}
+CANDIDATE_TRANSITION_KEYS = {
+    "transition_id",
+    "from_state",
+    "to_state",
+    "at",
+    "reason",
+    "authorizing_evidence_ids",
+    "receipt_ids",
+}
+CANDIDATE_EVALUATION_KEYS = {"status", "last_evaluated_at", "history"}
+CANDIDATE_EVALUATION_HISTORY_KEYS = {
+    "evaluation_id",
+    "evaluated_at",
+    "recommendation",
+    "reasons",
+    "candidate_id",
+    "shadow_only",
+}
+CANDIDATE_DECISION_KEYS = {
+    "decision_id",
+    "at",
+    "outcome",
+    "reason",
+    "related_lifecycle_id",
+    "evidence_ids",
+    "shadow_only",
+}
+CANDIDATE_BLOCKER_KEYS = {"covering_lifecycle_ids", "tombstone_ids", "uncertain"}
+CANDIDATE_STATE_LABELS = {
+    "collecting": "Collecting evidence (shadow-only, not active)",
+    "ready_for_draft": "Ready for draft (shadow-only, not active)",
+    "evaluating": "Evaluating (shadow-only, not active)",
+    "expired": "Expired (shadow-only, not active)",
+    "rejected": "Rejected (shadow-only, not active)",
+    "absorbed": "Absorbed (shadow-only, not active)",
+}
+CANDIDATE_INITIAL_STATES = {"collecting"}
+CANDIDATE_TRANSITIONS = {
+    "collecting": {"ready_for_draft", "expired", "rejected", "absorbed"},
+    "ready_for_draft": {"collecting", "evaluating", "expired", "rejected", "absorbed"},
+    "evaluating": {"collecting", "ready_for_draft", "expired", "rejected", "absorbed"},
+    "expired": {"collecting", "rejected", "absorbed"},
+    "rejected": {"collecting", "absorbed"},
+    "absorbed": set(),
+}
+CANDIDATE_MATCH_OUTCOMES = {
+    "same",
+    "different",
+    "uncertain",
+    "duplicate",
+    "supersedes",
+    "absorbs",
+}
+CANDIDATE_EVALUATION_LABELS = {
+    "not_evaluated": "Recurrence gate not evaluated",
+    "shadow_ready": "Recurrence gate passed in shadow (no publication authority)",
+    "not_ready": "Recurrence gate not passed",
+}
+CANDIDATE_RECOMMENDATION_LABELS = {
+    "ready_for_draft": (
+        "Shadow-only recommendation: draft this candidate. It does not activate, "
+        "publish, or admit anything."
+    ),
+    "collecting": (
+        "Shadow-only recommendation: keep collecting evidence. It does not activate, "
+        "publish, or admit anything."
+    ),
+    "none": "No shadow recommendation has been recorded for this candidate",
+}
+CANDIDATE_GATE_LABELS = {
+    "recurrence": "Recurrence and independence",
+    "routing": "Routing trials",
+    "task_value": "Paired task-value trials",
+}
+CANDIDATE_UNEVALUATED_GATES = ("routing", "task_value")
 
 
 class DashboardError(RuntimeError):
@@ -59,6 +199,14 @@ class DashboardError(RuntimeError):
         self.sources = sources or []
 
 
+class CandidateInvalid(RuntimeError):
+    """One shadow candidate record, package, or reference is untrustworthy."""
+
+    def __init__(self, reason: str, detail: str = ""):
+        super().__init__(detail or reason)
+        self.reason = reason
+
+
 def canonical(value: Any) -> bytes:
     return json.dumps(
         value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
@@ -67,6 +215,38 @@ def canonical(value: Any) -> bytes:
 
 def sha(value: Any) -> str:
     return "sha256:" + hashlib.sha256(canonical(value)).hexdigest()
+
+
+def candidate_canonical(value: Any) -> bytes:
+    """Canonical bytes exactly as the candidate lifecycle owner writes them."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode("utf-8")
+
+
+def candidate_sha(value: Any) -> str:
+    return "sha256:" + hashlib.sha256(candidate_canonical(value)).hexdigest()
+
+
+def candidate_require(condition: Any, reason: str, detail: str = "") -> None:
+    if not condition:
+        raise CandidateInvalid(reason, detail)
+
+
+def candidate_keys(value: Any, keys: set[str], reason: str) -> dict[str, Any]:
+    candidate_require(isinstance(value, dict) and set(value) == keys, reason)
+    return value
+
+
+def candidate_text(value: Any, reason: str, limit: int = 4000) -> str:
+    candidate_require(
+        isinstance(value, str) and value.strip() and len(value) <= limit, reason
+    )
+    return value
+
+
+def candidate_time(value: Any, reason: str) -> float:
+    parsed = parse_time(value) if isinstance(value, str) else None
+    candidate_require(parsed is not None, reason)
+    return parsed
 
 
 def now_iso() -> str:
@@ -111,6 +291,8 @@ class DashboardPaths:
     repo: Path
     assets: Path
     token: Path
+    candidate_records: Path | None = None
+    candidate_packages: Path | None = None
 
     @classmethod
     def defaults(cls) -> "DashboardPaths":
@@ -150,6 +332,14 @@ class DashboardPaths:
                 state / "dashboard/access-token",
             )
         )
+        candidate_records = (
+            Path(os.environ.get("DREAMING_STATE_ROOT", state)).resolve()
+            / "skill-review/candidates/v1/records"
+        )
+        candidate_packages = (
+            Path(os.environ.get("DREAMING_DATA_ROOT", data)).resolve()
+            / "candidates/v1/packages"
+        )
         return cls(
             state,
             control_state,
@@ -159,6 +349,8 @@ class DashboardPaths:
             repo,
             assets,
             token,
+            candidate_records,
+            candidate_packages,
         )
 
 
@@ -912,6 +1104,873 @@ class DashboardData:
     def transcript(self, digest: str) -> dict[str, Any]:
         return self._snapshot(digest)
 
+    def _candidate_records_root(self) -> Path:
+        return self.paths.candidate_records or (
+            self.paths.state / "skill-review/candidates/v1/records"
+        )
+
+    def _candidate_packages_root(self) -> Path:
+        return self.paths.candidate_packages or (
+            self.paths.data / "candidates/v1/packages"
+        )
+
+    def _candidate_package_files(self, root: Path) -> list[dict[str, Any]]:
+        candidate_require(not root.is_symlink(), "package_symlinked")
+        candidate_require(root.is_dir(), "package_unavailable")
+        files: list[dict[str, Any]] = []
+        total = 0
+        try:
+            for path in sorted(root.rglob("*")):
+                candidate_require(not path.is_symlink(), "package_symlinked")
+                if path.is_dir():
+                    continue
+                candidate_require(path.is_file(), "package_irregular_entry")
+                candidate_require(
+                    len(files) < MAX_CANDIDATE_PACKAGE_FILES, "package_oversized"
+                )
+                content = path.read_bytes()
+                total += len(content)
+                candidate_require(
+                    total <= MAX_CANDIDATE_PACKAGE_BYTES, "package_oversized"
+                )
+                files.append(
+                    {
+                        "path": path.relative_to(root).as_posix(),
+                        "sha256": hashlib.sha256(content).hexdigest(),
+                        "size": len(content),
+                    }
+                )
+        except OSError as exc:
+            raise CandidateInvalid("package_unreadable", str(exc)) from exc
+        candidate_require(files, "package_empty")
+        return files
+
+    def _candidate_declared_files(self, value: Any) -> list[dict[str, Any]]:
+        candidate_require(isinstance(value, list) and value, "revision_files_invalid")
+        seen: set[str] = set()
+        for item in value:
+            item = candidate_keys(item, CANDIDATE_FILE_KEYS, "revision_files_invalid")
+            relative = item["path"]
+            candidate_require(
+                isinstance(relative, str) and relative, "revision_files_invalid"
+            )
+            candidate_require(
+                not Path(relative).is_absolute()
+                and ".." not in Path(relative).parts
+                and relative not in seen,
+                "revision_files_invalid",
+            )
+            seen.add(relative)
+            candidate_require(
+                isinstance(item["sha256"], str) and SHA256_RE.fullmatch(item["sha256"]),
+                "revision_files_invalid",
+            )
+            candidate_require(
+                isinstance(item["size"], int)
+                and not isinstance(item["size"], bool)
+                and item["size"] >= 0,
+                "revision_files_invalid",
+            )
+        candidate_require(
+            value == sorted(value, key=lambda item: item["path"]),
+            "revision_files_invalid",
+        )
+        return value
+
+    def _candidate_record(self, path: Path) -> dict[str, Any]:
+        candidate_require(not path.is_symlink(), "record_symlinked")
+        candidate_require(path.is_file(), "record_not_regular_file")
+        try:
+            candidate_require(
+                path.stat().st_size <= MAX_CANDIDATE_RECORD_BYTES, "record_oversized"
+            )
+            record = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise CandidateInvalid("record_unreadable", str(exc)) from exc
+        record = candidate_keys(record, CANDIDATE_RECORD_KEYS, "record_schema_unknown")
+        candidate_require(
+            record["schema_version"] == 1
+            and not isinstance(record["schema_version"], bool),
+            "record_schema_version_unsupported",
+        )
+        lifecycle_id = record["lifecycle_id"]
+        candidate_require(
+            isinstance(lifecycle_id, str) and CANDIDATE_UUID_RE.fullmatch(lifecycle_id),
+            "record_lifecycle_id_invalid",
+        )
+        candidate_require(lifecycle_id == path.stem, "record_identity_mismatch")
+        candidate_require(
+            record["state"] in CANDIDATE_STATE_LABELS, "record_state_not_shadow"
+        )
+        candidate_require(
+            record["publication"] == {"status": "shadow_only"},
+            "record_publication_not_shadow",
+        )
+        candidate_require(
+            record["authority"] in {"autonomous", "user_authorized"},
+            "record_authority_invalid",
+        )
+        candidate_require(
+            isinstance(record["proposed_name"], str)
+            and CANDIDATE_NAME_RE.fullmatch(record["proposed_name"]),
+            "record_name_invalid",
+        )
+        candidate_require(
+            isinstance(record["record_version"], int)
+            and not isinstance(record["record_version"], bool)
+            and record["record_version"] >= 1,
+            "record_version_invalid",
+        )
+
+        procedure = candidate_keys(
+            record["procedure"], CANDIDATE_PROCEDURE_KEYS, "procedure_invalid"
+        )
+        candidate_require(
+            procedure["schema_version"] == 1
+            and not isinstance(procedure["schema_version"], bool),
+            "procedure_invalid",
+        )
+        candidate_text(procedure["trigger"], "procedure_invalid")
+        candidate_text(procedure["outcome"], "procedure_invalid")
+        for field in ("actions", "exclusions"):
+            values = procedure[field]
+            candidate_require(
+                isinstance(values, list) and 1 <= len(values) <= 16, "procedure_invalid"
+            )
+            for item in values:
+                candidate_text(item, "procedure_invalid")
+        candidate_require(
+            isinstance(procedure["match_fingerprint"], str)
+            and CANDIDATE_ID_RE.fullmatch(procedure["match_fingerprint"]),
+            "procedure_invalid",
+        )
+
+        candidate_require(isinstance(record["evidence"], list), "evidence_invalid")
+        evidence_ids: set[str] = set()
+        for item in record["evidence"]:
+            item = candidate_keys(item, CANDIDATE_EVIDENCE_KEYS, "evidence_invalid")
+            observation = {
+                key: item[key] for key in CANDIDATE_EVIDENCE_KEYS - {"evidence_id"}
+            }
+            candidate_require(
+                item["evidence_id"] == candidate_sha(observation),
+                "evidence_identity_mismatch",
+            )
+            candidate_require(
+                item["evidence_id"] not in evidence_ids, "evidence_identity_repeated"
+            )
+            evidence_ids.add(item["evidence_id"])
+            candidate_text(item["task_key"], "evidence_invalid", 512)
+            candidate_text(item["session_id"], "evidence_invalid", 512)
+            candidate_text(item["summary"], "evidence_invalid")
+            candidate_time(item["observed_at"], "evidence_invalid")
+            candidate_require(
+                item["independence"] in {"verified", "unverified"}, "evidence_invalid"
+            )
+            candidate_require(
+                item["procedure_fingerprint"] == procedure["match_fingerprint"],
+                "evidence_procedure_mismatch",
+            )
+
+        revisions = record["candidate_revisions"]
+        candidate_require(isinstance(revisions, list) and revisions, "revision_invalid")
+        revision_ids: list[str] = []
+        for revision in revisions:
+            revision = candidate_keys(
+                revision, CANDIDATE_REVISION_KEYS, "revision_invalid"
+            )
+            identity = revision["candidate_id"]
+            candidate_require(
+                isinstance(identity, str) and CANDIDATE_ID_RE.fullmatch(identity),
+                "revision_invalid",
+            )
+            candidate_require(identity not in revision_ids, "revision_repeated")
+            revision_ids.append(identity)
+            candidate_require(
+                revision["package_path"]
+                == f"candidates/v1/packages/{lifecycle_id}/{identity}",
+                "package_reference_invalid",
+            )
+            self._candidate_declared_files(revision["files"])
+            candidate_time(revision["staged_at"], "revision_invalid")
+        current = record["current_candidate_id"]
+        candidate_require(current in revision_ids, "current_candidate_unknown")
+
+        packages = self._candidate_packages_root() / lifecycle_id
+        for revision in revisions:
+            directory = packages / revision["candidate_id"]
+            if revision["candidate_id"] != current:
+                candidate_require(not directory.is_symlink(), "package_symlinked")
+                candidate_require(directory.is_dir(), "package_unavailable")
+                continue
+            files = self._candidate_package_files(directory)
+            candidate_require(files == revision["files"], "package_inventory_mismatch")
+            candidate_require(
+                candidate_sha(files) == current, "candidate_identity_mismatch"
+            )
+
+        evaluation = candidate_keys(
+            record["evaluation"], CANDIDATE_EVALUATION_KEYS, "evaluation_invalid"
+        )
+        candidate_require(
+            evaluation["status"] in CANDIDATE_EVALUATION_LABELS, "evaluation_invalid"
+        )
+        history = evaluation["history"]
+        candidate_require(isinstance(history, list), "evaluation_invalid")
+        for entry in history:
+            entry = candidate_keys(
+                entry, CANDIDATE_EVALUATION_HISTORY_KEYS, "evaluation_invalid"
+            )
+            payload = {
+                key: entry[key]
+                for key in CANDIDATE_EVALUATION_HISTORY_KEYS - {"evaluation_id"}
+            }
+            candidate_require(
+                entry["evaluation_id"] == candidate_sha(payload),
+                "evaluation_identity_mismatch",
+            )
+            candidate_time(entry["evaluated_at"], "evaluation_invalid")
+            candidate_require(
+                entry["recommendation"] in {"ready_for_draft", "collecting"},
+                "evaluation_recommendation_invalid",
+            )
+            candidate_require(
+                isinstance(entry["reasons"], list)
+                and all(isinstance(reason, str) for reason in entry["reasons"]),
+                "evaluation_invalid",
+            )
+            candidate_require(
+                entry["candidate_id"] in revision_ids, "evaluation_candidate_unknown"
+            )
+            candidate_require(entry["shadow_only"] is True, "evaluation_not_shadow")
+        if history:
+            candidate_require(
+                evaluation["last_evaluated_at"] == history[-1]["evaluated_at"],
+                "evaluation_reference_stale",
+            )
+            candidate_require(
+                (evaluation["status"] == "shadow_ready")
+                == (history[-1]["recommendation"] == "ready_for_draft"),
+                "evaluation_status_mismatch",
+            )
+        else:
+            candidate_require(
+                evaluation["status"] == "not_evaluated"
+                and evaluation["last_evaluated_at"] is None,
+                "evaluation_status_mismatch",
+            )
+
+        lifecycle = candidate_keys(
+            record["lifecycle"], CANDIDATE_LIFECYCLE_KEYS, "lifecycle_invalid"
+        )
+        for field in ("created_at", "last_supported_at", "expires_at"):
+            candidate_time(lifecycle[field], "lifecycle_invalid")
+        transitions = lifecycle["transition_history"]
+        candidate_require(
+            isinstance(transitions, list) and transitions, "transition_invalid"
+        )
+        prior = None
+        for entry in transitions:
+            entry = candidate_keys(
+                entry, CANDIDATE_TRANSITION_KEYS, "transition_invalid"
+            )
+            payload = {
+                key: entry[key] for key in CANDIDATE_TRANSITION_KEYS - {"transition_id"}
+            }
+            candidate_require(
+                entry["transition_id"] == candidate_sha(payload),
+                "transition_identity_mismatch",
+            )
+            candidate_require(
+                entry["from_state"] == prior, "transition_history_discontinuous"
+            )
+            candidate_require(
+                entry["to_state"] in CANDIDATE_STATE_LABELS,
+                "transition_state_not_shadow",
+            )
+            candidate_require(
+                entry["to_state"] in CANDIDATE_INITIAL_STATES
+                if prior is None
+                else entry["to_state"] in CANDIDATE_TRANSITIONS[prior],
+                "transition_illegal",
+            )
+            candidate_time(entry["at"], "transition_invalid")
+            candidate_require(
+                isinstance(entry["reason"], str)
+                and CANDIDATE_REASON_RE.fullmatch(entry["reason"]),
+                "transition_reason_invalid",
+            )
+            candidate_require(
+                isinstance(entry["authorizing_evidence_ids"], list),
+                "transition_evidence_invalid",
+            )
+            candidate_require(
+                all(
+                    item in evidence_ids for item in entry["authorizing_evidence_ids"]
+                ),
+                "transition_evidence_invalid",
+            )
+            candidate_require(
+                isinstance(entry["receipt_ids"], list)
+                and all(
+                    isinstance(item, str) and CANDIDATE_ID_RE.fullmatch(item)
+                    for item in entry["receipt_ids"]
+                ),
+                "transition_receipt_invalid",
+            )
+            prior = entry["to_state"]
+        candidate_require(prior == record["state"], "state_history_mismatch")
+
+        candidate_require(isinstance(record["aliases"], list), "alias_invalid")
+        aliases: set[tuple[str, str]] = set()
+        for alias in record["aliases"]:
+            alias = candidate_keys(alias, {"namespace", "value"}, "alias_invalid")
+            item = (
+                candidate_text(alias["namespace"], "alias_invalid", 128),
+                candidate_text(alias["value"], "alias_invalid", 512),
+            )
+            candidate_require(item not in aliases, "alias_repeated")
+            aliases.add(item)
+
+        absorbed = record["absorbed_into"]
+        candidate_require(
+            (
+                isinstance(absorbed, str) and CANDIDATE_UUID_RE.fullmatch(absorbed)
+                if record["state"] == "absorbed"
+                else absorbed is None
+            ),
+            "absorption_target_invalid",
+        )
+
+        candidate_require(isinstance(record["match_decisions"], list), "decision_invalid")
+        decision_ids: set[str] = set()
+        for decision in record["match_decisions"]:
+            decision = candidate_keys(
+                decision, CANDIDATE_DECISION_KEYS, "decision_invalid"
+            )
+            payload = {
+                key: decision[key]
+                for key in CANDIDATE_DECISION_KEYS - {"decision_id"}
+            }
+            candidate_require(
+                decision["decision_id"] == candidate_sha(payload),
+                "decision_identity_mismatch",
+            )
+            candidate_require(
+                decision["decision_id"] not in decision_ids,
+                "decision_identity_repeated",
+            )
+            decision_ids.add(decision["decision_id"])
+            candidate_time(decision["at"], "decision_invalid")
+            candidate_require(
+                decision["outcome"] in CANDIDATE_MATCH_OUTCOMES,
+                "decision_outcome_invalid",
+            )
+            candidate_require(
+                isinstance(decision["reason"], str)
+                and CANDIDATE_REASON_RE.fullmatch(decision["reason"]),
+                "decision_reason_invalid",
+            )
+            related = decision["related_lifecycle_id"]
+            candidate_require(
+                related is None
+                or (isinstance(related, str) and CANDIDATE_UUID_RE.fullmatch(related)),
+                "decision_relation_invalid",
+            )
+            candidate_require(
+                isinstance(decision["evidence_ids"], list),
+                "decision_evidence_invalid",
+            )
+            candidate_require(
+                all(item in evidence_ids for item in decision["evidence_ids"]),
+                "decision_evidence_invalid",
+            )
+            candidate_require(decision["shadow_only"] is True, "decision_not_shadow")
+
+        blockers = candidate_keys(
+            record["blockers"], CANDIDATE_BLOCKER_KEYS, "blocker_invalid"
+        )
+        covering = blockers["covering_lifecycle_ids"]
+        candidate_require(isinstance(covering, list), "blocker_invalid")
+        candidate_require(
+            all(
+                isinstance(item, str) and CANDIDATE_UUID_RE.fullmatch(item)
+                for item in covering
+            ),
+            "blocker_invalid",
+        )
+        candidate_require(len(set(covering)) == len(covering), "blocker_invalid")
+        tombstones = blockers["tombstone_ids"]
+        candidate_require(isinstance(tombstones, list), "blocker_invalid")
+        candidate_require(
+            all(
+                isinstance(item, str) and item and len(item) <= 512
+                for item in tombstones
+            ),
+            "blocker_invalid",
+        )
+        candidate_require(len(set(tombstones)) == len(tombstones), "blocker_invalid")
+        candidate_require(isinstance(blockers["uncertain"], bool), "blocker_invalid")
+        return record
+
+    def _candidate_gates(self, record: dict[str, Any]) -> list[dict[str, Any]]:
+        evaluation = record["evaluation"]
+        history = evaluation["history"]
+        gates = [
+            {
+                "name": "recurrence",
+                "label": CANDIDATE_GATE_LABELS["recurrence"],
+                "status": evaluation["status"],
+                "status_label": CANDIDATE_EVALUATION_LABELS[evaluation["status"]],
+                "reasons": list(history[-1]["reasons"]) if history else [],
+                "evaluated_at": evaluation["last_evaluated_at"],
+                "shadow_only": True,
+            }
+        ]
+        for name in CANDIDATE_UNEVALUATED_GATES:
+            gates.append(
+                {
+                    "name": name,
+                    "label": CANDIDATE_GATE_LABELS[name],
+                    "status": "unavailable",
+                    "status_label": f"{CANDIDATE_GATE_LABELS[name]}: no evidence recorded",
+                    "reasons": [f"no-{name.replace('_', '-')}-evidence-recorded"],
+                    "evaluated_at": None,
+                    "shadow_only": True,
+                }
+            )
+        return gates
+
+    def _candidate_view(
+        self, record: dict[str, Any], detail: bool = False
+    ) -> dict[str, Any]:
+        now = time.time()
+        lifecycle = record["lifecycle"]
+        transitions = lifecycle["transition_history"]
+        latest_transition = transitions[-1]
+        evidence = record["evidence"]
+        verified = [item for item in evidence if item["independence"] == "verified"]
+        newest = (
+            max(verified, key=lambda item: parse_time(item["observed_at"]))
+            if verified
+            else None
+        )
+        newest_at = parse_time(newest["observed_at"]) if newest else None
+        expires_at = parse_time(lifecycle["expires_at"])
+        evaluation = record["evaluation"]
+        history = evaluation["history"]
+        latest_evaluation = history[-1] if history else None
+        recommendation = (
+            latest_evaluation["recommendation"] if latest_evaluation else "none"
+        )
+        decisions = record["match_decisions"]
+        counts = {outcome: 0 for outcome in sorted(CANDIDATE_MATCH_OUTCOMES)}
+        for decision in decisions:
+            counts[decision["outcome"]] += 1
+        blockers = record["blockers"]
+        blocker_reasons = []
+        if blockers["uncertain"]:
+            blocker_reasons.append("uncertain-match-blocker")
+        if blockers["covering_lifecycle_ids"]:
+            blocker_reasons.append("covering-lifecycle-blocker")
+        if blockers["tombstone_ids"]:
+            blocker_reasons.append("tombstone-blocker")
+        current = next(
+            item
+            for item in record["candidate_revisions"]
+            if item["candidate_id"] == record["current_candidate_id"]
+        )
+        updated_at = max(
+            (
+                value
+                for value in (
+                    latest_transition["at"],
+                    evaluation["last_evaluated_at"],
+                    decisions[-1]["at"] if decisions else None,
+                )
+                if value is not None
+            ),
+            key=lambda value: parse_time(value) or 0,
+        )
+        view = {
+            "lifecycle_id": record["lifecycle_id"],
+            "status": "shadow",
+            "state": record["state"],
+            "state_label": CANDIDATE_STATE_LABELS[record["state"]],
+            "state_reason": latest_transition["reason"],
+            "state_changed_at": latest_transition["at"],
+            "proposed_name": safe_text(record["proposed_name"], 64),
+            "authority": CANDIDATE_AUTHORITY,
+            "record_authority": record["authority"],
+            "label": CANDIDATE_LABEL,
+            "notice": CANDIDATE_NOTICE,
+            "shadow_only": True,
+            "active": False,
+            "published": False,
+            "discoverable": False,
+            "publication_status": record["publication"]["status"],
+            "publication_targets": [],
+            "current_candidate_id": record["current_candidate_id"],
+            "candidate_revision": {
+                "candidate_id": current["candidate_id"],
+                "package_path": current["package_path"],
+                "package_status": "verified",
+                "file_count": len(current["files"]),
+                "bytes": sum(item["size"] for item in current["files"]),
+                "staged_at": current["staged_at"],
+            },
+            "candidate_revision_count": len(record["candidate_revisions"]),
+            "evidence": {
+                "total": len(evidence),
+                "verified": len(verified),
+                "unverified": len(evidence) - len(verified),
+                "distinct_tasks": len({item["task_key"] for item in verified}),
+                "distinct_sessions": len({item["session_id"] for item in verified}),
+            },
+            "freshness": {
+                "created_at": lifecycle["created_at"],
+                "last_supported_at": lifecycle["last_supported_at"],
+                "expires_at": lifecycle["expires_at"],
+                "newest_verified_evidence_at": (
+                    newest["observed_at"] if newest else None
+                ),
+                "fresh_evidence": (
+                    newest_at is not None
+                    and 0 <= now - newest_at <= CANDIDATE_FRESH_SECONDS
+                ),
+                "past_expiry": expires_at is not None and expires_at <= now,
+                "days_until_expiry": (
+                    max(0, math.ceil((expires_at - now) / 86400))
+                    if expires_at is not None
+                    else None
+                ),
+            },
+            "evaluation": {
+                "status": evaluation["status"],
+                "status_label": CANDIDATE_EVALUATION_LABELS[evaluation["status"]],
+                "last_evaluated_at": evaluation["last_evaluated_at"],
+                "history_count": len(history),
+                "composite_score": None,
+                "gates": self._candidate_gates(record),
+                "shadow_only": True,
+                "authorizes_publication": False,
+            },
+            "recommendation": {
+                "value": recommendation,
+                "label": CANDIDATE_RECOMMENDATION_LABELS[recommendation],
+                "reasons": (
+                    list(latest_evaluation["reasons"]) if latest_evaluation else []
+                ),
+                "candidate_id": (
+                    latest_evaluation["candidate_id"] if latest_evaluation else None
+                ),
+                "evaluated_at": (
+                    latest_evaluation["evaluated_at"] if latest_evaluation else None
+                ),
+                "stale": bool(
+                    latest_evaluation
+                    and latest_evaluation["candidate_id"]
+                    != record["current_candidate_id"]
+                ),
+                "shadow_only": True,
+                "authorizes_publication": False,
+                "authorizes_activation": False,
+            },
+            "decisions": {
+                "total": len(decisions),
+                "counts": counts,
+                "outcomes": sorted({item["outcome"] for item in decisions}),
+                "shadow_only": True,
+            },
+            "blockers": {
+                "present": bool(blocker_reasons),
+                "reasons": blocker_reasons,
+                "covering_lifecycle_ids": list(blockers["covering_lifecycle_ids"]),
+                "tombstone_ids": [
+                    safe_text(item, 512) for item in blockers["tombstone_ids"]
+                ],
+                "uncertain": blockers["uncertain"],
+            },
+            "absorbed_into": record["absorbed_into"],
+            "aliases": [
+                {
+                    "namespace": safe_text(item["namespace"], 128),
+                    "value": safe_text(item["value"], 512),
+                }
+                for item in record["aliases"]
+            ],
+            "created_at": lifecycle["created_at"],
+            "updated_at": updated_at,
+            "record_version": record["record_version"],
+        }
+        if not detail:
+            return view
+        procedure = record["procedure"]
+        names = self._dream_names()
+        return {
+            **view,
+            "procedure": {
+                "trigger": safe_text(procedure["trigger"], 4000),
+                "outcome": safe_text(procedure["outcome"], 4000),
+                "actions": [safe_text(item, 4000) for item in procedure["actions"]],
+                "exclusions": [
+                    safe_text(item, 4000) for item in procedure["exclusions"]
+                ],
+                "match_fingerprint": procedure["match_fingerprint"],
+            },
+            "evidence_items": [
+                {
+                    "evidence_id": item["evidence_id"],
+                    "task_key": safe_text(item["task_key"], 512),
+                    "session_id": item["session_id"],
+                    "dream_name": self._dream_name(item["session_id"], names),
+                    "observed_at": item["observed_at"],
+                    "independence": item["independence"],
+                    "summary": safe_text(item["summary"], 4000),
+                }
+                for item in evidence
+            ],
+            "candidate_revisions": [
+                {
+                    "candidate_id": item["candidate_id"],
+                    "package_path": item["package_path"],
+                    "package_status": (
+                        "verified"
+                        if item["candidate_id"] == record["current_candidate_id"]
+                        else "present"
+                    ),
+                    "current": item["candidate_id"] == record["current_candidate_id"],
+                    "file_count": len(item["files"]),
+                    "bytes": sum(entry["size"] for entry in item["files"]),
+                    "staged_at": item["staged_at"],
+                }
+                for item in record["candidate_revisions"]
+            ],
+            "transition_history": [
+                {
+                    "transition_id": item["transition_id"],
+                    "from_state": item["from_state"],
+                    "from_state_label": (
+                        CANDIDATE_STATE_LABELS[item["from_state"]]
+                        if item["from_state"]
+                        else None
+                    ),
+                    "to_state": item["to_state"],
+                    "to_state_label": CANDIDATE_STATE_LABELS[item["to_state"]],
+                    "at": item["at"],
+                    "reason": item["reason"],
+                    "authorizing_evidence_ids": list(
+                        item["authorizing_evidence_ids"]
+                    ),
+                    "receipt_ids": list(item["receipt_ids"]),
+                    "shadow_only": True,
+                }
+                for item in transitions
+            ],
+            "evaluation_history": [
+                {
+                    "evaluation_id": item["evaluation_id"],
+                    "evaluated_at": item["evaluated_at"],
+                    "recommendation": item["recommendation"],
+                    "recommendation_label": CANDIDATE_RECOMMENDATION_LABELS[
+                        item["recommendation"]
+                    ],
+                    "reasons": list(item["reasons"]),
+                    "candidate_id": item["candidate_id"],
+                    "current_candidate": (
+                        item["candidate_id"] == record["current_candidate_id"]
+                    ),
+                    "shadow_only": True,
+                    "authorizes_publication": False,
+                }
+                for item in history
+            ],
+            "match_decisions": [
+                {
+                    "decision_id": item["decision_id"],
+                    "at": item["at"],
+                    "outcome": item["outcome"],
+                    "reason": item["reason"],
+                    "related_lifecycle_id": item["related_lifecycle_id"],
+                    "evidence_ids": list(item["evidence_ids"]),
+                    "shadow_only": True,
+                }
+                for item in decisions
+            ],
+        }
+
+    def _candidate_unavailable(self, path: Path, error: Exception) -> dict[str, Any]:
+        reason = getattr(error, "reason", "record_unreadable")
+        return {
+            "lifecycle_id": (
+                path.stem if CANDIDATE_UUID_RE.fullmatch(path.stem) else None
+            ),
+            "source": path.name,
+            "status": "invalid",
+            "state": None,
+            "state_label": CANDIDATE_INVALID_LABEL,
+            "state_reason": reason,
+            "proposed_name": None,
+            "authority": CANDIDATE_AUTHORITY,
+            "label": CANDIDATE_INVALID_LABEL,
+            "notice": CANDIDATE_NOTICE,
+            "shadow_only": True,
+            "active": False,
+            "published": False,
+            "discoverable": False,
+            "current_candidate_id": None,
+            "reasons": [reason],
+            "error": safe_text(str(error), 500),
+            "updated_at": None,
+        }
+
+    def candidate_rows(self) -> tuple[list[dict[str, Any]], str]:
+        root = self._candidate_records_root()
+        packages = self._candidate_packages_root()
+        if root.is_symlink() or (root.exists() and not root.is_dir()):
+            raise DashboardError(
+                503,
+                "candidate_state_invalid",
+                "Candidate record root is not a directory",
+                ["candidate records"],
+            )
+        fingerprint = self._fingerprint([root, packages])
+        if not root.is_dir():
+            return [], fingerprint
+        rows = []
+        try:
+            entries = sorted(root.glob("*.json"))
+        except OSError as exc:
+            raise DashboardError(
+                503,
+                "candidate_state_invalid",
+                "Candidate record root is unreadable",
+                ["candidate records"],
+            ) from exc
+        for path in entries:
+            try:
+                rows.append(self._candidate_view(self._candidate_record(path)))
+            except (CandidateInvalid, OSError, UnicodeError, DashboardError) as exc:
+                rows.append(self._candidate_unavailable(path, exc))
+        rows.sort(
+            key=lambda item: (
+                parse_time(item.get("updated_at")) or 0,
+                item.get("lifecycle_id") or item.get("source") or "",
+            ),
+            reverse=True,
+        )
+        return rows, fingerprint
+
+    def candidates(self, params: dict[str, list[str]]) -> dict[str, Any]:
+        rows, fingerprint = self.candidate_rows()
+        state = first(params, "state")
+        status = first(params, "status")
+        recommendation = first(params, "recommendation")
+        query_text = first(params, "query").casefold()
+        if state:
+            rows = [item for item in rows if item.get("state") == state]
+        if status:
+            rows = [item for item in rows if item.get("status") == status]
+        if recommendation:
+            rows = [
+                item
+                for item in rows
+                if (item.get("recommendation") or {}).get("value") == recommendation
+            ]
+        if query_text:
+            rows = [
+                item
+                for item in rows
+                if query_text in (item.get("proposed_name") or "").casefold()
+                or query_text in (item.get("lifecycle_id") or "").casefold()
+            ]
+        sort = first(params, "sort") or "updated"
+        if sort == "name":
+            rows.sort(key=lambda item: (item.get("proposed_name") or "").casefold())
+        elif sort == "state":
+            rows.sort(key=lambda item: (item.get("state") or "", item.get("proposed_name") or ""))
+        query = {
+            "state": state,
+            "status": status,
+            "recommendation": recommendation,
+            "query": query_text,
+            "sort": sort,
+        }
+        return {
+            **self._cursor(
+                rows,
+                query,
+                fingerprint,
+                first(params, "cursor") or None,
+                parse_limit(params),
+            ),
+            "authority": CANDIDATE_AUTHORITY,
+            "shadow_only": True,
+            "active": False,
+            "published": False,
+            "label": CANDIDATE_LABEL,
+            "notice": CANDIDATE_NOTICE,
+        }
+
+    def candidate_detail(self, lifecycle_id: str) -> dict[str, Any]:
+        if not CANDIDATE_UUID_RE.fullmatch(lifecycle_id):
+            raise DashboardError(
+                404, "candidate_not_found", "Candidate record was not found"
+            )
+        root = self._candidate_records_root()
+        path = root / f"{lifecycle_id}.json"
+        if (
+            not root.is_dir()
+            or root.is_symlink()
+            or path.is_symlink()
+            or not path.is_file()
+            or path.parent.resolve() != root.resolve()
+        ):
+            raise DashboardError(
+                404, "candidate_not_found", "Candidate record was not found"
+            )
+        try:
+            record = self._candidate_record(path)
+        except (CandidateInvalid, OSError, UnicodeError) as exc:
+            raise DashboardError(
+                422,
+                "candidate_invalid",
+                "Candidate record is unavailable or invalid",
+                [getattr(exc, "reason", "record_unreadable")],
+            ) from exc
+        return self._candidate_view(record, detail=True)
+
+    def candidate_summary(self) -> dict[str, Any]:
+        root = self._candidate_records_root()
+        rows, _ = self.candidate_rows()
+        valid = [item for item in rows if item["status"] == "shadow"]
+        states = {name: 0 for name in sorted(CANDIDATE_STATE_LABELS)}
+        recommendations = {"ready_for_draft": 0, "collecting": 0, "none": 0}
+        for item in valid:
+            states[item["state"]] += 1
+            recommendations[item["recommendation"]["value"]] += 1
+        return {
+            "authority": CANDIDATE_AUTHORITY,
+            "shadow_only": True,
+            "active": False,
+            "published": False,
+            "discoverable": False,
+            "label": CANDIDATE_LABEL,
+            "notice": CANDIDATE_NOTICE,
+            "records_root_present": root.is_dir(),
+            "total": len(rows),
+            "valid": len(valid),
+            "invalid": len(rows) - len(valid),
+            "states": states,
+            "state_labels": dict(CANDIDATE_STATE_LABELS),
+            "recommendations": recommendations,
+            "stale_recommendations": sum(
+                item["recommendation"]["stale"] for item in valid
+            ),
+            "blocked": sum(item["blockers"]["present"] for item in valid),
+            "past_expiry": sum(item["freshness"]["past_expiry"] for item in valid),
+        }
+
     def activity(self, params: dict[str, list[str]]) -> dict[str, Any]:
         runs_dir = self.paths.orchestrator_state / "runs"
         rows = []
@@ -1309,6 +2368,7 @@ class DashboardData:
                 "history": self._skill_history(),
             },
             "evaluations": self._evaluation_portfolio(),
+            "candidates": self.candidate_summary(),
             "activity": activity,
         }
 
@@ -1702,6 +2762,14 @@ class DashboardHandler(BaseHTTPRequestHandler):
                 result = self.data.evidence(name, params)
                 return self._json_response(result, result["fingerprint"])
             return self._json_response(self.data.skill_detail(urllib.parse.unquote(tail)))
+        if path == "/api/v1/candidates":
+            result = self.data.candidates(params)
+            return self._json_response(result, result["fingerprint"])
+        if path.startswith("/api/v1/candidates/"):
+            lifecycle_id = urllib.parse.unquote(
+                path.removeprefix("/api/v1/candidates/")
+            )
+            return self._json_response(self.data.candidate_detail(lifecycle_id))
         if path.startswith("/api/v1/transcripts/"):
             digest = path.removeprefix("/api/v1/transcripts/")
             return self._json_response(self.data.transcript(digest))

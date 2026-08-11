@@ -296,34 +296,71 @@ This milestone does not:
 
 #### Definition of Done: Shadow candidate admission and evaluation
 
-- [ ] Candidate records and isolated immutable packages implement stable
+- [x] Candidate records and isolated immutable packages implement stable
       lifecycle identity, exact revision identity, legal transitions,
       expiration, duplicate decisions, supersession, and absorption.
-- [ ] Fresh autonomous create findings enter candidate collection without
+- [x] Fresh autonomous create findings enter candidate collection without
       skill, Git, approved-inventory, publisher, LaunchAgent, or retirement
       mutation.
-- [ ] Recent independent recurrence produces only a shadow
+- [x] Recent independent recurrence produces only a shadow
       `ready_for_draft` recommendation, and every insufficient-evidence case
       remains `collecting`, `expired`, or `rejected` while any same, duplicate,
       uncertain, supersession, or absorption outcome remains a separate
       recorded decision rather than an undeclared lifecycle state.
-- [ ] Read-only dashboard views expose candidate, recurrence, lifecycle, and
+- [x] Read-only dashboard views expose candidate, recurrence, lifecycle, and
       evaluation state with explicit shadow-only authority.
-- [ ] The existing cross-CLI harness records exact-identity routing and paired
+- [x] The existing cross-CLI harness records exact-identity routing and paired
       task-value evidence, including success, turns, tokens, and tool use.
-- [ ] Missing, incomplete, mismatched, stale, or over-budget evidence fails
+- [x] Missing, incomplete, mismatched, stale, or over-budget evidence fails
       closed as `inconclusive`, stale, or regression.
-- [ ] Deterministic checks prove the full shadow flow cannot change managed
+- [x] Deterministic checks prove the full shadow flow cannot change managed
       skills, approved inventories, publishers, activation, quarantine, or
       retirement state.
-- [ ] Focused real-model trials cover representative positive, close-negative,
+- [x] Focused real-model trials cover representative positive, close-negative,
       unrelated, conflict, candidate, and control cases without running the
       complete portfolio matrix.
-- [ ] The implementation passes its targeted deterministic suites, critical
+- [x] The implementation passes its targeted deterministic suites, critical
       live proof, and required implementation review.
-- [ ] The installed generation remains halted throughout this milestone; this
+- [x] The installed generation remains halted throughout this milestone; this
       run does not certify the generation, write an activation receipt, remove
       the halt switch, or enable a LaunchAgent.
+
+#### Shadow milestone completion evidence
+
+Completed on 2026-08-11 on branch `feature/multi-cli-dreaming`, with the
+installed generation still halted and no production authority granted.
+
+- Final deterministic totals: candidate lifecycle `10`, core `32`, dashboard
+  contracts `54`, dashboard integration `102`, skill evaluation `23`,
+  evaluation harness `31`, vendor adapters `12`, and mutation boundary `8`.
+  Process cleanup, Python compilation, and shell syntax checks also passed.
+- The final real Codex `gpt-5.4-mini` run passed separate routing and task-value
+  gates. Candidate:
+  `sha256:05de0b79c5ad6d20d878af469b4f5d2755720bd0a6eb453d8a101de9ff689d2f`;
+  catalog:
+  `sha256:6d8c7b5bd73b40ade82fc3ea5bf86593f8fec87653bc918b825ac14f85a3f996`;
+  run:
+  `sha256:6216ef06ec0e2ddc75866cd03ca48a18172d96cd729ede14f176115baf2c82ab`;
+  result:
+  `sha256:0af389858e5e0f98f2551429fbcee3c663b2fd61cb868e01ed9566f6bf9c4a90`;
+  authoritative receipt basename:
+  `46fa118a2098d0ee7350b41d1168c69bb0c138d3ef0e36aa9d7f6c6636d9ceea`.
+- Independent final judges ruled `SC-016` and `SC-018` `SUPPORTED`. The
+  original Generation 10b receipt remains historical evidence but is stale
+  for landing because executable behavior changed afterward.
+- Round-one review findings were repaired: non-ASCII canonicalization,
+  candidate-root isolation, complete route sealing, receipt result binding,
+  exact same-model executor resolution, multi-skill Codex read attestation,
+  and task-value catalog semantics. The scheduled-recurrence claim was dropped
+  because scheduled observations intentionally remain `unverified` until a
+  trusted independent task identity exists.
+- Round two resolved every prior finding. One bounded evidence-integrity gap
+  remained: `candidate_loaded` was trusted rather than re-derived during
+  result verification. The verifier now derives it from sealed load evidence;
+  both reviewer families closed the finding with no regression.
+- Real Chrome proof covers the read-only candidate list and detail surfaces,
+  including explicit shadow-only authority and the absence of mutation
+  controls.
 
 ## Reuse contract
 
