@@ -1,7 +1,7 @@
 # Live curator transactions
 
-`scripts/curator-run.py` is the mutation boundary for an approved `--live`
-pass. It uses the same SQLite writer lease as dreaming and records an atomic
+`scripts/curator-run.py` is the mutation boundary for a machine-authorized or
+manual `--live` pass. It uses the same SQLite writer lease as dreaming and records an atomic
 manifest under
 `~/.copilot/skill-state/skill-review/curator-runs/<run-id>.json`.
 
@@ -18,6 +18,7 @@ run:
       "action": "patch",
       "root": "public",
       "skill": "umbrella",
+      "sources": ["narrow-sibling"],
       "paths": [
         "skills/umbrella/SKILL.md",
         "skills/umbrella/references/narrow-sibling.md"
@@ -37,18 +38,34 @@ and exact root-relative **file** paths. Directory scopes are not accepted:
 every file the edit may add, modify, or remove must be enumerated. Public
 registry files must be listed when a create changes them. `kind=archive`
 resolves its root and registry paths from the frozen inventory.
+Autonomous commit paths must remain inside the named destination skill; only
+the public registry files are allowed as additional paths for a public create.
+A consolidation archive must follow its destination commit in the plan.
 
 Begin before mutation:
 
 ```bash
-RUN_ID=$(scripts/curator-run.py begin \
-  --plan /path/to/approved-plan.json \
-  --report ~/.copilot/skill-state/reports/<approved>-curator-report.md)
+RUN_ID=$(scripts/curator-run.py begin --autonomous \
+  --plan /path/to/curator-plan.json \
+  --report ~/.copilot/skill-state/reports/<fresh>-curator-report.md)
 ```
 
-`begin` acquires the shared writer lease, validates both git identities,
-records starting commits and exact unrelated dirty state, rejects path
-overlap, and freezes scheduled-dependency results for every planned archive.
+`begin --autonomous` acquires the shared writer lease, validates both Git
+identities, binds the fresh report digest, independently verifies provenance,
+roots, pins, dependencies, halt, and pause, writes an immutable authorization
+receipt, records starting commits and exact unrelated dirty state, and rejects
+path overlap. Agent authority requires the marker, validated
+`.agent-created.json` envelope, and matching `author` frontmatter. Autonomous
+prunings also require the structured age/completion, use, reuse, evaluation,
+and tombstone evidence described in `curator-prompt.md`.
+
+For a manual-authority transaction, omit `--autonomous`:
+
+```bash
+RUN_ID=$(scripts/curator-run.py begin \
+  --plan /path/to/manual-plan.json \
+  --report /path/to/manual-report.md)
+```
 
 ## Patch or create
 
@@ -72,6 +89,10 @@ scripts/curator-run.py commit \
 
 It commits only declared paths and records the commit plus exact ledger/state
 effects. Never use a broad `git add -A` or a separate commit during a live run.
+Before each autonomous intent or commit, the runner rechecks pause, halt,
+report identity, provenance, and dependencies. Inventory revalidation permits
+only rows added, removed, or changed by already-authorized transaction
+operations; unrelated inventory drift refuses the next mutation.
 
 ## Archive
 
@@ -87,8 +108,11 @@ SKILLS_CURATOR_RUN_ID="$RUN_ID" \
 The archive still performs a current scheduled-dependency check immediately
 before intent. The begin-time freeze prevents a partial run from discovering
 an unsafe archive only after earlier mutations have landed.
+For consolidation, the destination commit must already be complete. Completion
+also verifies that the retirement record and tombstone name the exact planned
+replacement and bind the report plus full provenance references.
 
-## Finish or rollback
+## Publish, finish, or rollback
 
 Renew the lease before/after long model or evaluation work:
 
@@ -96,7 +120,17 @@ Renew the lease before/after long model or evaluation work:
 scripts/curator-run.py renew --run "$RUN_ID"
 ```
 
-After every planned operation completes:
+Renewal remains available in `publish_failed` so supervised retry or rollback
+can retain exclusive writer authority.
+
+After every planned operation completes, publish any public-root change while
+the lease is still held:
+
+```bash
+scripts/curator-run.py publish --run "$RUN_ID" --remote origin --branch main
+```
+
+Then finish:
 
 ```bash
 scripts/curator-run.py finish --run "$RUN_ID"
@@ -116,3 +150,10 @@ files, undeclared dirty paths, missing or rewritten commits, changed state
 effects, or ambiguous root identities. An interrupted intent is recovered:
 uncommitted declared paths are reset, while a single committed-but-unrecorded
 archive is inferred and restored.
+
+A rejected public push leaves the run in `publish_failed` with its lease held.
+Every failed push is reconciled against the exact prior and transaction remote
+heads before its outcome is classified. Rollback verifies both the recorded
+remote URL and remote head before reversing any local operation, then checks
+them again before pushing normal revert commits and recording the resulting
+remote identity.

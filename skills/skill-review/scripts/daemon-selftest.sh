@@ -182,6 +182,8 @@ for script in install.sh dreaming-deps.py test-shared-deps.sh \
   test-headless-roots.sh test-installer.sh test-repository-boundary.sh \
   manage-instructions.sh configure-adapters.py migrate-copilot-state.py \
   dreaming-enqueue.sh test-copilot-migration.sh \
+  transfer-dreaming-host.py test-transfer-dreaming-host.sh \
+  cutover-dreaming-host.py test-cutover-dreaming-host.sh \
   validate-plugin-manifests.mjs; do
   [[ -x "$ROOT_SCRIPT_DIR/$script" ]] && ok "executable: scripts/$script" ||
     bad "not executable: scripts/$script"
@@ -303,6 +305,16 @@ if run_isolated_test "$ROOT_SCRIPT_DIR/test-copilot-migration.sh" >>"$RESULT" 2>
   ok "deterministic Copilot migration checks"
 else
   bad "deterministic Copilot migration checks"
+fi
+if run_isolated_test "$ROOT_SCRIPT_DIR/test-transfer-dreaming-host.sh" >>"$RESULT" 2>&1; then
+  ok "deterministic host transfer checks"
+else
+  bad "deterministic host transfer checks"
+fi
+if run_isolated_test "$ROOT_SCRIPT_DIR/test-cutover-dreaming-host.sh" >>"$RESULT" 2>&1; then
+  ok "deterministic two-host cutover checks"
+else
+  bad "deterministic two-host cutover checks"
 fi
 if run_isolated_test "$ROOT_SCRIPT_DIR/test-repository-boundary.sh" >>"$RESULT" 2>&1; then
   ok "repository boundary checks"

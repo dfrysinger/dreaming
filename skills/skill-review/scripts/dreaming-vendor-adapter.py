@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import tomllib
 import unicodedata
 from pathlib import Path
 from typing import Any, Iterable
@@ -1442,6 +1443,7 @@ def bounded_file_text(path: Path, limit: int) -> str:
 
 
 def review_context() -> dict[str, Any]:
+    home = Path.home().resolve()
     repo_root = Path(
         os.environ.get("DREAMING_REPO_ROOT", Path(__file__).parents[3])
     ).resolve()
@@ -3935,6 +3937,7 @@ def publisher_install(args: argparse.Namespace) -> None:
     if existing and existing.get("bundle_id") == args.bundle_id:
         if inventory_contains(args.vendor, inventory_json(args.vendor), existing):
             emit({"ok": True, "installed": True, "bundle_id": args.bundle_id})
+            return
     descriptor = publication_descriptor(args.vendor, bundle, args.bundle_id)
     binary = executable(args.vendor)
     if args.vendor == "copilot":
@@ -4011,14 +4014,59 @@ def inventory_json(vendor: str) -> Any:
                 run_native([binary, "plugin", "marketplace", "list", "--json"])
             ),
         }
+    plugins = json.loads(run_native([binary, "plugin", "list", "--json"]))
     return {
-        "plugins": json.loads(
-            run_native([binary, "plugin", "list", "--available", "--json"])
-        ),
-        "marketplaces": json.loads(
-            run_native([binary, "plugin", "marketplace", "list", "--json"])
-        ),
+        "plugins": plugins,
+        "marketplaces": codex_marketplace_inventory(),
     }
+
+
+def codex_marketplace_inventory() -> dict[str, list[dict[str, Any]]]:
+    codex_home = Path(
+        os.environ.get("CODEX_HOME", Path.home() / ".codex")
+    ).expanduser()
+    config_path = codex_home / "config.toml"
+    try:
+        raw = config_path.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return {"marketplaces": []}
+    except OSError as error:
+        raise AdapterError(
+            "publisher-inventory-invalid", str(config_path)
+        ) from error
+    try:
+        config = tomllib.loads(raw)
+    except tomllib.TOMLDecodeError as error:
+        raise AdapterError(
+            "publisher-inventory-invalid", str(config_path)
+        ) from error
+    configured = config.get("marketplaces", {})
+    if not isinstance(configured, dict):
+        raise AdapterError("publisher-inventory-invalid", str(config_path))
+    rows: list[dict[str, Any]] = []
+    for name, value in configured.items():
+        if not isinstance(name, str) or not isinstance(value, dict):
+            continue
+        source_type = value.get("source_type")
+        source = value.get("source")
+        if not isinstance(source_type, str) or not isinstance(source, str):
+            continue
+        root = (
+            source
+            if source_type == "local"
+            else str(codex_home / ".tmp" / "marketplaces" / name)
+        )
+        rows.append(
+            {
+                "name": name,
+                "marketplaceSource": {
+                    "sourceType": source_type,
+                    "source": source,
+                },
+                "root": root,
+            }
+        )
+    return {"marketplaces": rows}
 
 
 def canonical_inventory_path(value: Any) -> Any:

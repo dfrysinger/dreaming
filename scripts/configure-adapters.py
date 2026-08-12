@@ -82,6 +82,8 @@ def adapter(
                 str(state_dir / "publisher-ownership.json"),
             ]
         )
+        timeout = positive_integer("DREAMING_PUBLISHER_TIMEOUT", "90")
+        return {"argv": argv, "timeout": timeout, "run_timeout": timeout}
     if role == "review-executor":
         for root in deny_roots or []:
             argv.extend(["--deny-root", str(root)])

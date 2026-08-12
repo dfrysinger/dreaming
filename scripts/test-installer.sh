@@ -247,6 +247,18 @@ for kind in dreaming selftest watchdog; do
   grep -q "<key>DREAMING_SKILLS_ROOT</key><string>$TMP/dreaming-skills</string>" "$plist"
   grep -q "<key>DREAMING_ORCHESTRATOR_STATE_DIR</key><string>$STATE/dreaming</string>" "$plist"
   grep -q "<key>COPILOT_HOME</key><string>$TMP/copilot-home</string>" "$plist"
+  if [[ "$kind" == "selftest" ]]; then
+    if grep -q "<key>SKILLS_REVIEW_STATE_DIR</key>" "$plist"; then
+      echo "installed selftest inherited production review state" >&2
+      exit 1
+    fi
+    grep -q "<string>-u</string>" "$plist"
+    grep -q "<string>SKILLS_REVIEW_STATE_DIR</string>" "$plist"
+  else
+    grep -q \
+      "<key>SKILLS_REVIEW_STATE_DIR</key><string>$STATE/skill-review</string>" \
+      "$plist"
+  fi
 done
 dashboard_plist="$DEST/com.fixture.dreaming.dashboard.plist"
 [[ -f "$dashboard_plist" ]] ||
@@ -441,6 +453,8 @@ for key in ("sources", "executors", "publishers"):
         raise SystemExit(f"selection change retained stale active adapters: {config!r}")
 if config["routes"] != ["codex>codex"] or config["executor_order"] != ["codex"]:
     raise SystemExit(f"selection change retained stale routing: {config!r}")
+if config["publishers"]["codex"].get("timeout") != 90:
+    raise SystemExit(f"publisher timeout does not cover native publication: {config!r}")
 PY
 EXTERNAL_CONFIG="$NATIVE/external-adapters.json"
 printf '{"externally_managed":true}\n' > "$EXTERNAL_CONFIG"

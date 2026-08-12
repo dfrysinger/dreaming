@@ -1544,21 +1544,35 @@ class DreamingRuntime:
         if not allowed:
             raise RuntimeFailure("no-allowed-executor", source_name)
 
-        current = source.call("inspect", session=qualified_session_id)["session"]
-        validate_identity(current, source_name)
         session_pending = self._pending_transaction_for_session(
             qualified_session_id
         )
         if session_pending is not None:
-            self._mark_queue(
-                qualified_session_id,
-                current["source_revision"],
-                "recovery-required",
-            )
+            pending_revision = session_pending.get("source_revision")
+            if isinstance(pending_revision, str):
+                self._mark_queue(
+                    qualified_session_id,
+                    pending_revision,
+                    "recovery-required",
+                )
             raise RuntimeFailure(
                 "mutation-recovery-required",
                 f"{qualified_session_id} has an unresolved transaction",
             )
+        try:
+            current = source.call("inspect", session=qualified_session_id)["session"]
+        except RuntimeFailure as error:
+            if (
+                error.code != "session-missing"
+                or error.message != qualified_session_id
+            ):
+                raise
+            if expected_revision is not None:
+                self._mark_queue(
+                    qualified_session_id, expected_revision, "deleted"
+                )
+            return {"status": "deleted"}
+        validate_identity(current, source_name)
         if (
             expected_revision is not None
             and current["source_revision"] != expected_revision

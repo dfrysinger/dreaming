@@ -6,6 +6,9 @@
   <string>__LABEL__</string>
   <key>ProgramArguments</key>
   <array>
+    <string>/usr/bin/env</string>
+    <string>-u</string>
+    <string>SKILLS_REVIEW_STATE_DIR</string>
     <string>/bin/bash</string>
     <string>__DREAMING_REPO_ROOT__/skills/skill-review/scripts/daemon-selftest.sh</string>
   </array>

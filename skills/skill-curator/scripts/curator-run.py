@@ -9,12 +9,13 @@ import fcntl
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
 import tempfile
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -27,6 +28,12 @@ LOCK_TOOL = Path(
 )
 SCANNER = Path(
     os.environ.get("CURATOR_DEPENDENCY_SCANNER", SCRIPT_DIR / "scheduled-skill-deps.py")
+)
+EVIDENCE_TOOL = Path(
+    os.environ.get(
+        "CURATOR_EVIDENCE_TOOL",
+        SCRIPT_DIR.parent.parent / "skill-review/scripts/evidence-envelope.py",
+    )
 )
 RESTORE_TOOL = Path(
     os.environ.get(
@@ -43,6 +50,8 @@ PUBLIC_MANIFESTS = (
     ".claude-plugin/marketplace.json",
     ".codex-plugin/plugin.json",
 )
+MAX_REPORT_AGE = timedelta(days=7)
+AGE_ONLY_PRUNING_DAYS = 90
 
 
 class RunError(RuntimeError):
@@ -83,11 +92,14 @@ def roots() -> dict[str, Path]:
 
 
 def archive_state_dir() -> Path:
-    return Path(
-        os.environ.get(
-            "SKILLS_STATE_DIR", Path.home() / ".copilot/skill-state/skill-review"
-        )
-    ).resolve()
+    explicit = os.environ.get("SKILLS_REVIEW_STATE_DIR")
+    if explicit:
+        return Path(explicit).resolve()
+    state = os.environ.get("SKILLS_STATE_DIR")
+    if state:
+        root = Path(state)
+        return (root if root.name == "skill-review" else root / "skill-review").resolve()
+    return (Path.home() / ".copilot/skill-state/skill-review").resolve()
 
 
 def runs_dir() -> Path:
@@ -119,6 +131,12 @@ def manifest_path(run_id: str) -> Path:
     return runs_dir() / f"{run_id}.json"
 
 
+def authorization_path(run_id: str) -> Path:
+    if not re_safe_id(run_id):
+        raise RunError(f"invalid run id: {run_id}")
+    return runs_dir() / f"{run_id}.authorization.json"
+
+
 def re_safe_id(value: str) -> bool:
     return bool(value) and all(ch.isalnum() or ch in "._-" for ch in value)
 
@@ -142,6 +160,28 @@ def atomic_write(path: Path, payload: dict[str, Any]) -> None:
     finally:
         if os.path.exists(temporary):
             os.unlink(temporary)
+
+
+def immutable_write(path: Path, payload: dict[str, Any]) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+    try:
+        descriptor = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o400)
+    except FileExistsError as error:
+        raise RunError(f"authorization receipt already exists: {path}") from error
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        directory = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
 
 
 def load_manifest(run_id: str) -> tuple[Path, dict[str, Any]]:
@@ -172,6 +212,12 @@ def root_identity(path: Path) -> dict[str, str]:
 
 def hash_bytes(data: bytes) -> str:
     return hashlib.sha256(data).hexdigest()
+
+
+def hash_json(payload: Any) -> str:
+    return hash_bytes(
+        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
+    )
 
 
 def dirty_paths(root: Path) -> set[str]:
@@ -247,6 +293,561 @@ def scanner_inventory() -> dict[str, Any]:
     return payload
 
 
+def curator_state_path() -> Path:
+    return Path(
+        os.environ.get(
+            "SKILLS_CURATOR_STATE_FILE",
+            archive_state_dir().parent / "curator.json",
+        )
+    ).resolve()
+
+
+def halt_switch_path() -> Path:
+    return Path(
+        os.environ.get(
+            "SKILLS_HALT_SWITCH",
+            archive_state_dir() / "disable-daemon",
+        )
+    ).resolve()
+
+
+def require_autonomous_switches_open() -> dict[str, Any]:
+    halt = halt_switch_path()
+    if halt.exists():
+        raise RunError(f"autonomous retirement is halted: {halt}")
+    state_path = curator_state_path()
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RunError(f"cannot verify curator pause state: {error}") from error
+    paused = state.get("paused")
+    if not isinstance(paused, bool):
+        raise RunError("curator pause state is malformed")
+    if paused:
+        raise RunError("autonomous retirement is paused")
+    return {
+        "halt_switch": str(halt),
+        "curator_state": str(state_path),
+        "curator_state_sha256": hash_bytes(state_path.read_bytes()),
+        "paused": paused,
+    }
+
+
+def report_scalar(raw: str, field: str) -> str:
+    value = raw.strip()
+    if not value:
+        raise RunError(f"curator report has empty {field}")
+    if value[0] in {"'", '"'}:
+        if len(value) < 2 or value[-1] != value[0]:
+            raise RunError(f"curator report has malformed quoted {field}")
+        value = value[1:-1]
+    return value
+
+
+def parse_report_actions(report: Path) -> dict[str, Any]:
+    try:
+        text = report.read_text(encoding="utf-8")
+    except OSError as error:
+        raise RunError(f"cannot read curator report: {error}") from error
+    blocks: list[str] = []
+    in_yaml = False
+    current: list[str] = []
+    for line in text.splitlines():
+        if line.strip() == "```yaml":
+            in_yaml = True
+            current = []
+        elif in_yaml and line.strip() == "```":
+            blocks.append("\n".join(current))
+            in_yaml = False
+        elif in_yaml:
+            current.append(line)
+    if not blocks:
+        raise RunError("curator report has no structured YAML block")
+    block = blocks[-1]
+    sections: dict[str, list[dict[str, Any]]] = {
+        "consolidations": [],
+        "prunings": [],
+        "manual_review": [],
+    }
+    section: str | None = None
+    item: dict[str, Any] | None = None
+    nested: dict[str, str] | None = None
+    seen_sections: set[str] = set()
+    for raw_line in block.splitlines():
+        stripped = raw_line.strip()
+        if not stripped or stripped.startswith("#"):
+            continue
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        if indent == 0:
+            section = None
+            item = None
+            nested = None
+            if ":" not in stripped:
+                raise RunError("curator report has malformed top-level YAML")
+            name, raw_value = stripped.split(":", 1)
+            if name not in sections:
+                continue
+            if name in seen_sections:
+                raise RunError(f"curator report repeats top-level section {name}")
+            seen_sections.add(name)
+            value = raw_value.strip()
+            if value == "[]":
+                continue
+            if value:
+                raise RunError(f"curator report section {name} must be a list")
+            section = name
+            continue
+        if section is None:
+            continue
+        if indent == 2 and stripped.startswith("- "):
+            item = {}
+            sections[section].append(item)
+            nested = None
+            remainder = stripped[2:].strip()
+            if not remainder:
+                continue
+            if ":" not in remainder:
+                raise RunError(f"curator report has malformed {section} item")
+            key, value = remainder.split(":", 1)
+            item[key.strip()] = report_scalar(value, f"{section}.{key.strip()}")
+            continue
+        if item is None:
+            raise RunError(f"curator report has malformed {section} indentation")
+        if indent == 4:
+            if ":" not in stripped:
+                raise RunError(f"curator report has malformed {section} field")
+            key, value = stripped.split(":", 1)
+            key = key.strip()
+            if key in item:
+                raise RunError(f"curator report repeats {section}.{key}")
+            if not value.strip():
+                if section != "prunings" or key != "evidence":
+                    raise RunError(
+                        f"curator report has unsupported nested field {section}.{key}"
+                    )
+                nested = {}
+                item[key] = nested
+            else:
+                nested = None
+                item[key] = report_scalar(value, f"{section}.{key}")
+            continue
+        if indent == 6 and nested is not None:
+            if stripped.startswith("- ") or ":" not in stripped:
+                raise RunError("curator pruning evidence must be a scalar mapping")
+            key, value = stripped.split(":", 1)
+            key = key.strip()
+            if key in nested:
+                raise RunError(f"curator report repeats pruning evidence.{key}")
+            nested[key] = report_scalar(value, f"pruning evidence.{key}")
+            continue
+        raise RunError(f"curator report has malformed nested {section} content")
+    consolidations: list[dict[str, str]] = []
+    for item in sections["consolidations"]:
+        if set(item) != {"from", "into", "reason"}:
+            raise RunError("curator report consolidation fields are malformed")
+        source = item.get("from", "")
+        destination = item.get("into", "")
+        if not re_safe_id(source) or not re_safe_id(destination):
+            raise RunError("curator report has malformed consolidation identity")
+        consolidations.append(
+            {"from": source, "into": destination, "reason": item["reason"]}
+        )
+    prunings: list[dict[str, Any]] = []
+    for item in sections["prunings"]:
+        if set(item) != {"name", "reason", "evidence"}:
+            raise RunError("curator report pruning evidence is incomplete")
+        name = item.get("name", "")
+        if not re_safe_id(name):
+            raise RunError("curator report has malformed pruning identity")
+        if not isinstance(item["evidence"], dict):
+            raise RunError("curator report pruning evidence is malformed")
+        prunings.append(item)
+    if len({item["from"] for item in consolidations}) != len(consolidations):
+        raise RunError("curator report repeats a consolidation source")
+    pruning_names = [item["name"] for item in prunings]
+    if len(set(pruning_names)) != len(pruning_names):
+        raise RunError("curator report repeats a pruning source")
+    if set(pruning_names) & {item["from"] for item in consolidations}:
+        raise RunError("curator report assigns a source to multiple actions")
+    return {
+        "consolidations": consolidations,
+        "prunings": prunings,
+    }
+
+
+def report_identity(path: Path) -> dict[str, Any]:
+    report = path.resolve()
+    try:
+        stat = report.stat()
+        data = report.read_bytes()
+    except OSError as error:
+        raise RunError(f"cannot identify curator report: {error}") from error
+    if not report.is_file() or report.is_symlink():
+        raise RunError(f"curator report is not a regular file: {report}")
+    modified_at = datetime.fromtimestamp(stat.st_mtime, timezone.utc)
+    match = re.fullmatch(
+        r"(\d{8})-(\d{6})-curator-report\.md",
+        report.name,
+    )
+    if match:
+        created_at = datetime.strptime(
+            "".join(match.groups()), "%Y%m%d%H%M%S"
+        ).replace(tzinfo=timezone.utc)
+    elif os.environ.get("CURATOR_ALLOW_UNSTAMPED_REPORT") == "1":
+        created_at = modified_at
+    else:
+        raise RunError("curator report filename has no trusted timestamp")
+    age = datetime.now(timezone.utc) - created_at
+    if age < timedelta(0) or age > MAX_REPORT_AGE:
+        raise RunError("curator report is stale or has an invalid timestamp")
+    return {
+        "path": str(report),
+        "sha256": hash_bytes(data),
+        "created_at": created_at.isoformat(),
+        "modified_at": modified_at.isoformat(),
+        "max_age_seconds": int(MAX_REPORT_AGE.total_seconds()),
+        "actions": parse_report_actions(report),
+    }
+
+
+def inventory_rows(inventory: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    rows: dict[str, dict[str, Any]] = {}
+    for row in inventory["skills"]:
+        name = row.get("name")
+        if not isinstance(name, str) or name in rows:
+            raise RunError("scheduled dependency inventory has duplicate skill identity")
+        rows[name] = row
+    return rows
+
+
+def skill_directory(row: dict[str, Any], configured_roots: dict[str, Path]) -> Path:
+    root_name = row.get("root")
+    if root_name not in configured_roots:
+        raise RunError(f"skill is outside curator-managed roots: {row.get('name')}")
+    path = Path(str(row.get("path", ""))).resolve()
+    expected_root = (
+        configured_roots[root_name] / "skills"
+        if root_name == "public"
+        else configured_roots[root_name]
+    )
+    try:
+        relative = path.relative_to(expected_root.resolve())
+    except ValueError as error:
+        raise RunError(f"skill path escaped its managed root: {path}") from error
+    if len(relative.parts) != 1 or relative.name != row.get("name"):
+        raise RunError(f"skill path does not match inventory identity: {path}")
+    return path
+
+
+def frontmatter_author(skill_md: Path) -> str:
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except OSError as error:
+        raise RunError(f"cannot read skill provenance frontmatter: {error}") from error
+    match = re.match(r"\A---\n(.*?)\n---(?:\n|\Z)", text, re.DOTALL)
+    if not match:
+        raise RunError(f"agent-created skill has malformed frontmatter: {skill_md}")
+    authors = re.findall(r"(?m)^author:\s*([^\s#]+)\s*$", match.group(1))
+    if len(authors) != 1:
+        raise RunError(f"agent-created skill has invalid author provenance: {skill_md}")
+    return authors[0]
+
+
+def parse_iso_timestamp(value: Any, field: str) -> datetime:
+    if not isinstance(value, str) or not value:
+        raise RunError(f"{field} must be an ISO timestamp")
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as error:
+        raise RunError(f"{field} must be an ISO timestamp") from error
+    if parsed.tzinfo is None:
+        raise RunError(f"{field} must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def require_agent_created(
+    name: str,
+    rows: dict[str, dict[str, Any]],
+    configured_roots: dict[str, Path],
+) -> dict[str, Any]:
+    row = rows.get(name)
+    if row is None:
+        raise RunError(f"authorized skill is not live: {name}")
+    if row.get("pinned") or row.get("implicit_pin"):
+        raise RunError(f"authorized skill is pinned: {name}")
+    directory = skill_directory(row, configured_roots)
+    marker = directory / ".agent-created"
+    if not marker.is_file() or marker.is_symlink():
+        raise RunError(f"authorized skill is not agent-created: {name}")
+    envelope = directory / ".agent-created.json"
+    if not envelope.is_file() or envelope.is_symlink():
+        raise RunError(f"authorized skill has no valid provenance envelope: {name}")
+    validation = run([str(EVIDENCE_TOOL), "validate", str(envelope)], check=False)
+    if validation.returncode:
+        raise RunError(
+            f"authorized skill provenance envelope is invalid: {name}: "
+            f"{validation.stderr.strip()}"
+        )
+    try:
+        provenance = json.loads(envelope.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RunError(f"cannot load provenance envelope for {name}: {error}") from error
+    if provenance.get("skill") != name:
+        raise RunError(f"authorized skill provenance belongs to another skill: {name}")
+    created_by = provenance.get("created_by", "skill-review")
+    author = frontmatter_author(directory / "SKILL.md")
+    if author != created_by:
+        raise RunError(f"authorized skill author provenance does not match: {name}")
+    created_at = provenance.get("created_at")
+    parse_iso_timestamp(created_at, f"{name} provenance created_at")
+    source_session_id = provenance.get("source_session_id")
+    if not isinstance(source_session_id, str) or not source_session_id:
+        raise RunError(f"authorized skill source provenance is missing: {name}")
+    return {
+        "name": name,
+        "root": row["root"],
+        "path": str(directory),
+        "marker": str(marker),
+        "marker_sha256": hash_bytes(marker.read_bytes()),
+        "envelope": str(envelope),
+        "envelope_sha256": hash_bytes(envelope.read_bytes()),
+        "envelope_schema_version": provenance.get("schema_version", 1),
+        "created_at": created_at,
+        "source_session_id": source_session_id,
+        "created_by": created_by,
+        "skill_md": str(directory / "SKILL.md"),
+        "skill_md_sha256": hash_bytes((directory / "SKILL.md").read_bytes()),
+        "author": author,
+    }
+
+
+def completed_project_cooldown_days() -> int:
+    state_path = curator_state_path()
+    try:
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RunError(f"cannot read curator pruning policy: {error}") from error
+    value = state.get("config_overrides", {}).get(
+        "completed_project_cooldown_days", 14
+    )
+    if not isinstance(value, int) or isinstance(value, bool) or not 1 <= value <= 365:
+        raise RunError("completed-project pruning cooldown is malformed")
+    return value
+
+
+def validate_pruning_evidence(
+    pruning: dict[str, Any], provenance: dict[str, Any]
+) -> None:
+    evidence = pruning["evidence"]
+    expected_fields = {
+        "basis",
+        "created_at",
+        "last_used_at",
+        "completion_evidence",
+        "reuse_assessment",
+        "evaluation",
+        "tombstone_effect",
+    }
+    if set(evidence) != expected_fields:
+        raise RunError(
+            f"autonomous pruning evidence is incomplete: {pruning['name']}"
+        )
+    if evidence["reuse_assessment"] != "no-reusable-content":
+        raise RunError(f"autonomous pruning has reusable content: {pruning['name']}")
+    if evidence["evaluation"] != "not-required-no-merge-target":
+        raise RunError(
+            f"autonomous pruning evaluation evidence is unsupported: {pruning['name']}"
+        )
+    if (
+        evidence["tombstone_effect"]
+        != "permanent-name-family-block-acknowledged"
+    ):
+        raise RunError(
+            f"autonomous pruning omits permanent tombstone acknowledgement: "
+            f"{pruning['name']}"
+        )
+    created = parse_iso_timestamp(
+        evidence["created_at"], f"{pruning['name']} pruning created_at"
+    )
+    provenance_created = parse_iso_timestamp(
+        provenance["created_at"], f"{pruning['name']} provenance created_at"
+    )
+    if created != provenance_created:
+        raise RunError(
+            f"autonomous pruning creation evidence does not match provenance: "
+            f"{pruning['name']}"
+        )
+    last_used_raw = evidence["last_used_at"]
+    last_used = (
+        created
+        if last_used_raw == "never"
+        else parse_iso_timestamp(
+            last_used_raw, f"{pruning['name']} pruning last_used_at"
+        )
+    )
+    if last_used < created:
+        raise RunError(
+            f"autonomous pruning last-use evidence predates creation: {pruning['name']}"
+        )
+    age = datetime.now(timezone.utc) - max(created, last_used)
+    basis = evidence["basis"]
+    if basis == "age-only":
+        if age < timedelta(days=AGE_ONLY_PRUNING_DAYS):
+            raise RunError(
+                f"autonomous age-only pruning is too recent: {pruning['name']}"
+            )
+        if evidence["completion_evidence"] != "not-required-age-threshold":
+            raise RunError(
+                f"autonomous age-only pruning has unsupported completion evidence: "
+                f"{pruning['name']}"
+            )
+    elif basis == "completed-project":
+        if age < timedelta(days=completed_project_cooldown_days()):
+            raise RunError(
+                f"autonomous completed-project pruning is inside cooldown: "
+                f"{pruning['name']}"
+            )
+        completion = evidence["completion_evidence"].strip()
+        if completion in {"", "unknown", "none", "unsupported"}:
+            raise RunError(
+                f"autonomous completed-project pruning lacks direct completion "
+                f"evidence: {pruning['name']}"
+            )
+    else:
+        raise RunError(f"autonomous pruning basis is unsupported: {pruning['name']}")
+
+
+def destination_path_prefix(root_name: str, destination: str) -> str:
+    return f"skills/{destination}/" if root_name == "public" else f"{destination}/"
+
+
+def validate_destination_paths(operation: dict[str, Any], destination: str) -> None:
+    prefix = destination_path_prefix(operation["root"], destination)
+    permitted = {
+        path
+        for path in operation["paths"]
+        if path.startswith(prefix)
+        or (
+            operation["root"] == "public"
+            and operation["action"] == "create"
+            and path in PUBLIC_MANIFESTS
+        )
+    }
+    if permitted != set(operation["paths"]):
+        raise RunError(
+            f"commit paths escape authorized destination skill: {destination}"
+        )
+
+
+def linked_destination_commit(
+    operations: list[dict[str, Any]], archive_index: int
+) -> dict[str, Any] | None:
+    archive = operations[archive_index]
+    destination = archive.get("absorbed_into")
+    if not destination:
+        return None
+    for operation in reversed(operations[:archive_index]):
+        if (
+            operation["kind"] == "commit"
+            and operation["root"] == archive["root"]
+            and operation.get("skill") == destination
+            and archive["skill"] in operation.get("sources", [])
+        ):
+            return operation
+    raise RunError(
+        f"consolidation archive lacks a preceding destination commit: "
+        f"{archive['skill']}"
+    )
+
+
+def authorize_operations(
+    operations: list[dict[str, Any]],
+    report: dict[str, Any],
+    inventory: dict[str, Any],
+) -> dict[str, Any]:
+    rows = inventory_rows(inventory)
+    configured_roots = roots()
+    consolidations = {
+        item["from"]: item["into"] for item in report["actions"]["consolidations"]
+    }
+    prunings = {
+        item["name"]: item for item in report["actions"]["prunings"]
+    }
+    evidence: dict[str, dict[str, Any]] = {}
+    for index, operation in enumerate(operations):
+        if operation["kind"] == "archive" and operation.get("absorbed_into"):
+            linked_destination_commit(operations, index)
+        if operation["status"] == "complete":
+            continue
+        if operation["kind"] == "archive":
+            name = operation["skill"]
+            destination = operation.get("absorbed_into")
+            if destination:
+                if consolidations.get(name) != destination:
+                    raise RunError(
+                        f"archive is not authorized by report consolidation: {name}"
+                    )
+            elif name not in prunings:
+                raise RunError(f"archive is not authorized by report pruning: {name}")
+            source_evidence = require_agent_created(name, rows, configured_roots)
+            if not destination:
+                validate_pruning_evidence(prunings[name], source_evidence)
+            evidence[name] = source_evidence
+            continue
+        destination = operation.get("skill")
+        sources = operation.get("sources", [])
+        if not isinstance(destination, str) or not re_safe_id(destination):
+            raise RunError("autonomous commit requires a destination skill")
+        if not sources or any(not isinstance(item, str) for item in sources):
+            raise RunError(f"autonomous commit requires declared sources: {destination}")
+        expected_sources = {
+            source for source, target in consolidations.items() if target == destination
+        }
+        if set(sources) != expected_sources:
+            raise RunError(
+                f"commit sources do not match report consolidations: {destination}"
+            )
+        validate_destination_paths(operation, destination)
+        for source in sources:
+            source_evidence = require_agent_created(source, rows, configured_roots)
+            if source_evidence["root"] != operation["root"]:
+                raise RunError(
+                    f"consolidation crosses managed roots: {source} -> {destination}"
+                )
+            evidence[source] = source_evidence
+        if operation["action"] == "patch":
+            destination_evidence = require_agent_created(
+                destination, rows, configured_roots
+            )
+            if destination_evidence["root"] != operation["root"]:
+                raise RunError(f"destination root mismatch: {destination}")
+            evidence[destination] = destination_evidence
+        else:
+            if operation["status"] == "planned" and destination in rows:
+                raise RunError(f"create destination already exists: {destination}")
+            if operation["status"] == "intent":
+                destination_evidence = require_agent_created(
+                    destination, rows, configured_roots
+                )
+                if destination_evidence["root"] != operation["root"]:
+                    raise RunError(f"destination root mismatch: {destination}")
+                evidence[destination] = destination_evidence
+            prefix = "skills/" if operation["root"] == "public" else ""
+            required = {
+                f"{prefix}{destination}/SKILL.md",
+                f"{prefix}{destination}/.agent-created",
+                f"{prefix}{destination}/.agent-created.json",
+            }
+            if not required.issubset(operation["paths"]):
+                raise RunError(
+                    f"create destination lacks package/provenance paths: {destination}"
+                )
+    return {
+        "dependency_inventory_sha256": hash_json(inventory),
+        "skills": sorted(evidence.values(), key=lambda item: item["name"]),
+    }
+
+
 def normalize_plan(plan: dict[str, Any], inventory: dict[str, Any]) -> list[dict[str, Any]]:
     raw_operations = plan.get("operations")
     if not isinstance(raw_operations, list) or not raw_operations:
@@ -261,6 +862,13 @@ def normalize_plan(plan: dict[str, Any], inventory: dict[str, Any]) -> list[dict
             name = raw.get("skill")
             if not isinstance(name, str) or name not in skills:
                 raise RunError(f"archive operation {index} names no live skill")
+            absorbed_into = raw.get("absorbed_into")
+            if absorbed_into is not None and (
+                not isinstance(absorbed_into, str) or not re_safe_id(absorbed_into)
+            ):
+                raise RunError(
+                    f"archive operation {index} has invalid replacement identity"
+                )
             row = skills[name]
             if row["pinned"] or row["implicit_pin"]:
                 raise RunError(f"archive operation {index} targets pinned skill: {name}")
@@ -282,7 +890,7 @@ def normalize_plan(plan: dict[str, Any], inventory: dict[str, Any]) -> list[dict
                 "kind": "archive",
                 "root": root_name,
                 "skill": name,
-                "absorbed_into": raw.get("absorbed_into"),
+                "absorbed_into": absorbed_into,
                 "paths": paths,
                 "status": "planned",
             }
@@ -294,12 +902,19 @@ def normalize_plan(plan: dict[str, Any], inventory: dict[str, Any]) -> list[dict
             raw_paths = raw.get("paths")
             if not isinstance(raw_paths, list) or not raw_paths:
                 raise RunError(f"commit operation {index} requires paths")
+            raw_sources = raw.get("sources", [])
+            if not isinstance(raw_sources, list) or any(
+                not isinstance(source, str) or not re_safe_id(source)
+                for source in raw_sources
+            ):
+                raise RunError(f"commit operation {index} has invalid sources")
             operation = {
                 "op_id": f"op-{index:03d}",
                 "kind": "commit",
                 "root": root_name,
                 "action": action,
                 "skill": raw.get("skill"),
+                "sources": sorted(set(raw_sources)),
                 "paths": sorted(
                     {validate_relative_path(root_name, str(path)) for path in raw_paths}
                 ),
@@ -314,6 +929,9 @@ def normalize_plan(plan: dict[str, Any], inventory: dict[str, Any]) -> list[dict
                         f"operation {index} has overlapping paths: {left}, {right}"
                     )
         operations.append(operation)
+    for index, operation in enumerate(operations):
+        if operation["kind"] == "archive" and operation.get("absorbed_into"):
+            linked_destination_commit(operations, index)
     return operations
 
 
@@ -383,6 +1001,149 @@ def verify_root_records(manifest: dict[str, Any]) -> dict[str, Path]:
         ).returncode:
             raise RunError(f"{name} starting commit is missing or rewritten")
     return current_roots
+
+
+def verify_expected_heads(
+    manifest: dict[str, Any], current_roots: dict[str, Path]
+) -> None:
+    for root_name, root in current_roots.items():
+        if git(root, "rev-parse", "HEAD") != expected_head(manifest, root_name):
+            raise RunError(f"unexpected commit appeared in {root_name} root")
+
+
+def authorized_changed_destination_skills(manifest: dict[str, Any]) -> set[str]:
+    return {
+        operation["skill"]
+        for operation in manifest["operations"]
+        if operation["kind"] == "commit"
+        and operation["status"] in {"intent", "complete"}
+        and isinstance(operation.get("skill"), str)
+    }
+
+
+def validate_inventory_revalidation(
+    manifest: dict[str, Any],
+    receipt: dict[str, Any],
+    current: dict[str, Any],
+) -> None:
+    frozen = manifest["dependency_freeze"]
+    if hash_json(frozen) != receipt["dependency_inventory_sha256"]:
+        raise RunError("authorization receipt dependency inventory does not match run")
+    if {
+        key: value for key, value in current.items() if key != "skills"
+    } != {
+        key: value for key, value in frozen.items() if key != "skills"
+    }:
+        raise RunError("scheduled dependency inventory metadata changed")
+    expected = inventory_rows(frozen)
+    changed: set[str] = set()
+    created: dict[str, dict[str, Any]] = {}
+    for operation in manifest["operations"]:
+        if operation["status"] not in {"intent", "complete"}:
+            continue
+        if operation["kind"] == "archive":
+            if operation["status"] != "complete":
+                continue
+            expected.pop(operation["skill"], None)
+            created.pop(operation["skill"], None)
+            changed.discard(operation["skill"])
+        elif operation["action"] == "create":
+            created[operation["skill"]] = operation
+            changed.add(operation["skill"])
+        else:
+            changed.add(operation["skill"])
+    current_rows = inventory_rows(current)
+    expected_names = (set(expected) | set(created))
+    if set(current_rows) != expected_names:
+        missing = sorted(expected_names - set(current_rows))
+        unexpected = sorted(set(current_rows) - expected_names)
+        raise RunError(
+            "scheduled dependency inventory changed outside authorized operations "
+            f"(missing={missing}, unexpected={unexpected})"
+        )
+    configured_roots = roots()
+    for name, frozen_row in expected.items():
+        current_row = current_rows[name]
+        if name not in changed:
+            if current_row != frozen_row:
+                raise RunError(
+                    f"scheduled dependency inventory drifted for unrelated skill: {name}"
+                )
+            continue
+        if (
+            current_row.get("root") != frozen_row.get("root")
+            or Path(str(current_row.get("path", ""))).resolve()
+            != Path(str(frozen_row.get("path", ""))).resolve()
+            or current_row.get("pinned")
+            or current_row.get("implicit_pin")
+        ):
+            raise RunError(
+                f"authorized destination inventory identity changed: {name}"
+            )
+        skill_directory(current_row, configured_roots)
+    for name, operation in created.items():
+        row = current_rows[name]
+        if (
+            row.get("root") != operation["root"]
+            or row.get("pinned")
+            or row.get("implicit_pin")
+        ):
+            raise RunError(f"created destination inventory is unsafe: {name}")
+        skill_directory(row, configured_roots)
+
+
+def validate_bound_provenance(
+    manifest: dict[str, Any],
+    receipt: dict[str, Any],
+    current_authorization: dict[str, Any],
+) -> None:
+    bound = {item["name"]: item for item in receipt["skills"]}
+    changed = authorized_changed_destination_skills(manifest)
+    for current in current_authorization["skills"]:
+        previous = bound.get(current["name"])
+        if previous is None or current["name"] in changed:
+            continue
+        if current != previous:
+            raise RunError(
+                f"marker-backed provenance changed after authorization: "
+                f"{current['name']}"
+            )
+
+
+def reverify_authorization(
+    manifest: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    receipt_path = Path(manifest["authorization_receipt"])
+    if (
+        not receipt_path.is_file()
+        or receipt_path.is_symlink()
+        or hash_bytes(receipt_path.read_bytes())
+        != manifest["authorization_receipt_sha256"]
+    ):
+        raise RunError("autonomous authorization receipt changed")
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RunError(f"cannot load autonomous authorization receipt: {error}") from error
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("run_id") != manifest["run_id"]
+    ):
+        raise RunError("autonomous authorization receipt identity is invalid")
+    report = report_identity(Path(manifest["report"]))
+    if (
+        report["sha256"] != manifest["report_sha256"]
+        or report["sha256"] != receipt["report"]["sha256"]
+        or report["modified_at"] != receipt["report"]["modified_at"]
+        or report["created_at"] != receipt["report"]["created_at"]
+    ):
+        raise RunError("curator report changed after authorization")
+    require_autonomous_switches_open()
+    inventory = scanner_inventory()
+    validate_inventory_revalidation(manifest, receipt, inventory)
+    current = authorize_operations(manifest["operations"], report, inventory)
+    validate_bound_provenance(manifest, receipt, current)
+    return report, receipt, current
 
 
 def snapshot_file(path: Path) -> dict[str, Any]:
@@ -488,6 +1249,18 @@ def command_begin(args: argparse.Namespace) -> int:
         raise RunError(f"cannot load plan: {error}") from error
     inventory = scanner_inventory()
     operations = normalize_plan(plan, inventory)
+    authorization: dict[str, Any] | None = None
+    report: dict[str, Any] | None = None
+    if args.autonomous:
+        report = report_identity(Path(args.report))
+        switches = require_autonomous_switches_open()
+        authorization = {
+            "schema_version": 1,
+            "authorized_at": now_iso(),
+            "report": report,
+            "switches": switches,
+            **authorize_operations(operations, report, inventory),
+        }
     configured_roots = roots()
     root_records = {
         name: {
@@ -504,6 +1277,15 @@ def command_begin(args: argparse.Namespace) -> int:
     if path.exists():
         raise RunError(f"run already exists: {run_id}")
     token = acquire_lock(f"skill-curator:{run_id}")
+    receipt_path: Path | None = None
+    try:
+        if authorization is not None:
+            receipt_path = authorization_path(run_id)
+            authorization["run_id"] = run_id
+            immutable_write(receipt_path, authorization)
+    except Exception:
+        lock_command("release", token, check=False)
+        raise
     payload = {
         "schema_version": 1,
         "run_id": run_id,
@@ -511,15 +1293,22 @@ def command_begin(args: argparse.Namespace) -> int:
         "started_at": now_iso(),
         "report": str(Path(args.report).resolve()),
         "plan": str(Path(args.plan).resolve()),
+        "authority_mode": "autonomous" if args.autonomous else "manual",
         "lock_token": token,
         "lock_renewed_at": now_iso(),
         "roots": root_records,
         "dependency_freeze": inventory,
         "operations": operations,
     }
+    if receipt_path is not None:
+        payload["report_sha256"] = report["sha256"]
+        payload["authorization_receipt"] = str(receipt_path)
+        payload["authorization_receipt_sha256"] = hash_bytes(receipt_path.read_bytes())
     try:
         atomic_write(path, payload)
     except Exception:
+        if receipt_path is not None:
+            receipt_path.unlink(missing_ok=True)
         lock_command("release", token, check=False)
         raise
     print(run_id)
@@ -528,11 +1317,92 @@ def command_begin(args: argparse.Namespace) -> int:
 
 def command_renew(args: argparse.Namespace) -> int:
     path, manifest = load_manifest(args.run)
-    if manifest["status"] != "active":
+    if manifest["status"] not in {"active", "publish_failed"}:
         raise RunError(f"cannot renew run in status {manifest['status']}")
     verify_root_records(manifest)
     renew_lock(manifest)
     atomic_write(path, manifest)
+    return 0
+
+
+def provenance_refs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    return [
+        {
+            "kind": "agent-created-marker",
+            "path": source["marker"],
+            "sha256": source["marker_sha256"],
+        },
+        {
+            "kind": "agent-created-envelope",
+            "path": source["envelope"],
+            "sha256": source["envelope_sha256"],
+            "schema_version": source["envelope_schema_version"],
+            "created_by": source["created_by"],
+            "source_session_id": source["source_session_id"],
+            "created_at": source["created_at"],
+        },
+        {
+            "kind": "skill-author-frontmatter",
+            "path": source["skill_md"],
+            "sha256": source["skill_md_sha256"],
+            "author": source["author"],
+        },
+    ]
+
+
+def command_archive_context(args: argparse.Namespace) -> int:
+    path, manifest = load_manifest(args.run)
+    if manifest["status"] != "active":
+        raise RunError(f"cannot authorize archive in status {manifest['status']}")
+    current_roots = verify_root_records(manifest)
+    renew_lock(manifest)
+    verify_expected_heads(manifest, current_roots)
+    verify_dirty_state(manifest, current_roots)
+    operation = next(
+        (
+            item
+            for item in manifest["operations"]
+            if item["status"] == "planned"
+        ),
+        None,
+    )
+    if (
+        operation is None
+        or operation["kind"] != "archive"
+        or operation.get("skill") != args.skill
+    ):
+        raise RunError(f"archive is not the next planned operation: {args.skill}")
+    archive_index = manifest["operations"].index(operation)
+    destination_commit = linked_destination_commit(
+        manifest["operations"], archive_index
+    )
+    if destination_commit is not None and destination_commit["status"] != "complete":
+        raise RunError(
+            f"consolidation destination commit is incomplete: {args.skill}"
+        )
+    if manifest.get("authority_mode") != "autonomous":
+        context = {
+            "authority_mode": "manual",
+            "absorbed_into": operation.get("absorbed_into"),
+        }
+        operation["archive_context"] = context
+        atomic_write(path, manifest)
+        print(json.dumps(context, sort_keys=True))
+        return 0
+    report, _, current = reverify_authorization(manifest)
+    source = next(
+        item for item in current["skills"] if item["name"] == args.skill
+    )
+    context = {
+        "authority_mode": "autonomous",
+        "report": report["path"],
+        "report_sha256": report["sha256"],
+        "absorbed_into": operation.get("absorbed_into"),
+        "evidence_refs": provenance_refs(source),
+    }
+    operation["archive_context"] = context
+    atomic_write(path, manifest)
+    print(json.dumps(context, sort_keys=True))
     return 0
 
 
@@ -542,8 +1412,12 @@ def command_intent(args: argparse.Namespace) -> int:
         raise RunError(f"cannot add intent to run in status {manifest['status']}")
     current_roots = verify_root_records(manifest)
     renew_lock(manifest)
+    if manifest.get("authority_mode") == "autonomous":
+        reverify_authorization(manifest)
     verify_dirty_state(manifest, current_roots)
     operation = find_planned_operation(manifest, args)
+    if operation["kind"] == "archive" and "archive_context" not in operation:
+        raise RunError("archive intent lacks bound archive context")
     current_head = git(current_roots[operation["root"]], "rev-parse", "HEAD")
     if current_head != expected_head(manifest, operation["root"]):
         raise RunError(f"unexpected commit appeared in {operation['root']} root")
@@ -584,6 +1458,62 @@ def record_ledger_effect(operation: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def snapshot_json(snapshot: dict[str, Any], label: str) -> dict[str, Any]:
+    if not snapshot.get("exists"):
+        raise RunError(f"archive did not write {label}")
+    try:
+        payload = json.loads(base64.b64decode(snapshot["bytes_b64"]))
+    except (ValueError, json.JSONDecodeError) as error:
+        raise RunError(f"archive wrote malformed {label}") from error
+    if not isinstance(payload, dict):
+        raise RunError(f"archive wrote malformed {label}")
+    return payload
+
+
+def validate_archive_completion(operation: dict[str, Any]) -> None:
+    expected_replacement = operation.get("absorbed_into")
+    retirement = snapshot_json(
+        operation["effects_after"]["retirement"], "retirement record"
+    )
+    context = operation.get("archive_context")
+    if not isinstance(context, dict):
+        raise RunError("archive completion lacks bound archive context")
+    tombstone_snapshot = operation["effects_after"]["tombstone"]
+    tombstone = (
+        snapshot_json(tombstone_snapshot, "tombstone")
+        if tombstone_snapshot.get("exists")
+        else None
+    )
+    if context.get("authority_mode") == "autonomous" and tombstone is None:
+        raise RunError("autonomous archive did not write a tombstone")
+    records = [("retirement record", retirement)]
+    if tombstone is not None:
+        records.append(("tombstone", tombstone))
+    for label, payload in records:
+        if payload.get("skill") != operation["skill"]:
+            raise RunError(f"archive {label} belongs to another skill")
+        if payload.get("replacement") != expected_replacement:
+            raise RunError(
+                f"archive {label} replacement differs from authorized destination"
+            )
+        expected_reason = "consolidated" if expected_replacement else "pruned"
+        if payload.get("reason") != expected_reason:
+            raise RunError(f"archive {label} reason differs from authorization")
+    if context.get("absorbed_into") != expected_replacement:
+        raise RunError("archive context replacement differs from plan")
+    if context.get("authority_mode") == "autonomous":
+        if (
+            retirement.get("curator_authority") != "autonomous"
+            or retirement.get("curator_report") != context.get("report")
+            or retirement.get("curator_report_sha256")
+            != context.get("report_sha256")
+            or retirement.get("evidence_refs") != context.get("evidence_refs")
+        ):
+            raise RunError(
+                "archive retirement record does not bind authorization evidence"
+            )
+
+
 def complete_operation(
     path: Path, manifest: dict[str, Any], operation: dict[str, Any]
 ) -> None:
@@ -613,6 +1543,8 @@ def complete_operation(
     operation["changed_paths"] = changed
     operation["effects_after"] = snapshot_effects(operation)
     operation["ledger_effect"] = record_ledger_effect(operation)
+    if operation["kind"] == "archive":
+        validate_archive_completion(operation)
     operation["status"] = "complete"
     operation["completed_at"] = now_iso()
     verify_dirty_state(manifest, current_roots)
@@ -638,6 +1570,8 @@ def command_commit(args: argparse.Namespace) -> int:
         raise RunError("scoped commit requires a commit intent")
     current_roots = verify_root_records(manifest)
     renew_lock(manifest)
+    if manifest.get("authority_mode") == "autonomous":
+        reverify_authorization(manifest)
     root = current_roots[operation["root"]]
     verify_dirty_state(
         manifest,
@@ -679,6 +1613,202 @@ def command_commit(args: argparse.Namespace) -> int:
     return 0
 
 
+def remote_head(root: Path, remote: str, branch: str) -> str | None:
+    result = run(
+        ["git", "-C", str(root), "ls-remote", "--heads", remote, f"refs/heads/{branch}"],
+        check=False,
+    )
+    if result.returncode:
+        raise RunError(f"cannot read public remote identity: {result.stderr.strip()}")
+    lines = [line for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
+        return None
+    if len(lines) != 1:
+        raise RunError("public remote returned ambiguous branch identity")
+    fields = lines[0].split()
+    if len(fields) != 2 or fields[1] != f"refs/heads/{branch}":
+        raise RunError("public remote returned malformed branch identity")
+    return fields[0]
+
+
+def public_changed(manifest: dict[str, Any]) -> bool:
+    return any(
+        operation["root"] == "public" and operation["status"] == "complete"
+        for operation in manifest["operations"]
+    )
+
+
+def recorded_remote_url(root: Path, remote: str) -> str:
+    value = git(root, "remote", "get-url", remote)
+    if not value:
+        raise RunError(f"public remote has no URL: {remote}")
+    return value
+
+
+def verify_recorded_remote_url(root: Path, publication: dict[str, Any]) -> None:
+    if recorded_remote_url(root, publication["remote"]) != publication["remote_url"]:
+        raise RunError("public remote URL changed after publication authorization")
+
+
+def mark_publication_failed(
+    path: Path,
+    manifest: dict[str, Any],
+    publication: dict[str, Any],
+    message: str,
+) -> None:
+    publication["status"] = "failed"
+    publication["failed_at"] = now_iso()
+    publication["error"] = message
+    manifest["status"] = "publish_failed"
+    atomic_write(path, manifest)
+
+
+def reconcile_publication(
+    path: Path,
+    manifest: dict[str, Any],
+    publication: dict[str, Any],
+    public: Path,
+    *,
+    recovered_field: str,
+) -> str:
+    verify_recorded_remote_url(public, publication)
+    try:
+        served = remote_head(
+            public, publication["remote"], publication["branch"]
+        )
+    except RunError as error:
+        mark_publication_failed(path, manifest, publication, str(error))
+        raise
+    publication["remote_after"] = served
+    if served == publication["new_head"]:
+        publication["status"] = "published"
+        publication["published_at"] = now_iso()
+        publication[recovered_field] = True
+        manifest["status"] = "active"
+        atomic_write(path, manifest)
+        return "published"
+    if served == publication["prior_head"]:
+        mark_publication_failed(
+            path,
+            manifest,
+            publication,
+            "publication did not update the remote",
+        )
+        return "not_published"
+    mark_publication_failed(
+        path,
+        manifest,
+        publication,
+        "publication remote identity is neither the prior nor transaction head",
+    )
+    raise RunError("publication remote identity is unresolved")
+
+
+def command_publish(args: argparse.Namespace) -> int:
+    path, manifest = load_manifest(args.run)
+    if manifest["status"] not in {"active", "publish_failed"}:
+        raise RunError(f"cannot publish run in status {manifest['status']}")
+    incomplete = [
+        operation["op_id"]
+        for operation in manifest["operations"]
+        if operation["status"] != "complete"
+    ]
+    if incomplete:
+        raise RunError(f"run has incomplete operations: {', '.join(incomplete)}")
+    current_roots = verify_root_records(manifest)
+    renew_lock(manifest)
+    if manifest.get("authority_mode") == "autonomous":
+        reverify_authorization(manifest)
+    verify_dirty_state(manifest, current_roots)
+    if not public_changed(manifest):
+        raise RunError("run has no public-root changes to publish")
+    public = current_roots["public"]
+    prior = manifest["roots"]["public"]["initial_head"]
+    new = expected_head(manifest, "public")
+    existing_publication = manifest.get("publication", {})
+    if existing_publication.get("status") in {"publishing", "failed"}:
+        if (
+            existing_publication.get("remote") != args.remote
+            or existing_publication.get("branch") != args.branch
+            or existing_publication.get("prior_head") != prior
+            or existing_publication.get("new_head") != new
+        ):
+            raise RunError("publication identity does not match retry")
+        outcome = reconcile_publication(
+            path,
+            manifest,
+            existing_publication,
+            public,
+            recovered_field="recovered_before_retry",
+        )
+        if outcome == "published":
+            return 0
+    if git(public, "rev-parse", "HEAD") != new:
+        raise RunError("public root is not at the finished transaction head")
+    if run(
+        ["git", "-C", str(public), "merge-base", "--is-ancestor", prior, new],
+        check=False,
+    ).returncode:
+        raise RunError("public transaction is not a fast-forward from its prior head")
+    remote_url = recorded_remote_url(public, args.remote)
+    before = remote_head(public, args.remote, args.branch)
+    if before != prior:
+        raise RunError("public remote no longer matches the transaction prior head")
+    publication = {
+        "status": "publishing",
+        "remote": args.remote,
+        "remote_url": remote_url,
+        "branch": args.branch,
+        "prior_head": prior,
+        "new_head": new,
+        "remote_before": before,
+        "started_at": now_iso(),
+    }
+    manifest["status"] = "active"
+    manifest["publication"] = publication
+    atomic_write(path, manifest)
+    result = run(
+        [
+            "git",
+            "-C",
+            str(public),
+            "push",
+            args.remote,
+            f"{new}:refs/heads/{args.branch}",
+        ],
+        check=False,
+    )
+    if result.returncode:
+        outcome = reconcile_publication(
+            path,
+            manifest,
+            publication,
+            public,
+            recovered_field="recovered_after_failed_push",
+        )
+        if outcome == "published":
+            publication["push_error"] = result.stderr.strip()
+            atomic_write(path, manifest)
+            return 0
+        publication["error"] = result.stderr.strip()
+        atomic_write(path, manifest)
+        raise RunError(f"public publication failed: {result.stderr.strip()}")
+    after = remote_head(public, args.remote, args.branch)
+    if after != new:
+        mark_publication_failed(
+            path,
+            manifest,
+            publication,
+            "remote identity differs from pushed transaction head",
+        )
+        raise RunError("public remote does not serve the pushed transaction head")
+    publication["status"] = "published"
+    publication["remote_after"] = after
+    publication["published_at"] = now_iso()
+    atomic_write(path, manifest)
+    return 0
+
+
 def command_finish(args: argparse.Namespace) -> int:
     path, manifest = load_manifest(args.run)
     if manifest["status"] != "active":
@@ -691,10 +1821,26 @@ def command_finish(args: argparse.Namespace) -> int:
     if incomplete:
         raise RunError(f"run has incomplete operations: {', '.join(incomplete)}")
     current_roots = verify_root_records(manifest)
+    if manifest.get("authority_mode") == "autonomous":
+        reverify_authorization(manifest)
     for root_name, root in current_roots.items():
         if git(root, "rev-parse", "HEAD") != expected_head(manifest, root_name):
             raise RunError(f"unexpected commit appeared in {root_name} root")
     verify_dirty_state(manifest, current_roots)
+    if public_changed(manifest):
+        publication = manifest.get("publication", {})
+        if publication.get("status") != "published":
+            raise RunError("public-root transaction has not been published")
+        verify_recorded_remote_url(current_roots["public"], publication)
+        if (
+            remote_head(
+                current_roots["public"],
+                publication["remote"],
+                publication["branch"],
+            )
+            != publication["new_head"]
+        ):
+            raise RunError("published public identity changed before completion")
     renew_lock(manifest)
     manifest["status"] = "complete"
     manifest["finished_at"] = now_iso()
@@ -992,12 +2138,48 @@ def command_rollback(args: argparse.Namespace) -> int:
     path, manifest = load_manifest(args.run)
     if manifest["status"] == "rolled_back":
         return 0
-    if manifest["status"] not in {"active", "complete", "rollback_failed", "rolling_back"}:
+    if manifest["status"] not in {
+        "active",
+        "complete",
+        "publish_failed",
+        "rollback_failed",
+        "rolling_back",
+    }:
         raise RunError(f"cannot rollback run in status {manifest['status']}")
     current_roots = verify_root_records(manifest)
     ensure_rollback_lock(manifest)
     atomic_write(path, manifest)
     validate_rollback_dirty(manifest, current_roots)
+    publication = manifest.get("publication", {})
+    if publication.get("status") in {"publishing", "failed", "published"}:
+        public = current_roots["public"]
+        verify_recorded_remote_url(public, publication)
+        served = remote_head(
+            public, publication["remote"], publication["branch"]
+        )
+        if served == publication["new_head"]:
+            previous_status = publication["status"]
+            publication["status"] = "published"
+            publication["remote_after"] = served
+            publication["published_at"] = now_iso()
+            if previous_status != "published":
+                publication["recovered_during_rollback"] = True
+            if previous_status == "publishing":
+                publication["recovered_after_interruption"] = True
+        elif (
+            served == publication["prior_head"]
+            and publication["status"] in {"publishing", "failed"}
+        ):
+            publication["status"] = "failed"
+            publication["failed_at"] = now_iso()
+            publication["error"] = (
+                "publication did not update the remote"
+            )
+        else:
+            raise RunError(
+                "publication remote identity changed before rollback"
+            )
+        atomic_write(path, manifest)
     manifest["status"] = "rolling_back"
     manifest.setdefault("rollback_started_at", now_iso())
     atomic_write(path, manifest)
@@ -1006,6 +2188,38 @@ def command_rollback(args: argparse.Namespace) -> int:
             if operation["status"] in {"complete", "intent"}:
                 renew_lock(manifest)
                 reverse_operation(path, manifest, operation, current_roots)
+        if publication.get("status") == "published":
+            public = current_roots["public"]
+            verify_recorded_remote_url(public, publication)
+            if (
+                remote_head(public, publication["remote"], publication["branch"])
+                != publication["new_head"]
+            ):
+                raise RunError("published public identity changed before rollback")
+            rollback_head = git(public, "rev-parse", "HEAD")
+            result = run(
+                [
+                    "git",
+                    "-C",
+                    str(public),
+                    "push",
+                    publication["remote"],
+                    f"{rollback_head}:refs/heads/{publication['branch']}",
+                ],
+                check=False,
+            )
+            if result.returncode:
+                raise RunError(
+                    f"public rollback publication failed: {result.stderr.strip()}"
+                )
+            if (
+                remote_head(public, publication["remote"], publication["branch"])
+                != rollback_head
+            ):
+                raise RunError("public remote does not serve the rollback head")
+            publication["rollback_head"] = rollback_head
+            publication["rolled_back_at"] = now_iso()
+            publication["status"] = "reverted"
         manifest["status"] = "rolled_back"
         manifest["rolled_back_at"] = now_iso()
         atomic_write(path, manifest)
@@ -1026,11 +2240,17 @@ def parser() -> argparse.ArgumentParser:
     begin.add_argument("--plan", required=True)
     begin.add_argument("--report", required=True)
     begin.add_argument("--run-id")
+    begin.add_argument("--autonomous", action="store_true")
     begin.set_defaults(func=command_begin)
 
     renew = sub.add_parser("renew")
     renew.add_argument("--run", required=True)
     renew.set_defaults(func=command_renew)
+
+    archive_context = sub.add_parser("archive-context")
+    archive_context.add_argument("--run", required=True)
+    archive_context.add_argument("--skill", required=True)
+    archive_context.set_defaults(func=command_archive_context)
 
     intent = sub.add_parser("intent")
     intent.add_argument("--run", required=True)
@@ -1051,6 +2271,12 @@ def parser() -> argparse.ArgumentParser:
     commit.add_argument("--op", required=True)
     commit.add_argument("--message-file", required=True)
     commit.set_defaults(func=command_commit)
+
+    publish = sub.add_parser("publish")
+    publish.add_argument("--run", required=True)
+    publish.add_argument("--remote", default="origin")
+    publish.add_argument("--branch", default="main")
+    publish.set_defaults(func=command_publish)
 
     finish = sub.add_parser("finish")
     finish.add_argument("--run", required=True)

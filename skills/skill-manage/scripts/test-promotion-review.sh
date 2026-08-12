@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Deterministic checks for the promotion public-safety inventory.
+# Deterministic checks for skill-manage promotion and retirement state.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -298,4 +298,231 @@ cached_after="$(git -C "$PUBLIC" diff --cached --binary -- \
   fail "failed promotion did not restore the scoped staged diff"
 pass "failed promotion restores local provenance and staged state"
 
-echo "PASS  $passes deterministic promotion checks"
+CHECK_TOMBSTONE="$SCRIPT_DIR/../../skill-review/scripts/check-tombstone.sh"
+TOMB_STATE="$TMP/tombstone-state"
+mkdir -p "$TOMB_STATE/review/tombstones" "$TOMB_STATE/legacy/tombstones"
+printf '{"skill":"canonical-skill","reason":"pruned"}\n' \
+  > "$TOMB_STATE/review/tombstones/canonical-skill.json"
+SKILLS_REVIEW_STATE_DIR="$TOMB_STATE/review" \
+  SKILLS_STATE_DIR="$TOMB_STATE/legacy" \
+  "$CHECK_TOMBSTONE" canonical-skill >/dev/null ||
+  fail "canonical review-state tombstone was not enforced"
+rm "$TOMB_STATE/review/tombstones/canonical-skill.json"
+printf '{"skill":"legacy-skill","reason":"pruned"}\n' \
+  > "$TOMB_STATE/legacy/tombstones/legacy-skill.json"
+SKILLS_REVIEW_STATE_DIR="$TOMB_STATE/review" \
+  SKILLS_STATE_DIR="$TOMB_STATE/legacy" \
+  "$CHECK_TOMBSTONE" legacy-skill >/dev/null ||
+  fail "pre-migration tombstone was not enforced"
+mkdir -p "$TOMB_STATE/custom-review/tombstones"
+printf '{"skill":"custom-skill","reason":"pruned"}\n' \
+  > "$TOMB_STATE/custom-review/tombstones/custom-skill.json"
+SKILLS_REVIEW_STATE_DIR= SKILLS_STATE_DIR="$TOMB_STATE/custom-review" \
+  "$CHECK_TOMBSTONE" custom-skill >/dev/null ||
+  fail "arbitrary legacy SKILLS_STATE_DIR override was reinterpreted"
+printf '{malformed\n' > "$TOMB_STATE/review/tombstones/ambiguous-skill.json"
+set +e
+SKILLS_REVIEW_STATE_DIR="$TOMB_STATE/review" \
+  SKILLS_STATE_DIR="$TOMB_STATE/legacy" \
+  "$CHECK_TOMBSTONE" ambiguous-skill >/dev/null 2>&1
+tombstone_status=$?
+set -e
+[[ "$tombstone_status" -eq 2 ]] ||
+  fail "ambiguous tombstone state failed open with status $tombstone_status"
+mkdir -p "$TOMB_STATE/dangling"
+ln -s "$TOMB_STATE/missing-tombstones" "$TOMB_STATE/dangling/tombstones"
+set +e
+SKILLS_REVIEW_STATE_DIR="$TOMB_STATE/dangling" SKILLS_STATE_DIR= \
+  "$CHECK_TOMBSTONE" absent-skill >/dev/null 2>&1
+tombstone_status=$?
+set -e
+[[ "$tombstone_status" -eq 2 ]] ||
+  fail "dangling tombstone state failed open with status $tombstone_status"
+pass "tombstone lookup shares canonical state and fails closed"
+
+init_retirement_roots() {
+  local fixture="$1"
+  RETIRE_LOCAL="$fixture/local"
+  RETIRE_PUBLIC="$fixture/public"
+  mkdir -p "$RETIRE_LOCAL" "$RETIRE_PUBLIC/skills"
+  git -C "$RETIRE_LOCAL" init -q
+  git -C "$RETIRE_PUBLIC" init -q
+  for root in "$RETIRE_LOCAL" "$RETIRE_PUBLIC"; do
+    git -C "$root" config user.email test@example.com
+    git -C "$root" config user.name Test
+    git -C "$root" commit --allow-empty -qm base
+  done
+}
+
+commit_then_delete_skill() {
+  local root="$1" name="$2"
+  mkdir -p "$root/$name"
+  printf -- '---\nname: %s\ndescription: Retirement fixture.\n---\n' "$name" \
+    > "$root/$name/SKILL.md"
+  git -C "$root" add "$name"
+  git -C "$root" commit -qm "add $name"
+  RETIRE_RESTORE_SHA="$(git -C "$root" rev-parse HEAD)"
+  git -C "$root" rm -qr "$name"
+  git -C "$root" commit -qm "delete $name"
+  RETIRE_DELETE_SHA="$(git -C "$root" rev-parse HEAD)"
+}
+
+ARCHIVE_FIXTURE="$TMP/archive-retirement"
+init_retirement_roots "$ARCHIVE_FIXTURE"
+make_skill "$RETIRE_LOCAL" archived-skill
+git -C "$RETIRE_LOCAL" add archived-skill
+git -C "$RETIRE_LOCAL" commit -qm "add archived skill"
+ARCHIVE_RESTORE_SHA="$(git -C "$RETIRE_LOCAL" rev-parse HEAD)"
+ARCHIVE_STATE="$ARCHIVE_FIXTURE/custom-review"
+SKILLS_REVIEW_STATE_DIR= \
+  SKILLS_STATE_DIR="$ARCHIVE_STATE" \
+  SKILLS_LOCAL_ROOT="$RETIRE_LOCAL" \
+  SKILLS_REPO_ROOT="$RETIRE_PUBLIC" \
+  SKILLS_ALLOW_NO_SCHEDULED_JOBS=1 \
+  SKILLS_COAUTHOR_TRAILER="Reviewed-by: fixture" \
+  "$SCRIPT_DIR/archive-skill.sh" archived-skill >/dev/null
+[[ -f "$ARCHIVE_STATE/retired/archived-skill.json" ]] ||
+  fail "archive did not preserve arbitrary SKILLS_STATE_DIR semantics"
+[[ -f "$ARCHIVE_STATE/tombstones/archived-skill.json" ]] ||
+  fail "archive did not write the matching tombstone path"
+[[ ! -e "$ARCHIVE_STATE/skill-review" ]] ||
+  fail "archive appended skill-review to a legacy override"
+SKILLS_REVIEW_STATE_DIR= \
+  SKILLS_STATE_DIR="$ARCHIVE_STATE" \
+  SKILLS_LOCAL_ROOT="$RETIRE_LOCAL" \
+  SKILLS_REPO_ROOT="$RETIRE_PUBLIC" \
+  SKILLS_COAUTHOR_TRAILER="Reviewed-by: fixture" \
+  "$SCRIPT_DIR/restore-skill.sh" archived-skill >/dev/null
+[[ -f "$RETIRE_LOCAL/archived-skill/SKILL.md" ]] ||
+  fail "archived skill was not restored"
+[[ ! -e "$ARCHIVE_STATE/retired/archived-skill.json" ]] ||
+  fail "active retirement record survived restore"
+ARCHIVE_HISTORY="$(find "$ARCHIVE_STATE/retirement-history" \
+  -name 'archived-skill-*.json' -type f)"
+[[ -n "$ARCHIVE_HISTORY" ]] ||
+  fail "retirement record was not moved into history"
+python3 - "$ARCHIVE_HISTORY" "$ARCHIVE_RESTORE_SHA" <<'PY'
+import json, sys
+record = json.load(open(sys.argv[1]))
+assert record["restore_sha"] == sys.argv[2]
+assert record["record_source"] == "record"
+assert record["restore_commit"]
+PY
+pass "archive and atomic restore preserve legacy override evidence"
+
+LEGACY_FIXTURE="$TMP/legacy-retirement"
+init_retirement_roots "$LEGACY_FIXTURE"
+commit_then_delete_skill "$RETIRE_LOCAL" legacy-record-skill
+LEGACY_STATE="$LEGACY_FIXTURE/state"
+CANONICAL_STATE="$LEGACY_STATE/skill-review"
+mkdir -p "$LEGACY_STATE/retired" "$LEGACY_STATE/tombstones" \
+  "$CANONICAL_STATE/tombstones"
+python3 - "$LEGACY_STATE/retired/legacy-record-skill.json" \
+  "$RETIRE_LOCAL" "$RETIRE_RESTORE_SHA" <<'PY'
+import json, sys
+path, root, sha = sys.argv[1:]
+json.dump({
+    "skill": "legacy-record-skill",
+    "path": "legacy-record-skill",
+    "dest": "legacy-record-skill",
+    "git_root": root,
+    "restore_sha": sha,
+    "retired_at": "2026-01-01T00:00:00+00:00",
+    "reason": "pruned",
+    "replacement": None,
+    "curator_report_sha256": "legacy-evidence",
+}, open(path, "w"), indent=2)
+open(path, "a").write("\n")
+PY
+printf '{"skill":"legacy-record-skill"}\n' \
+  > "$LEGACY_STATE/tombstones/legacy-record-skill.json"
+printf '{"skill":"legacy-record-skill"}\n' \
+  > "$CANONICAL_STATE/tombstones/legacy-record-skill.json"
+SKILLS_REVIEW_STATE_DIR="$CANONICAL_STATE" \
+  SKILLS_STATE_DIR="$LEGACY_STATE" \
+  SKILLS_LOCAL_ROOT="$RETIRE_LOCAL" \
+  SKILLS_REPO_ROOT="$RETIRE_PUBLIC" \
+  SKILLS_COAUTHOR_TRAILER="Reviewed-by: fixture" \
+  "$SCRIPT_DIR/restore-skill.sh" legacy-record-skill \
+  >"$LEGACY_FIXTURE/restore.out" 2>"$LEGACY_FIXTURE/restore.err"
+[[ -f "$RETIRE_LOCAL/legacy-record-skill/SKILL.md" ]] ||
+  fail "legacy retirement record was not restored"
+[[ ! -e "$LEGACY_STATE/retired/legacy-record-skill.json" ]] ||
+  fail "legacy retirement record survived restore"
+[[ ! -e "$LEGACY_STATE/tombstones/legacy-record-skill.json" &&
+   ! -e "$CANONICAL_STATE/tombstones/legacy-record-skill.json" ]] ||
+  fail "restore did not clear canonical and legacy tombstones"
+LEGACY_HISTORY="$(find "$LEGACY_STATE/retirement-history" \
+  -name 'legacy-record-skill-*.json' -type f)"
+[[ -n "$LEGACY_HISTORY" ]] ||
+  fail "legacy record evidence was not retained in history"
+python3 - "$LEGACY_HISTORY" <<'PY'
+import json, sys
+record = json.load(open(sys.argv[1]))
+assert record["curator_report_sha256"] == "legacy-evidence"
+assert record["record_source"] == "legacy-record"
+PY
+grep -q "legacy retirement record:" "$LEGACY_FIXTURE/restore.err" ||
+  fail "legacy record migration was not visible"
+pass "legacy records remain visible and retain provenance"
+
+HISTORY_FIXTURE="$TMP/history-only-retirement"
+init_retirement_roots "$HISTORY_FIXTURE"
+commit_then_delete_skill "$RETIRE_LOCAL" history-only-skill
+HISTORY_STATE="$HISTORY_FIXTURE/state"
+SKILLS_REVIEW_STATE_DIR="$HISTORY_STATE/skill-review" \
+  SKILLS_STATE_DIR="$HISTORY_STATE" \
+  SKILLS_LOCAL_ROOT="$RETIRE_LOCAL" \
+  SKILLS_REPO_ROOT="$RETIRE_PUBLIC" \
+  SKILLS_COAUTHOR_TRAILER="Reviewed-by: fixture" \
+  "$SCRIPT_DIR/restore-skill.sh" history-only-skill >/dev/null
+HISTORY_ONLY_RECORD="$(find "$HISTORY_STATE/skill-review/retirement-history" \
+  -name 'history-only-skill-*.json' -type f)"
+[[ -n "$HISTORY_ONLY_RECORD" ]] ||
+  fail "history-only restore did not create lifecycle history"
+python3 - "$HISTORY_ONLY_RECORD" "$RETIRE_DELETE_SHA" <<'PY'
+import json, sys
+record = json.load(open(sys.argv[1]))
+assert record["record_source"] == "git-history"
+assert record["delete_commit"] == sys.argv[2]
+assert record["restore_commit"]
+PY
+pass "history-only restores create durable lifecycle records"
+
+ROLLBACK_FIXTURE="$TMP/rollback-retirement"
+init_retirement_roots "$ROLLBACK_FIXTURE"
+make_skill "$RETIRE_LOCAL" rollback-retired-skill
+git -C "$RETIRE_LOCAL" add rollback-retired-skill
+git -C "$RETIRE_LOCAL" commit -qm "add rollback retired skill"
+ROLLBACK_SHA="$(git -C "$RETIRE_LOCAL" rev-parse HEAD)"
+ROLLBACK_STATE="$ROLLBACK_FIXTURE/state"
+SKILLS_REVIEW_STATE_DIR="$ROLLBACK_STATE/skill-review" \
+  SKILLS_STATE_DIR="$ROLLBACK_STATE" \
+  SKILLS_LOCAL_ROOT="$RETIRE_LOCAL" \
+  SKILLS_REPO_ROOT="$RETIRE_PUBLIC" \
+  SKILLS_ALLOW_NO_SCHEDULED_JOBS=1 \
+  SKILLS_COAUTHOR_TRAILER="Reviewed-by: fixture" \
+  "$SCRIPT_DIR/archive-skill.sh" rollback-retired-skill >/dev/null
+SKILLS_REVIEW_STATE_DIR="$ROLLBACK_STATE/skill-review" \
+  SKILLS_STATE_DIR="$ROLLBACK_STATE" \
+  "$CHECK_TOMBSTONE" rollback-retired-skill >/dev/null ||
+  fail "archive writer and tombstone guard disagreed on canonical state"
+SKILLS_REVIEW_STATE_DIR="$ROLLBACK_STATE/skill-review" \
+  SKILLS_STATE_DIR="$ROLLBACK_STATE" \
+  SKILLS_LOCAL_ROOT="$RETIRE_LOCAL" \
+  SKILLS_REPO_ROOT="$RETIRE_PUBLIC" \
+  SKILLS_CURATOR_ROLLBACK=fixture \
+  SKILLS_RESTORE_GIT_ROOT="$RETIRE_LOCAL" \
+  SKILLS_RESTORE_SRC_REL="rollback-retired-skill" \
+  SKILLS_RESTORE_SHA="$ROLLBACK_SHA" \
+  SKILLS_COAUTHOR_TRAILER="Reviewed-by: fixture" \
+  "$SCRIPT_DIR/restore-skill.sh" rollback-retired-skill >/dev/null
+[[ -f "$RETIRE_LOCAL/rollback-retired-skill/SKILL.md" ]] ||
+  fail "transaction rollback did not restore the skill"
+[[ ! -e "$ROLLBACK_STATE/skill-review/retired/rollback-retired-skill.json" ]] ||
+  fail "transaction rollback retained an active retirement record"
+[[ ! -d "$ROLLBACK_STATE/skill-review/retirement-history" ]] ||
+  fail "transaction rollback created user-facing retirement history"
+pass "transaction rollback semantics remain unchanged"
+
+echo "PASS  $passes deterministic skill-manage checks"

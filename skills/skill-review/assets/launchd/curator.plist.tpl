@@ -32,6 +32,7 @@
     <key>DREAMING_REPO_ROOT</key><string>__DREAMING_REPO_ROOT__</string>
     <key>DREAMING_SHARED_SKILLS_ROOT</key><string>__DREAMING_SHARED_SKILLS_ROOT__</string>
 __SKILLS_REPO_ROOT_ENV__    <key>SKILLS_STATE_DIR</key><string>__SKILLS_STATE_DIR__</string>
+    <key>SKILLS_REVIEW_STATE_DIR</key><string>__SKILLS_REVIEW_STATE_DIR__</string>
     <key>SKILLS_LOCAL_ROOT</key><string>__SKILLS_LOCAL_ROOT__</string>
   </dict>
   <key>ProcessType</key>

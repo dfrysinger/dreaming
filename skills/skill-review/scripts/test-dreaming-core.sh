@@ -872,6 +872,7 @@ class RuntimeTest(unittest.TestCase):
                 },
             },
         )
+
         after = self.adapter("review-executor", "after", after_fixture)
         core = self.core({("fake", "after"), ("fake", "second")})
         with self.assertRaisesRegex(RuntimeFailure, "mutation-recovery-required"):
@@ -896,6 +897,125 @@ class RuntimeTest(unittest.TestCase):
             core.review(
                 "fake", source, "fake:one", [("second", second)]
             )
+
+    def test_missing_queued_session_is_retired(self) -> None:
+        source = self.adapter(
+            "session-source", "fake", self.source_fixture([])
+        )
+        executor = self.adapter(
+            "review-executor",
+            "exec",
+            self.write("missing-executor.json", {"mode": "success"}),
+        )
+        core = self.core({("fake", "exec")})
+        core._write(
+            self.paths.queue,
+            [
+                {
+                    "qualified_session_id": "fake:missing",
+                    "source_revision": "missing-revision",
+                    "status": "queued",
+                }
+            ],
+        )
+        result = core.review(
+            "fake",
+            source,
+            "fake:missing",
+            [("exec", executor)],
+            expected_revision="missing-revision",
+        )
+        self.assertEqual(result, {"status": "deleted"})
+        self.assertEqual(
+            core._state(self.paths.queue, [])[0]["status"], "deleted"
+        )
+
+    def test_unrelated_missing_record_does_not_retire_queued_session(self) -> None:
+        class UnrelatedMissingSource:
+            def call(self, command: str, **arguments: object) -> dict:
+                self.assert_inspect(command, arguments)
+                raise RuntimeFailure(
+                    "session-missing", "/missing/unrelated-rollout.jsonl"
+                )
+
+            @staticmethod
+            def assert_inspect(command: str, arguments: dict[str, object]) -> None:
+                if command != "inspect" or arguments != {"session": "fake:one"}:
+                    raise AssertionError((command, arguments))
+
+        executor = self.adapter(
+            "review-executor",
+            "exec",
+            self.write("unrelated-missing-executor.json", {"mode": "success"}),
+        )
+        core = self.core({("fake", "exec")})
+        core._write(
+            self.paths.queue,
+            [
+                {
+                    "qualified_session_id": "fake:one",
+                    "source_revision": "queued-revision",
+                    "status": "queued",
+                }
+            ],
+        )
+        with self.assertRaisesRegex(
+            RuntimeFailure, "/missing/unrelated-rollout.jsonl"
+        ):
+            core.review(
+                "fake",
+                UnrelatedMissingSource(),
+                "fake:one",
+                [("exec", executor)],
+                expected_revision="queued-revision",
+            )
+        self.assertEqual(
+            core._state(self.paths.queue, [])[0]["status"], "queued"
+        )
+
+    def test_missing_queued_session_with_transaction_requires_recovery(self) -> None:
+        source = self.adapter(
+            "session-source", "fake", self.source_fixture([])
+        )
+        executor = self.adapter(
+            "review-executor",
+            "exec",
+            self.write("missing-transaction-executor.json", {"mode": "success"}),
+        )
+        core = self.core({("fake", "exec")})
+        core._write(
+            self.paths.queue,
+            [
+                {
+                    "qualified_session_id": "fake:missing",
+                    "source_revision": "missing-revision",
+                    "status": "queued",
+                }
+            ],
+        )
+        core._write_transaction(
+            "fake:missing",
+            "missing-revision",
+            {
+                "session_id": "fake:missing",
+                "source_revision": "missing-revision",
+                "phase": "mutation-started",
+            },
+        )
+        with self.assertRaisesRegex(
+            RuntimeFailure, "mutation-recovery-required"
+        ):
+            core.review(
+                "fake",
+                source,
+                "fake:missing",
+                [("exec", executor)],
+                expected_revision="missing-revision",
+            )
+        self.assertEqual(
+            core._state(self.paths.queue, [])[0]["status"],
+            "recovery-required",
+        )
 
     def test_missing_pre_mutation_result_remains_retryable(self) -> None:
         fixture = self.source_fixture([self.session("one", 10)])

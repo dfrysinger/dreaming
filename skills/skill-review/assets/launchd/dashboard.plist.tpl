@@ -33,6 +33,7 @@
     <key>DREAMING_DASHBOARD_ASSETS</key><string>__DREAMING_DASHBOARD_ASSETS__</string>
     <key>DREAMING_DASHBOARD_TOKEN_FILE</key><string>__DREAMING_DASHBOARD_TOKEN_FILE__</string>
     <key>SKILLS_STATE_DIR</key><string>__SKILLS_STATE_DIR__</string>
+    <key>SKILLS_REVIEW_STATE_DIR</key><string>__SKILLS_REVIEW_STATE_DIR__</string>
   </dict>
   <key>ProcessType</key>
   <string>Background</string>

@@ -65,6 +65,7 @@ class VendorAdapterTest(unittest.TestCase):
             "DREAMING_SKILLS_ROOT": str(self.case / "skills"),
             "DREAMING_STATE_DIR": str(self.case / "state"),
             "FAKE_CLI_LOG": str(self.case / "cli-invocations.jsonl"),
+            "CODEX_HOME": str(self.case / "codex-home"),
         }
         (self.case / "skills").mkdir()
         self._write_sources()
@@ -268,6 +269,20 @@ with Path(os.environ["FAKE_CLI_LOG"]).open("a") as log:
     log.write(json.dumps({"vendor": vendor, "args": args}) + "\\n")
 state_path = Path(os.environ["FAKE_CLI_STATE"])
 state = json.loads(state_path.read_text()) if state_path.exists() else {}
+def write_codex_marketplace_config():
+    if vendor != "codex":
+        return
+    codex_home = Path(os.environ["CODEX_HOME"])
+    codex_home.mkdir(parents=True, exist_ok=True)
+    lines = []
+    for value in state.get("codex_marketplaces", []):
+        lines.extend([
+          f'[marketplaces.{json.dumps(value["name"])}]',
+          'source_type = "local"',
+          f'source = {json.dumps(value["bundle"])}',
+          "",
+        ])
+    (codex_home / "config.toml").write_text("\\n".join(lines))
 if "--version" in args:
     print(vendor + " 1.0")
     raise SystemExit()
@@ -306,6 +321,7 @@ if "plugin" in args and ("marketplace" in args and "add" in args):
     values = state.setdefault(vendor + "_marketplaces", [])
     values[:] = [value for value in values if value["name"] != manifest["name"]]
     values.append({"name": manifest["name"], "bundle": str(Path(bundle).resolve())})
+    write_codex_marketplace_config()
 elif "skill" in args and "add" in args:
     fail_bundle = os.environ.get("FAKE_COPILOT_FAIL_ADD_BUNDLE")
     if args[-1] == fail_bundle and not state.get("copilot_fail_add_once"):
@@ -403,6 +419,7 @@ elif "plugin" in args and "marketplace" in args and "remove" in args:
       for value in state.get(vendor + "_marketplaces", [])
       if value["name"] != name
     ]
+    write_codex_marketplace_config()
 elif "plugin" in args and ("uninstall" in args or "remove" in args):
     name = next(a.split("@")[0] for a in args if a.startswith("dreaming-learned-"))
     state[vendor + "_plugins"] = [
@@ -772,6 +789,39 @@ print(json.dumps({"ok": True}))
                 stdout=subprocess.PIPE,
             )
             self.assertTrue(json.loads(verified.stdout)["verified"])
+            before = len(
+                Path(self.env["FAKE_CLI_LOG"]).read_text().splitlines()
+            )
+            subprocess.run(
+                common
+                + [
+                    "install",
+                    "--bundle",
+                    str(bundle),
+                    "--bundle-id",
+                    bundle_id,
+                ],
+                env=self.env,
+                check=True,
+                stdout=subprocess.PIPE,
+            )
+            repeated = [
+                json.loads(line)
+                for line in Path(self.env["FAKE_CLI_LOG"]).read_text().splitlines()[
+                    before:
+                ]
+            ]
+            native_mutations = [
+                row
+                for row in repeated
+                if row["args"][:2] in (
+                    ["skill", "add"],
+                    ["plugin", "install"],
+                    ["plugin", "add"],
+                )
+                or row["args"][:3] == ["plugin", "marketplace", "add"]
+            ]
+            self.assertEqual(native_mutations, [])
             subprocess.run(
                 common
                 + [
@@ -1047,6 +1097,118 @@ print(json.dumps({"ok": True}))
                 preserved[f"{vendor}_plugins"],
                 [{"name": descriptor["name"], "bundle": foreign}],
             )
+        invocations = [
+            json.loads(line)
+            for line in Path(self.env["FAKE_CLI_LOG"]).read_text().splitlines()
+        ]
+        codex_lists = [
+            row["args"]
+            for row in invocations
+            if row["vendor"] == "codex"
+            and row["args"][:2] == ["plugin", "list"]
+        ]
+        self.assertTrue(codex_lists)
+        self.assertTrue(all("--available" not in argv for argv in codex_lists))
+        codex_marketplace_lists = [
+            row["args"]
+            for row in invocations
+            if row["vendor"] == "codex"
+            and row["args"][:3] == ["plugin", "marketplace", "list"]
+        ]
+        self.assertEqual(codex_marketplace_lists, [])
+
+    def test_codex_marketplace_identity_is_independent_without_native_listing(self):
+        paths = module.RuntimePaths(
+            state=self.case / "state",
+            data=self.case / "data",
+            skills=self.case / "skills",
+        )
+        skill = paths.skills / "learned"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: learned\ndescription: fixture\n---\n"
+        )
+        bundle, bundle_id = module.DreamingRuntime(paths, set()).materialize_bundle(
+            paths.skills
+        )
+        journal = self.case / "codex-independent-journal.json"
+        common = [
+            sys.executable,
+            str(adapter),
+            "--vendor",
+            "codex",
+            "--role",
+            "skill-publisher",
+            "--ownership-journal",
+            str(journal),
+        ]
+        subprocess.run(
+            common
+            + [
+                "install",
+                "--bundle",
+                str(bundle),
+                "--bundle-id",
+                bundle_id,
+            ],
+            env=self.env,
+            check=True,
+            stdout=subprocess.PIPE,
+        )
+        descriptor = json.loads(journal.read_text())["codex"]
+        state_path = Path(self.env["FAKE_CLI_STATE"])
+        native_before = json.loads(state_path.read_text())
+        foreign = str((self.case / "foreign-codex-marketplace").resolve())
+        config_path = Path(self.env["CODEX_HOME"]) / "config.toml"
+        config_path.write_text(
+            "\n".join(
+                [
+                    f'[marketplaces.{json.dumps(descriptor["name"])}]',
+                    'source_type = "local"',
+                    f"source = {json.dumps(foreign)}",
+                    "",
+                ]
+            )
+        )
+        before = len(Path(self.env["FAKE_CLI_LOG"]).read_text().splitlines())
+        verified = subprocess.run(
+            common + ["verify", "--bundle-id", bundle_id],
+            env=self.env,
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+        )
+        self.assertFalse(json.loads(verified.stdout)["verified"])
+        subprocess.run(
+            common + ["remove"],
+            env=self.env,
+            check=True,
+            stdout=subprocess.PIPE,
+        )
+        self.assertEqual(json.loads(state_path.read_text()), native_before)
+        self.assertIn(foreign, config_path.read_text())
+        invocations = [
+            json.loads(line)
+            for line in Path(self.env["FAKE_CLI_LOG"]).read_text().splitlines()[
+                before:
+            ]
+        ]
+        self.assertTrue(
+            any(row["args"][:2] == ["plugin", "list"] for row in invocations)
+        )
+        self.assertFalse(
+            any(
+                row["args"][:3] == ["plugin", "marketplace", "list"]
+                for row in invocations
+            )
+        )
+        self.assertFalse(
+            any(
+                row["args"][:2] in (["plugin", "remove"], ["plugin", "uninstall"])
+                or row["args"][:3] == ["plugin", "marketplace", "remove"]
+                for row in invocations
+            )
+        )
 
     def test_configuration_is_complete_desired_state(self):
         output = self.case / "adapters.json"

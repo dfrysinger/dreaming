@@ -118,15 +118,16 @@ Before placing ANY skill in `consolidations:` or `prunings:`, check for a
 [[ -f "$SKILLS_REPO_ROOT/skills/<name>/.agent-created" || -f "$SKILLS_LOCAL_ROOT/<name>/.agent-created" ]] && echo agent-created || echo hand-made
 ```
 
-- **agent-created** → full autonomous authority (subject to the standard
-  dry-run → approve → `--live` gate). On archive, `archive-skill.sh` writes a
-  tombstone to `.skill-review/tombstones/<name>.json` so skill-review will not
-  recreate it.
+- **agent-created** → eligible for machine-authorized `--live` handling after
+  the fresh dry-run report, provenance envelope, dependency inventory, pause,
+  halt, and transaction checks all pass. On archive, `archive-skill.sh` writes
+  a tombstone to `.skill-review/tombstones/<name>.json` so skill-review will
+  not recreate it.
 - **hand-made** → **recommend-only**. MUST NOT appear in `consolidations:` or
   `prunings:`. If it looks like it belongs under an umbrella, surface it in the
-  `manual_review:` list below with a one-line rationale and STOP — the human
-  decides. A hand-made skill MAY still be an absorption *target* (`into:`);
-  patching it to absorb an agent-created sibling is allowed.
+  `manual_review:` list below with a one-line rationale and STOP — it remains
+  outside autonomous authority. A hand-made absorption *target* (`into:`) is
+  also manual and MUST NOT appear in an autonomous consolidation.
 
 ### Evaluation gate for umbrella changes
 
@@ -168,12 +169,36 @@ skill and may also block names sharing multiple tokens. Before proposing an
 early pruning, compare the candidate name with live skills. If another live
 skill shares two or more name tokens, keep or consolidate instead. Every
 completed-project pruning reason must state that permanent tombstone effect so
-the approval prompt exposes the future name-family consequence.
+the report exposes the future name-family consequence.
+
+Every autonomous pruning entry must also carry this scalar evidence mapping;
+missing, nested-list, malformed, unsupported, or stale evidence makes the
+entry report-only:
+
+```yaml
+prunings:
+  - name: <skill-name>
+    reason: <one short sentence>
+    evidence:
+      basis: <age-only | completed-project>
+      created_at: <exact .agent-created.json created_at>
+      last_used_at: <ISO timestamp | never>
+      completion_evidence: <direct evidence, or not-required-age-threshold>
+      reuse_assessment: no-reusable-content
+      evaluation: not-required-no-merge-target
+      tombstone_effect: permanent-name-family-block-acknowledged
+```
+
+`age-only` requires at least 90 days since both creation and last use and the
+exact `not-required-age-threshold` completion value. `completed-project`
+requires the configured cooldown plus direct, non-placeholder completion
+evidence. This mapping is authorization input, not explanatory prose.
 
 ### Extended structured block
 
-Emit the verbatim `consolidations:` / `prunings:` block, then append a third
-list for hand-made skills the curator would have touched but is not authorized to:
+Emit the `consolidations:` / `prunings:` block, adding the required evidence
+mapping to every pruning, then append a third list for hand-made skills the
+curator would have touched but is not authorized to:
 
 ```yaml
 manual_review:

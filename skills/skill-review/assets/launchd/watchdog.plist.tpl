@@ -35,6 +35,7 @@ __COPILOT_HOME_ENV__
     <key>DREAMING_ENABLE_COPILOT_COMPAT</key><string>__DREAMING_ENABLE_COPILOT_COMPAT__</string>
 __DREAMING_ADAPTER_CONFIG_ENV__
 __SKILLS_REPO_ROOT_ENV__    <key>SKILLS_STATE_DIR</key><string>__SKILLS_STATE_DIR__</string>
+    <key>SKILLS_REVIEW_STATE_DIR</key><string>__SKILLS_REVIEW_STATE_DIR__</string>
     <key>SKILLS_LOCAL_ROOT</key><string>__SKILLS_LOCAL_ROOT__</string>
   </dict>
   <key>ProcessType</key>

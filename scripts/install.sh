@@ -354,6 +354,7 @@ replacements = {
     "__DREAMING_REPO_ROOT__": repo,
     "__DREAMING_SHARED_SKILLS_ROOT__": shared,
     "__SKILLS_STATE_DIR__": state,
+    "__SKILLS_REVIEW_STATE_DIR__": state + "/skill-review",
     "__SKILLS_LOCAL_ROOT__": local,
     "__COPILOT_HOME__": copilot_home,
     "__DREAMING_DATA_DIR__": data,
