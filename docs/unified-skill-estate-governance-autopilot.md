@@ -72,13 +72,26 @@ met.
   `renamex_np(..., RENAME_SWAP)` to retain the exact displaced settings inode;
   unsupported volumes and unqualified plugin source classes remain
   report-only.
-- **Current phase:** begin implementation with the check contract and
-  report-only bounded estate census. Preserve phase ordering from the design.
+- **Current phase:** finish installed proof for the report-only bounded estate
+  census, then implement the remaining mutation phases in the design order.
 - **Implementation order:** census and identity model; estate dashboard and
   unresolved mappings; evaluation and recommendations; remote personal-skill
   archive/restore; atomic settings transaction and source qualification;
   plugin disable/restore; installed two-host proof and rollback.
-- **Live-proof status:** not started for this implementation.
+- **Implemented candidate:** local commits `79bf9b0`, `9cde88e`, and `a4e270b`
+  provide the bounded census, installed adapter upgrade, and non-interactive
+  adapter regeneration. Never push these commits.
+- **Installed state:** the Mac mini completed managed install, self-test, and
+  enable for `a4e270b`. The halt switch is absent, the self-test exit code is
+  `0`, the dashboard is running, and the remote source, publisher, executors,
+  and receiver-bound `estate_census` adapter are present.
+- **Live-proof status:** the first installed two-host census passed with a
+  content-addressed receipt and complete reconciliation: 93 effective skill
+  instances, 107 physical instances, 14 physical-only instances, five plugin
+  packages, three enabled plugin packages, and zero unresolved runtime skills.
+  Complete the independent collection comparison, restart persistence,
+  stale-state, fail-closed mismatch, dashboard privacy, and rollback checks
+  before treating the installed proof as complete.
 - **Completion authority:** only the design's named Definition of Done; do not
   substitute partial unit checks, dashboard rendering, or one successful
   mutation for the complete installed two-host proof.
