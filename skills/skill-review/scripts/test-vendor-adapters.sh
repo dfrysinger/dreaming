@@ -977,6 +977,120 @@ print(json.dumps({"ok": True}))
         state = json.loads(Path(self.env["FAKE_CLI_STATE"]).read_text())
         self.assertEqual(state["copilot_bundles"], [str(original)])
 
+    def test_copilot_snapshot_reconcile_restores_or_adopts_exact_state(self):
+        paths = module.RuntimePaths(
+            state=self.case / "state",
+            data=self.case / "data",
+            skills=self.case / "skills",
+        )
+        skill = paths.skills / "learned"
+        skill.mkdir(parents=True)
+        runtime = module.DreamingRuntime(paths, set())
+        (skill / "SKILL.md").write_text(
+            "---\nname: learned\ndescription: original\n---\n"
+        )
+        original, original_id = runtime.materialize_bundle(paths.skills)
+        (skill / "SKILL.md").write_text(
+            "---\nname: learned\ndescription: replacement\n---\n"
+        )
+        replacement, replacement_id = runtime.materialize_bundle(paths.skills)
+        journal = self.case / "copilot-reconcile-journal.json"
+        operation = self.case / "copilot-operation.json"
+        common = [
+            sys.executable,
+            str(adapter),
+            "--vendor",
+            "copilot",
+            "--role",
+            "skill-publisher",
+            "--ownership-journal",
+            str(journal),
+        ]
+        subprocess.run(
+            common
+            + ["install", "--bundle", str(original), "--bundle-id", original_id],
+            env=self.env,
+            check=True,
+            stdout=subprocess.PIPE,
+        )
+        snapshot = json.loads(
+            subprocess.run(
+                common
+                + [
+                    "snapshot",
+                    "--bundle",
+                    str(replacement),
+                    "--bundle-id",
+                    replacement_id,
+                ],
+                env=self.env,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+        )
+        operation.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "vendor": "copilot",
+                    "prior": snapshot["prior"],
+                    "new": snapshot["new"],
+                }
+            )
+        )
+        subprocess.run(
+            common
+            + ["install", "--bundle", str(replacement), "--bundle-id", replacement_id],
+            env=self.env,
+            check=True,
+            stdout=subprocess.PIPE,
+        )
+        rolled_back = json.loads(
+            subprocess.run(
+                common
+                + [
+                    "reconcile",
+                    "--operation",
+                    str(operation),
+                    "--outcome",
+                    "rollback",
+                ],
+                env=self.env,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+        )
+        self.assertEqual(rolled_back["status"], "rolled_back")
+        self.assertEqual(json.loads(journal.read_text())["copilot"], snapshot["prior"])
+        state_path = Path(self.env["FAKE_CLI_STATE"])
+        state = json.loads(state_path.read_text())
+        self.assertEqual(state["copilot_bundles"], [str(original)])
+
+        state["copilot_bundles"] = [str(replacement)]
+        state_path.write_text(json.dumps(state))
+        adopted = json.loads(
+            subprocess.run(
+                common
+                + [
+                    "reconcile",
+                    "--operation",
+                    str(operation),
+                    "--outcome",
+                    "auto",
+                ],
+                env=self.env,
+                check=True,
+                text=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+        )
+        self.assertEqual(adopted["status"], "committed")
+        self.assertEqual(json.loads(journal.read_text())["copilot"], snapshot["new"])
+        state = json.loads(state_path.read_text())
+        self.assertEqual(state["copilot_bundles"], [str(replacement)])
+
     def test_copilot_failed_replacement_does_not_restore_absent_superseded_bundles(self):
         paths = module.RuntimePaths(
             state=self.case / "state",

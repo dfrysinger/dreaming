@@ -341,6 +341,37 @@ class RuntimeTest(unittest.TestCase):
             ["fake:two"],
         )
 
+        recovery = (
+            Path(environment["DREAMING_STATE_DIR"])
+            / "publication-recovery-required.json"
+        )
+        recovery.write_text('{"status":"publication_recovery_required"}')
+        blocked = subprocess.run(
+            [sys.executable, str(RUNTIME_PATH), "run"],
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertNotEqual(blocked.returncode, 0)
+        blocked_report = json.loads(blocked.stdout)
+        self.assertFalse(blocked_report["ok"])
+        self.assertTrue(blocked_report["publication_recovery_required"])
+        self.assertEqual(
+            blocked_report["errors"],
+            [{"phase": "publication-recovery", "code": "recovery-required"}],
+        )
+        failed_selftest = subprocess.run(
+            [sys.executable, str(RUNTIME_PATH), "selftest"],
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        self.assertNotEqual(failed_selftest.returncode, 0)
+        self.assertIn("publication-recovery-required", failed_selftest.stdout)
+        recovery.unlink()
+
         config.unlink()
         result = subprocess.run(
             [sys.executable, str(RUNTIME_PATH), "selftest"],

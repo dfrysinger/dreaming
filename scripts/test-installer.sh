@@ -423,6 +423,10 @@ run_native_persisted() {
   export DREAMING_COPILOT_SOURCE_SSH_ADDRESS_FAMILY=6
   export DREAMING_COPILOT_SOURCE_SSH_PYTHON='/fixture/python3'
   export DREAMING_COPILOT_SOURCE_SSH_SCRIPT='/fixture/dreaming-vendor-adapter.py'
+  export DREAMING_COPILOT_PUBLISHER_SSH_HOST='fixture-client@fd7a:115c:a1e0::3'
+  export DREAMING_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY=6
+  export DREAMING_COPILOT_PUBLISHER_RECEIVER_ID='fixture-receiver'
+  export DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER=1
   run_native install >/dev/null
 )
 NATIVE_ADAPTERS="$NATIVE/dreaming-state/adapters.json"
@@ -456,6 +460,15 @@ if config["executors"]["copilot"]["argv"][1].endswith(
     "/scripts/ssh-session-source.py"
 ):
     raise SystemExit("remote source configuration changed the local executor")
+publisher = config["publishers"]["copilot"]["argv"]
+if not publisher[1].endswith("/scripts/ssh-skill-publisher.py"):
+    raise SystemExit(f"remote publisher proxy is missing: {publisher!r}")
+if publisher[publisher.index("--host") + 1] != "fixture-client@fd7a:115c:a1e0::3":
+    raise SystemExit(f"remote publisher host is malformed: {publisher!r}")
+if publisher[publisher.index("--expected-receiver-id") + 1] != "fixture-receiver":
+    raise SystemExit(f"remote publisher identity is malformed: {publisher!r}")
+if "--ownership-journal" in publisher:
+    raise SystemExit(f"mini-local publisher journal leaked into remote argv: {publisher!r}")
 PY
 FAKE_SSH="$NATIVE/fake-ssh.py"
 SSH_ARGV_LOG="$NATIVE/ssh-argv.json"
@@ -510,6 +523,9 @@ import sys
 argv = json.load(open(sys.argv[1], encoding="utf-8"))["sources"]["copilot"]["argv"]
 if "--host" not in argv or argv[argv.index("--host") + 1] != "fixture@fd7a:115c:a1e0::1":
     raise SystemExit(f"desired-state regeneration lost the remote source: {argv!r}")
+publisher = json.load(open(sys.argv[1], encoding="utf-8"))["publishers"]["copilot"]["argv"]
+if publisher[publisher.index("--host") + 1] != "fixture-client@fd7a:115c:a1e0::3":
+    raise SystemExit(f"desired-state regeneration lost the remote publisher: {publisher!r}")
 PY
 (
   export DREAMING_SESSION_SOURCES=copilot
@@ -528,6 +544,44 @@ argv = json.load(open(sys.argv[1], encoding="utf-8"))["sources"]["copilot"]["arg
 if argv[argv.index("--host") + 1] != "fixture@fd7a:115c:a1e0::2":
     raise SystemExit(f"explicit remote source update was ignored: {argv!r}")
 PY
+(
+  export DREAMING_SESSION_SOURCES=copilot
+  export DREAMING_REVIEW_EXECUTORS=copilot
+  export DREAMING_SKILL_TARGETS=copilot
+  export DREAMING_SOURCE_EXECUTOR_ALLOW='copilot>copilot'
+  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  export DREAMING_COPILOT_PUBLISHER_SSH_HOST='fixture-client@fd7a:115c:a1e0::4'
+  run_native_persisted install >/dev/null
+)
+python3 - "$NATIVE_ADAPTERS" <<'PY'
+import json
+import sys
+
+argv = json.load(open(sys.argv[1], encoding="utf-8"))["publishers"]["copilot"]["argv"]
+if argv[argv.index("--host") + 1] != "fixture-client@fd7a:115c:a1e0::4":
+    raise SystemExit(f"explicit remote publisher update was ignored: {argv!r}")
+PY
+if (
+  export DREAMING_SESSION_SOURCES=copilot
+  export DREAMING_REVIEW_EXECUTORS=copilot
+  export DREAMING_SKILL_TARGETS=copilot
+  export DREAMING_SOURCE_EXECUTOR_ALLOW='copilot>copilot'
+  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  export DREAMING_COPILOT_PUBLISHER_SSH_HOST=''
+  run_native_persisted install >/dev/null 2>&1
+); then
+  echo "remote-only publisher accepted an empty SSH host" >&2
+  exit 1
+fi
+(
+  export DREAMING_SESSION_SOURCES=copilot
+  export DREAMING_REVIEW_EXECUTORS=copilot
+  export DREAMING_SKILL_TARGETS=copilot
+  export DREAMING_SOURCE_EXECUTOR_ALLOW='copilot>copilot'
+  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  export DREAMING_COPILOT_PUBLISHER_SSH_HOST='fixture-client@fd7a:115c:a1e0::4'
+  run_native_persisted install >/dev/null
+)
 (
   export DREAMING_SESSION_SOURCES=copilot
   export DREAMING_REVIEW_EXECUTORS=copilot

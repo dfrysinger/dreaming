@@ -633,7 +633,10 @@ class DashboardData:
         rows = []
         evaluation_root = self.paths.control_state / "skill-review/evaluations"
         publication_path = self.paths.state / "publisher-ownership.json"
-        publication = self._publication_targets(publication_path)
+        remote_publication_path = self.paths.state / "remote-publication-summary.json"
+        publication = self._publication_targets(
+            publication_path, remote_publication_path
+        )
         for skill in sorted(self.paths.skills.iterdir()):
             if (
                 skill.is_symlink()
@@ -707,13 +710,18 @@ class DashboardData:
                     }
                 )
         return rows, self._fingerprint(
-            [self.paths.skills, evaluation_root, publication_path]
+            [
+                self.paths.skills,
+                evaluation_root,
+                publication_path,
+                remote_publication_path,
+            ]
         )
 
-    def _publication_targets(self, path: Path) -> dict[str, list[str]]:
-        if not path.exists():
-            return {}
-        journal = self._json(path, {}, "publisher ownership")
+    def _publication_targets(
+        self, path: Path, remote_path: Path
+    ) -> dict[str, list[str]]:
+        journal = self._json(path, {}, "publisher ownership") if path.exists() else {}
         if not isinstance(journal, dict):
             raise DashboardError(
                 503,
@@ -731,6 +739,24 @@ class DashboardData:
             for name in skills:
                 if isinstance(name, str) and SKILL_RE.fullmatch(name):
                     targets.setdefault(name, []).append(vendor)
+        if remote_path.exists():
+            summary = self._json(
+                remote_path, {}, "remote publication summary"
+            )
+            descriptor = (
+                summary.get("descriptor")
+                if isinstance(summary, dict)
+                and summary.get("schema_version") == 1
+                and summary.get("status") == "committed"
+                and isinstance(summary.get("receiver_id"), str)
+                else None
+            )
+            if isinstance(descriptor, dict):
+                skills = descriptor.get("skills")
+                if isinstance(skills, list):
+                    for name in skills:
+                        if isinstance(name, str) and SKILL_RE.fullmatch(name):
+                            targets.setdefault(name, []).append("copilot@MacBook")
         return {
             name: sorted(set(vendors))
             for name, vendors in targets.items()
@@ -2477,6 +2503,9 @@ class DashboardData:
 
     def health(self) -> dict[str, Any]:
         halt = self.paths.control_state / "skill-review/disable-daemon"
+        publication_recovery = (
+            self.paths.state / "publication-recovery-required.json"
+        )
         generation_path = self.paths.control_state / "dreaming/activation-generation"
         activation_generation = None
         if (
@@ -2503,11 +2532,14 @@ class DashboardData:
             "status": (
                 "halted"
                 if halt.exists()
+                else "publication_recovery_required"
+                if publication_recovery.exists()
                 else "healthy"
                 if isinstance(latest, dict) and latest.get("status") in {"ok", "skipped"}
                 else "unknown"
             ),
             "halted": halt.exists(),
+            "publication_recovery_required": publication_recovery.exists(),
             "activation_generation": activation_generation,
             "process_id": os.getpid(),
             "latest_run": latest,

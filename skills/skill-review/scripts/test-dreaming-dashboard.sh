@@ -211,6 +211,12 @@ for index in range(1750):
     "claude": {"skills": ["learned-skill-000"]},
     "codex": {"skills": []},
 }), encoding="utf-8")
+(state / "remote-publication-summary.json").write_text(json.dumps({
+    "schema_version": 1,
+    "status": "committed",
+    "receiver_id": "macbook-fixture",
+    "descriptor": {"skills": ["learned-skill-001"]},
+}), encoding="utf-8")
 (orchestrator / "runs/run-1.json").write_text(json.dumps({
     "run_id": "run-1",
     "started_at": "2026-01-02T19:30:00Z",
@@ -487,6 +493,13 @@ try:
         and skill_detail["publication_targets"] == ["claude", "copilot"],
         "skill detail reports publisher ownership targets",
     )
+    status, _, body = request("/api/v1/skills/learned-skill-001")
+    remote_skill = json.loads(body)["data"]
+    check(
+        status == 200
+        and remote_skill["publication_targets"] == ["copilot@MacBook"],
+        "skill detail reports verified remote publication target",
+    )
     publication_path = state / "publisher-ownership.json"
     publication_bytes = publication_path.read_bytes()
     publication_path.write_text("{malformed", encoding="utf-8")
@@ -705,6 +718,17 @@ try:
         and isinstance(health["process_id"], int),
         "authenticated health identifies the active generation and process",
     )
+    recovery = state / "publication-recovery-required.json"
+    recovery.write_text('{"status":"publication_recovery_required"}', encoding="utf-8")
+    status, _, body = request("/api/v1/health")
+    recovery_health = json.loads(body)["data"]
+    check(
+        status == 200
+        and recovery_health["status"] == "publication_recovery_required"
+        and recovery_health["publication_recovery_required"] is True,
+        "authenticated health exposes remote publication recovery",
+    )
+    recovery.unlink()
 finally:
     server.terminate()
     server.wait(timeout=30)

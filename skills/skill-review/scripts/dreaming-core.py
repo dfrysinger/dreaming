@@ -2534,6 +2534,9 @@ def configured_runtime_settings(config: dict[str, Any]) -> dict[str, Any]:
 
 def selftest(require_config: bool) -> dict[str, Any]:
     paths = default_paths()
+    recovery_state = paths.state / "publication-recovery-required.json"
+    if recovery_state.exists():
+        raise RuntimeFailure("publication-recovery-required", str(recovery_state))
     contract_path = Path(__file__).with_name("dreaming-adapter-contract-v1.json")
     contract = read_json(contract_path, None)
     if (
@@ -2637,6 +2640,14 @@ def scheduled_run() -> dict[str, Any]:
         "errors": adapter_errors,
         "legacy_records_imported": imported_legacy,
     }
+    recovery_state = paths.state / "publication-recovery-required.json"
+    if recovery_state.exists():
+        report["publication_recovery_required"] = True
+        report["errors"].append(
+            {"phase": "publication-recovery", "code": "recovery-required"}
+        )
+        report["ok"] = False
+        return report
     for source_name, source in sources.items():
         try:
             state = core.discover(

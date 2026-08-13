@@ -4001,6 +4001,97 @@ def publisher_install(args: argparse.Namespace) -> None:
     emit({"ok": True, "installed": True, "bundle_id": args.bundle_id})
 
 
+def publisher_snapshot(args: argparse.Namespace) -> None:
+    if args.vendor != "copilot":
+        raise AdapterError("unsupported-command", "snapshot is Copilot-only")
+    bundle = Path(args.bundle).resolve()
+    manifest = load_json(bundle / "dreaming-bundle-manifest.json", {})
+    if manifest.get("bundle_id") != args.bundle_id:
+        raise AdapterError("bundle-proof-invalid", args.bundle_id)
+    _, state = publisher_state(args)
+    prior = state.get(args.vendor)
+    emit(
+        {
+            "ok": True,
+            "prior": prior if isinstance(prior, dict) else None,
+            "new": publication_descriptor(args.vendor, bundle, args.bundle_id),
+        }
+    )
+
+
+def publisher_reconcile(args: argparse.Namespace) -> None:
+    if args.vendor != "copilot":
+        raise AdapterError("unsupported-command", "reconcile is Copilot-only")
+    operation = load_json(Path(args.operation), {})
+    if (
+        not isinstance(operation, dict)
+        or operation.get("schema_version") != 1
+        or operation.get("vendor") != args.vendor
+    ):
+        raise AdapterError("publication-operation-invalid", args.operation)
+    prior = operation.get("prior")
+    new = operation.get("new")
+    if prior is not None and not isinstance(prior, dict):
+        raise AdapterError("publication-operation-invalid", "prior descriptor")
+    if not isinstance(new, dict):
+        raise AdapterError("publication-operation-invalid", "new descriptor")
+    for descriptor in (prior, new):
+        if descriptor is None:
+            continue
+        if (
+            descriptor.get("vendor") != args.vendor
+            or not isinstance(descriptor.get("bundle"), str)
+            or not isinstance(descriptor.get("bundle_id"), str)
+            or not isinstance(descriptor.get("skills"), list)
+            or not isinstance(descriptor.get("name"), str)
+        ):
+            raise AdapterError("publication-operation-invalid", "descriptor")
+
+    path, state = publisher_state(args)
+    inventory = inventory_json(args.vendor)
+    commit = args.outcome == "auto" and inventory_contains(
+        args.vendor, inventory, new
+    )
+    if commit:
+        for descriptor in [prior, *superseded_descriptors(new)]:
+            if isinstance(descriptor, dict) and descriptor.get("bundle_id") != new.get(
+                "bundle_id"
+            ):
+                remove_if_present(args.vendor, descriptor)
+        state[args.vendor] = new
+        atomic_json(path, state)
+        if not inventory_contains(args.vendor, inventory_json(args.vendor), new):
+            raise AdapterError("publisher-verification-failed", new["bundle_id"])
+        emit(
+            {
+                "ok": True,
+                "status": "committed",
+                "bundle_id": new["bundle_id"],
+                "descriptor": new,
+            }
+        )
+
+    remove_if_present(args.vendor, new)
+    if prior is None:
+        state.pop(args.vendor, None)
+        atomic_json(path, state)
+        emit({"ok": True, "status": "rolled_back", "bundle_id": None})
+    if not inventory_contains(args.vendor, inventory_json(args.vendor), prior):
+        run_native([executable(args.vendor), "skill", "add", prior["bundle"]])
+    if not inventory_contains(args.vendor, inventory_json(args.vendor), prior):
+        raise AdapterError("publisher-rollback-failed", prior["bundle_id"])
+    state[args.vendor] = prior
+    atomic_json(path, state)
+    emit(
+        {
+            "ok": True,
+            "status": "rolled_back",
+            "bundle_id": prior["bundle_id"],
+            "descriptor": prior,
+        }
+    )
+
+
 def inventory_json(vendor: str) -> Any:
     binary = executable(vendor)
     if vendor == "copilot":
@@ -4214,6 +4305,10 @@ def publisher_command(args: argparse.Namespace) -> None:
         )
     if args.command == "install":
         publisher_install(args)
+    if args.command == "snapshot":
+        publisher_snapshot(args)
+    if args.command == "reconcile":
+        publisher_reconcile(args)
     row = state.get(args.vendor)
     if args.command == "verify":
         verified = bool(
@@ -4294,6 +4389,12 @@ def parser() -> argparse.ArgumentParser:
     install = sub.add_parser("install")
     install.add_argument("--bundle", required=True)
     install.add_argument("--bundle-id", required=True)
+    snapshot = sub.add_parser("snapshot")
+    snapshot.add_argument("--bundle", required=True)
+    snapshot.add_argument("--bundle-id", required=True)
+    reconcile = sub.add_parser("reconcile")
+    reconcile.add_argument("--operation", required=True)
+    reconcile.add_argument("--outcome", choices=("auto", "rollback"), required=True)
     verify = sub.add_parser("verify")
     verify.add_argument("--bundle-id", required=True)
     return result

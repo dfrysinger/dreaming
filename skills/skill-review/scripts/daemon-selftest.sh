@@ -181,6 +181,7 @@ ROOT_SCRIPT_DIR="$REPO/scripts"
 for script in install.sh dreaming-deps.py test-shared-deps.sh \
   test-headless-roots.sh test-installer.sh test-repository-boundary.sh \
   manage-instructions.sh configure-adapters.py migrate-copilot-state.py \
+  ssh-session-source.py ssh-skill-publisher.py test-ssh-skill-publisher.py \
   dreaming-enqueue.sh test-copilot-migration.sh \
   transfer-dreaming-host.py test-transfer-dreaming-host.sh \
   cutover-dreaming-host.py test-cutover-dreaming-host.sh \
@@ -300,6 +301,11 @@ if run_isolated_test "$ROOT_SCRIPT_DIR/test-installer.sh" >>"$RESULT" 2>&1; then
   ok "deterministic installer checks"
 else
   bad "deterministic installer checks"
+fi
+if run_isolated_test "$ROOT_SCRIPT_DIR/test-ssh-skill-publisher.py" >>"$RESULT" 2>&1; then
+  ok "deterministic SSH skill publisher checks"
+else
+  bad "deterministic SSH skill publisher checks"
 fi
 if run_isolated_test "$ROOT_SCRIPT_DIR/test-copilot-migration.sh" >>"$RESULT" 2>&1; then
   ok "deterministic Copilot migration checks"

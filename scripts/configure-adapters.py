@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -47,6 +48,11 @@ def adapter(
         if role == "session-source"
         else None
     )
+    remote_publisher = (
+        os.environ.get(f"DREAMING_{vendor.upper()}_PUBLISHER_SSH_HOST")
+        if role == "skill-publisher"
+        else None
+    )
     if remote_source:
         ssh = os.environ.get("DREAMING_SOURCE_SSH_BIN", "/usr/bin/ssh")
         address_family = os.environ.get(
@@ -79,6 +85,100 @@ def adapter(
             remote_python,
             "--remote-script",
             remote_script,
+            "--",
+            "--vendor",
+            vendor,
+            "--role",
+            role,
+        ]
+    elif remote_publisher:
+        ssh = os.environ.get(
+            "DREAMING_PUBLISHER_SSH_BIN",
+            os.environ.get("DREAMING_SOURCE_SSH_BIN", "/usr/bin/ssh"),
+        )
+        address_family = os.environ.get(
+            f"DREAMING_{vendor.upper()}_PUBLISHER_SSH_ADDRESS_FAMILY",
+            "",
+        )
+        if address_family not in {"", "4", "6"}:
+            raise ConfigError(
+                f"DREAMING_{vendor.upper()}_PUBLISHER_SSH_ADDRESS_FAMILY "
+                "must be 4, 6, or empty"
+            )
+        proxy = script.parents[3] / "scripts/ssh-skill-publisher.py"
+        receiver_id = os.environ.get(
+            f"DREAMING_{vendor.upper()}_PUBLISHER_RECEIVER_ID", ""
+        )
+        if not receiver_id:
+            raise ConfigError(
+                f"DREAMING_{vendor.upper()}_PUBLISHER_RECEIVER_ID is required"
+            )
+        remote_python = os.environ.get(
+            f"DREAMING_{vendor.upper()}_PUBLISHER_SSH_PYTHON",
+            sys.executable,
+        )
+        remote_script = os.environ.get(
+            f"DREAMING_{vendor.upper()}_PUBLISHER_SSH_SCRIPT",
+            str(proxy),
+        )
+        remote_adapter_python = os.environ.get(
+            f"DREAMING_{vendor.upper()}_PUBLISHER_ADAPTER_PYTHON",
+            remote_python,
+        )
+        remote_adapter_script = os.environ.get(
+            f"DREAMING_{vendor.upper()}_PUBLISHER_ADAPTER_SCRIPT",
+            str(script),
+        )
+        remote_home = os.environ.get(
+            f"DREAMING_{vendor.upper()}_PUBLISHER_REMOTE_HOME",
+            str(Path.home()),
+        )
+        argv = [
+            sys.executable,
+            str(proxy),
+            "--ssh-bin",
+            ssh,
+            "--host",
+            remote_publisher,
+            *(["--address-family", address_family] if address_family else []),
+            "--remote-python",
+            remote_python,
+            "--remote-script",
+            remote_script,
+            "--remote-adapter-python",
+            remote_adapter_python,
+            "--remote-adapter-script",
+            remote_adapter_script,
+            "--remote-bundle-root",
+            os.environ.get(
+                f"DREAMING_{vendor.upper()}_PUBLISHER_BUNDLE_ROOT",
+                str(Path(remote_home) / ".local/share/dreaming/remote-publisher-bundles"),
+            ),
+            "--remote-ownership-journal",
+            os.environ.get(
+                f"DREAMING_{vendor.upper()}_PUBLISHER_OWNERSHIP_JOURNAL",
+                str(Path(remote_home) / ".local/state/dreaming/publisher-ownership.json"),
+            ),
+            "--remote-operation-root",
+            os.environ.get(
+                f"DREAMING_{vendor.upper()}_PUBLISHER_OPERATION_ROOT",
+                str(Path(remote_home) / ".local/state/dreaming/remote-publication"),
+            ),
+            "--remote-receiver-id-file",
+            os.environ.get(
+                f"DREAMING_{vendor.upper()}_PUBLISHER_RECEIVER_ID_FILE",
+                str(Path(remote_home) / ".local/state/dreaming/receiver-id"),
+            ),
+            "--expected-receiver-id",
+            receiver_id,
+            "--expected-receiver-sha",
+            hashlib.sha256(proxy.read_bytes()).hexdigest(),
+            "--expected-adapter-sha",
+            hashlib.sha256(script.read_bytes()).hexdigest(),
+            "--summary",
+            str(state_dir / "remote-publication-summary.json"),
+            "--recovery-state",
+            str(state_dir / "publication-recovery-required.json"),
             "--",
             "--vendor",
             vendor,
@@ -120,12 +220,13 @@ def adapter(
             "run_timeout": int(timeout),
         }
     if role == "skill-publisher":
-        argv.extend(
-            [
-                "--ownership-journal",
-                str(state_dir / "publisher-ownership.json"),
-            ]
-        )
+        if not remote_publisher:
+            argv.extend(
+                [
+                    "--ownership-journal",
+                    str(state_dir / "publisher-ownership.json"),
+                ]
+            )
         timeout = positive_integer("DREAMING_PUBLISHER_TIMEOUT", "90")
         return {"argv": argv, "timeout": timeout, "run_timeout": timeout}
     if role == "review-executor":
@@ -182,6 +283,12 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
     missing = sorted(vendor for vendor in required if not executable(vendor))
     if missing:
         raise ConfigError("selected CLI binaries are unavailable: " + ", ".join(missing))
+    if (
+        os.environ.get("DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER") == "1"
+        and "copilot" in targets
+        and not os.environ.get("DREAMING_COPILOT_PUBLISHER_SSH_HOST")
+    ):
+        raise ConfigError("remote Copilot publisher is required on this host")
 
     explicit_routes = os.environ.get("DREAMING_SOURCE_EXECUTOR_ALLOW")
     routes = (
