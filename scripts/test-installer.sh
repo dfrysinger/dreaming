@@ -587,7 +587,7 @@ lines = [
 env.write_text("\n".join(lines) + "\n", encoding="utf-8")
 PY
 (
-  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  export PATH="/usr/bin:/bin"
   run_native_persisted install >/dev/null
 )
 python3 - "$NATIVE_ADAPTERS" <<'PY'

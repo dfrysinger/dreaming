@@ -361,10 +361,6 @@ def inherit_remote_copilot(existing: dict[str, object]) -> None:
 
 
 def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, object]:
-    detected = [vendor for vendor in VENDORS if executable(vendor)]
-    sources = selected("DREAMING_SESSION_SOURCES", detected)
-    executors = selected("DREAMING_REVIEW_EXECUTORS", sources)
-    targets = selected("DREAMING_SKILL_TARGETS", sources)
     existing: dict[str, object] = {}
     if output.is_file():
         try:
@@ -374,6 +370,33 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
         if isinstance(loaded, dict):
             existing = loaded
     inherit_remote_copilot(existing)
+    configured = {
+        vendor
+        for role in ("sources", "executors", "publishers")
+        for vendor in (
+            existing.get(role, {}).keys()
+            if isinstance(existing.get(role), dict)
+            else ()
+        )
+        if vendor in VENDORS
+    }
+    detected = [
+        vendor for vendor in VENDORS if executable(vendor) or vendor in configured
+    ]
+
+    def role_default(role: str, fallback: list[str]) -> list[str]:
+        entries = existing.get(role)
+        if not isinstance(entries, dict):
+            return fallback
+        return [vendor for vendor in VENDORS if vendor in entries]
+
+    sources = selected("DREAMING_SESSION_SOURCES", role_default("sources", detected))
+    executors = selected(
+        "DREAMING_REVIEW_EXECUTORS", role_default("executors", sources)
+    )
+    targets = selected(
+        "DREAMING_SKILL_TARGETS", role_default("publishers", sources)
+    )
     detach_remote_copilot = (
         os.environ.get("DREAMING_DETACH_REMOTE_COPILOT_PUBLISHER") == "1"
     )
@@ -389,7 +412,9 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
             "and remote-only enforcement disabled"
         )
     required = set(sources) | set(executors) | set(targets)
-    missing = sorted(vendor for vendor in required if not executable(vendor))
+    missing = sorted(
+        vendor for vendor in required if not executable(vendor) and vendor not in configured
+    )
     if missing:
         raise ConfigError("selected CLI binaries are unavailable: " + ", ".join(missing))
     if (
