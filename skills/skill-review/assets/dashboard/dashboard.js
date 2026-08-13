@@ -148,11 +148,12 @@ async function renderOverview() {
   document.getElementById("runtime").innerHTML = `<strong>${esc(runtime)}</strong><br>${data.runtime.halted ? "Mutation halt active" : "Scheduled runtime available"}`;
   const capability = data.evaluations;
   view.innerHTML = `
-    ${header("Overview", "Reliability, backlog burn-down, learned skills, and measured capability.", badge(runtime))}
+    ${header("Overview", "Reliability, bounded skill estate, backlog burn-down, and measured capability.", badge(runtime))}
     <div class="grid metrics">
       <article class="card"><div class="label">Scheduled reliability</div><div class="metric">${esc(runtime)}</div><div class="submetric">${data.runtime.halted ? "Halt switch active" : "Latest retained run status"}</div></article>
       <article class="card"><div class="label">Dreams remaining</div><div class="metric">${number(data.dreams.remaining)}</div><div class="submetric">${number(data.dreams.completed)} completed</div></article>
       <article class="card"><div class="label">Learned skills</div><div class="metric">${number(data.skills.count)}</div><div class="submetric">Git-backed agent-created skills</div></article>
+      <article class="card"><div class="label">Enabled estate</div><div class="metric">${number(data.estate.totals?.canonical_capabilities)}</div><div class="submetric"><a class="link" href="#estate">${esc(data.estate.status)} · ${number(data.estate.totals?.physical_instances)} physical instances</a></div></article>
       <article class="card"><div class="label">Shadow candidates</div><div class="metric">${number(data.candidates.total)}</div><div class="submetric"><a class="link" href="#candidates">${number(data.candidates.valid)} valid · ${number(data.candidates.invalid)} invalid · never active</a></div></article>
       <article class="card"><div class="label">Capability improvement</div><div class="metric">${percent(capability.candidate_percent)}</div><div class="submetric">Control ${percent(capability.control_percent)} · ${capability.comparable_skills} comparable skills</div></article>
     </div>
@@ -183,6 +184,36 @@ async function renderOverview() {
         </dl>
       </article>
     </div>`;
+}
+
+async function renderEstate() {
+  const data = await api("/api/v1/estate");
+  const totals = data.totals || {};
+  const capabilityTotal = plugin => Object.values(plugin.capability_counts || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+  view.innerHTML = `${header("Skill estate", "The complete bounded MacBook Copilot inventory. This view is read-only and never authorizes an action.", badge(data.status))}
+    ${!data.available ? `<div class="notice">${esc(data.message)}</div>` : `
+    <div class="grid metrics">
+      <article class="card"><div class="label">Physical instances</div><div class="metric">${number(totals.physical_instances)}</div><div class="submetric">${number(totals.physical_only_instances)} inactive, cached, or stale</div></article>
+      <article class="card"><div class="label">Enabled instances</div><div class="metric">${number(totals.effective_instances)}</div><div class="submetric">${number(totals.canonical_capabilities)} canonical capabilities</div></article>
+      <article class="card"><div class="label">Unresolved mappings</div><div class="metric">${number(totals.unresolved_runtime_skills)}</div><div class="submetric">${data.complete ? "Bounded census complete" : "Automatic removal blocked"}</div></article>
+      <article class="card"><div class="label">Plugin packages</div><div class="metric">${number(totals.plugin_packages)}</div><div class="submetric">${number(totals.enabled_plugin_packages)} effectively enabled</div></article>
+      <article class="card"><div class="label">Freshness</div><div class="metric">${data.fresh ? "Current" : "Stale"}</div><div class="submetric">Collected ${relative(data.collected_at)}</div></article>
+    </div>
+    <div class="notice"><strong>Bounded scope:</strong> ${esc(data.scope?.label)} Registered: ${esc((data.scope?.registered_context_ids || []).join(", ") || "none")}. Outside claim: ${esc((data.scope?.outside_context_ids || []).join(", ") || "none")}.</div>
+    <div class="grid split">
+      <article class="panel"><div class="panel-head"><h2>Authority and provenance</h2></div><table><thead><tr><th>Class</th><th>Physical instances</th></tr></thead><tbody>
+        ${Object.entries(data.authority_counts || {}).map(([name,count]) => `<tr><td>${badge(name)}</td><td>${number(count)}</td></tr>`).join("") || `<tr><td colspan="2">Unavailable</td></tr>`}
+      </tbody></table></article>
+      <article class="panel"><div class="panel-head"><h2>Runtime contexts</h2></div><table><thead><tr><th>Context</th><th>Scope</th><th>Mapped</th><th>Status</th></tr></thead><tbody>
+        ${(data.contexts || []).map(item => `<tr><td>${esc(item.id)}</td><td>${item.inside_completeness_claim ? "Inside claim" : "Outside claim"}</td><td>${number(item.mapped_skill_count)} / ${number(item.runtime_skill_count)}</td><td>${badge(item.complete === null ? "outside scope" : item.complete ? "complete" : "incomplete")}</td></tr>`).join("")}
+      </tbody></table></article>
+      <article class="panel full-span"><div class="panel-head"><h2>Plugins and complete capability sets</h2></div><table><thead><tr><th>Plugin</th><th>Version</th><th>State</th><th>Skills</th><th>Agents</th><th>Hooks</th><th>MCP</th><th>LSP</th><th>Inventory</th></tr></thead><tbody>
+        ${(data.plugins || []).map(item => `<tr><td>${esc(item.plugin_id)}</td><td>${esc(item.version)}</td><td>${badge(item.enabled ? "enabled" : "disabled")}</td><td>${number(item.capability_counts?.skills)}</td><td>${number(item.capability_counts?.agents)}</td><td>${number(item.capability_counts?.hooks)}</td><td>${number(item.capability_counts?.mcp_servers)}</td><td>${number(item.capability_counts?.lsp_servers)}</td><td>${badge(item.capability_inventory_complete ? `complete · ${capabilityTotal(item)}` : "incomplete")}</td></tr>`).join("")}
+      </tbody></table></article>
+      <article class="panel full-span"><div class="panel-head"><h2>Physical skill instances</h2><span>${number((data.instances || []).length)} shown</span></div><table><thead><tr><th>Skill</th><th>Root class</th><th>Authority</th><th>Effective state</th><th>Owner</th></tr></thead><tbody>
+        ${(data.instances || []).map(item => `<tr><td>${esc(item.skill_name)}</td><td>${esc(item.root_class)}</td><td>${badge(item.authority)}</td><td>${badge(item.physical_only ? "physical only" : "enabled")}</td><td>${esc(item.owner)}</td></tr>`).join("")}
+      </tbody></table></article>
+    </div>`}`;
 }
 
 function skillTable(items) {
@@ -413,6 +444,7 @@ async function route() {
     if (name === "overview") await renderOverview();
     else if (name === "activity") await renderActivity();
     else if (name === "dreams") await renderDreams();
+    else if (name === "estate") await renderEstate();
     else if (name === "candidates") await renderCandidates();
     else if (name === "candidate" && firstPart) await renderCandidate(decodeURIComponent(firstPart));
     else if (name === "skills") await renderSkills();

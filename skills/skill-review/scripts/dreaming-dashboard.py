@@ -2433,7 +2433,248 @@ class DashboardData:
             },
             "evaluations": self._evaluation_portfolio(),
             "candidates": self.candidate_summary(),
+            "estate": self.estate(summary_only=True),
             "activity": activity,
+        }
+
+    def estate(self, summary_only: bool = False) -> dict[str, Any]:
+        current_path = self.paths.state / "estate-census-current.json"
+        recovery_path = self.paths.state / "estate-recovery-required.json"
+        if not current_path.exists():
+            return {
+                "status": "unavailable",
+                "available": False,
+                "complete": None,
+                "fresh": None,
+                "collected_at": None,
+                "totals": None,
+                "recovery_required": recovery_path.exists(),
+                "message": "No estate census has been recorded.",
+            }
+        try:
+            current = self._json(
+                current_path, None, "current estate census"
+            )
+            if (
+                not isinstance(current, dict)
+                or current.get("schema_version") != 1
+                or not CANDIDATE_ID_RE.fullmatch(
+                    str(current.get("receipt_sha256", ""))
+                )
+                or not CANDIDATE_ID_RE.fullmatch(
+                    str(current.get("snapshot_sha256", ""))
+                )
+                or not isinstance(current.get("census"), dict)
+            ):
+                raise DashboardError(
+                    503,
+                    "estate_invalid",
+                    "Current estate census is malformed",
+                    ["current estate census"],
+                )
+            census = current["census"]
+            snapshot_sha256 = census.get("snapshot_sha256")
+            snapshot = {
+                key: value
+                for key, value in census.items()
+                if key != "snapshot_sha256"
+            }
+            if (
+                census.get("schema_version") != 1
+                or snapshot_sha256 != current["snapshot_sha256"]
+                or sha(snapshot) != snapshot_sha256
+            ):
+                raise DashboardError(
+                    503,
+                    "estate_invalid",
+                    "Estate census identity is invalid",
+                    ["current estate census"],
+                )
+            receipt_path = (
+                self.paths.state
+                / "estate-census-receipts"
+                / f"{current['receipt_sha256'].removeprefix('sha256:')}.json"
+            )
+            if (
+                not receipt_path.is_file()
+                or receipt_path.is_symlink()
+                or receipt_path.stat().st_size > MAX_JSON_BYTES
+            ):
+                raise DashboardError(
+                    503,
+                    "estate_invalid",
+                    "Estate census receipt is unavailable",
+                    ["estate census receipt"],
+                )
+        except DashboardError as error:
+            return {
+                "status": "invalid",
+                "available": False,
+                "complete": None,
+                "fresh": None,
+                "collected_at": None,
+                "totals": None,
+                "recovery_required": recovery_path.exists(),
+                "message": error.message,
+            }
+
+        collected_at = census.get("collected_at")
+        collected_epoch = parse_time(collected_at)
+        fresh = (
+            collected_epoch is not None
+            and time.time() - collected_epoch <= 24 * 60 * 60
+        )
+        complete = census.get("scope", {}).get("complete") is True
+        recovery_required = recovery_path.exists()
+        status = (
+            "recovery required"
+            if recovery_required
+            else "incomplete"
+            if not complete
+            else "stale"
+            if not fresh
+            else "current"
+        )
+        base = {
+            "status": status,
+            "available": True,
+            "complete": complete,
+            "fresh": fresh,
+            "collected_at": collected_at,
+            "snapshot_sha256": snapshot_sha256,
+            "totals": census.get("totals")
+            if isinstance(census.get("totals"), dict)
+            else None,
+            "scope": {
+                "label": safe_text(census.get("scope", {}).get("label"), 200),
+                "registered_context_ids": [
+                    safe_text(value, 200)
+                    for value in census.get("scope", {}).get(
+                        "registered_context_ids", []
+                    )
+                    if isinstance(value, str)
+                ],
+                "outside_context_ids": [
+                    safe_text(value, 200)
+                    for value in census.get("scope", {}).get(
+                        "outside_context_ids", []
+                    )
+                    if isinstance(value, str)
+                ],
+            },
+            "recovery_required": recovery_required,
+            "read_only": True,
+            "authorizes_actions": False,
+        }
+        if summary_only:
+            return base
+
+        authority: dict[str, int] = {}
+        root_classes: dict[str, int] = {}
+        instances: list[dict[str, Any]] = []
+        for item in census.get("physical_instances", []):
+            if not isinstance(item, dict):
+                continue
+            authority_name = safe_text(item.get("authority"), 80)
+            root_class = safe_text(item.get("root_class"), 80)
+            authority[authority_name] = authority.get(authority_name, 0) + 1
+            root_classes[root_class] = root_classes.get(root_class, 0) + 1
+            owner = item.get("owner")
+            if isinstance(owner, str) and owner.startswith("/"):
+                owner = "local configured root"
+            instances.append(
+                {
+                    "skill_name": safe_text(item.get("skill_name"), 200),
+                    "root_class": root_class,
+                    "authority": authority_name,
+                    "physical_only": item.get("physical_only") is True,
+                    "owner": safe_text(owner, 200),
+                    "instance_id": safe_text(item.get("instance_id"), 80),
+                    "canonical_capability_id": safe_text(
+                        item.get("canonical_capability_id"), 80
+                    ),
+                }
+            )
+        contexts = [
+            {
+                "id": safe_text(item.get("id"), 200),
+                "kind": safe_text(item.get("kind"), 40),
+                "registered": item.get("registered") is True,
+                "inside_completeness_claim": (
+                    item.get("inside_completeness_claim") is True
+                ),
+                "complete": item.get("complete"),
+                "runtime_skill_count": item.get("runtime_skill_count"),
+                "mapped_skill_count": item.get("mapped_skill_count"),
+                "unresolved_count": item.get("unresolved_count"),
+            }
+            for item in census.get("contexts", [])
+            if isinstance(item, dict)
+        ]
+        unresolved = [
+            {
+                "context_id": safe_text(item.get("context_id"), 200),
+                "runtime_name": safe_text(item.get("runtime_name"), 200),
+                "runtime_source": safe_text(item.get("runtime_source"), 80),
+                "reason": safe_text(item.get("reason"), 80),
+            }
+            for item in census.get("unresolved_mappings", [])
+            if isinstance(item, dict)
+        ]
+        plugins = []
+        for plugin in census.get("plugins", []):
+            if not isinstance(plugin, dict):
+                continue
+            capabilities = plugin.get("capabilities")
+            capability_counts = None
+            if isinstance(capabilities, dict):
+                capability_counts = {
+                    name: len(capabilities.get(name, []))
+                    for name in (
+                        "skills",
+                        "agents",
+                        "hooks",
+                        "mcp_servers",
+                        "lsp_servers",
+                    )
+                    if isinstance(capabilities.get(name, []), list)
+                }
+            plugins.append(
+                {
+                    "plugin_id": safe_text(plugin.get("plugin_id"), 200),
+                    "name": safe_text(plugin.get("name"), 200),
+                    "version": safe_text(plugin.get("version"), 80),
+                    "source_identity": safe_text(
+                        plugin.get("source_identity"), 200
+                    ),
+                    "enabled": plugin.get("enabled") is True,
+                    "capability_inventory_complete": (
+                        isinstance(capabilities, dict)
+                        and capabilities.get("complete") is True
+                    ),
+                    "capability_counts": capability_counts,
+                }
+            )
+        decisions = [
+            {
+                "action_id": safe_text(item.get("action_id"), 100),
+                "target": safe_text(item.get("target"), 200),
+                "decision": safe_text(item.get("decision"), 80),
+                "status": safe_text(item.get("status"), 80),
+                "at": item.get("at"),
+            }
+            for item in self._list("estate-action-ledger.json")
+            if isinstance(item, dict)
+        ]
+        return {
+            **base,
+            "authority_counts": dict(sorted(authority.items())),
+            "root_class_counts": dict(sorted(root_classes.items())),
+            "contexts": contexts,
+            "unresolved_mappings": unresolved,
+            "plugins": plugins,
+            "instances": instances,
+            "decisions": decisions,
         }
 
     def _backlog_history(self) -> list[dict[str, Any]]:
@@ -2813,6 +3054,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._json_response(self.data.health())
         if path == "/api/v1/overview":
             return self._json_response(self.data.overview())
+        if path == "/api/v1/estate":
+            return self._json_response(self.data.estate())
         if path == "/api/v1/activity":
             result = self.data.activity(params)
             return self._json_response(result, result["fingerprint"])

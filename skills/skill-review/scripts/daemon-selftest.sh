@@ -165,7 +165,8 @@ fi
 for script in daemon-pass.sh daemon-run.sh daemon-lock.sh daemon-lock.py \
   dreaming-run.sh dreaming-state.py test-dreaming-daemon.sh \
   test-process-cleanup.sh \
-  dreaming-core.py test-dreaming-core.sh dreaming-vendor-adapter.py \
+  dreaming-core.py test-dreaming-core.sh dreaming-estate.py \
+  test-dreaming-estate.sh dreaming-vendor-adapter.py \
   test-vendor-adapters.sh dreaming-dashboard.py test-dreaming-dashboard.sh \
   test-dreaming-dashboard-contracts.sh \
   evidence-envelope.py append-skill-evidence.sh mark-agent-created.sh \
@@ -182,6 +183,7 @@ for script in install.sh dreaming-deps.py test-shared-deps.sh \
   test-headless-roots.sh test-installer.sh test-repository-boundary.sh \
   manage-instructions.sh configure-adapters.py migrate-copilot-state.py \
   ssh-session-source.py ssh-skill-publisher.py test-ssh-skill-publisher.py \
+  ssh-estate-census.py test-ssh-estate-census.py \
   dreaming-enqueue.sh test-copilot-migration.sh \
   transfer-dreaming-host.py test-transfer-dreaming-host.sh \
   cutover-dreaming-host.py test-cutover-dreaming-host.sh \
@@ -226,6 +228,11 @@ if run_isolated_test "$SCRIPT_DIR/test-dreaming-core.sh" >>"$RESULT" 2>&1; then
   ok "deterministic standalone core checks"
 else
   bad "deterministic standalone core checks"
+fi
+if run_isolated_test "$SCRIPT_DIR/test-dreaming-estate.sh" >>"$RESULT" 2>&1; then
+  ok "deterministic estate census checks"
+else
+  bad "deterministic estate census checks"
 fi
 if run_isolated_test "$SCRIPT_DIR/test-dreaming-dashboard-contracts.sh" >>"$RESULT" 2>&1; then
   ok "deterministic dashboard contract checks"
@@ -306,6 +313,11 @@ if run_isolated_test "$ROOT_SCRIPT_DIR/test-ssh-skill-publisher.py" >>"$RESULT" 
   ok "deterministic SSH skill publisher checks"
 else
   bad "deterministic SSH skill publisher checks"
+fi
+if run_isolated_test "$ROOT_SCRIPT_DIR/test-ssh-estate-census.py" >>"$RESULT" 2>&1; then
+  ok "deterministic SSH estate census checks"
+else
+  bad "deterministic SSH estate census checks"
 fi
 if run_isolated_test "$ROOT_SCRIPT_DIR/test-copilot-migration.sh" >>"$RESULT" 2>&1; then
   ok "deterministic Copilot migration checks"

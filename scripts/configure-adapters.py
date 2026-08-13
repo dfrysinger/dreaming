@@ -386,6 +386,97 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
         "max_autonomous_session_age_days": 30,
         "allow_autonomous_skill_creation": False,
     }
+    estate_host = os.environ.get(
+        "DREAMING_COPILOT_ESTATE_SSH_HOST",
+        os.environ.get(
+            "DREAMING_COPILOT_PUBLISHER_SSH_HOST",
+            os.environ.get("DREAMING_COPILOT_SOURCE_SSH_HOST", ""),
+        ),
+    )
+    estate_receiver_id = os.environ.get(
+        "DREAMING_COPILOT_ESTATE_RECEIVER_ID",
+        os.environ.get("DREAMING_COPILOT_PUBLISHER_RECEIVER_ID", ""),
+    )
+    if estate_host:
+        if not estate_receiver_id:
+            raise ConfigError(
+                "remote Copilot estate census requires a receiver ID"
+            )
+        proxy = repo_root / "scripts/ssh-estate-census.py"
+        collector = repo_root / "skills/skill-review/scripts/dreaming-estate.py"
+        remote_home = os.environ.get(
+            "DREAMING_COPILOT_ESTATE_REMOTE_HOME", str(Path.home())
+        )
+        address_family = os.environ.get(
+            "DREAMING_COPILOT_ESTATE_SSH_ADDRESS_FAMILY",
+            os.environ.get(
+                "DREAMING_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY", ""
+            ),
+        )
+        if address_family not in {"", "4", "6"}:
+            raise ConfigError(
+                "DREAMING_COPILOT_ESTATE_SSH_ADDRESS_FAMILY must be 4, 6, or empty"
+            )
+        estate_argv = [
+            sys.executable,
+            str(proxy),
+            "--ssh-bin",
+            os.environ.get(
+                "DREAMING_ESTATE_SSH_BIN",
+                os.environ.get("DREAMING_PUBLISHER_SSH_BIN", "/usr/bin/ssh"),
+            ),
+            "--host",
+            estate_host,
+            *(["--address-family", address_family] if address_family else []),
+            "--remote-python",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_SSH_PYTHON",
+                os.environ.get(
+                    "DREAMING_COPILOT_PUBLISHER_SSH_PYTHON", sys.executable
+                ),
+            ),
+            "--remote-script",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_SSH_SCRIPT", str(proxy)
+            ),
+            "--remote-estate-script",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_COLLECTOR_SCRIPT", str(collector)
+            ),
+            "--remote-receiver-id-file",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_RECEIVER_ID_FILE",
+                str(Path(remote_home) / ".local/state/dreaming/receiver-id"),
+            ),
+            "--remote-copilot-binary",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_BIN",
+                os.environ.get("DREAMING_COPILOT_BIN", "copilot"),
+            ),
+            "--expected-receiver-id",
+            estate_receiver_id,
+            "--expected-receiver-sha",
+            hashlib.sha256(proxy.read_bytes()).hexdigest(),
+            "--expected-collector-sha",
+            hashlib.sha256(collector.read_bytes()).hexdigest(),
+            "--target-host-id",
+            estate_receiver_id,
+            "--target-home",
+            remote_home,
+            "--timeout",
+            str(positive_integer("DREAMING_ESTATE_TIMEOUT", "180")),
+        ]
+        project_contexts = os.environ.get(
+            "DREAMING_COPILOT_ESTATE_PROJECT_CONTEXTS_FILE"
+        )
+        if project_contexts:
+            estate_argv.extend(
+                ["--remote-project-contexts-file", project_contexts]
+            )
+        config["estate_census"] = {
+            "argv": estate_argv,
+            "timeout": positive_integer("DREAMING_ESTATE_TIMEOUT", "180") + 30,
+        }
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.parent / f".{output.name}.{uuid.uuid4().hex}"
     temporary.write_text(

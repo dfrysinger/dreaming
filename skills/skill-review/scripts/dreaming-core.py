@@ -372,6 +372,14 @@ class RuntimePaths:
     def bundles(self) -> Path:
         return self.data / "bundles"
 
+    @property
+    def estate_current(self) -> Path:
+        return self.state / "estate-census-current.json"
+
+    @property
+    def estate_receipts(self) -> Path:
+        return self.state / "estate-census-receipts"
+
 
 class DreamingRuntime:
     def __init__(
@@ -412,6 +420,66 @@ class DreamingRuntime:
 
     def _route_allowed(self, source: str, executor_id: str) -> bool:
         return (source, executor_id) in self.routes
+
+    def record_estate_census(
+        self, census: dict[str, Any], receiver: dict[str, Any]
+    ) -> dict[str, Any]:
+        if census.get("schema_version") != 1:
+            raise RuntimeFailure("estate-census-invalid", "schema version")
+        snapshot_sha256 = census.get("snapshot_sha256")
+        snapshot = {
+            key: value for key, value in census.items() if key != "snapshot_sha256"
+        }
+        if not isinstance(snapshot_sha256, str) or digest(snapshot) != snapshot_sha256:
+            raise RuntimeFailure("estate-census-invalid", "snapshot digest")
+        required_receiver = {
+            "receiver_id",
+            "receiver_sha256",
+            "collector_sha256",
+        }
+        if (
+            not isinstance(receiver, dict)
+            or not required_receiver.issubset(receiver)
+            or not all(
+                isinstance(receiver[key], str) and receiver[key]
+                for key in required_receiver
+            )
+        ):
+            raise RuntimeFailure("estate-census-invalid", "receiver identity")
+        receipt = {
+            "schema_version": 1,
+            "snapshot_sha256": snapshot_sha256,
+            "receiver": {
+                key: receiver[key] for key in sorted(required_receiver)
+            },
+            "census": census,
+        }
+        receipt_sha256 = digest(receipt)
+        receipt_path = (
+            self.paths.estate_receipts
+            / f"{receipt_sha256.removeprefix('sha256:')}.json"
+        )
+        if receipt_path.exists():
+            if read_json(receipt_path, {}) != receipt:
+                raise RuntimeFailure(
+                    "estate-census-receipt-collision", receipt_sha256
+                )
+        else:
+            atomic_json(receipt_path, receipt, mode=0o600)
+        current = {
+            "schema_version": 1,
+            "receipt_sha256": receipt_sha256,
+            "snapshot_sha256": snapshot_sha256,
+            "census": census,
+        }
+        atomic_json(self.paths.estate_current, current, mode=0o600)
+        return {
+            "status": "recorded",
+            "receipt_sha256": receipt_sha256,
+            "snapshot_sha256": snapshot_sha256,
+            "complete": census.get("scope", {}).get("complete") is True,
+            "totals": census.get("totals", {}),
+        }
 
     def _mark_queue(self, qualified_session_id: str, revision: str, status: str) -> None:
         queue = self._state(self.paths.queue, [])
@@ -2532,6 +2600,67 @@ def configured_runtime_settings(config: dict[str, Any]) -> dict[str, Any]:
     return settings
 
 
+def configured_estate_census(config: dict[str, Any]) -> dict[str, Any] | None:
+    entry = config.get("estate_census")
+    if entry is None:
+        return None
+    if not isinstance(entry, dict):
+        raise RuntimeFailure(
+            "invalid-adapter-config", "estate_census must be an object"
+        )
+    argv = entry.get("argv")
+    timeout = entry.get("timeout", 180)
+    if (
+        not isinstance(argv, list)
+        or not argv
+        or not all(isinstance(item, str) and item for item in argv)
+        or not isinstance(timeout, int)
+        or timeout < 1
+    ):
+        raise RuntimeFailure(
+            "invalid-adapter-config", "estate_census command is invalid"
+        )
+    return {"argv": argv, "timeout": timeout}
+
+
+def collect_estate_census(
+    core: DreamingRuntime, config: dict[str, Any]
+) -> dict[str, Any] | None:
+    entry = configured_estate_census(config)
+    if entry is None:
+        return None
+    try:
+        process = subprocess.run(
+            entry["argv"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=entry["timeout"],
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeFailure("estate-census-failed", str(error)) from error
+    try:
+        values = [
+            json.loads(line)
+            for line in process.stdout.splitlines()
+            if line.strip()
+        ]
+    except json.JSONDecodeError as error:
+        raise RuntimeFailure("estate-census-malformed", str(error)) from error
+    if len(values) != 1 or not isinstance(values[0], dict):
+        raise RuntimeFailure("estate-census-malformed", "ambiguous output")
+    result = values[0]
+    if process.returncode != 0 or result.get("ok") is not True:
+        raise RuntimeFailure(
+            "estate-census-failed", str(result.get("error", process.stderr.strip()))
+        )
+    census = result.get("census")
+    receiver = result.get("receiver")
+    if not isinstance(census, dict):
+        raise RuntimeFailure("estate-census-malformed", "census missing")
+    return core.record_estate_census(census, receiver)
+
+
 def selftest(require_config: bool) -> dict[str, Any]:
     paths = default_paths()
     recovery_state = paths.state / "publication-recovery-required.json"
@@ -2565,6 +2694,7 @@ def selftest(require_config: bool) -> dict[str, Any]:
     adapters: list[dict[str, Any]] = []
     if config_path.exists():
         adapters = validate_adapter_config(config_path)
+        configured_estate_census(load_adapter_config(config_path))
     elif require_config:
         raise RuntimeFailure("adapter-config-missing", str(config_path))
     return {
@@ -2640,6 +2770,12 @@ def scheduled_run() -> dict[str, Any]:
         "errors": adapter_errors,
         "legacy_records_imported": imported_legacy,
     }
+    try:
+        report["estate_census"] = collect_estate_census(core, config)
+    except RuntimeFailure as error:
+        report["errors"].append(
+            {"phase": "estate-census", "code": error.code}
+        )
     recovery_state = paths.state / "publication-recovery-required.json"
     if recovery_state.exists():
         report["publication_recovery_required"] = True
@@ -2842,6 +2978,21 @@ def reconcile_publications() -> dict[str, Any]:
     return report
 
 
+def census_only() -> dict[str, Any]:
+    paths = default_paths()
+    config = load_adapter_config(default_adapter_config(paths))
+    core = DreamingRuntime(paths, configured_routes(config))
+    result = collect_estate_census(core, config)
+    if result is None:
+        raise RuntimeFailure("estate-census-not-configured", "estate_census")
+    return {
+        "ok": True,
+        "runtime": "dreaming-core",
+        "command": "census",
+        "estate_census": result,
+    }
+
+
 def enqueue_session(source_name: str, qualified_session_id: str) -> dict[str, Any]:
     paths = default_paths()
     config_path = default_adapter_config(paths)
@@ -2882,6 +3033,7 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("run")
     subcommands.add_parser("publish")
     subcommands.add_parser("unpublish")
+    subcommands.add_parser("census")
     enqueue = subcommands.add_parser("enqueue")
     enqueue.add_argument("--source", required=True)
     enqueue.add_argument("--session", required=True)
@@ -2909,6 +3061,8 @@ def main() -> None:
             report = reconcile_publications()
         elif args.command == "unpublish":
             report = remove_publications()
+        elif args.command == "census":
+            report = census_only()
         elif args.command == "enqueue":
             report = enqueue_session(args.source, args.session)
         else:

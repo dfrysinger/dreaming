@@ -155,6 +155,34 @@ class RuntimeTest(unittest.TestCase):
             now=lambda: self.clock,
         )
 
+    def test_estate_census_receipt_is_content_addressed(self) -> None:
+        core = self.core({("fake", "executor")})
+        snapshot = {
+            "schema_version": 1,
+            "host_id": "macbook",
+            "scope": {"complete": True},
+            "totals": {"physical_instances": 2, "effective_instances": 1},
+        }
+        census = {
+            **snapshot,
+            "snapshot_sha256": runtime_module.digest(snapshot),
+        }
+        receiver = {
+            "receiver_id": "fixture",
+            "receiver_sha256": "a" * 64,
+            "collector_sha256": "b" * 64,
+        }
+        first = core.record_estate_census(census, receiver)
+        second = core.record_estate_census(census, receiver)
+        self.assertEqual(first, second)
+        current = json.loads(self.paths.estate_current.read_text())
+        self.assertEqual(current["receipt_sha256"], first["receipt_sha256"])
+        receipt = (
+            self.paths.estate_receipts
+            / f"{first['receipt_sha256'].removeprefix('sha256:')}.json"
+        )
+        self.assertTrue(receipt.is_file())
+
     def initialize_git_repo(self) -> None:
         subprocess.run(
             ["git", "-C", str(self.paths.skills), "init", "-q"],

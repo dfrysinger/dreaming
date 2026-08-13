@@ -89,6 +89,99 @@ token = "A" * 43
 token_path.write_text(token + "\n", encoding="ascii")
 token_path.chmod(0o600)
 
+estate_snapshot = {
+    "schema_version": 1,
+    "host_id": "macbook-fixture",
+    "collected_at": "2026-08-13T12:00:00+00:00",
+    "scope": {
+        "label": "Fixture bounded scope",
+        "complete": True,
+        "registered_context_ids": ["user"],
+        "outside_context_ids": ["unregistered"],
+    },
+    "totals": {
+        "physical_instances": 3,
+        "effective_instances": 2,
+        "canonical_capabilities": 2,
+        "physical_only_instances": 1,
+        "unresolved_runtime_skills": 0,
+        "plugin_packages": 1,
+        "enabled_plugin_packages": 1,
+    },
+    "contexts": [{
+        "id": "user",
+        "kind": "user",
+        "registered": True,
+        "inside_completeness_claim": True,
+        "complete": True,
+        "runtime_skill_count": 2,
+        "mapped_skill_count": 2,
+        "unresolved_count": 0,
+    }],
+    "physical_instances": [{
+        "skill_name": "fixture-skill",
+        "root_class": "personal",
+        "authority": "unknown_provenance",
+        "physical_only": False,
+        "owner": "/private/settings/path",
+        "instance_id": "sha256:" + "1" * 64,
+        "canonical_capability_id": "sha256:" + "2" * 64,
+        "absolute_path": "/private/skill/path",
+        "files": [{"path": "secret", "sha256": "private-sentinel"}],
+    }],
+    "enabled_instances": [],
+    "unresolved_mappings": [],
+    "plugins": [{
+        "plugin_id": "fixture@market",
+        "name": "fixture",
+        "version": "1.0.0",
+        "source_identity": "installed:market/fixture",
+        "package_root": "/private/plugin/path",
+        "enabled": True,
+        "capabilities": {
+            "complete": True,
+            "skills": ["./skills/fixture"],
+            "agents": [],
+            "hooks": [],
+            "mcp_servers": [],
+            "lsp_servers": [],
+        },
+    }],
+    "evidence": {
+        "settings_path": "/private/settings.json",
+        "settings_sha256": "private-settings-sentinel",
+    },
+}
+estate_census = {
+    **estate_snapshot,
+    "snapshot_sha256": dashboard.sha(estate_snapshot),
+}
+estate_receipt = {
+    "schema_version": 1,
+    "snapshot_sha256": estate_census["snapshot_sha256"],
+    "receiver": {
+        "receiver_id": "macbook-fixture",
+        "receiver_sha256": "a" * 64,
+        "collector_sha256": "b" * 64,
+    },
+    "census": estate_census,
+}
+estate_receipt_sha = dashboard.sha(estate_receipt)
+estate_receipts = state / "estate-census-receipts"
+estate_receipts.mkdir()
+(estate_receipts / f"{estate_receipt_sha.removeprefix('sha256:')}.json").write_text(
+    json.dumps(estate_receipt), encoding="utf-8"
+)
+(state / "estate-census-current.json").write_text(
+    json.dumps({
+        "schema_version": 1,
+        "receipt_sha256": estate_receipt_sha,
+        "snapshot_sha256": estate_census["snapshot_sha256"],
+        "census": estate_census,
+    }),
+    encoding="utf-8",
+)
+
 paths = dashboard.DashboardPaths(
     state, control, orchestrator, data, skills, repo, assets, token_path
 )
@@ -623,8 +716,31 @@ try:
     (data / "snapshots" / f"{oversized_digest}.json").write_bytes(b"x" * (dashboard.MAX_SNAPSHOT_BYTES + 1))
     check(request(f"/api/v1/transcripts/{oversized_digest}")[0] == 422, "oversized snapshot is rejected")
 
-    for route in ("/api/v1/overview", "/api/v1/activity", "/api/v1/system", "/api/v1/health"):
+    for route in ("/api/v1/overview", "/api/v1/estate", "/api/v1/activity", "/api/v1/system", "/api/v1/health"):
         check(request(route)[0] == 200, f"{route} returns schema-v1 data")
+    _, _, estate_body = request("/api/v1/estate")
+    estate_view = json.loads(estate_body)["data"]
+    check(
+        estate_view["totals"]["physical_instances"] == 3
+        and estate_view["authority_counts"] == {"unknown_provenance": 1}
+        and estate_view["plugins"][0]["capability_counts"]["skills"] == 1
+        and estate_view["read_only"] is True
+        and estate_view["authorizes_actions"] is False,
+        "estate API reports bounded totals, authority, and plugin capability inventory",
+    )
+    check(
+        all(
+            sentinel not in estate_body.decode()
+            for sentinel in (
+                "private-settings-sentinel",
+                "private-sentinel",
+                "/private/settings",
+                "/private/plugin/path",
+                "/private/skill/path",
+            )
+        ),
+        "estate API excludes private settings, file inventories, and local roots",
+    )
     _, _, activity_body = request("/api/v1/activity")
     activity = json.loads(activity_body)["data"]["items"]
     scheduled = next(item for item in activity if item["id"] == "run-1")
