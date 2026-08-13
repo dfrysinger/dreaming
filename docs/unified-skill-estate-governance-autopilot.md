@@ -72,16 +72,18 @@ met.
   `renamex_np(..., RENAME_SWAP)` to retain the exact displaced settings inode;
   unsupported volumes and unqualified plugin source classes remain
   report-only.
-- **Current phase:** implement the sealed remote personal-skill archive/restore
-  transaction (CHK-03) after completing the report-only provenance authority
-  matrix (CHK-02).
+- **Current phase:** implement the complete report-only plugin capability gate
+  (CHK-04). CHK-02 and the receiver-side CHK-03 transaction are complete;
+  mini-side action planning, dispatch, and installed reversible proof remain
+  intentionally deferred until the complete evidence-binding path exists.
 - **Implementation order:** census and identity model; estate dashboard and
   unresolved mappings; evaluation and recommendations; remote personal-skill
   archive/restore; atomic settings transaction and source qualification;
   plugin disable/restore; installed two-host proof and rollback.
 - **Implemented candidate:** local commits `79bf9b0`, `9cde88e`, `a4e270b`,
-  and `ef677e2` provide the bounded census, installed adapter upgrades, and
-  the full report-only provenance authority matrix. Never push these commits.
+  `ef677e2`, and `edab92c` provide the bounded census, installed adapter
+  upgrades, provenance authority matrix, and sealed retry-safe remote
+  personal-skill archive/restore receiver. Never push these commits.
 - **Installed state:** the Mac mini completed managed install, self-test, and
   enable for `a4e270b`. The halt switch is absent, the self-test exit code is
   `0`, the dashboard is running, and the remote source, publisher, executors,
