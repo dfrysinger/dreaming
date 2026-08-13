@@ -331,12 +331,13 @@ fails.
 
 ## Definition of Done: Mac mini ownership and autonomous retirement
 
-Final evidence: the reviewed candidate passed the complete installed Mac mini
-self-test with zero failures at activation generation
-`20260812T170255Z-install-88451`. Scheduled run
-`20260812T174948Z-29405` then completed with `status: ok` while the source
-remained halted, unloaded, and free of Dreaming workers. Dual review and the
-critical-lane judged ensemble have no unresolved in-scope material finding.
+Final evidence: the installed Mac mini candidate passed the complete self-test
+with zero failures at activation generation
+`20260813T004423Z-install-69160`. It then inspected a queued Copilot session
+through the MacBook SSH source and completed run
+`20260813T012330Z-5866` with exit code zero. The run accepted `25` Copilot
+reviews without increasing the deleted-session count. The MacBook remained
+halted, unloaded, and free of Dreaming workers.
 
 - [x] A fresh read-only curator report inventories the current managed skill
       library and records proposed consolidations, prunings, and manual-only
@@ -357,6 +358,8 @@ critical-lane judged ensemble have no unresolved in-scope material finding.
       transaction-bound and validated.
 - [x] The exact Dreaming revision, verified dependencies, managed skill roots,
       and supported state are installed on the Mac mini.
+- [x] The Mac mini reads the MacBook Copilot session library through the
+      SSH-backed source while review execution and publication remain local.
 - [x] The Mac mini installed self-test reports exactly zero failures.
 - [x] One real scheduled pass succeeds on the Mac mini while the source Mac
       remains halted and inactive.

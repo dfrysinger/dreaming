@@ -58,24 +58,20 @@ evaluation, review, and restore owners rather than creating alternatives.
   by the Mac mini through a non-interactive IPv6 SSH source adapter. Codex
   sessions remain local to the Mac mini. All review execution and publication
   remain on the Mac mini; the MacBook does not regain scheduled ownership.
-- **Current phase:** local landing. The Mac mini is
-  configured for authenticated Copilot and Codex source and review execution.
+- **Current phase:** complete. The Mac mini is configured for authenticated
+  Copilot and Codex source and review execution.
   Copilot is the scheduled publisher. Codex retains its current installed
   bundle but is not a scheduled publication target because its native plugin
   inventory can block under the daemon on a Dropbox-backed local marketplace.
   Claude Code remains installed but inactive because it is unauthenticated on
-  both Macs. The final reviewed installed self-test passed with zero failures and is
-  bound to activation generation `20260812T170255Z-install-88451`. The source
-  remains halted and unloaded; the Mac mini is the sole active scheduler.
-- **Live-proof status:** PASS. Earlier post-activation passes failed closed before
-  roll or prune began while the adapter-path and Codex publication behavior
-  were isolated. No retirement mutation occurred, every failed activation
-  receipt is retained, and verified orphaned inventory processes were removed.
-  The guarded ownership cutover is complete. Final reviewed scheduled run
-  `20260812T174948Z-29405` finished `status: ok`;
-  consolidation succeeded and weekly roll/prune were correctly not due. The
-  supported runtime keeps Codex for discovery and review while routing
-  scheduled publication only through healthy Copilot. Evidence is recorded in
+  both Macs. The installed self-test passed with zero failures and is bound to
+  activation generation `20260813T004423Z-install-69160`. The MacBook remains
+  halted and unloaded; the Mac mini is the sole active scheduler.
+- **Live-proof status:** PASS. The Mac mini inspected MacBook Copilot session
+  `copilot:b01450ad-b811-4e77-999d-1972f8e5796c` through the SSH-backed source.
+  Run `20260813T012330Z-5866` then completed the full Dreaming pipeline with
+  exit code zero, accepted `25` Copilot reviews, and left the deleted-session
+  count unchanged at `75`. Evidence is recorded in
   `mac-mini-live-proof.txt` and `mac-mini-cutover-receipt.json`.
 - **Completed baseline:** shadow lifecycle landed locally at `10c20c1`.
 - **Curator review:** completed without skill mutation. It scanned `73` managed
@@ -86,5 +82,4 @@ evaluation, review, and restore owners rather than creating alternatives.
   critical-lane judged ensemble confirmed additional fail-closed gaps; all
   material families were repaired, and both reviewer families closed the final
   fix delta with no unresolved material finding.
-- **Remaining:** commit locally, mark the migration todos complete, and stop
-  the charter schedule.
+- **Remaining:** none for this charter.
