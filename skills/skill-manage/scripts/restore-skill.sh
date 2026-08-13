@@ -41,6 +41,7 @@ if [[ -n "${SKILLS_REVIEW_STATE_DIR:-}" &&
   LEGACY_STATE_DIR="$SKILLS_STATE_DIR"
 fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CURATOR_RUNNER="${SKILLS_CURATOR_RUNNER:-$SCRIPT_DIR/../../skill-curator/scripts/curator-run.py}"
 LOCK_SCRIPT="$SCRIPT_DIR/../../skill-review/scripts/daemon-lock.sh"
 LOCK_TOKEN=""
 release_lock() {
@@ -196,7 +197,9 @@ if [[ -e "$DEST" ]]; then
   exit 1
 fi
 
-if [[ -z "${SKILLS_CURATOR_ROLLBACK:-}" ]]; then
+if [[ -n "${SKILLS_CURATOR_RUN_ID:-}" ]]; then
+  "$CURATOR_RUNNER" renew --run "$SKILLS_CURATOR_RUN_ID"
+elif [[ -z "${SKILLS_CURATOR_ROLLBACK:-}" ]]; then
   LOCK_TOKEN="$("$LOCK_SCRIPT" acquire --mode session --owner "restore-skill:$NAME")"
 fi
 
@@ -291,11 +294,12 @@ if [[ -z "${SKILLS_CURATOR_ROLLBACK:-}" ]]; then
     # Moving the active record into history is the state transition. rename(2)
     # keeps one durable evidence file visible at all times; enrichment happens
     # only after the move and can never destroy the original record contents.
-    python3 - "$RECORD" "$HISTORY" "$RESTORE_COMMIT" "$RECORD_SOURCE" <<'PY'
+    python3 - "$RECORD" "$HISTORY" "$RESTORE_COMMIT" "$RECORD_SOURCE" \
+      "${SKILLS_RESTORE_CONTEXT:-}" <<'PY'
 import json, os, sys, tempfile
 from datetime import datetime, timezone
 
-source, destination, restore_commit, record_source = sys.argv[1:]
+source, destination, restore_commit, record_source, context_raw = sys.argv[1:]
 if os.path.exists(destination):
     raise SystemExit(f"REFUSED: retirement history already exists: {destination}")
 
@@ -314,6 +318,29 @@ try:
     record["restored_at"] = datetime.now(timezone.utc).isoformat()
     record["restore_commit"] = restore_commit
     record["record_source"] = record_source
+    if context_raw:
+        context = json.loads(context_raw)
+        required = {
+            "authority_mode",
+            "op_id",
+            "request_sha256",
+            "census_snapshot_sha256",
+            "dependency_inventory_sha256",
+            "restore_source_head",
+        }
+        if set(context) != required or context["authority_mode"] != "remote":
+            raise ValueError("remote restore context is malformed")
+        if context["restore_source_head"] != record["restore_sha"]:
+            raise ValueError("remote restore source differs from retirement record")
+        record["restore_authorization"] = {
+            key: context[key]
+            for key in (
+                "op_id",
+                "request_sha256",
+                "census_snapshot_sha256",
+                "dependency_inventory_sha256",
+            )
+        }
     descriptor, temporary = tempfile.mkstemp(
         prefix=f".{os.path.basename(destination)}.",
         dir=destination_dir,

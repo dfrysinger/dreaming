@@ -536,6 +536,20 @@ if estate[estate.index("--host") + 1] != "fixture-client@fd7a:115c:a1e0::3":
     raise SystemExit(f"remote estate host is malformed: {estate!r}")
 if estate[estate.index("--expected-receiver-id") + 1] != "fixture-receiver":
     raise SystemExit(f"remote estate identity is malformed: {estate!r}")
+curator = config.get("estate_curator", {})
+curator_argv = curator.get("argv", [])
+if (
+    curator.get("enabled") is not False
+    or not curator_argv
+    or not curator_argv[1].endswith("/scripts/ssh-estate-curator.py")
+):
+    raise SystemExit(f"disabled remote estate curator route is missing: {config!r}")
+if curator_argv[curator_argv.index("--host") + 1] != "fixture-client@fd7a:115c:a1e0::3":
+    raise SystemExit(f"remote estate curator host is malformed: {curator_argv!r}")
+if curator_argv[curator_argv.index("--expected-receiver-id") + 1] != "fixture-receiver":
+    raise SystemExit(f"remote estate curator identity is malformed: {curator_argv!r}")
+if "--request" in curator_argv:
+    raise SystemExit("estate curator route must remain unarmed without a sealed request")
 PY
 FAKE_SSH="$NATIVE/fake-ssh.py"
 SSH_ARGV_LOG="$NATIVE/ssh-argv.json"
@@ -576,6 +590,7 @@ import sys
 adapters = pathlib.Path(sys.argv[1])
 config = json.loads(adapters.read_text(encoding="utf-8"))
 config.pop("estate_census", None)
+config.pop("estate_curator", None)
 adapters.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 env = pathlib.Path(sys.argv[2])
 lines = [
@@ -598,12 +613,19 @@ config = json.load(open(sys.argv[1], encoding="utf-8"))
 source = config["sources"]["copilot"]["argv"]
 publisher = config["publishers"]["copilot"]["argv"]
 estate = config.get("estate_census", {}).get("argv", [])
+curator = config.get("estate_curator", {})
 if source[source.index("--host") + 1] != "fixture@fd7a:115c:a1e0::1":
     raise SystemExit(f"upgrade lost the inherited remote source: {source!r}")
 if publisher[publisher.index("--host") + 1] != "fixture-client@fd7a:115c:a1e0::3":
     raise SystemExit(f"upgrade lost the inherited remote publisher: {publisher!r}")
 if not estate or estate[estate.index("--host") + 1] != "fixture-client@fd7a:115c:a1e0::3":
     raise SystemExit(f"upgrade did not add the inherited estate census: {config!r}")
+if (
+    curator.get("enabled") is not False
+    or curator.get("argv", [None, None])[1] is None
+    or not curator["argv"][1].endswith("/scripts/ssh-estate-curator.py")
+):
+    raise SystemExit(f"upgrade did not add the disabled estate curator route: {config!r}")
 PY
 native_hash="$(shasum -a 256 "$NATIVE_ADAPTERS" | awk '{print $1}')"
 (

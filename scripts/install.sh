@@ -548,7 +548,10 @@ except (OSError, json.JSONDecodeError) as error:
     raise SystemExit(f"existing adapter config is invalid: {error}")
 if not isinstance(config, dict):
     raise SystemExit("existing adapter config must be an object")
-if isinstance(config.get("estate_census"), dict):
+if (
+    isinstance(config.get("estate_census"), dict)
+    and isinstance(config.get("estate_curator"), dict)
+):
     raise SystemExit(1)
 for role, suffix in (
     ("sources", "/scripts/ssh-session-source.py"),

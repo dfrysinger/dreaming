@@ -60,6 +60,8 @@ PUBLIC_MANIFESTS = (
 MAX_REPORT_AGE = timedelta(days=7)
 AGE_ONLY_PRUNING_DAYS = 90
 PROVENANCE_MODULE: Any | None = None
+REMOTE_PROTOCOL = "dreaming.estate-curator"
+REMOTE_SCHEMA_VERSION = 1
 
 
 class RunError(RuntimeError):
@@ -228,6 +230,10 @@ def hash_json(payload: Any) -> str:
     )
 
 
+def sealed_hash(payload: Any) -> str:
+    return f"sha256:{hash_json(payload)}"
+
+
 def dirty_paths(root: Path) -> set[str]:
     paths: set[str] = set()
     for args in (
@@ -264,6 +270,18 @@ def path_fingerprint(root: Path, relative: str) -> dict[str, Any]:
 
 def dirty_snapshot(root: Path) -> list[dict[str, Any]]:
     return [path_fingerprint(root, path) for path in sorted(dirty_paths(root))]
+
+
+def safe_json_file(path: Path, label: str) -> dict[str, Any]:
+    if not path.is_file() or path.is_symlink():
+        raise RunError(f"{label} is not a regular file")
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise RunError(f"{label} is malformed") from error
+    if not isinstance(value, dict):
+        raise RunError(f"{label} must be an object")
+    return value
 
 
 def overlaps(left: str, right: str) -> bool:
@@ -338,6 +356,466 @@ def require_autonomous_switches_open() -> dict[str, Any]:
         "curator_state": str(state_path),
         "curator_state_sha256": hash_bytes(state_path.read_bytes()),
         "paused": paused,
+    }
+
+
+def remote_recovery_path() -> Path:
+    value = os.environ.get("CURATOR_REMOTE_RECOVERY_STATE")
+    if not value:
+        raise RunError("remote recovery-state path is not configured")
+    return Path(value).expanduser().resolve()
+
+
+def remote_executable_identity() -> dict[str, str]:
+    configured = {
+        "receiver_sha256": os.environ.get("CURATOR_REMOTE_RECEIVER_SCRIPT"),
+        "curator_sha256": str(Path(__file__).resolve()),
+        "archive_sha256": str(Path(os.environ.get("CURATOR_REMOTE_ARCHIVE_TOOL", ""))),
+        "restore_sha256": str(Path(os.environ.get("CURATOR_REMOTE_RESTORE_TOOL", ""))),
+        "estate_sha256": str(Path(os.environ.get("CURATOR_REMOTE_ESTATE_SCRIPT", ""))),
+        "dependency_scanner_sha256": str(SCANNER),
+    }
+    identity: dict[str, str] = {}
+    for field, raw in configured.items():
+        if not raw:
+            raise RunError(f"remote executable path is not configured: {field}")
+        path = Path(raw).expanduser().resolve()
+        if not path.is_file() or path.is_symlink():
+            raise RunError(f"remote executable is unavailable: {field}")
+        identity[field] = hash_bytes(path.read_bytes())
+    receiver_id = os.environ.get("CURATOR_REMOTE_RECEIVER_ID", "")
+    if not re_safe_id(receiver_id):
+        raise RunError("remote receiver identity is invalid")
+    return {"receiver_id": receiver_id, **identity}
+
+
+def current_remote_census(request: dict[str, Any]) -> dict[str, Any]:
+    target_home = os.environ.get("CURATOR_REMOTE_TARGET_HOME")
+    copilot_binary = os.environ.get("CURATOR_REMOTE_COPILOT_BINARY")
+    user_context_cwd = os.environ.get("CURATOR_REMOTE_USER_CONTEXT_CWD")
+    if not target_home or not copilot_binary or not user_context_cwd:
+        raise RunError("remote census collection is not configured")
+    target = request["target"]
+    config: dict[str, Any] = {
+        "host_id": request["receiver"]["receiver_id"],
+        "target_home": target_home,
+        "user_context_cwd": user_context_cwd,
+        "copilot_binary": copilot_binary,
+        "provenance_policy": target["provenance_inputs"]["policy"],
+        "legacy_proofs": (
+            {target["skill"]: target["provenance_inputs"]["proof"]}
+            if target["provenance_inputs"]["proof"] is not None
+            else {}
+        ),
+    }
+    contexts_path = os.environ.get("CURATOR_REMOTE_PROJECT_CONTEXTS_FILE")
+    if contexts_path:
+        path = Path(contexts_path).expanduser().resolve()
+        try:
+            contexts = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise RunError("remote project-context inventory is malformed") from error
+        if not isinstance(contexts, list):
+            raise RunError("remote project-context inventory is malformed")
+        config["project_contexts"] = contexts
+    module = provenance_module()
+    try:
+        current = module.collect(config)
+    except module.EstateError as error:
+        raise RunError(f"current estate census failed: {error}") from error
+    if not isinstance(current, dict):
+        raise RunError("current estate census is malformed")
+    return current
+
+
+def comparable_census(value: dict[str, Any]) -> dict[str, Any]:
+    comparable = json.loads(json.dumps(value))
+    comparable.pop("snapshot_sha256", None)
+    comparable["collected_at"] = "<normalized>"
+    return comparable
+
+
+def validate_decision_receipt(value: Any, label: str) -> None:
+    if not isinstance(value, dict) or set(value) != {"status", "payload", "sha256"}:
+        raise RunError(f"{label} decision evidence is malformed")
+    if value["status"] != "passed" or value["sha256"] != sealed_hash(value["payload"]):
+        raise RunError(f"{label} decision evidence is not passing and sealed")
+
+
+def retirement_record(name: str) -> tuple[Path, dict[str, Any]]:
+    path = archive_state_dir() / "retired" / f"{name}.json"
+    return path, safe_json_file(path, "retirement record")
+
+
+def git_tree_inventory(root: Path, commit: str, relative: str) -> list[dict[str, str]]:
+    output = run(
+        ["git", "-C", str(root), "ls-tree", "-r", "-z", commit, "--", relative],
+        text=False,
+    ).stdout
+    prefix = relative.rstrip("/") + "/"
+    inventory: list[dict[str, str]] = []
+    for record in output.split(b"\0"):
+        if not record:
+            continue
+        metadata, raw_path = record.split(b"\t", 1)
+        mode, object_type, object_id = metadata.decode("ascii").split(" ")
+        path = raw_path.decode("utf-8")
+        if object_type != "blob" or mode == "120000" or not path.startswith(prefix):
+            raise RunError("restore source tree contains an unsafe entry")
+        content = run(
+            ["git", "-C", str(root), "cat-file", "blob", object_id],
+            text=False,
+        ).stdout
+        inventory.append(
+            {
+                "path": path.removeprefix(prefix),
+                "sha256": hash_bytes(content),
+            }
+        )
+    inventory.sort(key=lambda item: item["path"])
+    if not any(item["path"] == "SKILL.md" for item in inventory):
+        raise RunError("restore source tree has no SKILL.md")
+    return inventory
+
+
+def current_tree_inventory(root: Path, relative: str) -> list[dict[str, str]]:
+    target = root / relative
+    if not target.is_dir() or target.is_symlink():
+        raise RunError("restored target is not a regular directory")
+    inventory: list[dict[str, str]] = []
+    for path in sorted(target.rglob("*")):
+        if path.is_symlink():
+            raise RunError("restored target contains a symlink")
+        if path.is_file():
+            inventory.append(
+                {
+                    "path": path.relative_to(target).as_posix(),
+                    "sha256": hash_bytes(path.read_bytes()),
+                }
+            )
+    return inventory
+
+
+def remote_request_payload(path: Path) -> dict[str, Any]:
+    request = safe_json_file(path, "remote curator request")
+    expected_fields = {
+        "schema_version",
+        "protocol",
+        "op_id",
+        "operation",
+        "receiver",
+        "managed_root",
+        "target",
+        "pre_state",
+        "decision_evidence",
+        "expected_result",
+        "request_sha256",
+    }
+    if set(request) != expected_fields:
+        raise RunError("remote curator request fields are unsupported")
+    seal = request["request_sha256"]
+    payload = {key: value for key, value in request.items() if key != "request_sha256"}
+    if (
+        request["schema_version"] != REMOTE_SCHEMA_VERSION
+        or request["protocol"] != REMOTE_PROTOCOL
+        or not isinstance(seal, str)
+        or seal != hash_json(payload)
+    ):
+        raise RunError("remote curator request seal is invalid")
+    if not re_safe_id(str(request["op_id"])):
+        raise RunError("remote curator operation ID is invalid")
+    return request
+
+
+def validate_remote_request(
+    request: dict[str, Any],
+    operations: list[dict[str, Any]] | None = None,
+) -> dict[str, Any]:
+    if request["receiver"] != remote_executable_identity():
+        raise RunError("remote receiver or executable identity changed")
+    operation = request["operation"]
+    if (
+        not isinstance(operation, dict)
+        or set(operation) != {"kind", "order"}
+        or operation["kind"] not in {"archive", "restore"}
+        or not isinstance(operation["order"], int)
+        or isinstance(operation["order"], bool)
+        or operation["order"] != 1
+    ):
+        raise RunError("remote curator operation is malformed")
+    target = request["target"]
+    target_fields = {
+        "skill",
+        "instance_id",
+        "canonical_capability_id",
+        "absolute_path",
+        "relative_path",
+        "inventory_sha256",
+        "authority_class",
+        "provenance",
+        "verified_evidence",
+        "provenance_inputs",
+    }
+    if (
+        not isinstance(target, dict)
+        or set(target) != target_fields
+        or not re_safe_id(str(target.get("skill", "")))
+        or target["relative_path"] != target["skill"]
+        or target["authority_class"] != "legacy_machine"
+        or not all(
+            isinstance(target.get(field), str) and target[field]
+            for field in (
+                "instance_id",
+                "canonical_capability_id",
+                "absolute_path",
+                "relative_path",
+                "inventory_sha256",
+            )
+        )
+        or not isinstance(target["provenance"], dict)
+        or not isinstance(target["verified_evidence"], dict)
+    ):
+        raise RunError("remote curator target identity is malformed or protected")
+    local_root = roots()["local"]
+    target_home = os.environ.get("CURATOR_REMOTE_TARGET_HOME", "")
+    if (
+        not target_home
+        or (Path(target_home).expanduser().resolve() / ".copilot/skills").resolve()
+        != local_root
+    ):
+        raise RunError("remote target home does not own the managed personal root")
+    expected_target = local_root / target["skill"]
+    if (
+        Path(str(target["absolute_path"])).resolve() != expected_target
+        or target["relative_path"] != expected_target.relative_to(local_root).as_posix()
+    ):
+        raise RunError("remote curator target path does not match the managed root")
+    root_record = root_identity(local_root)
+    managed = request["managed_root"]
+    if (
+        not isinstance(managed, dict)
+        or set(managed) != {"path", "git_dir", "expected_head"}
+        or managed["path"] != root_record["path"]
+        or managed["git_dir"] != root_record["git_dir"]
+        or managed["expected_head"] != root_record["initial_head"]
+    ):
+        raise RunError("remote managed-root identity or Git HEAD changed")
+    pre_state = request["pre_state"]
+    if not isinstance(pre_state, dict) or set(pre_state) != {
+        "census",
+        "census_snapshot_sha256",
+        "dependency_inventory",
+        "dependency_inventory_sha256",
+        "unrelated_dirty",
+        "unrelated_dirty_sha256",
+        "halt",
+    }:
+        raise RunError("remote curator pre-state is malformed")
+    census = pre_state["census"]
+    if not isinstance(census, dict):
+        raise RunError("estate census is malformed")
+    census_snapshot = {
+        key: value for key, value in census.items() if key != "snapshot_sha256"
+    }
+    if (
+        census.get("snapshot_sha256") != sealed_hash(census_snapshot)
+        or pre_state["census_snapshot_sha256"] != census.get("snapshot_sha256")
+        or census.get("scope", {}).get("complete") is not True
+        or census.get("host_id") != request["receiver"]["receiver_id"]
+    ):
+        raise RunError("estate census is incomplete or does not match its seal")
+    current_census = current_remote_census(request)
+    if (
+        current_census.get("scope", {}).get("complete") is not True
+        or comparable_census(current_census) != comparable_census(census)
+    ):
+        raise RunError("estate census changed after authorization")
+    instances = [
+        row
+        for row in census.get("physical_instances", [])
+        if isinstance(row, dict) and row.get("instance_id") == target["instance_id"]
+    ]
+    if operation["kind"] == "archive":
+        if len(instances) != 1:
+            raise RunError("archive target is missing or ambiguous in the census")
+        instance = instances[0]
+        for field in (
+            "canonical_capability_id",
+            "absolute_path",
+            "relative_path",
+            "inventory_sha256",
+            "authority",
+            "provenance",
+        ):
+            expected = (
+                target["authority_class"] if field == "authority" else target[field]
+            )
+            if instance.get(field) != expected:
+                raise RunError("archive target identity differs from the census")
+    elif instances:
+        raise RunError("restore target is unexpectedly live in the pre-state census")
+    inventory = scanner_inventory()
+    if (
+        pre_state["dependency_inventory"] != inventory
+        or pre_state["dependency_inventory_sha256"] != hash_json(inventory)
+    ):
+        raise RunError("dependency inventory changed or is incomplete")
+    rows = inventory_rows(inventory)
+    if operation["kind"] == "archive":
+        row = rows.get(target["skill"])
+        if row is None or row.get("pinned") or row.get("implicit_pin"):
+            raise RunError("archive target dependency identity is missing or pinned")
+        if Path(str(row.get("path", ""))).resolve() != expected_target:
+            raise RunError("archive target dependency path is ambiguous")
+    elif target["skill"] in rows:
+        raise RunError("restore target already appears in the dependency inventory")
+    current_dirty = dirty_snapshot(local_root)
+    if (
+        pre_state["unrelated_dirty"] != current_dirty
+        or pre_state["unrelated_dirty_sha256"] != hash_json(current_dirty)
+    ):
+        raise RunError("unrelated dirty-path fingerprint changed")
+    for dirty in current_dirty:
+        if overlaps(dirty["path"], target["relative_path"]):
+            raise RunError("relevant dirty path blocks remote curator mutation")
+    switches = require_autonomous_switches_open()
+    recovery = remote_recovery_path()
+    if recovery.exists():
+        raise RunError("estate mutation recovery is required")
+    halt = pre_state["halt"]
+    expected_halt = {
+        **switches,
+        "halted": False,
+        "recovery_state": str(recovery),
+        "recovery_required": False,
+    }
+    if halt != expected_halt:
+        raise RunError("halt or recovery state changed after authorization")
+    decisions = request["decision_evidence"]
+    if not isinstance(decisions, dict) or set(decisions) != {
+        "routing",
+        "portfolio",
+        "policy",
+    }:
+        raise RunError("remote curator decision evidence is incomplete")
+    for label, receipt in decisions.items():
+        validate_decision_receipt(receipt, label)
+    provenance_inputs = target["provenance_inputs"]
+    if (
+        not isinstance(provenance_inputs, dict)
+        or set(provenance_inputs) != {"policy", "proof"}
+    ):
+        raise RunError("remote curator provenance inputs are malformed")
+    if operation["kind"] == "archive":
+        module = provenance_module()
+        files, inventory_sha256 = module.skill_inventory(expected_target)
+        classification = module.classify_skill_authority(
+            expected_target,
+            {
+                "class": "personal",
+                "path": str(local_root),
+                "provenance_policy": provenance_inputs["policy"],
+                "legacy_proofs": (
+                    {target["skill"]: provenance_inputs["proof"]}
+                    if provenance_inputs["proof"] is not None
+                    else {}
+                ),
+            },
+            target["relative_path"],
+            files,
+            evidence_tool=EVIDENCE_TOOL,
+        )
+        if (
+            inventory_sha256 != target["inventory_sha256"]
+            or classification.get("authority") != "legacy_machine"
+            or classification.get("provenance") != target["provenance"]
+            or classification.get("_verified_evidence") != target["verified_evidence"]
+        ):
+            raise RunError("remote curator provenance authority proof changed")
+    else:
+        _, record = retirement_record(target["skill"])
+        archived_target = {
+            key: value
+            for key, value in target.items()
+            if key != "verified_evidence"
+        }
+        archived_target["verified_evidence"] = {
+            key: value
+            for key, value in target["verified_evidence"].items()
+            if key != "archive_request_sha256"
+        }
+        provenance_authority = {
+            "authority_class": archived_target["authority_class"],
+            "provenance": archived_target["provenance"],
+            "verified_evidence": archived_target["verified_evidence"],
+            "provenance_inputs": archived_target["provenance_inputs"],
+        }
+        remote_authorization = record.get("remote_authorization", {})
+        if (
+            record.get("git_root") != str(local_root)
+            or record.get("path") != target["relative_path"]
+            or record.get("restore_sha") != request["expected_result"].get(
+                "restore_source_head"
+            )
+            or record.get("curator_authority") != "remote"
+            or remote_authorization.get("request_sha256")
+            != target["verified_evidence"].get("archive_request_sha256")
+            or remote_authorization.get("target_identity_sha256")
+            != hash_json(archived_target)
+            or remote_authorization.get("provenance_authority_sha256")
+            != hash_json(provenance_authority)
+        ):
+            raise RunError("restore retirement authority proof is missing or changed")
+    expected_result = request["expected_result"]
+    if not isinstance(expected_result, dict):
+        raise RunError("remote curator expected result is malformed")
+    if operation["kind"] == "archive":
+        if expected_result != {
+            "live_tree": "absent",
+            "retirement_record": "present",
+            "tombstone": "present",
+            "restore_source_head": managed["expected_head"],
+        }:
+            raise RunError("archive expected evidence is unsupported")
+    else:
+        expected_fields = {
+            "live_tree_sha256",
+            "retirement_record",
+            "tombstone",
+            "retirement_history",
+            "restore_source_head",
+        }
+        if (
+            set(expected_result) != expected_fields
+            or expected_result["retirement_record"] != "absent"
+            or expected_result["tombstone"] != "absent"
+            or expected_result["retirement_history"] != "present"
+            or expected_result["live_tree_sha256"]
+            != hash_json(
+                git_tree_inventory(
+                    local_root,
+                    expected_result["restore_source_head"],
+                    target["relative_path"],
+                )
+            )
+        ):
+            raise RunError("restore expected evidence is unsupported or stale")
+    if operations is not None:
+        if len(operations) != 1:
+            raise RunError("remote curator plan must contain one operation")
+        planned = operations[0]
+        if (
+            planned["kind"] != operation["kind"]
+            or planned.get("skill") != target["skill"]
+            or planned["root"] != "local"
+        ):
+            raise RunError("remote curator plan differs from the sealed operation")
+    return {
+        "schema_version": 1,
+        "authority_mode": "remote",
+        "request": request,
+        "request_sha256": request["request_sha256"],
+        "validated_at": now_iso(),
     }
 
 
@@ -789,6 +1267,8 @@ def authorize_operations(
     }
     evidence: dict[str, dict[str, Any]] = {}
     for index, operation in enumerate(operations):
+        if operation["kind"] == "restore":
+            raise RunError("autonomous local reports cannot authorize restore")
         if operation["kind"] == "archive" and operation.get("absorbed_into"):
             linked_destination_commit(operations, index)
         if operation["status"] == "complete":
@@ -906,6 +1386,41 @@ def normalize_plan(plan: dict[str, Any], inventory: dict[str, Any]) -> list[dict
                 "skill": name,
                 "absorbed_into": absorbed_into,
                 "paths": paths,
+                "status": "planned",
+            }
+        elif kind == "restore":
+            name = raw.get("skill")
+            if not isinstance(name, str) or not re_safe_id(name):
+                raise RunError(f"restore operation {index} has invalid skill")
+            if name in skills:
+                raise RunError(f"restore operation {index} targets a live skill")
+            record_path, record = retirement_record(name)
+            local_root = roots()["local"]
+            if (
+                record.get("git_root") != str(local_root)
+                or record.get("path") != name
+                or record.get("dest", name) != name
+                or not isinstance(record.get("restore_sha"), str)
+            ):
+                raise RunError(
+                    f"restore operation {index} has an invalid retirement record"
+                )
+            if record_path.is_symlink():
+                raise RunError(
+                    f"restore operation {index} retirement record is a symlink"
+                )
+            inventory_paths = [
+                f"{name}/{item['path']}"
+                for item in git_tree_inventory(
+                    local_root, record["restore_sha"], name
+                )
+            ]
+            operation = {
+                "op_id": f"op-{index:03d}",
+                "kind": "restore",
+                "root": "local",
+                "skill": name,
+                "paths": inventory_paths,
                 "status": "planned",
             }
         elif kind == "commit":
@@ -1144,6 +1659,24 @@ def reverify_authorization(
         or receipt.get("run_id") != manifest["run_id"]
     ):
         raise RunError("autonomous authorization receipt identity is invalid")
+    if manifest.get("authority_mode") == "remote":
+        request = receipt.get("request")
+        if (
+            receipt.get("authority_mode") != "remote"
+            or not isinstance(request, dict)
+            or receipt.get("request_sha256") != request.get("request_sha256")
+        ):
+            raise RunError("remote authorization receipt identity is invalid")
+        if any(
+            operation["status"] in {"planned", "intent"}
+            for operation in manifest["operations"]
+        ):
+            current = validate_remote_request(request, manifest["operations"])
+        else:
+            if request["receiver"] != remote_executable_identity():
+                raise RunError("remote receiver or executable identity changed")
+            current = receipt
+        return {}, receipt, current
     report = report_identity(Path(manifest["report"]))
     if (
         report["sha256"] != manifest["report_sha256"]
@@ -1176,11 +1709,19 @@ def snapshot_file(path: Path) -> dict[str, Any]:
 
 def snapshot_effects(operation: dict[str, Any]) -> dict[str, Any]:
     effects: dict[str, Any] = {"ledger": snapshot_file(ledger_path())}
-    if operation["kind"] == "archive":
+    if operation["kind"] in {"archive", "restore"}:
         name = operation["skill"]
         state = archive_state_dir()
         effects["retirement"] = snapshot_file(state / "retired" / f"{name}.json")
         effects["tombstone"] = snapshot_file(state / "tombstones" / f"{name}.json")
+        history = state / "retirement-history"
+        if history.is_dir():
+            for path in sorted(history.glob(f"{name}-*.json")):
+                if path.is_symlink() or not path.is_file():
+                    raise RunError(
+                        f"retirement history contains an unsafe entry: {path.name}"
+                    )
+                effects[f"history:{path.name}"] = snapshot_file(path)
         if operation["root"] == "public":
             public_root = roots()["public"]
             for relative in PUBLIC_MANIFESTS:
@@ -1265,7 +1806,15 @@ def command_begin(args: argparse.Namespace) -> int:
     operations = normalize_plan(plan, inventory)
     authorization: dict[str, Any] | None = None
     report: dict[str, Any] | None = None
-    if args.autonomous:
+    remote_request: dict[str, Any] | None = None
+    if args.remote_request:
+        if args.autonomous:
+            raise RunError("remote authorization cannot also be autonomous report mode")
+        remote_request = remote_request_payload(Path(args.remote_request).resolve())
+        authorization = validate_remote_request(remote_request, operations)
+    elif args.autonomous:
+        if not args.report:
+            raise RunError("autonomous authorization requires a curator report")
         report = report_identity(Path(args.report))
         switches = require_autonomous_switches_open()
         authorization = {
@@ -1305,9 +1854,13 @@ def command_begin(args: argparse.Namespace) -> int:
         "run_id": run_id,
         "status": "active",
         "started_at": now_iso(),
-        "report": str(Path(args.report).resolve()),
+        "report": str(Path(args.report).resolve()) if args.report else None,
         "plan": str(Path(args.plan).resolve()),
-        "authority_mode": "autonomous" if args.autonomous else "manual",
+        "authority_mode": (
+            "remote" if remote_request is not None
+            else "autonomous" if args.autonomous
+            else "manual"
+        ),
         "lock_token": token,
         "lock_renewed_at": now_iso(),
         "roots": root_records,
@@ -1315,7 +1868,8 @@ def command_begin(args: argparse.Namespace) -> int:
         "operations": operations,
     }
     if receipt_path is not None:
-        payload["report_sha256"] = report["sha256"]
+        if report is not None:
+            payload["report_sha256"] = report["sha256"]
         payload["authorization_receipt"] = str(receipt_path)
         payload["authorization_receipt_sha256"] = hash_bytes(receipt_path.read_bytes())
     try:
@@ -1340,6 +1894,25 @@ def command_renew(args: argparse.Namespace) -> int:
 
 
 def provenance_refs(source: dict[str, Any]) -> list[dict[str, Any]]:
+    if "envelope" not in source:
+        return [
+            {
+                "kind": "agent-created-marker",
+                "path": source["marker"],
+                "sha256": source["marker_sha256"],
+            },
+            {
+                "kind": "verified-legacy-git-proof",
+                "policy_sha256": source["policy_sha256"],
+                "proof_sha256": source["proof_sha256"],
+                "creation_commit": source["creation_commit"],
+                "history_checkpoint": source["history_checkpoint"],
+                "creation_inventory_sha256": source[
+                    "creation_inventory_sha256"
+                ],
+                "machine_author": source["machine_author"],
+            },
+        ]
     return [
         {
             "kind": "agent-created-marker",
@@ -1394,10 +1967,40 @@ def command_archive_context(args: argparse.Namespace) -> int:
         raise RunError(
             f"consolidation destination commit is incomplete: {args.skill}"
         )
-    if manifest.get("authority_mode") != "autonomous":
+    if manifest.get("authority_mode") == "manual":
         context = {
             "authority_mode": "manual",
             "absorbed_into": operation.get("absorbed_into"),
+        }
+        operation["archive_context"] = context
+        atomic_write(path, manifest)
+        print(json.dumps(context, sort_keys=True))
+        return 0
+    if manifest.get("authority_mode") == "remote":
+        _, receipt, _ = reverify_authorization(manifest)
+        request = receipt["request"]
+        source = request["target"]
+        context = {
+            "authority_mode": "remote",
+            "op_id": request["op_id"],
+            "request_sha256": request["request_sha256"],
+            "target_identity_sha256": hash_json(request["target"]),
+            "provenance_authority_sha256": hash_json(
+                {
+                    "authority_class": request["target"]["authority_class"],
+                    "provenance": request["target"]["provenance"],
+                    "verified_evidence": request["target"]["verified_evidence"],
+                    "provenance_inputs": request["target"]["provenance_inputs"],
+                }
+            ),
+            "census_snapshot_sha256": request["pre_state"][
+                "census_snapshot_sha256"
+            ],
+            "dependency_inventory_sha256": request["pre_state"][
+                "dependency_inventory_sha256"
+            ],
+            "absorbed_into": None,
+            "evidence_refs": provenance_refs(source["verified_evidence"]),
         }
         operation["archive_context"] = context
         atomic_write(path, manifest)
@@ -1420,18 +2023,60 @@ def command_archive_context(args: argparse.Namespace) -> int:
     return 0
 
 
+def command_restore_context(args: argparse.Namespace) -> int:
+    path, manifest = load_manifest(args.run)
+    if manifest["status"] != "active" or manifest.get("authority_mode") != "remote":
+        raise RunError("restore requires an active remote-authorized run")
+    current_roots = verify_root_records(manifest)
+    renew_lock(manifest)
+    verify_expected_heads(manifest, current_roots)
+    verify_dirty_state(manifest, current_roots)
+    operation = next(
+        (
+            item
+            for item in manifest["operations"]
+            if item["status"] == "planned"
+        ),
+        None,
+    )
+    if (
+        operation is None
+        or operation["kind"] != "restore"
+        or operation.get("skill") != args.skill
+    ):
+        raise RunError(f"restore is not the next planned operation: {args.skill}")
+    _, receipt, _ = reverify_authorization(manifest)
+    request = receipt["request"]
+    context = {
+        "authority_mode": "remote",
+        "op_id": request["op_id"],
+        "request_sha256": request["request_sha256"],
+        "census_snapshot_sha256": request["pre_state"]["census_snapshot_sha256"],
+        "dependency_inventory_sha256": request["pre_state"][
+            "dependency_inventory_sha256"
+        ],
+        "restore_source_head": request["expected_result"]["restore_source_head"],
+    }
+    operation["restore_context"] = context
+    atomic_write(path, manifest)
+    print(json.dumps(context, sort_keys=True))
+    return 0
+
+
 def command_intent(args: argparse.Namespace) -> int:
     path, manifest = load_manifest(args.run)
     if manifest["status"] != "active":
         raise RunError(f"cannot add intent to run in status {manifest['status']}")
     current_roots = verify_root_records(manifest)
     renew_lock(manifest)
-    if manifest.get("authority_mode") == "autonomous":
+    if manifest.get("authority_mode") in {"autonomous", "remote"}:
         reverify_authorization(manifest)
     verify_dirty_state(manifest, current_roots)
     operation = find_planned_operation(manifest, args)
     if operation["kind"] == "archive" and "archive_context" not in operation:
         raise RunError("archive intent lacks bound archive context")
+    if operation["kind"] == "restore" and "restore_context" not in operation:
+        raise RunError("restore intent lacks bound restore context")
     current_head = git(current_roots[operation["root"]], "rev-parse", "HEAD")
     if current_head != expected_head(manifest, operation["root"]):
         raise RunError(f"unexpected commit appeared in {operation['root']} root")
@@ -1498,8 +2143,8 @@ def validate_archive_completion(operation: dict[str, Any]) -> None:
         if tombstone_snapshot.get("exists")
         else None
     )
-    if context.get("authority_mode") == "autonomous" and tombstone is None:
-        raise RunError("autonomous archive did not write a tombstone")
+    if context.get("authority_mode") in {"autonomous", "remote"} and tombstone is None:
+        raise RunError("authorized archive did not write a tombstone")
     records = [("retirement record", retirement)]
     if tombstone is not None:
         records.append(("tombstone", tombstone))
@@ -1526,6 +2171,78 @@ def validate_archive_completion(operation: dict[str, Any]) -> None:
             raise RunError(
                 "archive retirement record does not bind authorization evidence"
             )
+    elif context.get("authority_mode") == "remote":
+        remote = retirement.get("remote_authorization")
+        if (
+            retirement.get("curator_authority") != "remote"
+            or not isinstance(remote, dict)
+            or remote != {
+                "op_id": context.get("op_id"),
+                "request_sha256": context.get("request_sha256"),
+                "target_identity_sha256": context.get("target_identity_sha256"),
+                "provenance_authority_sha256": context.get(
+                    "provenance_authority_sha256"
+                ),
+                "census_snapshot_sha256": context.get(
+                    "census_snapshot_sha256"
+                ),
+                "dependency_inventory_sha256": context.get(
+                    "dependency_inventory_sha256"
+                ),
+            }
+            or retirement.get("evidence_refs") != context.get("evidence_refs")
+        ):
+            raise RunError(
+                "archive retirement record does not bind remote authorization"
+            )
+    root = roots()[operation["root"]]
+    if (root / operation["paths"][0]).exists():
+        raise RunError("archive target remains in the live tree")
+    if retirement.get("restore_sha") != operation["before_head"]:
+        raise RunError("archive retirement record names the wrong restore source")
+
+
+def validate_restore_completion(operation: dict[str, Any]) -> None:
+    context = operation.get("restore_context")
+    if not isinstance(context, dict) or context.get("authority_mode") != "remote":
+        raise RunError("restore completion lacks remote authorization context")
+    root = roots()[operation["root"]]
+    expected = git_tree_inventory(
+        root,
+        context["restore_source_head"],
+        operation["skill"],
+    )
+    current = current_tree_inventory(root, operation["skill"])
+    if current != expected:
+        raise RunError("restored tree is not byte-for-byte equal to its source")
+    after = operation["effects_after"]
+    if after["retirement"]["exists"] or after["tombstone"]["exists"]:
+        raise RunError("restore did not clear active retirement state")
+    before_history = {
+        key for key in operation["effects_before"] if key.startswith("history:")
+    }
+    after_history = {
+        key for key in after if key.startswith("history:")
+    }
+    added = after_history - before_history
+    if len(added) != 1 or before_history - after_history:
+        raise RunError("restore history transition is missing or ambiguous")
+    history = snapshot_json(after[next(iter(added))], "retirement history")
+    remote = history.get("restore_authorization")
+    if (
+        history.get("skill") != operation["skill"]
+        or history.get("restore_sha") != context["restore_source_head"]
+        or history.get("restore_commit") != operation["commit"]
+        or remote != {
+            "op_id": context["op_id"],
+            "request_sha256": context["request_sha256"],
+            "census_snapshot_sha256": context["census_snapshot_sha256"],
+            "dependency_inventory_sha256": context[
+                "dependency_inventory_sha256"
+            ],
+        }
+    ):
+        raise RunError("restore history does not bind remote authorization")
 
 
 def complete_operation(
@@ -1559,6 +2276,8 @@ def complete_operation(
     operation["ledger_effect"] = record_ledger_effect(operation)
     if operation["kind"] == "archive":
         validate_archive_completion(operation)
+    elif operation["kind"] == "restore":
+        validate_restore_completion(operation)
     operation["status"] = "complete"
     operation["completed_at"] = now_iso()
     verify_dirty_state(manifest, current_roots)
@@ -1584,7 +2303,7 @@ def command_commit(args: argparse.Namespace) -> int:
         raise RunError("scoped commit requires a commit intent")
     current_roots = verify_root_records(manifest)
     renew_lock(manifest)
-    if manifest.get("authority_mode") == "autonomous":
+    if manifest.get("authority_mode") in {"autonomous", "remote"}:
         reverify_authorization(manifest)
     root = current_roots[operation["root"]]
     verify_dirty_state(
@@ -1731,7 +2450,7 @@ def command_publish(args: argparse.Namespace) -> int:
         raise RunError(f"run has incomplete operations: {', '.join(incomplete)}")
     current_roots = verify_root_records(manifest)
     renew_lock(manifest)
-    if manifest.get("authority_mode") == "autonomous":
+    if manifest.get("authority_mode") in {"autonomous", "remote"}:
         reverify_authorization(manifest)
     verify_dirty_state(manifest, current_roots)
     if not public_changed(manifest):
@@ -1835,7 +2554,7 @@ def command_finish(args: argparse.Namespace) -> int:
     if incomplete:
         raise RunError(f"run has incomplete operations: {', '.join(incomplete)}")
     current_roots = verify_root_records(manifest)
-    if manifest.get("authority_mode") == "autonomous":
+    if manifest.get("authority_mode") in {"autonomous", "remote"}:
         reverify_authorization(manifest)
     for root_name, root in current_roots.items():
         if git(root, "rev-parse", "HEAD") != expected_head(manifest, root_name):
@@ -1978,9 +2697,16 @@ def remove_uncommitted_operation(root: Path, operation: dict[str, Any]) -> None:
 
 def restore_snapshot(snapshot: dict[str, Any], expected_after: dict[str, Any] | None) -> None:
     path = Path(snapshot["path"])
-    if expected_after and expected_after.get("exists") and path.exists():
-        if hash_bytes(path.read_bytes()) != expected_after["sha256"]:
-            raise RunError(f"state effect changed after operation: {path}")
+    if expected_after:
+        if expected_after.get("exists"):
+            if (
+                not path.is_file()
+                or path.is_symlink()
+                or hash_bytes(path.read_bytes()) != expected_after["sha256"]
+            ):
+                raise RunError(f"state effect changed after operation: {path}")
+        elif path.exists() or path.is_symlink():
+            raise RunError(f"unexpected state effect appeared after operation: {path}")
     if snapshot["exists"]:
         path.parent.mkdir(parents=True, exist_ok=True)
         data = base64.b64decode(snapshot["bytes_b64"])
@@ -2137,10 +2863,18 @@ def reverse_operation(
 
     reverse_ledger(operation)
     after = operation.get("effects_after", {})
+    expected_state = {} if operation["kind"] == "archive" else after
+    for name, snapshot in after.items():
+        if name == "ledger" or name in operation["effects_before"]:
+            continue
+        restore_snapshot(
+            {"path": snapshot["path"], "exists": False},
+            expected_state.get(name),
+        )
     for name, snapshot in operation["effects_before"].items():
         if name == "ledger":
             continue
-        restore_snapshot(snapshot, None)
+        restore_snapshot(snapshot, expected_state.get(name))
     operation["status"] = "rolled_back"
     operation["rollback_commit"] = git(root, "rev-parse", "HEAD")
     operation["rolled_back_at"] = now_iso()
@@ -2252,9 +2986,10 @@ def parser() -> argparse.ArgumentParser:
 
     begin = sub.add_parser("begin")
     begin.add_argument("--plan", required=True)
-    begin.add_argument("--report", required=True)
+    begin.add_argument("--report")
     begin.add_argument("--run-id")
     begin.add_argument("--autonomous", action="store_true")
+    begin.add_argument("--remote-request")
     begin.set_defaults(func=command_begin)
 
     renew = sub.add_parser("renew")
@@ -2266,9 +3001,16 @@ def parser() -> argparse.ArgumentParser:
     archive_context.add_argument("--skill", required=True)
     archive_context.set_defaults(func=command_archive_context)
 
+    restore_context = sub.add_parser("restore-context")
+    restore_context.add_argument("--run", required=True)
+    restore_context.add_argument("--skill", required=True)
+    restore_context.set_defaults(func=command_restore_context)
+
     intent = sub.add_parser("intent")
     intent.add_argument("--run", required=True)
-    intent.add_argument("--kind", choices=("archive", "commit"), required=True)
+    intent.add_argument(
+        "--kind", choices=("archive", "restore", "commit"), required=True
+    )
     intent.add_argument("--root", choices=("public", "local"), required=True)
     intent.add_argument("--skill")
     intent.add_argument("--action", choices=("patch", "create"))
@@ -2306,7 +3048,7 @@ def main() -> int:
     args = parser().parse_args()
     try:
         return args.func(args)
-    except (RunError, OSError, ValueError, KeyError) as error:
+    except (RunError, OSError, ValueError, TypeError, KeyError) as error:
         print(f"REFUSED: {error}", file=sys.stderr)
         return 1
 

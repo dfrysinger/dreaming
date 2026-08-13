@@ -591,6 +591,167 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
             "argv": estate_argv,
             "timeout": positive_integer("DREAMING_ESTATE_TIMEOUT", "180") + 30,
         }
+        curator_proxy = repo_root / "scripts/ssh-estate-curator.py"
+        curator_runner = (
+            repo_root / "skills/skill-curator/scripts/curator-run.py"
+        )
+        archive_tool = (
+            repo_root / "skills/skill-manage/scripts/archive-skill.sh"
+        )
+        restore_tool = (
+            repo_root / "skills/skill-manage/scripts/restore-skill.sh"
+        )
+        dependency_scanner = (
+            repo_root
+            / "skills/skill-curator/scripts/scheduled-skill-deps.py"
+        )
+        remote_review_state = Path(
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_REVIEW_STATE_DIR",
+                str(Path(remote_home) / ".copilot/skill-state/skill-review"),
+            )
+        )
+        curator_argv = [
+            sys.executable,
+            str(curator_proxy),
+            "--ssh-bin",
+            os.environ.get(
+                "DREAMING_ESTATE_SSH_BIN",
+                os.environ.get("DREAMING_PUBLISHER_SSH_BIN", "/usr/bin/ssh"),
+            ),
+            "--host",
+            estate_host,
+            *(["--address-family", address_family] if address_family else []),
+            "--remote-python",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_SSH_PYTHON",
+                os.environ.get(
+                    "DREAMING_COPILOT_PUBLISHER_SSH_PYTHON", sys.executable
+                ),
+            ),
+            "--remote-script",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_CURATOR_SSH_SCRIPT",
+                str(curator_proxy),
+            ),
+            "--remote-curator-runner",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_CURATOR_RUNNER",
+                str(curator_runner),
+            ),
+            "--remote-archive-tool",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_ARCHIVE_TOOL",
+                str(archive_tool),
+            ),
+            "--remote-restore-tool",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_RESTORE_TOOL",
+                str(restore_tool),
+            ),
+            "--remote-estate-script",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_COLLECTOR_SCRIPT", str(collector)
+            ),
+            "--remote-dependency-scanner",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_DEPENDENCY_SCANNER",
+                str(dependency_scanner),
+            ),
+            "--remote-public-root",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_PUBLIC_ROOT",
+                str(Path(remote_home) / "code/skills"),
+            ),
+            "--remote-personal-root",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_PERSONAL_ROOT",
+                str(Path(remote_home) / ".copilot/skills"),
+            ),
+            "--remote-review-state-dir",
+            str(remote_review_state),
+            "--remote-runs-dir",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_RUNS_DIR",
+                str(remote_review_state / "curator-runs"),
+            ),
+            "--remote-curator-state-file",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_CURATOR_STATE_FILE",
+                str(remote_review_state.parent / "curator.json"),
+            ),
+            "--remote-halt-switch",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_HALT_SWITCH",
+                str(remote_review_state / "disable-daemon"),
+            ),
+            "--remote-lock-dir",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_LOCK_DIR",
+                str(remote_review_state / "writer-lock.sqlite"),
+            ),
+            "--remote-operation-root",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_OPERATION_ROOT",
+                str(
+                    Path(remote_home)
+                    / ".local/state/dreaming/estate-transactions"
+                ),
+            ),
+            "--remote-recovery-state",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_RECOVERY_STATE",
+                str(
+                    Path(remote_home)
+                    / ".local/state/dreaming/estate-recovery-required.json"
+                ),
+            ),
+            "--remote-receiver-id-file",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_RECEIVER_ID_FILE",
+                str(Path(remote_home) / ".local/state/dreaming/receiver-id"),
+            ),
+            "--remote-target-home",
+            remote_home,
+            "--remote-copilot-binary",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_BIN",
+                os.environ.get("DREAMING_COPILOT_BIN", "copilot"),
+            ),
+            "--remote-user-context-cwd",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_USER_CONTEXT_CWD",
+                remote_home,
+            ),
+            "--expected-receiver-id",
+            estate_receiver_id,
+            "--expected-receiver-sha",
+            hashlib.sha256(curator_proxy.read_bytes()).hexdigest(),
+            "--expected-curator-sha",
+            hashlib.sha256(curator_runner.read_bytes()).hexdigest(),
+            "--expected-archive-sha",
+            hashlib.sha256(archive_tool.read_bytes()).hexdigest(),
+            "--expected-restore-sha",
+            hashlib.sha256(restore_tool.read_bytes()).hexdigest(),
+            "--expected-estate-sha",
+            hashlib.sha256(collector.read_bytes()).hexdigest(),
+            "--expected-dependency-scanner-sha",
+            hashlib.sha256(dependency_scanner.read_bytes()).hexdigest(),
+            "--local-recovery-state",
+            str(state_dir / "estate-recovery-required.json"),
+            "--timeout",
+            str(positive_integer("DREAMING_ESTATE_CURATOR_TIMEOUT", "300")),
+        ]
+        if project_contexts:
+            curator_argv.extend(
+                ["--remote-project-contexts-file", project_contexts]
+            )
+        config["estate_curator"] = {
+            "argv": curator_argv,
+            "timeout": positive_integer("DREAMING_ESTATE_CURATOR_TIMEOUT", "300")
+            + 30,
+            "enabled": False,
+        }
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.parent / f".{output.name}.{uuid.uuid4().hex}"
     temporary.write_text(

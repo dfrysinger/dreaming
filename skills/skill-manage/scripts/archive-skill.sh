@@ -46,6 +46,7 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CURATOR_RUNNER="${SKILLS_CURATOR_RUNNER:-$SCRIPT_DIR/../../skill-curator/scripts/curator-run.py}"
+DEPENDENCY_SCANNER="${CURATOR_DEPENDENCY_SCANNER:-$SCRIPT_DIR/../../skill-curator/scripts/scheduled-skill-deps.py}"
 CURATOR_OP_ID=""
 ARCHIVE_CONTEXT='{"authority_mode":"manual"}'
 LOCK_SCRIPT="$SCRIPT_DIR/../../skill-review/scripts/daemon-lock.sh"
@@ -79,8 +80,7 @@ fi
 # Installed jobs and durable daemon prompts are implicit pins. Enumeration
 # failures are also refusals: archiving is unsafe when the dependency set is
 # incomplete.
-"$SCRIPT_DIR/../../skill-curator/scripts/scheduled-skill-deps.py" --check "$NAME" \
-  >/dev/null
+"$DEPENDENCY_SCANNER" --check "$NAME" >/dev/null
 
 REPO_ROOT="${SKILLS_REPO_ROOT:-$HOME/code/skills}"
 LOCAL_ROOT="${SKILLS_LOCAL_ROOT:-$HOME/.copilot/skills}"
@@ -264,6 +264,22 @@ if context["authority_mode"] == "autonomous":
     record.update({
         "curator_report": context["report"],
         "curator_report_sha256": context["report_sha256"],
+        "evidence_refs": context["evidence_refs"],
+    })
+elif context["authority_mode"] == "remote":
+    record.update({
+        "remote_authorization": {
+            "op_id": context["op_id"],
+            "request_sha256": context["request_sha256"],
+            "target_identity_sha256": context["target_identity_sha256"],
+            "provenance_authority_sha256": context[
+                "provenance_authority_sha256"
+            ],
+            "census_snapshot_sha256": context["census_snapshot_sha256"],
+            "dependency_inventory_sha256": context[
+                "dependency_inventory_sha256"
+            ],
+        },
         "evidence_refs": context["evidence_refs"],
     })
 descriptor, temporary = tempfile.mkstemp(
