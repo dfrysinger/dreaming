@@ -743,12 +743,50 @@ class DashboardData:
             summary = self._json(
                 remote_path, {}, "remote publication summary"
             )
+            config_path = Path(
+                os.environ.get(
+                    "DREAMING_ADAPTER_CONFIG",
+                    self.paths.state / "adapters.json",
+                )
+            )
+            config = (
+                self._json(config_path, {}, "adapter config")
+                if config_path.exists()
+                else {}
+            )
+            publisher = (
+                config.get("publishers", {}).get("copilot")
+                if isinstance(config, dict)
+                and isinstance(config.get("publishers"), dict)
+                else None
+            )
+            argv = publisher.get("argv") if isinstance(publisher, dict) else None
+
+            def argument(name: str) -> str | None:
+                if not isinstance(argv, list):
+                    return None
+                try:
+                    index = argv.index(name)
+                except ValueError:
+                    return None
+                if index + 1 >= len(argv) or not isinstance(argv[index + 1], str):
+                    return None
+                return argv[index + 1]
+
+            expected_identity = (
+                argument("--expected-receiver-id"),
+                argument("--expected-receiver-sha"),
+                argument("--expected-adapter-sha"),
+            )
             descriptor = (
                 summary.get("descriptor")
                 if isinstance(summary, dict)
                 and summary.get("schema_version") == 1
                 and summary.get("status") == "committed"
-                and isinstance(summary.get("receiver_id"), str)
+                and expected_identity[0] is not None
+                and summary.get("receiver_id") == expected_identity[0]
+                and summary.get("receiver_sha256") == expected_identity[1]
+                and summary.get("adapter_sha256") == expected_identity[2]
                 else None
             )
             if isinstance(descriptor, dict):

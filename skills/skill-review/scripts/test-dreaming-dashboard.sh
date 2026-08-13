@@ -211,10 +211,28 @@ for index in range(1750):
     "claude": {"skills": ["learned-skill-000"]},
     "codex": {"skills": []},
 }), encoding="utf-8")
+(state / "adapters.json").write_text(json.dumps({
+    "publishers": {
+        "copilot": {
+            "argv": [
+                "/fixture/python",
+                "/fixture/scripts/ssh-skill-publisher.py",
+                "--expected-receiver-id",
+                "macbook-fixture",
+                "--expected-receiver-sha",
+                "a" * 64,
+                "--expected-adapter-sha",
+                "b" * 64,
+            ]
+        }
+    }
+}), encoding="utf-8")
 (state / "remote-publication-summary.json").write_text(json.dumps({
     "schema_version": 1,
     "status": "committed",
     "receiver_id": "macbook-fixture",
+    "receiver_sha256": "a" * 64,
+    "adapter_sha256": "b" * 64,
     "descriptor": {"skills": ["learned-skill-001"]},
 }), encoding="utf-8")
 (orchestrator / "runs/run-1.json").write_text(json.dumps({
@@ -500,6 +518,23 @@ try:
         and remote_skill["publication_targets"] == ["copilot@MacBook"],
         "skill detail reports verified remote publication target",
     )
+    adapters_path = state / "adapters.json"
+    adapters = json.loads(adapters_path.read_text(encoding="utf-8"))
+    receiver_index = adapters["publishers"]["copilot"]["argv"].index(
+        "--expected-receiver-id"
+    )
+    adapters["publishers"]["copilot"]["argv"][receiver_index + 1] = "replacement"
+    adapters_path.write_text(json.dumps(adapters), encoding="utf-8")
+    status, _, body = request("/api/v1/skills/learned-skill-001")
+    stale_remote_skill = json.loads(body)["data"]
+    check(
+        status == 200 and stale_remote_skill["publication_targets"] == [],
+        "skill detail rejects a summary bound to stale receiver configuration",
+    )
+    adapters["publishers"]["copilot"]["argv"][receiver_index + 1] = (
+        "macbook-fixture"
+    )
+    adapters_path.write_text(json.dumps(adapters), encoding="utf-8")
     publication_path = state / "publisher-ownership.json"
     publication_bytes = publication_path.read_bytes()
     publication_path.write_text("{malformed", encoding="utf-8")

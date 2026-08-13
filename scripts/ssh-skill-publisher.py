@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 MAX_ARCHIVE_BYTES = 100 * 1024 * 1024
+MAX_EXTRACTED_BYTES = 100 * 1024 * 1024
 
 
 class PublisherError(RuntimeError):
@@ -216,6 +217,7 @@ def safe_extract(payload: bytes, destination: Path, bundle_id: str) -> None:
         seen: set[str] = set()
         try:
             with zipfile.ZipFile(archive_path) as archive:
+                extracted_bytes = 0
                 for item in archive.infolist():
                     relative = PurePosixPath(item.filename)
                     mode = item.external_attr >> 16
@@ -228,11 +230,23 @@ def safe_extract(payload: bytes, destination: Path, bundle_id: str) -> None:
                         or (mode & 0o170000) == 0o120000
                     ):
                         raise PublisherError("bundle-archive-invalid", item.filename)
+                    if (
+                        item.file_size < 0
+                        or item.file_size > MAX_EXTRACTED_BYTES
+                        or extracted_bytes + item.file_size > MAX_EXTRACTED_BYTES
+                    ):
+                        raise PublisherError("bundle-too-large", item.filename)
                     seen.add(item.filename)
                     target = extract_root.joinpath(*relative.parts)
                     target.parent.mkdir(parents=True, exist_ok=True)
                     with archive.open(item) as source, target.open("wb") as output:
-                        shutil.copyfileobj(source, output)
+                        while chunk := source.read(1024 * 1024):
+                            extracted_bytes += len(chunk)
+                            if extracted_bytes > MAX_EXTRACTED_BYTES:
+                                raise PublisherError(
+                                    "bundle-too-large", str(extracted_bytes)
+                                )
+                            output.write(chunk)
         except (OSError, zipfile.BadZipFile) as error:
             raise PublisherError("bundle-archive-invalid", str(error)) from error
         validate_bundle(extract_root, bundle_id)
@@ -459,6 +473,8 @@ def remote_command(args: argparse.Namespace, arguments: list[str]) -> list[str]:
 def update_summary(args: argparse.Namespace, result: dict[str, Any]) -> None:
     descriptor = result.get("descriptor")
     if not isinstance(descriptor, dict):
+        if result.get("verified") is False:
+            Path(args.summary).unlink(missing_ok=True)
         return
     atomic_json(
         Path(args.summary),

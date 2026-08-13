@@ -444,6 +444,24 @@ config["publishers"]["copilot"]["argv"] = [sys.executable, sys.argv[2]]
 with open(path, "w", encoding="utf-8") as handle:
     json.dump(config, handle)
 PY
+if (
+  export DREAMING_ENABLE_COPILOT_COMPAT=0
+  export DREAMING_CONFIGURE_NATIVE_ADAPTERS=1
+  export DREAMING_SESSION_SOURCES=copilot
+  export DREAMING_REVIEW_EXECUTORS=copilot
+  export DREAMING_SKILL_TARGETS=copilot
+  export DREAMING_SOURCE_EXECUTOR_ALLOW='copilot>copilot'
+  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  export DREAMING_COPILOT_PUBLISHER_SSH_HOST='fixture-client@fd7a:115c:a1e0::3'
+  export DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER=1
+  export LOCAL_PUBLISHER_LOG
+  run_native install >/dev/null 2>&1
+); then
+  echo "invalid remote publisher configuration passed preflight" >&2
+  exit 1
+fi
+[[ ! -e "$LOCAL_PUBLISHER_LOG" ]] ||
+  { echo "local publisher was removed before remote preflight passed" >&2; exit 1; }
 (
   export DREAMING_ENABLE_COPILOT_COMPAT=0
   export DREAMING_CONFIGURE_NATIVE_ADAPTERS=1

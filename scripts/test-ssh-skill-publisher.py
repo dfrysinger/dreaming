@@ -84,6 +84,12 @@ class SshSkillPublisherTest(unittest.TestCase):
         self.assert_archive_rejected(
             [("dreaming-bundle-manifest.json", b"{}")]
         )
+        original_limit = module.MAX_EXTRACTED_BYTES
+        module.MAX_EXTRACTED_BYTES = 100
+        try:
+            self.assert_archive_rejected([("oversized", b"x" * 101)])
+        finally:
+            module.MAX_EXTRACTED_BYTES = original_limit
 
     def test_receiver_identity_binds_host_and_code(self) -> None:
         receiver_id = self.root / "receiver-id"
@@ -172,6 +178,16 @@ class SshSkillPublisherTest(unittest.TestCase):
             ],
         )
         self.assertEqual(reconcile[8], "reconcile")
+
+    def test_failed_verify_clears_committed_summary(self) -> None:
+        summary = self.root / "summary.json"
+        recovery = self.root / "recovery.json"
+        summary.write_text('{"status":"committed"}', encoding="utf-8")
+        module.update_summary(
+            Namespace(summary=str(summary), recovery_state=str(recovery)),
+            {"ok": True, "verified": False},
+        )
+        self.assertFalse(summary.exists())
 
     def test_fake_ssh_publication_and_recovery_transaction(self) -> None:
         fake_ssh = self.root / "ssh"

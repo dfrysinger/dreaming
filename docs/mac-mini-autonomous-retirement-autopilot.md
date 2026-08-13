@@ -60,8 +60,9 @@ contents. Preserve manual authority over hand-made skills.
   sessions and review execution remain local to the mini; Codex is not a
   publication target.
 - **Current phase:** live validation. The candidate is committed locally
-  through `e45a4ba`; the mini is halted on the remote-only topology while the
-  corrected activation generation completes certification.
+  through `b9a07ab`. The remote placement passed certification and enable; the
+  mini is now halted while the detach-only reverse placement completes its
+  installed certification before the final remote topology is restored.
 - **Existing learned catalog:** the mini now contains the exact six learned
   skills and seven-commit MacBook history at
   `b4b1e3a6ff4612e5e6a3dc71b8bbf5e1e1269932`, with a clean worktree and no
@@ -70,12 +71,15 @@ contents. Preserve manual authority over hand-made skills.
   Its receiver-bound SSH publisher has replaced the MacBook Copilot
   registration with the exact six-skill content-addressed bundle while
   preserving the MacBook Claude and Codex descriptors and their shared bundle.
-- **Live-proof status:** the real SSH install and verify transaction passed,
-  the mini summary is committed and receiver-bound, publication recovery is
-  clear, all six skills resolve on the MacBook, the mini has no local bundle,
-  and the MacBook halt and unloaded scheduler are unchanged. Final installed
-  certification, enable, dashboard observation, rollback proof, and
-  implementation review remain.
+- **Live-proof status:** the real SSH install and verify transaction passed;
+  activation generation `20260813T045801Z-install-49761` passed with zero
+  failures and enabled; the authenticated dashboard reported healthy, six
+  skills, and `copilot@MacBook`; publication recovery is clear; and the
+  MacBook halt and unloaded scheduler are unchanged. The reverse transition
+  has detached the mini publisher and mirror without changing the MacBook
+  journal, bundle, inventory, or local publisher configuration. Its
+  certification and enable proof, final remote restoration, implementation
+  review, and final validation remain.
 - **Completed baseline:** shadow lifecycle landed locally at `10c20c1`.
 - **Curator review:** completed without skill mutation. It scanned `73` managed
   skills and proposed `9` agent-created consolidations into `3` new umbrellas
@@ -85,7 +89,7 @@ contents. Preserve manual authority over hand-made skills.
   ambiguous SSH recovery, ownership-state separation, wrong-host refusal,
   existing-publication adoption, shared Claude/Codex bundle retention, and
   reverse-placement findings.
-- **Remaining:** complete installed certification for `e45a4ba`, enable the
-  certified generation, capture the dashboard and reverse-placement proof,
-  complete implementation review and final validation, update the acceptance
-  receipt and design checklist, and commit locally without pushing Dreaming.
+- **Remaining:** finish and enable the reversed placement, restore and
+  recertify the final remote-only topology, complete implementation review and
+  final validation, update the acceptance receipt and design checklist, and
+  commit locally without pushing Dreaming.

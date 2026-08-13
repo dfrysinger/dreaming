@@ -538,7 +538,7 @@ sync_plugin() {
 }
 
 configure_native_adapters() {
-  local generated="$DREAMING_STATE_DIR/adapters.json"
+  local generated="$DREAMING_STATE_DIR/adapters.json" candidate
   if [[ -n "$REQUESTED_ADAPTER_CONFIG" ]]; then
     return 0
   fi
@@ -553,10 +553,23 @@ configure_native_adapters() {
     return 0
   fi
   export_runtime_env
-  "$DREAMING_REPO_ROOT/scripts/configure-adapters.py" \
-    --output "$DREAMING_ADAPTER_CONFIG" \
+  candidate="${DREAMING_ADAPTER_CONFIG}.candidate.$$"
+  rm -f "$candidate"
+  if [[ -f "$DREAMING_ADAPTER_CONFIG" ]]; then
+    cp -p "$DREAMING_ADAPTER_CONFIG" "$candidate"
+  fi
+  if ! "$DREAMING_REPO_ROOT/scripts/configure-adapters.py" \
+    --output "$candidate" \
     --repo-root "$DREAMING_REPO_ROOT" \
-    --state-dir "$DREAMING_STATE_DIR" >/dev/null
+    --state-dir "$DREAMING_STATE_DIR" >/dev/null; then
+    rm -f "$candidate"
+    return 1
+  fi
+  if ! retire_local_copilot_publisher_for_remote_cutover; then
+    rm -f "$candidate"
+    return 1
+  fi
+  mv "$candidate" "$DREAMING_ADAPTER_CONFIG"
 }
 
 run_core() {
@@ -615,7 +628,6 @@ PY
 cmd_install() {
   local kind label generation
   cmd_prepare
-  retire_local_copilot_publisher_for_remote_cutover
   if [[ "$REQUESTED_COPILOT_MIGRATION" == "1" ]]; then
     "$DREAMING_REPO_ROOT/scripts/migrate-copilot-state.py" apply \
       --legacy-skills "${DREAMING_LEGACY_COPILOT_SKILLS:-$HOME/.copilot/skills}" \
