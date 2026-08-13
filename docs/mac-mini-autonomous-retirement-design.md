@@ -2,9 +2,9 @@
 
 ## Objective
 
-Move Dreaming's single scheduled installation to the Mac mini and allow it to
-recoverably retire agent-created skills without waiting for per-run human
-approval.
+Run Dreaming's scheduled processing and learned-skill authority on the Mac mini
+while using the MacBook as the Copilot transcript source and learned-skill
+installation destination.
 
 ## Lane
 
@@ -28,6 +28,14 @@ authority state. A bad retirement decision can remove useful instructions.
 - Do not implement the full portfolio benchmark or existing-skill lifecycle
   migration in this change.
 - Do not remotely reboot the Mac mini.
+- Do not install Dreaming-learned skills into the Mac mini's Copilot
+  installation.
+- Do not run scheduling, review execution, skill decisions, or publication
+  decisions on the MacBook.
+- Do not build general multi-host publication fan-out. The supported placement
+  is one Mac mini server and one MacBook Copilot client.
+- Do not synchronize hand-made personal skills or plugin-provided skills
+  between the Macs.
 
 ## User-visible outcome
 
@@ -45,8 +53,10 @@ may remain on another Mac. The production Copilot source is read from the
 MacBook over non-interactive SSH, so its existing session library remains
 reviewable without copying hundreds of gigabytes or enabling a second
 scheduler. Remote source commands preserve exact argument boundaries and fail
-closed when SSH is unavailable. Review execution and skill publication remain
-local to the Mac mini.
+closed when SSH is unavailable. Review execution remains local to the Mac mini.
+The mini transfers each exact learned-skill bundle to the MacBook and invokes
+the existing Copilot publisher there over SSH. The MacBook installs the bundle
+but does not decide its contents or run Dreaming.
 
 ## Reuse contract
 
@@ -66,7 +76,7 @@ This change reuses the existing owners:
 - Existing evaluation and dual-review gates remain required when consolidation
   changes an umbrella skill.
 
-Three bounded extensions are required:
+Five bounded extensions are required:
 
 1. A host-transfer helper must inventory, copy, and compare the exact
    repositories and machine-local Dreaming state because the existing
@@ -77,8 +87,93 @@ Three bounded extensions are required:
 3. `curator-run.py` must own a lease-held publication phase so a public push is
    verified before the transaction becomes complete and releases its writer
    lease.
+4. An SSH publication transport must carry the existing skill-publisher
+   protocol to the MacBook. It may transfer an exact content-addressed bundle,
+   but the existing vendor adapter remains the owner of Copilot installation,
+   inventory, verification, replacement, and removal.
+5. The existing Copilot publisher adapter must add transaction-aware snapshot
+   and reconciliation commands. They atomically restore or adopt an exact
+   descriptor so interrupted native inventory changes and the ownership journal
+   cannot diverge.
 
 No second publication, archive, or rollback owner is introduced.
+
+## MacBook client publication
+
+The Mac mini is the sole learned-skill writer. Its
+`~/.local/share/dreaming/skills` repository contains the complete agent-created
+catalog and Git history. The six learned skills that predate the host migration
+are seeded from the MacBook into this repository before remote publication is
+enabled.
+
+The configured Copilot publisher on the mini is an SSH transport rather than a
+local Copilot publisher:
+
+1. Dreaming materializes and verifies the content-addressed bundle on the mini.
+2. Before every operation, the transport requires the receiver's configured
+   random identity and the exact receiver and vendor-adapter script digests.
+   A missing, wrong-host, or code-skewed receiver refuses before staging or
+   Copilot invocation.
+3. For `install`, the transport validates the local manifest and file hashes,
+   sends a bounded archive over authenticated batch-mode SSH, and stages it
+   under a content-addressed MacBook bundle directory.
+4. A receiver on the MacBook rejects absolute paths, parent traversal,
+   symbolic links, duplicate entries, undeclared files, missing files, hash
+   mismatches, and bundle identity mismatches before replacing the durable
+   staged bundle.
+5. The receiver writes a durable operation record containing the new bundle,
+   the previously verified Copilot descriptor, and phase before invoking the
+   existing publisher. It adopts the existing MacBook journal at
+   `~/.local/state/dreaming/publisher-ownership.json`, so the first remote
+   publication supersedes the pre-cutover six-skill bundle rather than
+   creating a duplicate registration.
+6. The receiver invokes the existing Copilot skill-publisher adapter, performs
+   local inventory verification in the same operation, and records either
+   `committed` or `rolled_back`. A local verification failure invokes the
+   adapter's transaction-aware reconciliation command, which removes the
+   interrupted descriptor, restores the exact prior inventory and journal
+   snapshot without creating a self-superseding descriptor, and verifies both
+   before returning failure.
+7. If SSH loses the response after Copilot invocation, the operation remains
+   `installing`. The next `install`, `verify`, or recovery request reconciles
+   that record through the adapter's reconciliation command. A fully installed
+   new bundle is adopted into the journal and becomes `committed`; every other
+   state removes the interrupted descriptor, restores the exact prior inventory
+   and journal, and becomes `rolled_back`. Dreaming does not report either
+   bundle as active until it receives the reconciled remote receipt.
+8. `verify`, `inventory`, and `remove` execute against the MacBook adapter over
+   the same SSH boundary. Successful install or verify mirrors a
+   content-addressed, receiver-bound publication summary into the mini's
+   `remote-publication-summary.json` for the dashboard. This mini record is a
+   verified view, not installation authority, and is excluded from host
+   authority transfer because it can be regenerated from the MacBook receipt.
+
+The transport immediately retries reconciliation after a lost or ambiguous
+response. While SSH remains unavailable, the mini records
+`publication_recovery_required`, blocks later publication and learned-skill
+mutation, and exposes the state through the dashboard, watchdog, and installed
+self-test. The receiver also reconciles a non-terminal operation before
+accepting any command. Recovery therefore runs on the first restored
+connection rather than waiting for a later scheduled publication.
+
+The MacBook's historical learned-skill repository becomes an inert migration
+source after its history is seeded on the mini. Runtime availability on the
+MacBook comes from the verified Copilot publication bundle, not from a second
+Dreaming writer or Git synchronization loop.
+
+The cutover removes the mini's existing local Dreaming Copilot registration
+through the old adapter before replacing its configuration with the SSH
+publisher. The MacBook's existing Copilot descriptor and bundle are retained
+as the receiver's initial previously verified publication. A deployment marker
+requires remote Copilot publication on the mini; missing or explicitly empty
+publisher SSH configuration is an installation error rather than a fallback to
+local publication.
+
+The remote-only marker, journal adoption, registration replacement, and
+reconciliation apply only to the Copilot publisher. Existing Claude and Codex
+descriptors in the adopted MacBook journal remain untouched. A staged bundle
+directory is deleted only when no Copilot, Claude, or Codex descriptor in that
+journal references it.
 
 ## Authority policy
 
@@ -204,6 +299,32 @@ completed its first healthy scheduled pass.
 - **Public publication failure:** the local transaction finishes but GitHub
   rejects or serves the wrong public commit. The transaction remains
   incomplete and the active installation keeps the prior public revision.
+- **Remote bundle transfer failure:** SSH disconnects or the archive is
+  incomplete. The receiver leaves the prior content-addressed bundle and
+  Copilot registration in place; an incomplete staging directory is never
+  installed.
+- **Remote verification failure:** the MacBook installs a different bundle or
+  its Copilot inventory does not contain every declared skill. The receiver
+  restores the prior verified descriptor, records `rolled_back`, and reports
+  failure.
+- **Ambiguous SSH outcome:** the receiver begins or completes Copilot
+  replacement but the SSH response is lost. The durable `installing` record is
+  reconciled by immediate retry and before the receiver accepts another
+  operation. Either the exact new inventory and journal are verified and
+  committed or the interrupted descriptor is removed and the exact prior
+  inventory and journal are restored. An unreachable receiver leaves a visible
+  recovery-required state and blocks later mutation.
+- **Wrong-host publication:** configuration points the publisher at the mini or
+  another host. Receiver identity and exact script-digest checks refuse before
+  bundle staging or Copilot invocation.
+- **Receiver code skew:** the MacBook receiver or vendor adapter differs from
+  the exact reviewed scripts configured on the mini. The protocol handshake
+  refuses before mutation.
+- **Publication-state divergence:** the MacBook journal is authoritative for
+  Copilot installation while the mini retains a stale
+  `remote-publication-summary.json`. Every publication operation refreshes the
+  summary from a receiver-bound committed receipt; the dashboard marks absent
+  or mismatched summaries unverified.
 
 ## Hard invariants
 
@@ -231,6 +352,25 @@ completed its first healthy scheduled pass.
     credentials and transient state.
 14. Single-owner authority is proved from both real hosts over authenticated
     SSH, not inferred from fixtures.
+15. The learned-skill Git repository and all review and mutation authority live
+    on the Mac mini.
+16. The active Copilot learned-skill bundle is installed on the MacBook and is
+    absent from the Mac mini.
+17. Remote publication succeeds only after the MacBook verifies the exact
+    bundle identity, every declared file hash, receiver identity, script
+    digests, Copilot inventory, and a committed operation receipt.
+18. A rejected pre-invocation transfer or a failed local verification leaves
+    the previously verified MacBook publication active.
+19. An ambiguous post-invocation outcome is reconciled before another
+    receiver operation and leaves either the exact prior or exact new inventory
+    and journal active, never an unowned or unverified registration.
+20. The MacBook journal owns Copilot installation state. The mini mirror is
+    accepted only when bound to the current receiver identity and committed
+    receipt.
+21. The mini refuses local learned-skill publication while its remote-only
+    deployment marker is present.
+22. A non-terminal remote publication blocks learned-skill mutation and remains
+    unhealthy in the dashboard, watchdog, and self-test until reconciled.
 
 ## Acceptance criteria
 
@@ -262,8 +402,35 @@ completed its first healthy scheduled pass.
   finished transaction commit, records remote identity, and can be reversed by
   a normal pushed revert.
 - **AC-12:** Before rollback re-enables the source Mac, post-cutover local-root
-  commits, retirement records, tombstones, reports, and publisher state are
-  transferred back and verified.
+  commits, retirement records, tombstones, and reports are transferred back and
+  verified. The MacBook publisher journal remains authoritative and the mini's
+  regenerable remote-publication summary is not transferred as authority.
+- **AC-13:** The Mac mini learned-skill repository contains the six preexisting
+  MacBook skills and their seven-commit history before publication cutover.
+- **AC-14:** A mini-side publish installs and verifies the exact generated
+  bundle in Copilot on the MacBook, supersedes the pre-cutover Dreaming bundle,
+  leaves no other Dreaming-owned bundle registered there, and installs no
+  learned bundle on the mini.
+- **AC-15:** Corrupt, truncated, traversing, symlinked, duplicate, oversized,
+  or identity-mismatched bundle transfers are rejected before the MacBook
+  publisher is invoked, leaving the prior publication active.
+- **AC-16:** Ordinary installer regeneration preserves the remote Copilot
+  publisher configuration. Missing, explicitly empty, wrong-identity, or
+  code-skewed publisher configuration refuses installation or publication
+  while the mini's remote-only marker is present.
+- **AC-17:** The mini dashboard lists the seeded learned skills from the
+  authoritative mini repository and reports the MacBook publication target
+  only from a receiver-bound committed receipt.
+- **AC-18:** Losing SSH after Copilot invocation is recoverable. Reconciliation
+  proves the exact new inventory and journal active or restores the exact prior
+  inventory and journal before the receiver accepts another operation.
+  Immediate retry begins on transport loss; an unreachable receiver blocks
+  mutation and appears as recovery-required in the dashboard, watchdog, and
+  self-test.
+- **AC-19:** Reversing the placement preserves the MacBook journal and active
+  bundle, removes the mini's remote-only publisher configuration and mirrored
+  summary, restores a local publisher configuration on the MacBook, and leaves
+  exactly one verified Copilot registration.
 
 ## Deterministic check contract
 
@@ -306,6 +473,49 @@ completed its first healthy scheduled pass.
 - **CHK-11: Reverse migration.** Add destination-only local retirement state,
   then exercise rollback preparation. Source re-enable must refuse until local
   Git history and authority state are copied back and exactly verified.
+- **CHK-12: Remote publisher protocol.** Exercise contract, doctor, inventory,
+  install, verify, and remove through a fake SSH boundary. Exact empty and
+  quoted arguments must survive transport, receiver identity and script
+  digests must match, and remote failures must preserve their nonzero result.
+- **CHK-13: Bundle receiver safety.** Feed valid and invalid archives to an
+  isolated receiver. A valid archive must produce the declared bundle and
+  invoke the fixture publisher once. Traversal, symbolic links, duplicates,
+  undeclared files, missing files, hash mismatch, identity mismatch, truncation,
+  and size overflow must fail before invocation and leave the prior bundle
+  unchanged.
+- **CHK-14: Publisher configuration persistence.** Generate, reinstall, and
+  regenerate adapters with a remote Copilot publisher. The publisher must
+  remain remote while the source and executors retain their configured
+  placement. Explicit host replacement must replace it only with matching
+  receiver identity and scripts. Missing or explicitly empty remote
+  configuration must fail while the remote-only marker is present.
+- **CHK-15: Live Mac placement.** Seed the exact six-skill Git history on the
+  mini, publish from the mini, and inspect both real Copilot inventories. Pass
+  requires every skill to resolve under the newly staged content-addressed
+  MacBook bundle, no other Dreaming-owned bundle on the MacBook, no Dreaming
+  bundle on the mini, a dashboard count of six with a verified MacBook target,
+  and the MacBook scheduler halt and unload state unchanged.
+- **CHK-16: Ambiguous publication recovery.** Kill the SSH transport after the
+  fixture publisher changes registration but before the result reaches the
+  mini. Immediate retry must begin. Reconciliation must commit an exactly
+  matching new inventory and journal or remove the interrupted descriptor and
+  restore the exact prior inventory and journal. A subsequent publish must
+  leave exactly one Copilot Dreaming bundle. While the receiver is unreachable,
+  mutation must remain blocked and every health surface must report recovery
+  required.
+- **CHK-17: Existing-publication adoption.** Start with the MacBook's
+  pre-cutover journal and six-skill registration, then publish remotely. Pass
+  requires the old descriptor to become superseded and then removed, exactly
+  one Dreaming-owned bundle to remain, and every skill to resolve beneath it.
+- **CHK-18: Remote publication rollback.** Reverse a completed remote
+  publication. Preserve and verify the MacBook journal and active bundle,
+  remove the mini mirror and remote-only publisher configuration, restore the
+  MacBook local publisher configuration, and prove exactly one scheduler and
+  one Copilot publication owner remain.
+- **CHK-19: Shared bundle retention.** Adopt a journal whose Copilot, Claude,
+  and Codex descriptors share a bundle directory. Copilot replacement and
+  cleanup must leave the Claude and Codex descriptors and every bundle path
+  they reference intact.
 
 ## Rollback
 
@@ -319,15 +529,53 @@ completed its first healthy scheduled pass.
 6. Keep automatically archived skills archived unless a recorded restore is
    required; restore only through `restore-skill.sh`.
 7. Transfer destination-only local skill commits, retirement records,
-   tombstones, reports, and publisher authority back to the source and verify
-   their manifest.
-8. Re-enable the original Mac only if the synchronized state and exact
-   installed self-test pass.
-9. Never enable both schedulers during rollback.
+   tombstones, and reports back to the source and verify their manifest. Do not
+   transfer the mini's regenerable remote-publication summary or overwrite the
+   authoritative MacBook publisher journal.
+8. Reconcile any non-terminal remote publication receipt. Preserve and verify
+   the active MacBook bundle and journal, then remove the mini's mirrored
+   summary and remote-only publisher configuration.
+9. Restore the MacBook's local publisher configuration using its existing
+   journal. Remove superseded staged bundles only after exact inventory
+   verification.
+10. Re-enable the original Mac only if the synchronized state and exact
+    installed self-test pass.
+11. Never enable both schedulers during rollback.
 
 Fail-closed evidence is the absence of managed-root changes when any authority,
 dependency, provenance, freshness, pin, halt, evaluation, or transaction check
 fails.
+
+## Definition of Done: MacBook client publication
+
+- [ ] The Mac mini learned-skill repository contains the six preexisting
+      learned skills and their seven-commit Git history.
+- [ ] Copilot transcript reads continue from the MacBook while review execution
+      and all learned-skill decisions remain on the mini.
+- [ ] The configured Copilot publisher transfers and verifies exact bundles on
+      the MacBook over authenticated batch-mode SSH.
+- [ ] The MacBook Copilot inventory contains the active learned bundle and the
+      Mac mini Copilot inventory does not; no superseded Dreaming registration
+      remains on either host.
+- [ ] Failed or malformed transfer cases leave the previous MacBook
+      publication active.
+- [ ] Ambiguous post-invocation outcomes reconcile to the exact prior or exact
+      new verified inventory and journal before another receiver operation;
+      an unreachable receiver visibly blocks mutation.
+- [ ] Installer and adapter tests cover remote publication, persistence, host
+      replacement, receiver identity and code skew, existing-publication
+      adoption, and remote-only refusal.
+- [ ] The installed Mac mini self-test reports exactly zero failures.
+- [ ] The mini dashboard lists the six seeded learned skills and shows a
+      verified MacBook publication target from the mirrored committed receipt.
+- [ ] The dashboard, watchdog, and self-test report recovery-required while a
+      remote publication operation is non-terminal.
+- [ ] The MacBook remains halted, unloaded, and free of Dreaming workers.
+- [ ] The completed remote publication can be reversed while preserving one
+      verified MacBook registration and one scheduler.
+- [ ] Copilot publication replacement leaves existing MacBook Claude and Codex
+      descriptors and shared bundle paths intact.
+- [ ] Required implementation review has no verified in-scope material finding.
 
 ## Definition of Done: Mac mini ownership and autonomous retirement
 
@@ -359,7 +607,7 @@ halted, unloaded, and free of Dreaming workers.
 - [x] The exact Dreaming revision, verified dependencies, managed skill roots,
       and supported state are installed on the Mac mini.
 - [x] The Mac mini reads the MacBook Copilot session library through the
-      SSH-backed source while review execution and publication remain local.
+      SSH-backed source while review execution remains local.
 - [x] The Mac mini installed self-test reports exactly zero failures.
 - [x] One real scheduled pass succeeds on the Mac mini while the source Mac
       remains halted and inactive.

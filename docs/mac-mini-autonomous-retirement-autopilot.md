@@ -3,21 +3,21 @@
 ## Objective
 
 Achieve the Definition of Done in
-`docs/mac-mini-autonomous-retirement-design.md`, moving Dreaming's sole
-scheduled ownership to the Mac mini and enabling recoverable autonomous
-retirement for eligible agent-created skills.
+`docs/mac-mini-autonomous-retirement-design.md`, making the Mac mini the sole
+Dreaming processor and learned-skill authority while this MacBook supplies
+Copilot transcripts and receives the verified learned-skill publication.
 
 ## Charter
 
 Work in `/Users/dfrysinger/code/dreaming` on
 `feature/multi-cli-dreaming`. Keep all work local until the migration requires
 the existing public skills repository transaction; do not push Dreaming.
-Preserve the source halt switch until the Mac mini passes the exact installed
-self-test. Never enable both machines. Run the curator review before mutation,
-but treat its report as an audit record rather than a human approval gate for
-eligible agent-created-only operations. Preserve manual authority over
-hand-made skills. Use existing migration, installer, transaction, archive,
-evaluation, review, and restore owners rather than creating alternatives.
+Preserve the MacBook halt switch and never enable scheduling on both machines.
+Keep transcript reads, review execution, learned-skill decisions, publication
+transport, rollback, and health reporting under their existing owners. The mini
+must not install the Dreaming-learned Copilot bundle locally. The MacBook may
+install a receiver-verified bundle but must not schedule Dreaming or decide its
+contents. Preserve manual authority over hand-made skills.
 
 ### Required process skills
 
@@ -43,8 +43,7 @@ evaluation, review, and restore owners rather than creating alternatives.
 - **Push policy:** do not push Dreaming; public skill-root pushes occur only
   through a completed curator transaction when required.
 - **Design:** `docs/mac-mini-autonomous-retirement-design.md`.
-- **Definition of Done:** `Definition of Done: Mac mini ownership and
-  autonomous retirement`.
+- **Definition of Done:** `Definition of Done: MacBook client publication`.
 - **Source safety:** the source halt switch must remain present.
 - **Destination:** Tailscale SSH host `mac-mini`, Apple Silicon, macOS 26.6,
   FileVault off, approximately 130 GiB free.
@@ -54,32 +53,36 @@ evaluation, review, and restore owners rather than creating alternatives.
   final candidate and authority state are synchronized, the destination
   installer has rendered the corrected configuration, and the exact final
   source and destination authority manifests match.
-- **Session placement:** Copilot sessions remain on the MacBook and are read
-  by the Mac mini through a non-interactive IPv6 SSH source adapter. Codex
-  sessions remain local to the Mac mini. All review execution and publication
-  remain on the Mac mini; the MacBook does not regain scheduled ownership.
-- **Current phase:** complete. The Mac mini is configured for authenticated
-  Copilot and Codex source and review execution.
-  Copilot is the scheduled publisher. Codex retains its current installed
-  bundle but is not a scheduled publication target because its native plugin
-  inventory can block under the daemon on a Dropbox-backed local marketplace.
-  Claude Code remains installed but inactive because it is unauthenticated on
-  both Macs. The installed self-test passed with zero failures and is bound to
-  activation generation `20260813T004423Z-install-69160`. The MacBook remains
-  halted and unloaded; the Mac mini is the sole active scheduler.
-- **Live-proof status:** PASS. The Mac mini inspected MacBook Copilot session
-  `copilot:b01450ad-b811-4e77-999d-1972f8e5796c` through the SSH-backed source.
-  Run `20260813T012330Z-5866` then completed the full Dreaming pipeline with
-  exit code zero, accepted `25` Copilot reviews, and left the deleted-session
-  count unchanged at `75`. Evidence is recorded in
-  `mac-mini-live-proof.txt` and `mac-mini-cutover-receipt.json`.
+- **Placement:** Copilot transcripts remain on the MacBook and are read by the
+  mini through the SSH source. Review execution and learned-skill decisions
+  remain on the mini. Copilot learned-skill bundles are transferred to and
+  installed on the MacBook through a receiver-verified SSH publisher. Codex
+  sessions and review execution remain local to the mini; Codex is not a
+  publication target.
+- **Current phase:** implementation. The critical design and its cross-host
+  publication, recovery, rollback, and health checks completed the required
+  two-family design review with no unresolved material finding.
+- **Existing learned catalog:** the MacBook has six learned skills and seven
+  Git commits. The mini learned-skill repository is empty and must be seeded
+  with that exact history before publication cutover.
+- **Existing publication:** the MacBook journal and six-skill Copilot bundle
+  are the initial verified publication. The mini currently has its own empty
+  Dreaming bundle registration, which must be removed before remote-only
+  publisher activation.
+- **Live-proof status:** pending for this placement change. Prior ownership and
+  remote transcript-source proof remains valid, but publication proof must show
+  six dashboard skills, one MacBook Copilot bundle, no mini Copilot bundle, and
+  an unchanged MacBook halt and scheduler state.
 - **Completed baseline:** shadow lifecycle landed locally at `10c20c1`.
 - **Curator review:** completed without skill mutation. It scanned `73` managed
   skills and proposed `9` agent-created consolidations into `3` new umbrellas
   plus `1` hand-made destination. The hand-made destination proposal remains
   manual under this design. No pure pruning had sufficient evidence.
-- **Review:** dual-review round two closed its initial three findings. The
-  critical-lane judged ensemble confirmed additional fail-closed gaps; all
-  material families were repaired, and both reviewer families closed the final
-  fix delta with no unresolved material finding.
-- **Remaining:** none for this charter.
+- **Review:** design review closed the remote publication transaction,
+  ambiguous SSH recovery, ownership-state separation, wrong-host refusal,
+  existing-publication adoption, shared Claude/Codex bundle retention, and
+  reverse-placement findings.
+- **Remaining:** implement the receiver and transport, persist remote publisher
+  configuration, seed the learned catalog, pass targeted and installed tests,
+  prove the real two-host placement, complete implementation review, and commit
+  locally without pushing Dreaming.
