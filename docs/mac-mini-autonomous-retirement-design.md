@@ -548,34 +548,34 @@ fails.
 
 ## Definition of Done: MacBook client publication
 
-- [ ] The Mac mini learned-skill repository contains the six preexisting
+- [x] The Mac mini learned-skill repository contains the six preexisting
       learned skills and their seven-commit Git history.
-- [ ] Copilot transcript reads continue from the MacBook while review execution
+- [x] Copilot transcript reads continue from the MacBook while review execution
       and all learned-skill decisions remain on the mini.
-- [ ] The configured Copilot publisher transfers and verifies exact bundles on
+- [x] The configured Copilot publisher transfers and verifies exact bundles on
       the MacBook over authenticated batch-mode SSH.
-- [ ] The MacBook Copilot inventory contains the active learned bundle and the
+- [x] The MacBook Copilot inventory contains the active learned bundle and the
       Mac mini Copilot inventory does not; no superseded Dreaming registration
       remains on either host.
-- [ ] Failed or malformed transfer cases leave the previous MacBook
+- [x] Failed or malformed transfer cases leave the previous MacBook
       publication active.
-- [ ] Ambiguous post-invocation outcomes reconcile to the exact prior or exact
+- [x] Ambiguous post-invocation outcomes reconcile to the exact prior or exact
       new verified inventory and journal before another receiver operation;
       an unreachable receiver visibly blocks mutation.
-- [ ] Installer and adapter tests cover remote publication, persistence, host
+- [x] Installer and adapter tests cover remote publication, persistence, host
       replacement, receiver identity and code skew, existing-publication
       adoption, and remote-only refusal.
-- [ ] The installed Mac mini self-test reports exactly zero failures.
-- [ ] The mini dashboard lists the six seeded learned skills and shows a
+- [x] The installed Mac mini self-test reports exactly zero failures.
+- [x] The mini dashboard lists the six seeded learned skills and shows a
       verified MacBook publication target from the mirrored committed receipt.
-- [ ] The dashboard, watchdog, and self-test report recovery-required while a
+- [x] The dashboard, watchdog, and self-test report recovery-required while a
       remote publication operation is non-terminal.
-- [ ] The MacBook remains halted, unloaded, and free of Dreaming workers.
-- [ ] The completed remote publication can be reversed while preserving one
+- [x] The MacBook remains halted, unloaded, and free of Dreaming workers.
+- [x] The completed remote publication can be reversed while preserving one
       verified MacBook registration and one scheduler.
-- [ ] Copilot publication replacement leaves existing MacBook Claude and Codex
+- [x] Copilot publication replacement leaves existing MacBook Claude and Codex
       descriptors and shared bundle paths intact.
-- [ ] Required implementation review has no verified in-scope material finding.
+- [x] Required implementation review has no verified in-scope material finding.
 
 ## Definition of Done: Mac mini ownership and autonomous retirement
 

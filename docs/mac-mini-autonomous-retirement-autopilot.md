@@ -59,10 +59,8 @@ contents. Preserve manual authority over hand-made skills.
   installed on the MacBook through a receiver-verified SSH publisher. Codex
   sessions and review execution remain local to the mini; Codex is not a
   publication target.
-- **Current phase:** live validation. The candidate is committed locally
-  through `b9a07ab`. The remote placement passed certification and enable; the
-  mini is now halted while the detach-only reverse placement completes its
-  installed certification before the final remote topology is restored.
+- **Current phase:** complete. Candidate `7ede47d` passed final installed
+  certification, live two-host acceptance, and round-two implementation review.
 - **Existing learned catalog:** the mini now contains the exact six learned
   skills and seven-commit MacBook history at
   `b4b1e3a6ff4612e5e6a3dc71b8bbf5e1e1269932`, with a clean worktree and no
@@ -71,15 +69,14 @@ contents. Preserve manual authority over hand-made skills.
   Its receiver-bound SSH publisher has replaced the MacBook Copilot
   registration with the exact six-skill content-addressed bundle while
   preserving the MacBook Claude and Codex descriptors and their shared bundle.
-- **Live-proof status:** the real SSH install and verify transaction passed;
-  activation generation `20260813T045801Z-install-49761` passed with zero
-  failures and enabled; the authenticated dashboard reported healthy, six
-  skills, and `copilot@MacBook`; publication recovery is clear; and the
-  MacBook halt and unloaded scheduler are unchanged. The reverse transition
-  has detached the mini publisher and mirror without changing the MacBook
-  journal, bundle, inventory, or local publisher configuration. Its
-  certification and enable proof, final remote restoration, implementation
-  review, and final validation remain.
+- **Live-proof status:** PASS at
+  `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/macbook-client-publication-live-proof.md`.
+  Activation generation `20260813T080718Z-install-19443` passed with zero
+  failures and is enabled. The authenticated dashboard is healthy, lists six
+  skills, and binds `copilot@MacBook` to the active receiver identity and
+  script digests. The MacBook has one verified six-skill bundle, remains
+  halted and unloaded with zero workers, and retains its exact Claude and
+  Codex descriptors and shared bundle.
 - **Completed baseline:** shadow lifecycle landed locally at `10c20c1`.
 - **Curator review:** completed without skill mutation. It scanned `73` managed
   skills and proposed `9` agent-created consolidations into `3` new umbrellas
@@ -88,8 +85,8 @@ contents. Preserve manual authority over hand-made skills.
 - **Review:** design review closed the remote publication transaction,
   ambiguous SSH recovery, ownership-state separation, wrong-host refusal,
   existing-publication adoption, shared Claude/Codex bundle retention, and
-  reverse-placement findings.
-- **Remaining:** finish and enable the reversed placement, restore and
-  recertify the final remote-only topology, complete implementation review and
-  final validation, update the acceptance receipt and design checklist, and
-  commit locally without pushing Dreaming.
+  reverse-placement findings. Round-one implementation review found archive
+  expansion, stale-summary, and preflight-order gaps; `7ede47d` fixed all
+  three, and both reviewer families closed them in round two with no remaining
+  material finding.
+- **Remaining:** none for `Definition of Done: MacBook client publication`.
