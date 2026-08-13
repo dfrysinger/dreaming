@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -31,10 +32,23 @@ AUTHORITIES = {
     "unknown_provenance",
     "user_protected",
 }
+SHA256_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
+LEGACY_POLICY_VERSION = 1
+LEGACY_PROOF_VERSION = 1
+LEGACY_PROOF_KIND = "legacy_git_creation"
 
 
 class EstateError(RuntimeError):
     """A fail-closed estate collection or reconciliation error."""
+
+
+class ProvenanceFailure(ValueError):
+    """A non-authorizing provenance classification result."""
+
+    def __init__(self, reason: str):
+        super().__init__(reason)
+        self.reason = reason
 
 
 def canonical(value: Any) -> bytes:
@@ -72,6 +86,578 @@ def skill_inventory(skill: Path) -> tuple[list[dict[str, str]], str]:
     if not any(item["path"] == "SKILL.md" for item in files):
         raise EstateError(f"skill has no SKILL.md: {skill}")
     return files, digest(files)
+
+
+def classification(
+    authority: str,
+    status: str,
+    basis: str,
+    *,
+    policy_sha256: str | None = None,
+    proof_sha256: str | None = None,
+    verified_evidence: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    provenance = {"status": status, "basis": basis}
+    if policy_sha256 is not None:
+        provenance["policy_sha256"] = policy_sha256
+    if proof_sha256 is not None:
+        provenance["proof_sha256"] = proof_sha256
+    result = {"authority": authority, "provenance": provenance}
+    if verified_evidence is not None:
+        result["_verified_evidence"] = verified_evidence
+    return result
+
+
+def public_classification(value: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "authority": value["authority"],
+        "provenance": dict(value["provenance"]),
+    }
+
+
+def frontmatter_author(skill_md: Path) -> str:
+    try:
+        text = skill_md.read_text(encoding="utf-8")
+    except OSError as error:
+        raise ProvenanceFailure("unreadable_skill_frontmatter") from error
+    match = re.match(r"\A---\n(.*?)\n---(?:\n|\Z)", text, re.DOTALL)
+    if not match:
+        raise ProvenanceFailure("malformed_skill_frontmatter")
+    authors = re.findall(r"(?m)^author:\s*([^\s#]+)\s*$", match.group(1))
+    if len(authors) != 1:
+        raise ProvenanceFailure("ambiguous_skill_author")
+    return authors[0]
+
+
+def current_envelope_evidence(
+    skill: Path, evidence_tool: Path
+) -> dict[str, Any]:
+    marker = skill / ".agent-created"
+    envelope = skill / ".agent-created.json"
+    if not marker.exists() and not envelope.exists():
+        raise ProvenanceFailure("no_evidence")
+    if not marker.is_file() or marker.is_symlink():
+        raise ProvenanceFailure("invalid_creation_marker")
+    if not envelope.exists():
+        raise ProvenanceFailure("marker_only")
+    if not envelope.is_file() or envelope.is_symlink():
+        raise ProvenanceFailure("invalid_provenance_envelope")
+    try:
+        validation = subprocess.run(
+            [str(evidence_tool), "validate", str(envelope)],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ProvenanceFailure("provenance_validator_unavailable") from error
+    if validation.returncode:
+        raise ProvenanceFailure("malformed_provenance_envelope")
+    try:
+        provenance = json.loads(envelope.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ProvenanceFailure("malformed_provenance_envelope") from error
+    if not isinstance(provenance, dict) or provenance.get("skill") != skill.name:
+        raise ProvenanceFailure("provenance_skill_mismatch")
+    created_by = provenance.get("created_by", "skill-review")
+    if frontmatter_author(skill / "SKILL.md") != created_by:
+        raise ProvenanceFailure("provenance_author_mismatch")
+    created_at = provenance.get("created_at")
+    source_session_id = provenance.get("source_session_id")
+    if not isinstance(created_at, str) or not created_at:
+        raise ProvenanceFailure("provenance_created_at_missing")
+    if not isinstance(source_session_id, str) or not source_session_id:
+        raise ProvenanceFailure("provenance_source_missing")
+    return {
+        "basis": (
+            "current_envelope"
+            if provenance.get("schema_version") == 2
+            else "legacy_envelope"
+        ),
+        "marker": str(marker),
+        "marker_sha256": file_sha256(marker),
+        "envelope": str(envelope),
+        "envelope_sha256": file_sha256(envelope),
+        "envelope_schema_version": provenance.get("schema_version", 1),
+        "created_at": created_at,
+        "source_session_id": source_session_id,
+        "created_by": created_by,
+        "skill_md": str(skill / "SKILL.md"),
+        "skill_md_sha256": file_sha256(skill / "SKILL.md"),
+        "author": created_by,
+    }
+
+
+def require_sealed_payload(
+    value: Any, expected_fields: set[str], seal_field: str, reason: str
+) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != expected_fields:
+        raise ProvenanceFailure(reason)
+    seal = value.get(seal_field)
+    payload = {key: item for key, item in value.items() if key != seal_field}
+    if not isinstance(seal, str) or seal != digest(payload):
+        raise ProvenanceFailure(f"{reason}_digest")
+    return value
+
+
+def validate_legacy_policy(value: Any) -> dict[str, Any]:
+    policy = require_sealed_payload(
+        value,
+        {
+            "schema_version",
+            "accepted_legacy_proof_versions",
+            "machine_authors",
+            "migration_cutoff",
+            "protected_claim_paths",
+            "policy_sha256",
+        },
+        "policy_sha256",
+        "invalid_legacy_policy",
+    )
+    if policy["schema_version"] != LEGACY_POLICY_VERSION:
+        raise ProvenanceFailure("unsupported_legacy_policy_version")
+    versions = policy["accepted_legacy_proof_versions"]
+    if (
+        not isinstance(versions, list)
+        or not versions
+        or any(not isinstance(item, int) or isinstance(item, bool) for item in versions)
+        or len(versions) != len(set(versions))
+    ):
+        raise ProvenanceFailure("invalid_legacy_policy_versions")
+    authors = policy["machine_authors"]
+    if not isinstance(authors, list) or not authors:
+        raise ProvenanceFailure("invalid_machine_author_policy")
+    normalized_authors: set[tuple[str, str]] = set()
+    for author in authors:
+        if (
+            not isinstance(author, dict)
+            or set(author) != {"name", "email"}
+            or not isinstance(author["name"], str)
+            or not author["name"]
+            or not isinstance(author["email"], str)
+            or not author["email"]
+        ):
+            raise ProvenanceFailure("invalid_machine_author_policy")
+        normalized_authors.add((author["name"], author["email"]))
+    if len(normalized_authors) != len(authors):
+        raise ProvenanceFailure("ambiguous_machine_author_policy")
+    try:
+        cutoff = datetime.fromisoformat(
+            str(policy["migration_cutoff"]).replace("Z", "+00:00")
+        )
+    except ValueError as error:
+        raise ProvenanceFailure("invalid_migration_cutoff") from error
+    if cutoff.tzinfo is None:
+        raise ProvenanceFailure("invalid_migration_cutoff")
+    claim_paths = policy["protected_claim_paths"]
+    if (
+        not isinstance(claim_paths, list)
+        or len(claim_paths) != len(set(claim_paths))
+        or any(
+            not isinstance(item, str)
+            or not item
+            or Path(item).is_absolute()
+            or ".." in Path(item).parts
+            for item in claim_paths
+        )
+    ):
+        raise ProvenanceFailure("invalid_protected_claim_policy")
+    return {
+        **policy,
+        "_machine_authors": normalized_authors,
+        "_migration_cutoff": cutoff.astimezone(timezone.utc),
+    }
+
+
+def validate_legacy_proof(
+    value: Any, skill_name: str, policy: dict[str, Any]
+) -> dict[str, Any]:
+    proof = require_sealed_payload(
+        value,
+        {
+            "schema_version",
+            "kind",
+            "skill",
+            "creation_commit",
+            "history_checkpoint",
+            "creation_inventory_sha256",
+            "policy_sha256",
+            "proof_sha256",
+        },
+        "proof_sha256",
+        "invalid_legacy_proof",
+    )
+    version = proof["schema_version"]
+    if (
+        not isinstance(version, int)
+        or isinstance(version, bool)
+        or version not in policy["accepted_legacy_proof_versions"]
+        or version != LEGACY_PROOF_VERSION
+    ):
+        raise ProvenanceFailure("unsupported_legacy_proof_version")
+    if proof["kind"] != LEGACY_PROOF_KIND:
+        raise ProvenanceFailure("unsupported_legacy_proof_kind")
+    if proof["skill"] != skill_name:
+        raise ProvenanceFailure("legacy_proof_skill_mismatch")
+    if proof["policy_sha256"] != policy["policy_sha256"]:
+        raise ProvenanceFailure("legacy_proof_policy_mismatch")
+    if not isinstance(proof["creation_commit"], str) or not GIT_COMMIT_RE.fullmatch(
+        proof["creation_commit"]
+    ):
+        raise ProvenanceFailure("invalid_legacy_creation_commit")
+    if not isinstance(proof["history_checkpoint"], str) or not GIT_COMMIT_RE.fullmatch(
+        proof["history_checkpoint"]
+    ):
+        raise ProvenanceFailure("invalid_legacy_history_checkpoint")
+    if (
+        not isinstance(proof["creation_inventory_sha256"], str)
+        or not SHA256_ID_RE.fullmatch(proof["creation_inventory_sha256"])
+    ):
+        raise ProvenanceFailure("invalid_legacy_creation_inventory")
+    return proof
+
+
+def git_output(root: Path, *args: str, text: bool = True) -> str | bytes:
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(root), *args],
+            check=False,
+            capture_output=True,
+            text=text,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ProvenanceFailure("legacy_git_unavailable") from error
+    if result.returncode:
+        raise ProvenanceFailure("legacy_git_verification_failed")
+    return result.stdout
+
+
+def require_git_ancestor(
+    root: Path, ancestor: str, descendant: str, reason: str
+) -> None:
+    try:
+        result = subprocess.run(
+            [
+                "git",
+                "-C",
+                str(root),
+                "merge-base",
+                "--is-ancestor",
+                ancestor,
+                descendant,
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise ProvenanceFailure("legacy_git_unavailable") from error
+    if result.returncode == 1:
+        raise ProvenanceFailure(reason)
+    if result.returncode:
+        raise ProvenanceFailure("legacy_git_verification_failed")
+
+
+def git_skill_inventory(
+    root: Path, commit: str, relative: str
+) -> tuple[list[dict[str, str]], str]:
+    output = git_output(root, "ls-tree", "-r", "-z", commit, "--", relative, text=False)
+    assert isinstance(output, bytes)
+    files: list[dict[str, str]] = []
+    prefix = relative.rstrip("/") + "/"
+    for record in output.split(b"\0"):
+        if not record:
+            continue
+        metadata, raw_path = record.split(b"\t", 1)
+        mode, object_type, object_id = metadata.decode("ascii").split(" ")
+        path = raw_path.decode("utf-8")
+        if object_type != "blob" or mode == "120000" or not path.startswith(prefix):
+            raise ProvenanceFailure("unsafe_legacy_creation_inventory")
+        content = git_output(root, "cat-file", "blob", object_id, text=False)
+        assert isinstance(content, bytes)
+        files.append(
+            {
+                "path": path.removeprefix(prefix),
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+        )
+    files.sort(key=lambda item: item["path"])
+    if not any(item["path"] == "SKILL.md" for item in files):
+        raise ProvenanceFailure("legacy_creation_missing_skill")
+    return files, digest(files)
+
+
+def first_history_commit(root: Path, head: str, relative: str) -> str:
+    output = git_output(root, "rev-list", "--reverse", head, "--", relative)
+    assert isinstance(output, str)
+    commits = output.splitlines()
+    if not commits:
+        raise ProvenanceFailure("legacy_creation_history_missing")
+    return commits[0]
+
+
+def commit_author(root: Path, commit: str) -> tuple[str, str]:
+    output = git_output(root, "show", "-s", "--format=%an%x00%ae", commit)
+    assert isinstance(output, str)
+    values = output.rstrip("\n").split("\x00")
+    if len(values) != 2 or not all(values):
+        raise ProvenanceFailure("legacy_machine_author_missing")
+    return values[0], values[1]
+
+
+def commit_timestamp(root: Path, commit: str) -> datetime:
+    output = git_output(root, "show", "-s", "--format=%aI", commit)
+    assert isinstance(output, str)
+    try:
+        value = datetime.fromisoformat(output.strip().replace("Z", "+00:00"))
+    except ValueError as error:
+        raise ProvenanceFailure("legacy_creation_timestamp_invalid") from error
+    if value.tzinfo is None:
+        raise ProvenanceFailure("legacy_creation_timestamp_invalid")
+    return value.astimezone(timezone.utc)
+
+
+def verify_legacy_git_creation(
+    skill: Path,
+    root: dict[str, Any],
+    relative: str,
+    policy_value: Any,
+    proof_value: Any,
+) -> dict[str, Any]:
+    policy = validate_legacy_policy(policy_value)
+    proof = validate_legacy_proof(proof_value, skill.name, policy)
+    marker = skill / ".agent-created"
+    if not marker.is_file() or marker.is_symlink():
+        raise ProvenanceFailure("invalid_creation_marker")
+    root_path = Path(root["path"]).expanduser().resolve()
+    top = git_output(root_path, "rev-parse", "--show-toplevel")
+    assert isinstance(top, str)
+    if Path(top.strip()).resolve() != root_path:
+        raise ProvenanceFailure("unexpected_personal_git_root")
+    head = git_output(root_path, "rev-parse", "HEAD")
+    assert isinstance(head, str)
+    head = head.strip()
+    creation = proof["creation_commit"]
+    checkpoint = proof["history_checkpoint"]
+    if checkpoint == creation:
+        raise ProvenanceFailure("legacy_history_checkpoint_not_distinct")
+    require_git_ancestor(
+        root_path,
+        creation,
+        checkpoint,
+        "legacy_history_checkpoint_precedes_creation",
+    )
+    require_git_ancestor(
+        root_path,
+        checkpoint,
+        head,
+        "legacy_history_checkpoint_rewritten",
+    )
+    status = git_output(
+        root_path, "status", "--porcelain=v1", "--untracked-files=all", "--", relative
+    )
+    assert isinstance(status, str)
+    if status:
+        raise ProvenanceFailure("legacy_skill_worktree_dirty")
+    if first_history_commit(root_path, head, relative) != creation:
+        raise ProvenanceFailure("legacy_creation_not_initial_package")
+    marker_relative = f"{relative}/.agent-created"
+    if first_history_commit(root_path, head, marker_relative) != creation:
+        raise ProvenanceFailure("legacy_marker_not_created_with_package")
+    files, inventory_sha256 = git_skill_inventory(root_path, creation, relative)
+    if inventory_sha256 != proof["creation_inventory_sha256"]:
+        raise ProvenanceFailure("legacy_creation_inventory_mismatch")
+    creation_marker = next(
+        (item for item in files if item["path"] == ".agent-created"), None
+    )
+    if creation_marker is None or file_sha256(marker) != creation_marker["sha256"]:
+        raise ProvenanceFailure("legacy_marker_changed")
+    author = commit_author(root_path, creation)
+    if author not in policy["_machine_authors"]:
+        raise ProvenanceFailure("legacy_machine_author_untrusted")
+    if commit_timestamp(root_path, creation) >= policy["_migration_cutoff"]:
+        raise ProvenanceFailure("legacy_creation_not_before_migration")
+    later = git_output(root_path, "rev-list", f"{creation}..{head}", "--", relative)
+    assert isinstance(later, str)
+    for commit in later.splitlines():
+        if commit_author(root_path, commit) not in policy["_machine_authors"]:
+            raise ProvenanceFailure("later_user_authorship_conflict")
+    for claim_path in policy["protected_claim_paths"]:
+        current_claim = skill / claim_path
+        if current_claim.exists() or current_claim.is_symlink():
+            raise ProvenanceFailure("later_user_protection_claim")
+        claim_history = git_output(
+            root_path,
+            "rev-list",
+            f"{creation}..{head}",
+            "--",
+            f"{relative}/{claim_path}",
+        )
+        assert isinstance(claim_history, str)
+        if claim_history:
+            raise ProvenanceFailure("later_user_protection_claim")
+    return {
+        "basis": "verified_legacy_git_proof",
+        "policy_sha256": policy["policy_sha256"],
+        "proof_sha256": proof["proof_sha256"],
+        "creation_commit": creation,
+        "history_checkpoint": checkpoint,
+        "creation_inventory_sha256": inventory_sha256,
+        "marker": str(marker),
+        "marker_sha256": file_sha256(marker),
+        "machine_author": {"name": author[0], "email": author[1]},
+    }
+
+
+def verify_publisher_identity(
+    skill: Path,
+    root: dict[str, Any],
+    relative: str,
+    files: list[dict[str, str]],
+) -> None:
+    bundle_id = root.get("bundle_id")
+    if not isinstance(bundle_id, str) or not SHA256_ID_RE.fullmatch(bundle_id):
+        raise ProvenanceFailure("invalid_dreaming_bundle_identity")
+    manifest_path = Path(root["path"]).expanduser().resolve() / "dreaming-bundle-manifest.json"
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        raise ProvenanceFailure("missing_dreaming_bundle_manifest")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ProvenanceFailure("malformed_dreaming_bundle_manifest") from error
+    if (
+        not isinstance(manifest, dict)
+        or manifest.get("bundle_id") != bundle_id
+        or digest({key: value for key, value in manifest.items() if key != "bundle_id"})
+        != bundle_id
+    ):
+        raise ProvenanceFailure("invalid_dreaming_bundle_manifest")
+    manifest_files = manifest.get("files")
+    if not isinstance(manifest_files, list):
+        raise ProvenanceFailure("invalid_dreaming_bundle_inventory")
+    expected: dict[str, str] = {}
+    for item in manifest_files:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"path", "sha256"}
+            or not isinstance(item["path"], str)
+            or not isinstance(item["sha256"], str)
+            or item["path"] in expected
+        ):
+            raise ProvenanceFailure("invalid_dreaming_bundle_inventory")
+        expected[item["path"]] = item["sha256"]
+    prefix = f"{relative}/"
+    expected_skill = {
+        path: sha256 for path, sha256 in expected.items() if path.startswith(prefix)
+    }
+    actual_skill = {
+        f"{relative}/{item['path']}": item["sha256"] for item in files
+    }
+    if actual_skill != expected_skill:
+        raise ProvenanceFailure("dreaming_bundle_inventory_mismatch")
+
+
+def classify_skill_authority(
+    skill: Path,
+    root: dict[str, Any],
+    relative: str,
+    files: list[dict[str, str]],
+    *,
+    evidence_tool: Path | None = None,
+) -> dict[str, Any]:
+    root_class = root["class"]
+    if root_class == "plugin":
+        package = root.get("package")
+        identity = {
+            "plugin_id": root.get("plugin_id"),
+            "source_identity": root.get("source_identity"),
+            "version": root.get("version"),
+        }
+        if (
+            all(isinstance(value, str) and value for value in identity.values())
+            and package == identity
+        ):
+            return classification("plugin_managed", "verified", "exact_plugin_identity")
+        return classification(
+            "unknown_provenance", "invalid", "invalid_plugin_identity"
+        )
+    if root_class == "builtin":
+        if (
+            isinstance(root.get("copilot_version"), str)
+            and root["copilot_version"]
+            and relative
+        ):
+            return classification("cli_builtin", "verified", "exact_cli_identity")
+        return classification(
+            "unknown_provenance", "invalid", "invalid_cli_identity"
+        )
+    if root_class == "dreaming_publisher":
+        try:
+            verify_publisher_identity(skill, root, relative, files)
+        except ProvenanceFailure as error:
+            return classification("unknown_provenance", "invalid", error.reason)
+        return classification(
+            "dreaming_managed", "verified", "current_lifecycle_catalog"
+        )
+
+    pin = skill / ".pinned"
+    if pin.exists() or pin.is_symlink():
+        return classification("user_protected", "protected", "explicit_user_pin")
+    if root_class != "personal":
+        return classification("unknown_provenance", "insufficient", "no_evidence")
+
+    proofs = root.get("legacy_proofs", {})
+    if not isinstance(proofs, dict):
+        return classification(
+            "unknown_provenance", "invalid", "invalid_legacy_proof_index"
+        )
+    proof_present = skill.name in proofs
+    envelope_present = (skill / ".agent-created.json").exists() or (
+        skill / ".agent-created.json"
+    ).is_symlink()
+    envelope_evidence: dict[str, Any] | None = None
+    if envelope_present:
+        try:
+            envelope_evidence = current_envelope_evidence(
+                skill,
+                evidence_tool
+                or Path(__file__).with_name("evidence-envelope.py"),
+            )
+        except ProvenanceFailure as error:
+            return classification("unknown_provenance", "invalid", error.reason)
+    if proof_present:
+        try:
+            legacy_evidence = verify_legacy_git_creation(
+                skill,
+                root,
+                relative,
+                root.get("provenance_policy"),
+                proofs[skill.name],
+            )
+        except ProvenanceFailure as error:
+            return classification("unknown_provenance", "invalid", error.reason)
+        if envelope_evidence is None:
+            return classification(
+                "legacy_machine",
+                "verified",
+                legacy_evidence["basis"],
+                policy_sha256=legacy_evidence["policy_sha256"],
+                proof_sha256=legacy_evidence["proof_sha256"],
+                verified_evidence=legacy_evidence,
+            )
+    if envelope_evidence is not None:
+        return classification(
+            "legacy_machine",
+            "verified",
+            envelope_evidence["basis"],
+            verified_evidence=envelope_evidence,
+        )
+    if (skill / ".agent-created").exists() or (skill / ".agent-created").is_symlink():
+        return classification("unknown_provenance", "insufficient", "marker_only")
+    return classification("unknown_provenance", "insufficient", "no_evidence")
 
 
 def canonical_capability_id(
@@ -124,13 +710,11 @@ def canonical_capability_id(
 
 
 def scan_root(host_id: str, root: dict[str, Any]) -> list[dict[str, Any]]:
-    required = {"id", "class", "path", "authority", "discovery_surface"}
+    required = {"id", "class", "path", "discovery_surface"}
     if not required.issubset(root):
         raise EstateError(f"root is missing fields: {sorted(required - set(root))}")
     if root["class"] not in ROOT_CLASSES:
         raise EstateError(f"unsupported root class: {root['class']}")
-    if root["authority"] not in AUTHORITIES:
-        raise EstateError(f"unsupported authority: {root['authority']}")
     path = Path(root["path"]).expanduser().resolve()
     if path.is_symlink():
         raise EstateError(f"root is a symlink: {path}")
@@ -146,6 +730,7 @@ def scan_root(host_id: str, root: dict[str, Any]) -> list[dict[str, Any]]:
             continue
         files, inventory_sha256 = skill_inventory(skill)
         relative = skill.relative_to(path).as_posix()
+        authority = classify_skill_authority(skill, root, relative, files)
         physical_identity = {
             "host_id": host_id,
             "root_id": root["id"],
@@ -167,7 +752,7 @@ def scan_root(host_id: str, root: dict[str, Any]) -> list[dict[str, Any]]:
                 "skill_name": skill.name,
                 "inventory_sha256": inventory_sha256,
                 "files": files,
-                "authority": root["authority"],
+                **public_classification(authority),
                 "owner": root.get("owner"),
                 "package": root.get("package"),
                 "physical_only": True,
@@ -207,9 +792,7 @@ def reconcile(
         raise EstateError("declared root IDs must be unique")
 
     physical = [
-        instance
-        for root in roots
-        for instance in scan_root(host_id, root)
+        instance for root in roots for instance in scan_root(host_id, root)
     ]
     by_path: dict[str, list[dict[str, Any]]] = {}
     for instance in physical:
@@ -292,6 +875,12 @@ def reconcile(
     canonical_ids = {
         instance["canonical_capability_id"] for instance in enabled_instances
     }
+    authority_counts = Counter(
+        instance["authority"] for instance in physical
+    )
+    root_class_counts = Counter(
+        instance["root_class"] for instance in physical
+    )
     snapshot = {
         "schema_version": SCHEMA_VERSION,
         "host_id": host_id,
@@ -316,6 +905,14 @@ def reconcile(
                 instance["physical_only"] for instance in physical
             ),
             "unresolved_runtime_skills": len(unresolved),
+        },
+        "authority_counts": {
+            authority: authority_counts.get(authority, 0)
+            for authority in sorted(AUTHORITIES)
+        },
+        "root_class_counts": {
+            root_class: root_class_counts.get(root_class, 0)
+            for root_class in sorted(ROOT_CLASSES)
         },
         "contexts": reconciled_contexts,
         "physical_instances": physical,
@@ -653,6 +1250,8 @@ def discover_roots(
             "authority": "unknown_provenance",
             "discovery_surface": "personal-copilot",
             "owner": "personal",
+            "provenance_policy": config.get("provenance_policy"),
+            "legacy_proofs": config.get("legacy_proofs", {}),
         }
     ]
     plugin_roots, plugins = discover_plugin_roots(

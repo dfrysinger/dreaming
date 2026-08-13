@@ -695,6 +695,13 @@ RECEIPT="$RUNS/$RUN_ID.authorization.json"
 [[ -f "$RECEIPT" ]] || fail "autonomous authorization receipt was not written"
 [[ "$(stat -f '%Lp' "$RECEIPT")" == "400" ]] ||
   fail "autonomous authorization receipt is mutable"
+python3 - "$RECEIPT" <<'PY'
+import json, sys
+receipt = json.load(open(sys.argv[1]))
+skill = receipt["skills"][0]
+assert skill["authority_class"] == "legacy_machine"
+assert skill["provenance_basis"] == "current_envelope"
+PY
 REPORT_SHA="$(shasum -a 256 "$CASE/report.md" | awk '{print $1}')"
 archive_skill "$RUN_ID" old-local
 run_curator finish --run "$RUN_ID"
@@ -733,10 +740,10 @@ cat > "$CASE/plan.json" <<'JSON'
 JSON
 rm "$LOCAL/old-local/.agent-created"
 git -C "$LOCAL" add old-local/.agent-created
-git -C "$LOCAL" commit -qm "make fixture hand-made"
+git -C "$LOCAL" commit -qm "remove marker without authorship proof"
 if run_curator begin --autonomous --plan "$CASE/plan.json" \
   --report "$CASE/report.md" >/dev/null 2>&1; then
-  fail "autonomous authorization accepted a hand-made source"
+  fail "autonomous authorization accepted missing-marker provenance"
 fi
 touch "$LOCAL/old-local/.agent-created"
 git -C "$LOCAL" add old-local/.agent-created

@@ -42,6 +42,22 @@ EVALUATION_SIDECARS = {
     ".skill-evaluation-policy.json",
     ".pinned",
 }
+ESTATE_AUTHORITIES = {
+    "cli_builtin",
+    "dreaming_managed",
+    "legacy_machine",
+    "plugin_managed",
+    "unknown_provenance",
+    "user_protected",
+}
+ESTATE_ROOT_CLASSES = {
+    "builtin",
+    "custom",
+    "dreaming_publisher",
+    "personal",
+    "plugin",
+    "project",
+}
 CANDIDATE_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 CANDIDATE_NAME_RE = re.compile(r"^[a-z][a-z0-9-]{2,63}$")
 CANDIDATE_REASON_RE = re.compile(r"^[a-z][a-z0-9_.:-]{2,127}$")
@@ -2569,16 +2585,18 @@ class DashboardData:
         if summary_only:
             return base
 
-        authority: dict[str, int] = {}
-        root_classes: dict[str, int] = {}
+        authority = {name: 0 for name in sorted(ESTATE_AUTHORITIES)}
+        root_classes = {name: 0 for name in sorted(ESTATE_ROOT_CLASSES)}
         instances: list[dict[str, Any]] = []
         for item in census.get("physical_instances", []):
             if not isinstance(item, dict):
                 continue
             authority_name = safe_text(item.get("authority"), 80)
             root_class = safe_text(item.get("root_class"), 80)
-            authority[authority_name] = authority.get(authority_name, 0) + 1
-            root_classes[root_class] = root_classes.get(root_class, 0) + 1
+            if authority_name in authority:
+                authority[authority_name] += 1
+            if root_class in root_classes:
+                root_classes[root_class] += 1
             owner = item.get("owner")
             if isinstance(owner, str) and owner.startswith("/"):
                 owner = "local configured root"
@@ -2595,6 +2613,38 @@ class DashboardData:
                     ),
                 }
             )
+        declared_authority = census.get("authority_counts")
+        if (
+            isinstance(declared_authority, dict)
+            and set(declared_authority) == ESTATE_AUTHORITIES
+            and all(
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and value >= 0
+                for value in declared_authority.values()
+            )
+            and sum(declared_authority.values()) == len(instances)
+        ):
+            authority = {
+                name: declared_authority[name]
+                for name in sorted(ESTATE_AUTHORITIES)
+            }
+        declared_root_classes = census.get("root_class_counts")
+        if (
+            isinstance(declared_root_classes, dict)
+            and set(declared_root_classes) == ESTATE_ROOT_CLASSES
+            and all(
+                isinstance(value, int)
+                and not isinstance(value, bool)
+                and value >= 0
+                for value in declared_root_classes.values()
+            )
+            and sum(declared_root_classes.values()) == len(instances)
+        ):
+            root_classes = {
+                name: declared_root_classes[name]
+                for name in sorted(ESTATE_ROOT_CLASSES)
+            }
         contexts = [
             {
                 "id": safe_text(item.get("id"), 200),

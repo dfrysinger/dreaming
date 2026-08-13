@@ -7,6 +7,7 @@ import argparse
 import base64
 import fcntl
 import hashlib
+import importlib.util
 import json
 import os
 import re
@@ -35,6 +36,12 @@ EVIDENCE_TOOL = Path(
         SCRIPT_DIR.parent.parent / "skill-review/scripts/evidence-envelope.py",
     )
 )
+ESTATE_CLASSIFIER = Path(
+    os.environ.get(
+        "CURATOR_ESTATE_CLASSIFIER",
+        SCRIPT_DIR.parent.parent / "skill-review/scripts/dreaming-estate.py",
+    )
+)
 RESTORE_TOOL = Path(
     os.environ.get(
         "CURATOR_RESTORE_TOOL",
@@ -52,6 +59,7 @@ PUBLIC_MANIFESTS = (
 )
 MAX_REPORT_AGE = timedelta(days=7)
 AGE_ONLY_PRUNING_DAYS = 90
+PROVENANCE_MODULE: Any | None = None
 
 
 class RunError(RuntimeError):
@@ -539,18 +547,25 @@ def skill_directory(row: dict[str, Any], configured_roots: dict[str, Path]) -> P
     return path
 
 
-def frontmatter_author(skill_md: Path) -> str:
+def provenance_module() -> Any:
+    global PROVENANCE_MODULE
+    if PROVENANCE_MODULE is not None:
+        return PROVENANCE_MODULE
+    spec = importlib.util.spec_from_file_location(
+        "curator_estate_classifier", ESTATE_CLASSIFIER
+    )
+    if spec is None or spec.loader is None:
+        raise RunError(f"cannot load estate provenance classifier: {ESTATE_CLASSIFIER}")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[spec.name] = module
     try:
-        text = skill_md.read_text(encoding="utf-8")
-    except OSError as error:
-        raise RunError(f"cannot read skill provenance frontmatter: {error}") from error
-    match = re.match(r"\A---\n(.*?)\n---(?:\n|\Z)", text, re.DOTALL)
-    if not match:
-        raise RunError(f"agent-created skill has malformed frontmatter: {skill_md}")
-    authors = re.findall(r"(?m)^author:\s*([^\s#]+)\s*$", match.group(1))
-    if len(authors) != 1:
-        raise RunError(f"agent-created skill has invalid author provenance: {skill_md}")
-    return authors[0]
+        spec.loader.exec_module(module)
+    except (OSError, ImportError) as error:
+        raise RunError(
+            f"cannot load estate provenance classifier: {ESTATE_CLASSIFIER}"
+        ) from error
+    PROVENANCE_MODULE = module
+    return module
 
 
 def parse_iso_timestamp(value: Any, field: str) -> datetime:
@@ -576,48 +591,47 @@ def require_agent_created(
     if row.get("pinned") or row.get("implicit_pin"):
         raise RunError(f"authorized skill is pinned: {name}")
     directory = skill_directory(row, configured_roots)
-    marker = directory / ".agent-created"
-    if not marker.is_file() or marker.is_symlink():
-        raise RunError(f"authorized skill is not agent-created: {name}")
-    envelope = directory / ".agent-created.json"
-    if not envelope.is_file() or envelope.is_symlink():
-        raise RunError(f"authorized skill has no valid provenance envelope: {name}")
-    validation = run([str(EVIDENCE_TOOL), "validate", str(envelope)], check=False)
-    if validation.returncode:
+    module = provenance_module()
+    classification = module.classify_skill_authority(
+        directory,
+        {
+            "class": "personal",
+            "path": str(directory.parent),
+        },
+        name,
+        [],
+        evidence_tool=EVIDENCE_TOOL,
+    )
+    provenance = classification["provenance"]
+    if (
+        classification["authority"] != "legacy_machine"
+        or provenance.get("basis") not in {"current_envelope", "legacy_envelope"}
+    ):
         raise RunError(
-            f"authorized skill provenance envelope is invalid: {name}: "
-            f"{validation.stderr.strip()}"
+            f"authorized skill has no current verified machine provenance: {name}"
         )
-    try:
-        provenance = json.loads(envelope.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError) as error:
-        raise RunError(f"cannot load provenance envelope for {name}: {error}") from error
-    if provenance.get("skill") != name:
-        raise RunError(f"authorized skill provenance belongs to another skill: {name}")
-    created_by = provenance.get("created_by", "skill-review")
-    author = frontmatter_author(directory / "SKILL.md")
-    if author != created_by:
-        raise RunError(f"authorized skill author provenance does not match: {name}")
-    created_at = provenance.get("created_at")
+    evidence = classification.get("_verified_evidence")
+    if not isinstance(evidence, dict):
+        raise RunError(f"authorized skill provenance is incomplete: {name}")
+    created_at = evidence["created_at"]
     parse_iso_timestamp(created_at, f"{name} provenance created_at")
-    source_session_id = provenance.get("source_session_id")
-    if not isinstance(source_session_id, str) or not source_session_id:
-        raise RunError(f"authorized skill source provenance is missing: {name}")
     return {
         "name": name,
         "root": row["root"],
         "path": str(directory),
-        "marker": str(marker),
-        "marker_sha256": hash_bytes(marker.read_bytes()),
-        "envelope": str(envelope),
-        "envelope_sha256": hash_bytes(envelope.read_bytes()),
-        "envelope_schema_version": provenance.get("schema_version", 1),
+        "authority_class": classification["authority"],
+        "provenance_basis": provenance["basis"],
+        "marker": evidence["marker"],
+        "marker_sha256": evidence["marker_sha256"],
+        "envelope": evidence["envelope"],
+        "envelope_sha256": evidence["envelope_sha256"],
+        "envelope_schema_version": evidence["envelope_schema_version"],
         "created_at": created_at,
-        "source_session_id": source_session_id,
-        "created_by": created_by,
-        "skill_md": str(directory / "SKILL.md"),
-        "skill_md_sha256": hash_bytes((directory / "SKILL.md").read_bytes()),
-        "author": author,
+        "source_session_id": evidence["source_session_id"],
+        "created_by": evidence["created_by"],
+        "skill_md": evidence["skill_md"],
+        "skill_md_sha256": evidence["skill_md_sha256"],
+        "author": evidence["author"],
     }
 
 

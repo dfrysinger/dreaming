@@ -108,6 +108,22 @@ estate_snapshot = {
         "plugin_packages": 1,
         "enabled_plugin_packages": 1,
     },
+    "authority_counts": {
+        "cli_builtin": 0,
+        "dreaming_managed": 0,
+        "legacy_machine": 0,
+        "plugin_managed": 0,
+        "unknown_provenance": 1,
+        "user_protected": 0,
+    },
+    "root_class_counts": {
+        "builtin": 0,
+        "custom": 0,
+        "dreaming_publisher": 0,
+        "personal": 1,
+        "plugin": 0,
+        "project": 0,
+    },
     "contexts": [{
         "id": "user",
         "kind": "user",
@@ -128,6 +144,11 @@ estate_snapshot = {
         "canonical_capability_id": "sha256:" + "2" * 64,
         "absolute_path": "/private/skill/path",
         "files": [{"path": "secret", "sha256": "private-sentinel"}],
+        "provenance": {
+            "status": "invalid",
+            "basis": "private-provenance-sentinel",
+            "private_evidence_path": "/private/provenance/path",
+        },
     }],
     "enabled_instances": [],
     "unresolved_mappings": [],
@@ -722,7 +743,14 @@ try:
     estate_view = json.loads(estate_body)["data"]
     check(
         estate_view["totals"]["physical_instances"] == 3
-        and estate_view["authority_counts"] == {"unknown_provenance": 1}
+        and estate_view["authority_counts"] == {
+            "cli_builtin": 0,
+            "dreaming_managed": 0,
+            "legacy_machine": 0,
+            "plugin_managed": 0,
+            "unknown_provenance": 1,
+            "user_protected": 0,
+        }
         and estate_view["plugins"][0]["capability_counts"]["skills"] == 1
         and estate_view["read_only"] is True
         and estate_view["authorizes_actions"] is False,
@@ -737,6 +765,8 @@ try:
                 "/private/settings",
                 "/private/plugin/path",
                 "/private/skill/path",
+                "/private/provenance/path",
+                "private-provenance-sentinel",
             )
         ),
         "estate API excludes private settings, file inventories, and local roots",
