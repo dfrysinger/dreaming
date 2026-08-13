@@ -54,6 +54,10 @@ evaluation, review, and restore owners rather than creating alternatives.
   final candidate and authority state are synchronized, the destination
   installer has rendered the corrected configuration, and the exact final
   source and destination authority manifests match.
+- **Session placement:** Copilot sessions remain on the MacBook and are read
+  by the Mac mini through a non-interactive IPv6 SSH source adapter. Codex
+  sessions remain local to the Mac mini. All review execution and publication
+  remain on the Mac mini; the MacBook does not regain scheduled ownership.
 - **Current phase:** local landing. The Mac mini is
   configured for authenticated Copilot and Codex source and review execution.
   Copilot is the scheduled publisher. Codex retains its current installed

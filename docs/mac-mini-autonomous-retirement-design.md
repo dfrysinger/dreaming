@@ -40,6 +40,14 @@ tombstones, and the existing restore command.
 Hand-made skills remain recommendations only. A proposed merge that would edit
 a hand-made destination remains a manual decision.
 
+The scheduler and review executors run on the Mac mini, but a session source
+may remain on another Mac. The production Copilot source is read from the
+MacBook over non-interactive SSH, so its existing session library remains
+reviewable without copying hundreds of gigabytes or enabling a second
+scheduler. Remote source commands preserve exact argument boundaries and fail
+closed when SSH is unavailable. Review execution and skill publication remain
+local to the Mac mini.
+
 ## Reuse contract
 
 This change reuses the existing owners:

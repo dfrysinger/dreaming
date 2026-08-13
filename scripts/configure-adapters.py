@@ -42,14 +42,58 @@ def adapter(
     state_dir: Path,
     deny_roots: list[Path] | None = None,
 ) -> dict[str, object]:
-    argv = [
-        sys.executable,
-        str(script),
-        "--vendor",
-        vendor,
-        "--role",
-        role,
-    ]
+    remote_source = (
+        os.environ.get(f"DREAMING_{vendor.upper()}_SOURCE_SSH_HOST")
+        if role == "session-source"
+        else None
+    )
+    if remote_source:
+        ssh = os.environ.get("DREAMING_SOURCE_SSH_BIN", "/usr/bin/ssh")
+        address_family = os.environ.get(
+            f"DREAMING_{vendor.upper()}_SOURCE_SSH_ADDRESS_FAMILY",
+            "",
+        )
+        if address_family not in {"", "4", "6"}:
+            raise ConfigError(
+                f"DREAMING_{vendor.upper()}_SOURCE_SSH_ADDRESS_FAMILY "
+                "must be 4, 6, or empty"
+            )
+        remote_python = os.environ.get(
+            f"DREAMING_{vendor.upper()}_SOURCE_SSH_PYTHON",
+            sys.executable,
+        )
+        remote_script = os.environ.get(
+            f"DREAMING_{vendor.upper()}_SOURCE_SSH_SCRIPT",
+            str(script),
+        )
+        proxy = script.parents[3] / "scripts/ssh-session-source.py"
+        argv = [
+            sys.executable,
+            str(proxy),
+            "--ssh-bin",
+            ssh,
+            "--host",
+            remote_source,
+            *(["--address-family", address_family] if address_family else []),
+            "--remote-python",
+            remote_python,
+            "--remote-script",
+            remote_script,
+            "--",
+            "--vendor",
+            vendor,
+            "--role",
+            role,
+        ]
+    else:
+        argv = [
+            sys.executable,
+            str(script),
+            "--vendor",
+            vendor,
+            "--role",
+            role,
+        ]
     if role == "session-source":
         override = os.environ.get(f"DREAMING_{vendor.upper()}_SESSION_ROOT")
         if override:

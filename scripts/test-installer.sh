@@ -419,10 +419,75 @@ run_native_persisted() {
   export DREAMING_SKILL_TARGETS=copilot
   export DREAMING_SOURCE_EXECUTOR_ALLOW='copilot>copilot'
   export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  export DREAMING_COPILOT_SOURCE_SSH_HOST='fixture@fd7a:115c:a1e0::1'
+  export DREAMING_COPILOT_SOURCE_SSH_ADDRESS_FAMILY=6
+  export DREAMING_COPILOT_SOURCE_SSH_PYTHON='/fixture/python3'
+  export DREAMING_COPILOT_SOURCE_SSH_SCRIPT='/fixture/dreaming-vendor-adapter.py'
   run_native install >/dev/null
 )
 NATIVE_ADAPTERS="$NATIVE/dreaming-state/adapters.json"
 grep -q '"copilot"' "$NATIVE_ADAPTERS"
+python3 - "$NATIVE_ADAPTERS" <<'PY'
+import json
+import sys
+
+config = json.load(open(sys.argv[1], encoding="utf-8"))
+argv = config["sources"]["copilot"]["argv"]
+expected = [
+    config["sources"]["copilot"]["argv"][0],
+    config["sources"]["copilot"]["argv"][1],
+    "--ssh-bin",
+    "/usr/bin/ssh",
+    "--host",
+    "fixture@fd7a:115c:a1e0::1",
+    "--address-family",
+    "6",
+    "--remote-python",
+    "/fixture/python3",
+    "--remote-script",
+    "/fixture/dreaming-vendor-adapter.py",
+    "--",
+]
+if argv[: len(expected)] != expected:
+    raise SystemExit(f"remote source adapter is malformed: {argv!r}")
+if not argv[1].endswith("/scripts/ssh-session-source.py"):
+    raise SystemExit(f"remote source proxy is missing: {argv!r}")
+if config["executors"]["copilot"]["argv"][1].endswith(
+    "/scripts/ssh-session-source.py"
+):
+    raise SystemExit("remote source configuration changed the local executor")
+PY
+FAKE_SSH="$NATIVE/fake-ssh.py"
+SSH_ARGV_LOG="$NATIVE/ssh-argv.json"
+cat > "$FAKE_SSH" <<'PY'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+with open(os.environ["SSH_ARGV_LOG"], "w", encoding="utf-8") as handle:
+    json.dump(sys.argv[1:], handle)
+PY
+chmod +x "$FAKE_SSH"
+SSH_ARGV_LOG="$SSH_ARGV_LOG" python3 "$ROOT/scripts/ssh-session-source.py" \
+  --ssh-bin "$FAKE_SSH" \
+  --host fixture \
+  --remote-python /fixture/python3 \
+  --remote-script /fixture/adapter.py \
+  -- --vendor copilot --role session-source list --cursor '' \
+  --floor '"value with spaces"' >/dev/null
+python3 - "$SSH_ARGV_LOG" <<'PY'
+import json
+import shlex
+import sys
+
+ssh_argv = json.load(open(sys.argv[1], encoding="utf-8"))
+remote = shlex.split(ssh_argv[-1])
+cursor = remote[remote.index("--cursor") + 1]
+floor = remote[remote.index("--floor") + 1]
+if cursor != "" or floor != '"value with spaces"':
+    raise SystemExit(f"remote argument boundaries were not preserved: {remote!r}")
+PY
 native_hash="$(shasum -a 256 "$NATIVE_ADAPTERS" | awk '{print $1}')"
 (
   export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
@@ -430,6 +495,56 @@ native_hash="$(shasum -a 256 "$NATIVE_ADAPTERS" | awk '{print $1}')"
 )
 [[ "$(shasum -a 256 "$NATIVE_ADAPTERS" | awk '{print $1}')" == "$native_hash" ]] ||
   { echo "ordinary reinstall rewrote persisted adapter config" >&2; exit 1; }
+(
+  export DREAMING_SESSION_SOURCES=copilot
+  export DREAMING_REVIEW_EXECUTORS=copilot
+  export DREAMING_SKILL_TARGETS=copilot
+  export DREAMING_SOURCE_EXECUTOR_ALLOW='copilot>copilot'
+  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  run_native_persisted install >/dev/null
+)
+python3 - "$NATIVE_ADAPTERS" <<'PY'
+import json
+import sys
+
+argv = json.load(open(sys.argv[1], encoding="utf-8"))["sources"]["copilot"]["argv"]
+if "--host" not in argv or argv[argv.index("--host") + 1] != "fixture@fd7a:115c:a1e0::1":
+    raise SystemExit(f"desired-state regeneration lost the remote source: {argv!r}")
+PY
+(
+  export DREAMING_SESSION_SOURCES=copilot
+  export DREAMING_REVIEW_EXECUTORS=copilot
+  export DREAMING_SKILL_TARGETS=copilot
+  export DREAMING_SOURCE_EXECUTOR_ALLOW='copilot>copilot'
+  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  export DREAMING_COPILOT_SOURCE_SSH_HOST='fixture@fd7a:115c:a1e0::2'
+  run_native_persisted install >/dev/null
+)
+python3 - "$NATIVE_ADAPTERS" <<'PY'
+import json
+import sys
+
+argv = json.load(open(sys.argv[1], encoding="utf-8"))["sources"]["copilot"]["argv"]
+if argv[argv.index("--host") + 1] != "fixture@fd7a:115c:a1e0::2":
+    raise SystemExit(f"explicit remote source update was ignored: {argv!r}")
+PY
+(
+  export DREAMING_SESSION_SOURCES=copilot
+  export DREAMING_REVIEW_EXECUTORS=copilot
+  export DREAMING_SKILL_TARGETS=copilot
+  export DREAMING_SOURCE_EXECUTOR_ALLOW='copilot>copilot'
+  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  export DREAMING_COPILOT_SOURCE_SSH_HOST=''
+  run_native_persisted install >/dev/null
+)
+python3 - "$NATIVE_ADAPTERS" <<'PY'
+import json
+import sys
+
+argv = json.load(open(sys.argv[1], encoding="utf-8"))["sources"]["copilot"]["argv"]
+if any(item.endswith("/scripts/ssh-session-source.py") for item in argv):
+    raise SystemExit(f"explicit local-source reset was ignored: {argv!r}")
+PY
 (
   export DREAMING_SESSION_SOURCES=codex
   export DREAMING_REVIEW_EXECUTORS=codex
