@@ -537,15 +537,49 @@ sync_plugin() {
     "$COPILOT" plugin install dfrysinger/dreaming
 }
 
+native_adapter_needs_upgrade() {
+  /usr/bin/python3 - "$1" <<'PY'
+import json
+import sys
+
+try:
+    config = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"existing adapter config is invalid: {error}")
+if not isinstance(config, dict):
+    raise SystemExit("existing adapter config must be an object")
+if isinstance(config.get("estate_census"), dict):
+    raise SystemExit(1)
+for role, suffix in (
+    ("sources", "/scripts/ssh-session-source.py"),
+    ("publishers", "/scripts/ssh-skill-publisher.py"),
+):
+    entries = config.get(role, {})
+    entry = entries.get("copilot") if isinstance(entries, dict) else None
+    argv = entry.get("argv", []) if isinstance(entry, dict) else []
+    if isinstance(argv, list) and any(
+        isinstance(value, str) and value.endswith(suffix) for value in argv
+    ):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
 configure_native_adapters() {
-  local generated="$DREAMING_STATE_DIR/adapters.json" candidate
+  local generated="$DREAMING_STATE_DIR/adapters.json" candidate status
   if [[ -n "$REQUESTED_ADAPTER_CONFIG" ]]; then
     return 0
   fi
   if [[ "$REQUESTED_ADAPTER_DESIRED_STATE" == "1" ]]; then
     DREAMING_ADAPTER_CONFIG="$generated"
   elif [[ -n "$DREAMING_ADAPTER_CONFIG" ]]; then
-    return 0
+    if native_adapter_needs_upgrade "$DREAMING_ADAPTER_CONFIG"; then
+      :
+    else
+      status=$?
+      [[ "$status" == "1" ]] && return 0
+      return "$status"
+    fi
   elif [[ "$REQUESTED_NATIVE_ADAPTERS" == "1" ||
           "$DREAMING_ENABLE_COPILOT_COMPAT" == "0" ]]; then
     DREAMING_ADAPTER_CONFIG="$generated"

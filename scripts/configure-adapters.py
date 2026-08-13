@@ -272,11 +272,108 @@ def positive_integer(name: str, default: str) -> int:
     return int(value)
 
 
+def argv_value(entry: object, flag: str) -> str | None:
+    if not isinstance(entry, dict):
+        return None
+    argv = entry.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(value, str) for value in argv):
+        return None
+    try:
+        index = argv.index(flag)
+    except ValueError:
+        return None
+    if index + 1 >= len(argv):
+        return None
+    return argv[index + 1]
+
+
+def inherit_remote_copilot(existing: dict[str, object]) -> None:
+    source = existing.get("sources", {})
+    source_entry = source.get("copilot") if isinstance(source, dict) else None
+    source_argv = source_entry.get("argv", []) if isinstance(source_entry, dict) else []
+    if isinstance(source_argv, list) and any(
+        isinstance(value, str) and value.endswith("/scripts/ssh-session-source.py")
+        for value in source_argv
+    ):
+        source_values = {
+            "DREAMING_SOURCE_SSH_BIN": argv_value(source_entry, "--ssh-bin"),
+            "DREAMING_COPILOT_SOURCE_SSH_HOST": argv_value(source_entry, "--host"),
+            "DREAMING_COPILOT_SOURCE_SSH_ADDRESS_FAMILY": argv_value(
+                source_entry, "--address-family"
+            ),
+            "DREAMING_COPILOT_SOURCE_SSH_PYTHON": argv_value(
+                source_entry, "--remote-python"
+            ),
+            "DREAMING_COPILOT_SOURCE_SSH_SCRIPT": argv_value(
+                source_entry, "--remote-script"
+            ),
+        }
+        for name, value in source_values.items():
+            if name not in os.environ and value is not None:
+                os.environ[name] = value
+
+    publishers = existing.get("publishers", {})
+    publisher = (
+        publishers.get("copilot") if isinstance(publishers, dict) else None
+    )
+    publisher_argv = publisher.get("argv", []) if isinstance(publisher, dict) else []
+    if isinstance(publisher_argv, list) and any(
+        isinstance(value, str) and value.endswith("/scripts/ssh-skill-publisher.py")
+        for value in publisher_argv
+    ):
+        publisher_values = {
+            "DREAMING_PUBLISHER_SSH_BIN": argv_value(publisher, "--ssh-bin"),
+            "DREAMING_COPILOT_PUBLISHER_SSH_HOST": argv_value(publisher, "--host"),
+            "DREAMING_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY": argv_value(
+                publisher, "--address-family"
+            ),
+            "DREAMING_COPILOT_PUBLISHER_SSH_PYTHON": argv_value(
+                publisher, "--remote-python"
+            ),
+            "DREAMING_COPILOT_PUBLISHER_SSH_SCRIPT": argv_value(
+                publisher, "--remote-script"
+            ),
+            "DREAMING_COPILOT_PUBLISHER_ADAPTER_PYTHON": argv_value(
+                publisher, "--remote-adapter-python"
+            ),
+            "DREAMING_COPILOT_PUBLISHER_ADAPTER_SCRIPT": argv_value(
+                publisher, "--remote-adapter-script"
+            ),
+            "DREAMING_COPILOT_PUBLISHER_BUNDLE_ROOT": argv_value(
+                publisher, "--remote-bundle-root"
+            ),
+            "DREAMING_COPILOT_PUBLISHER_OWNERSHIP_JOURNAL": argv_value(
+                publisher, "--remote-ownership-journal"
+            ),
+            "DREAMING_COPILOT_PUBLISHER_OPERATION_ROOT": argv_value(
+                publisher, "--remote-operation-root"
+            ),
+            "DREAMING_COPILOT_PUBLISHER_RECEIVER_ID_FILE": argv_value(
+                publisher, "--remote-receiver-id-file"
+            ),
+            "DREAMING_COPILOT_PUBLISHER_RECEIVER_ID": argv_value(
+                publisher, "--expected-receiver-id"
+            ),
+        }
+        for name, value in publisher_values.items():
+            if name not in os.environ and value is not None:
+                os.environ[name] = value
+
+
 def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, object]:
     detected = [vendor for vendor in VENDORS if executable(vendor)]
     sources = selected("DREAMING_SESSION_SOURCES", detected)
     executors = selected("DREAMING_REVIEW_EXECUTORS", sources)
     targets = selected("DREAMING_SKILL_TARGETS", sources)
+    existing: dict[str, object] = {}
+    if output.is_file():
+        try:
+            loaded = json.loads(output.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError) as error:
+            raise ConfigError(f"existing adapter config is invalid: {output}") from error
+        if isinstance(loaded, dict):
+            existing = loaded
+    inherit_remote_copilot(existing)
     detach_remote_copilot = (
         os.environ.get("DREAMING_DETACH_REMOTE_COPILOT_PUBLISHER") == "1"
     )
@@ -329,14 +426,6 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
 
     script = repo_root / "skills/skill-review/scripts/dreaming-vendor-adapter.py"
     denied_roots = [source_root(vendor) for vendor in sources]
-    existing = {}
-    if output.is_file():
-        try:
-            loaded = json.loads(output.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as error:
-            raise ConfigError(f"existing adapter config is invalid: {output}") from error
-        if isinstance(loaded, dict):
-            existing = loaded
     retired_publishers: dict[str, object] = {}
     for key in ("retired_publishers", "publishers"):
         values = existing.get(key, {})

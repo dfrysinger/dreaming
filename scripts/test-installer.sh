@@ -529,6 +529,13 @@ if publisher[publisher.index("--expected-receiver-id") + 1] != "fixture-receiver
     raise SystemExit(f"remote publisher identity is malformed: {publisher!r}")
 if "--ownership-journal" in publisher:
     raise SystemExit(f"mini-local publisher journal leaked into remote argv: {publisher!r}")
+estate = config.get("estate_census", {}).get("argv", [])
+if not estate or not estate[1].endswith("/scripts/ssh-estate-census.py"):
+    raise SystemExit(f"remote estate census is missing: {config!r}")
+if estate[estate.index("--host") + 1] != "fixture-client@fd7a:115c:a1e0::3":
+    raise SystemExit(f"remote estate host is malformed: {estate!r}")
+if estate[estate.index("--expected-receiver-id") + 1] != "fixture-receiver":
+    raise SystemExit(f"remote estate identity is malformed: {estate!r}")
 PY
 FAKE_SSH="$NATIVE/fake-ssh.py"
 SSH_ARGV_LOG="$NATIVE/ssh-argv.json"
@@ -560,6 +567,43 @@ cursor = remote[remote.index("--cursor") + 1]
 floor = remote[remote.index("--floor") + 1]
 if cursor != "" or floor != '"value with spaces"':
     raise SystemExit(f"remote argument boundaries were not preserved: {remote!r}")
+PY
+python3 - "$NATIVE_ADAPTERS" "$NATIVE/config.env" <<'PY'
+import json
+import pathlib
+import sys
+
+adapters = pathlib.Path(sys.argv[1])
+config = json.loads(adapters.read_text(encoding="utf-8"))
+config.pop("estate_census", None)
+adapters.write_text(json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+env = pathlib.Path(sys.argv[2])
+lines = [
+    line
+    for line in env.read_text(encoding="utf-8").splitlines()
+    if not line.startswith("DREAMING_COPILOT_")
+    and not line.startswith("DREAMING_SOURCE_SSH_BIN=")
+]
+env.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+(
+  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  run_native_persisted install >/dev/null
+)
+python3 - "$NATIVE_ADAPTERS" <<'PY'
+import json
+import sys
+
+config = json.load(open(sys.argv[1], encoding="utf-8"))
+source = config["sources"]["copilot"]["argv"]
+publisher = config["publishers"]["copilot"]["argv"]
+estate = config.get("estate_census", {}).get("argv", [])
+if source[source.index("--host") + 1] != "fixture@fd7a:115c:a1e0::1":
+    raise SystemExit(f"upgrade lost the inherited remote source: {source!r}")
+if publisher[publisher.index("--host") + 1] != "fixture-client@fd7a:115c:a1e0::3":
+    raise SystemExit(f"upgrade lost the inherited remote publisher: {publisher!r}")
+if not estate or estate[estate.index("--host") + 1] != "fixture-client@fd7a:115c:a1e0::3":
+    raise SystemExit(f"upgrade did not add the inherited estate census: {config!r}")
 PY
 native_hash="$(shasum -a 256 "$NATIVE_ADAPTERS" | awk '{print $1}')"
 (
