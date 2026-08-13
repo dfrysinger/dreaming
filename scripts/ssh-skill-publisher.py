@@ -138,6 +138,8 @@ def command_index(arguments: list[str]) -> int:
         "doctor",
         "inventory",
         "install",
+        "snapshot",
+        "reconcile",
         "verify",
         "remove",
     }

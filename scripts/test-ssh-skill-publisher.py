@@ -131,6 +131,44 @@ class SshSkillPublisherTest(unittest.TestCase):
         self.assertEqual(command[:4], ["/usr/bin/ssh", "-6", "-o", "BatchMode=yes"])
         self.assertIn("'sha256:\"value with spaces\"'", command[-1])
 
+    def test_internal_recovery_commands_reach_adapter(self) -> None:
+        args = Namespace(
+            adapter_python="/usr/bin/python3",
+            adapter_script="/fixture/adapter.py",
+            ownership_journal="/fixture/publisher-ownership.json",
+        )
+        snapshot = module.adapter_command(
+            args,
+            [
+                "--vendor",
+                "copilot",
+                "--role",
+                "skill-publisher",
+                "snapshot",
+                "--bundle",
+                str(self.bundle),
+                "--bundle-id",
+                self.bundle_id,
+            ],
+        )
+        self.assertEqual(snapshot[6], "--ownership-journal")
+        self.assertEqual(snapshot[8], "snapshot")
+        reconcile = module.adapter_command(
+            args,
+            [
+                "--vendor",
+                "copilot",
+                "--role",
+                "skill-publisher",
+                "reconcile",
+                "--operation",
+                "/fixture/operation.json",
+                "--outcome",
+                "auto",
+            ],
+        )
+        self.assertEqual(reconcile[8], "reconcile")
+
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
