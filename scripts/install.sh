@@ -578,9 +578,44 @@ attempt_unpublish() {
   return 0
 }
 
+retire_local_copilot_publisher_for_remote_cutover() {
+  [[ -n "${DREAMING_COPILOT_PUBLISHER_SSH_HOST:-}" &&
+     -n "$DREAMING_ADAPTER_CONFIG" &&
+     -f "$DREAMING_ADAPTER_CONFIG" ]] || return 0
+  /usr/bin/python3 - "$DREAMING_ADAPTER_CONFIG" <<'PY'
+import json
+import subprocess
+import sys
+
+path = sys.argv[1]
+config = json.load(open(path, encoding="utf-8"))
+entry = config.get("publishers", {}).get("copilot")
+if not isinstance(entry, dict):
+    raise SystemExit()
+argv = entry.get("argv")
+if not isinstance(argv, list) or not all(isinstance(value, str) for value in argv):
+    raise SystemExit("existing Copilot publisher argv is invalid")
+if any(value.endswith("/scripts/ssh-skill-publisher.py") for value in argv):
+    raise SystemExit()
+result = subprocess.run(
+    [*argv, "remove"],
+    text=True,
+    capture_output=True,
+    timeout=int(entry.get("timeout", 90)),
+)
+try:
+    payload = json.loads(result.stdout.splitlines()[-1])
+except (IndexError, json.JSONDecodeError) as error:
+    raise SystemExit("local Copilot publisher removal returned malformed output") from error
+if result.returncode != 0 or payload.get("ok") is not True:
+    raise SystemExit("local Copilot publisher removal failed")
+PY
+}
+
 cmd_install() {
   local kind label generation
   cmd_prepare
+  retire_local_copilot_publisher_for_remote_cutover
   if [[ "$REQUESTED_COPILOT_MIGRATION" == "1" ]]; then
     "$DREAMING_REPO_ROOT/scripts/migrate-copilot-state.py" apply \
       --legacy-skills "${DREAMING_LEGACY_COPILOT_SKILLS:-$HOME/.copilot/skills}" \
