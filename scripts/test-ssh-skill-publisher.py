@@ -7,7 +7,11 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import subprocess
+import sys
 import tempfile
+import textwrap
 import unittest
 import zipfile
 from argparse import Namespace
@@ -168,6 +172,246 @@ class SshSkillPublisherTest(unittest.TestCase):
             ],
         )
         self.assertEqual(reconcile[8], "reconcile")
+
+    def test_fake_ssh_publication_and_recovery_transaction(self) -> None:
+        fake_ssh = self.root / "ssh"
+        fake_ssh.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env python3
+                import subprocess
+                import sys
+
+                process = subprocess.run(
+                    ["/bin/sh", "-c", sys.argv[-1]],
+                    input=sys.stdin.buffer.read(),
+                    capture_output=True,
+                )
+                sys.stdout.buffer.write(process.stdout)
+                sys.stderr.buffer.write(process.stderr)
+                raise SystemExit(process.returncode)
+                """
+            ),
+            encoding="utf-8",
+        )
+        os.chmod(fake_ssh, 0o755)
+        adapter = self.root / "adapter.py"
+        adapter.write_text(
+            textwrap.dedent(
+                """\
+                #!/usr/bin/env python3
+                import json
+                import pathlib
+                import sys
+
+                COMMANDS = {
+                    "contract", "doctor", "inventory", "install", "snapshot",
+                    "reconcile", "verify", "remove",
+                }
+                args = sys.argv[1:]
+                command = next(value for value in args if value in COMMANDS)
+                journal = pathlib.Path(args[args.index("--ownership-journal") + 1])
+                calls = journal.with_suffix(".calls")
+                calls.parent.mkdir(parents=True, exist_ok=True)
+                with calls.open("a", encoding="utf-8") as handle:
+                    handle.write(command + "\\n")
+
+                def option(name):
+                    return args[args.index(name) + 1]
+
+                def load(path, default):
+                    try:
+                        return json.loads(path.read_text(encoding="utf-8"))
+                    except (OSError, json.JSONDecodeError):
+                        return default
+
+                def save(path, value):
+                    path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_text(json.dumps(value), encoding="utf-8")
+
+                def descriptor(bundle, bundle_id):
+                    root = pathlib.Path(bundle)
+                    manifest = load(root / "dreaming-bundle-manifest.json", {})
+                    return {
+                        "vendor": "copilot",
+                        "bundle": str(root),
+                        "bundle_id": bundle_id,
+                        "name": manifest.get("publication_name", "fixture-publication"),
+                        "skills": sorted(
+                            path.parent.name for path in root.glob("*/SKILL.md")
+                        ),
+                    }
+
+                state = load(journal, {})
+                if command == "contract":
+                    result = {
+                        "ok": True,
+                        "protocol": "dreaming.skill-publisher",
+                        "role": "skill-publisher",
+                        "capabilities": [
+                            "content-addressed-bundle",
+                            "ownership-safe-remove",
+                            "exact-inventory",
+                        ],
+                    }
+                elif command == "doctor":
+                    result = {"ok": True, "healthy": True}
+                elif command == "inventory":
+                    row = state.get("copilot")
+                    result = {
+                        "ok": True,
+                        "owned_bundle_ids": [row["bundle_id"]] if row else [],
+                    }
+                elif command == "snapshot":
+                    new = descriptor(option("--bundle"), option("--bundle-id"))
+                    result = {"ok": True, "prior": state.get("copilot"), "new": new}
+                elif command == "install":
+                    row = descriptor(option("--bundle"), option("--bundle-id"))
+                    state["copilot"] = row
+                    save(journal, state)
+                    result = {"ok": True, "installed": True, "bundle_id": row["bundle_id"]}
+                elif command == "verify":
+                    row = state.get("copilot")
+                    bundle_id = option("--bundle-id")
+                    verified = bool(
+                        row
+                        and row.get("bundle_id") == bundle_id
+                        and pathlib.Path(row["bundle"]).is_dir()
+                    )
+                    result = {
+                        "ok": True,
+                        "verified": verified,
+                        "bundle_id": bundle_id if verified else None,
+                    }
+                elif command == "reconcile":
+                    operation = load(pathlib.Path(option("--operation")), {})
+                    outcome = option("--outcome")
+                    commit = outcome == "auto" and operation.get("new")
+                    row = operation.get("new") if commit else operation.get("prior")
+                    if row:
+                        state["copilot"] = row
+                    else:
+                        state.pop("copilot", None)
+                    save(journal, state)
+                    result = {
+                        "ok": True,
+                        "status": "committed" if commit else "rolled_back",
+                        "descriptor": row,
+                    }
+                else:
+                    state.pop("copilot", None)
+                    save(journal, state)
+                    result = {"ok": True, "removed": True}
+                print(json.dumps(result))
+                """
+            ),
+            encoding="utf-8",
+        )
+        receiver_id = self.root / "receiver-id"
+        receiver_id.write_text("fixture-client\n", encoding="ascii")
+        journal = self.root / "publisher-ownership.json"
+        journal.write_text(
+            json.dumps({"claude": {"preserved": True}}), encoding="utf-8"
+        )
+        operations = self.root / "operations"
+        summary = self.root / "summary.json"
+        recovery = self.root / "recovery.json"
+        base = [
+            sys.executable,
+            str(SCRIPT),
+            "--ssh-bin",
+            str(fake_ssh),
+            "--host",
+            "fixture",
+            "--remote-python",
+            sys.executable,
+            "--remote-script",
+            str(SCRIPT),
+            "--remote-adapter-python",
+            sys.executable,
+            "--remote-adapter-script",
+            str(adapter),
+            "--remote-bundle-root",
+            str(self.root / "published"),
+            "--remote-ownership-journal",
+            str(journal),
+            "--remote-operation-root",
+            str(operations),
+            "--remote-receiver-id-file",
+            str(receiver_id),
+            "--expected-receiver-id",
+            "fixture-client",
+            "--expected-receiver-sha",
+            module.sha256_file(SCRIPT),
+            "--expected-adapter-sha",
+            module.sha256_file(adapter),
+            "--summary",
+            str(summary),
+            "--recovery-state",
+            str(recovery),
+            "--",
+            "--vendor",
+            "copilot",
+            "--role",
+            "skill-publisher",
+        ]
+        install = subprocess.run(
+            base
+            + [
+                "install",
+                "--bundle",
+                str(self.bundle),
+                "--bundle-id",
+                self.bundle_id,
+            ],
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        self.assertEqual(install.returncode, 0, install.stdout + install.stderr)
+        result = json.loads(install.stdout)
+        self.assertEqual(result["descriptor"]["skills"], ["learned"])
+        self.assertTrue(summary.is_file())
+        state = json.loads(journal.read_text(encoding="utf-8"))
+        self.assertEqual(state["claude"], {"preserved": True})
+        self.assertEqual(state["copilot"]["bundle_id"], self.bundle_id)
+
+        pending = {
+            "schema_version": 1,
+            "vendor": "copilot",
+            "phase": "installing",
+            "receiver": {
+                "receiver_id": "fixture-client",
+                "receiver_sha256": module.sha256_file(SCRIPT),
+                "adapter_sha256": module.sha256_file(adapter),
+            },
+            "prior": None,
+            "new": state["copilot"],
+        }
+        operations.mkdir(exist_ok=True)
+        (operations / "copilot.json").write_text(
+            json.dumps(pending), encoding="utf-8"
+        )
+        doctor = subprocess.run(
+            base + ["doctor"], text=True, capture_output=True, timeout=30
+        )
+        self.assertEqual(doctor.returncode, 0, doctor.stdout + doctor.stderr)
+        self.assertEqual(
+            json.loads(doctor.stdout)["recovered_operation"]["phase"], "committed"
+        )
+
+        calls = journal.with_suffix(".calls")
+        before = calls.read_text(encoding="utf-8")
+        wrong_receiver = list(base)
+        wrong_receiver[wrong_receiver.index("--expected-receiver-id") + 1] = "wrong"
+        refused = subprocess.run(
+            wrong_receiver + ["doctor"],
+            text=True,
+            capture_output=True,
+            timeout=30,
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertEqual(calls.read_text(encoding="utf-8"), before)
 
 
 if __name__ == "__main__":

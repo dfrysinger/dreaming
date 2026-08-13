@@ -59,20 +59,23 @@ contents. Preserve manual authority over hand-made skills.
   installed on the MacBook through a receiver-verified SSH publisher. Codex
   sessions and review execution remain local to the mini; Codex is not a
   publication target.
-- **Current phase:** implementation. The critical design and its cross-host
-  publication, recovery, rollback, and health checks completed the required
-  two-family design review with no unresolved material finding.
-- **Existing learned catalog:** the MacBook has six learned skills and seven
-  Git commits. The mini learned-skill repository is empty and must be seeded
-  with that exact history before publication cutover.
-- **Existing publication:** the MacBook journal and six-skill Copilot bundle
-  are the initial verified publication. The mini currently has its own empty
-  Dreaming bundle registration, which must be removed before remote-only
-  publisher activation.
-- **Live-proof status:** pending for this placement change. Prior ownership and
-  remote transcript-source proof remains valid, but publication proof must show
-  six dashboard skills, one MacBook Copilot bundle, no mini Copilot bundle, and
-  an unchanged MacBook halt and scheduler state.
+- **Current phase:** live validation. The candidate is committed locally
+  through `e45a4ba`; the mini is halted on the remote-only topology while the
+  corrected activation generation completes certification.
+- **Existing learned catalog:** the mini now contains the exact six learned
+  skills and seven-commit MacBook history at
+  `b4b1e3a6ff4612e5e6a3dc71b8bbf5e1e1269932`, with a clean worktree and no
+  Git remote.
+- **Existing publication:** the mini has no Dreaming Copilot registration.
+  Its receiver-bound SSH publisher has replaced the MacBook Copilot
+  registration with the exact six-skill content-addressed bundle while
+  preserving the MacBook Claude and Codex descriptors and their shared bundle.
+- **Live-proof status:** the real SSH install and verify transaction passed,
+  the mini summary is committed and receiver-bound, publication recovery is
+  clear, all six skills resolve on the MacBook, the mini has no local bundle,
+  and the MacBook halt and unloaded scheduler are unchanged. Final installed
+  certification, enable, dashboard observation, rollback proof, and
+  implementation review remain.
 - **Completed baseline:** shadow lifecycle landed locally at `10c20c1`.
 - **Curator review:** completed without skill mutation. It scanned `73` managed
   skills and proposed `9` agent-created consolidations into `3` new umbrellas
@@ -82,7 +85,7 @@ contents. Preserve manual authority over hand-made skills.
   ambiguous SSH recovery, ownership-state separation, wrong-host refusal,
   existing-publication adoption, shared Claude/Codex bundle retention, and
   reverse-placement findings.
-- **Remaining:** implement the receiver and transport, persist remote publisher
-  configuration, seed the learned catalog, pass targeted and installed tests,
-  prove the real two-host placement, complete implementation review, and commit
-  locally without pushing Dreaming.
+- **Remaining:** complete installed certification for `e45a4ba`, enable the
+  certified generation, capture the dashboard and reverse-placement proof,
+  complete implementation review and final validation, update the acceptance
+  receipt and design checklist, and commit locally without pushing Dreaming.

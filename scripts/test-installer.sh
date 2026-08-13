@@ -411,6 +411,39 @@ run_native_persisted() {
     "$INSTALLER" "$@"
 }
 
+LOCAL_PUBLISHER_LOG="$NATIVE/local-publisher.log"
+FAKE_LOCAL_PUBLISHER="$NATIVE/fake-local-publisher.py"
+cat > "$FAKE_LOCAL_PUBLISHER" <<'PY'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+with open(os.environ["LOCAL_PUBLISHER_LOG"], "a", encoding="utf-8") as handle:
+    handle.write(json.dumps(sys.argv[1:]) + "\n")
+print(json.dumps({"ok": True, "removed": True}))
+PY
+chmod +x "$FAKE_LOCAL_PUBLISHER"
+(
+  export DREAMING_ENABLE_COPILOT_COMPAT=0
+  export DREAMING_CONFIGURE_NATIVE_ADAPTERS=1
+  export DREAMING_SESSION_SOURCES=copilot
+  export DREAMING_REVIEW_EXECUTORS=copilot
+  export DREAMING_SKILL_TARGETS=copilot
+  export DREAMING_SOURCE_EXECUTOR_ALLOW='copilot>copilot'
+  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  run_native install >/dev/null
+)
+python3 - "$NATIVE/dreaming-state/adapters.json" "$FAKE_LOCAL_PUBLISHER" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+config = json.load(open(path, encoding="utf-8"))
+config["publishers"]["copilot"]["argv"] = [sys.executable, sys.argv[2]]
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle)
+PY
 (
   export DREAMING_ENABLE_COPILOT_COMPAT=0
   export DREAMING_CONFIGURE_NATIVE_ADAPTERS=1
@@ -427,8 +460,17 @@ run_native_persisted() {
   export DREAMING_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY=6
   export DREAMING_COPILOT_PUBLISHER_RECEIVER_ID='fixture-receiver'
   export DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER=1
+  export LOCAL_PUBLISHER_LOG
   run_native install >/dev/null
 )
+python3 - "$LOCAL_PUBLISHER_LOG" <<'PY'
+import json
+import sys
+
+calls = [json.loads(line) for line in open(sys.argv[1], encoding="utf-8")]
+if calls != [["remove"]]:
+    raise SystemExit(f"local publisher was not retired exactly once: {calls!r}")
+PY
 NATIVE_ADAPTERS="$NATIVE/dreaming-state/adapters.json"
 grep -q '"copilot"' "$NATIVE_ADAPTERS"
 python3 - "$NATIVE_ADAPTERS" <<'PY'
@@ -598,6 +640,35 @@ import sys
 argv = json.load(open(sys.argv[1], encoding="utf-8"))["sources"]["copilot"]["argv"]
 if any(item.endswith("/scripts/ssh-session-source.py") for item in argv):
     raise SystemExit(f"explicit local-source reset was ignored: {argv!r}")
+PY
+printf '{}\n' > "$NATIVE/dreaming-state/remote-publication-summary.json"
+printf '{}\n' > "$NATIVE/dreaming-state/publication-recovery-required.json"
+(
+  export DREAMING_SESSION_SOURCES=copilot
+  export DREAMING_REVIEW_EXECUTORS=copilot
+  export DREAMING_SKILL_TARGETS=''
+  export DREAMING_SOURCE_EXECUTOR_ALLOW='copilot>copilot'
+  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  export DREAMING_COPILOT_PUBLISHER_SSH_HOST=''
+  export DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER=0
+  export DREAMING_DETACH_REMOTE_COPILOT_PUBLISHER=1
+  run_native_persisted install >/dev/null
+)
+python3 - "$NATIVE_ADAPTERS" "$NATIVE/dreaming-state" <<'PY'
+import json
+import pathlib
+import sys
+
+config = json.load(open(sys.argv[1], encoding="utf-8"))
+if "copilot" in config["publishers"] or "copilot" in config["retired_publishers"]:
+    raise SystemExit(f"detached remote publisher remained actionable: {config!r}")
+state = pathlib.Path(sys.argv[2])
+for name in (
+    "remote-publication-summary.json",
+    "publication-recovery-required.json",
+):
+    if (state / name).exists():
+        raise SystemExit(f"detached remote publisher mirror remained: {name}")
 PY
 (
   export DREAMING_SESSION_SOURCES=codex

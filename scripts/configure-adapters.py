@@ -277,8 +277,20 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
     sources = selected("DREAMING_SESSION_SOURCES", detected)
     executors = selected("DREAMING_REVIEW_EXECUTORS", sources)
     targets = selected("DREAMING_SKILL_TARGETS", sources)
+    detach_remote_copilot = (
+        os.environ.get("DREAMING_DETACH_REMOTE_COPILOT_PUBLISHER") == "1"
+    )
     if not sources or not executors:
         raise ConfigError("at least one session source and review executor are required")
+    if detach_remote_copilot and (
+        "copilot" in targets
+        or os.environ.get("DREAMING_COPILOT_PUBLISHER_SSH_HOST")
+        or os.environ.get("DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER") == "1"
+    ):
+        raise ConfigError(
+            "remote Copilot detach requires no Copilot target, no publisher host, "
+            "and remote-only enforcement disabled"
+        )
     required = set(sources) | set(executors) | set(targets)
     missing = sorted(vendor for vendor in required if not executable(vendor))
     if missing:
@@ -331,6 +343,18 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
         if isinstance(values, dict):
             for vendor, entry in values.items():
                 if vendor in VENDORS and vendor not in targets and isinstance(entry, dict):
+                    argv = entry.get("argv", [])
+                    if (
+                        detach_remote_copilot
+                        and vendor == "copilot"
+                        and isinstance(argv, list)
+                        and any(
+                            isinstance(value, str)
+                            and value.endswith("/scripts/ssh-skill-publisher.py")
+                            for value in argv
+                        )
+                    ):
+                        continue
                     retired_publishers[vendor] = entry
     config: dict[str, object] = {
         "contract_version": 1,
@@ -368,6 +392,9 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
         json.dumps(config, indent=2, sort_keys=True) + "\n", encoding="utf-8"
     )
     os.replace(temporary, output)
+    if detach_remote_copilot:
+        (state_dir / "remote-publication-summary.json").unlink(missing_ok=True)
+        (state_dir / "publication-recovery-required.json").unlink(missing_ok=True)
     return config
 
 
