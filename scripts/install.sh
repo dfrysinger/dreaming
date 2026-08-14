@@ -185,6 +185,16 @@ DREAMING_STATE_DIR="${REQUESTED_STATE_DIR:-${DREAMING_STATE_DIR:-${XDG_STATE_HOM
 DREAMING_SKILLS_ROOT="${REQUESTED_SKILLS_ROOT:-${DREAMING_SKILLS_ROOT:-$DREAMING_DATA_DIR/skills}}"
 DREAMING_DEPS_DIR="${REQUESTED_DEPS_DIR:-${DREAMING_DEPS_DIR:-$DREAMING_DATA_DIR/deps}}"
 DREAMING_ADAPTER_CONFIG="${REQUESTED_ADAPTER_CONFIG:-${DREAMING_ADAPTER_CONFIG:-}}"
+DREAMING_ADAPTER_CONFIG_MANAGED="${DREAMING_ADAPTER_CONFIG_MANAGED:-}"
+if [[ -n "$REQUESTED_ADAPTER_CONFIG" ]]; then
+  DREAMING_ADAPTER_CONFIG_MANAGED=0
+fi
+[[ -z "$DREAMING_ADAPTER_CONFIG_MANAGED" ||
+   "$DREAMING_ADAPTER_CONFIG_MANAGED" == "0" ||
+   "$DREAMING_ADAPTER_CONFIG_MANAGED" == "1" ]] || {
+  echo "DREAMING_ADAPTER_CONFIG_MANAGED must be 0, 1, or empty" >&2
+  exit 2
+}
 DREAMING_ENABLE_COPILOT_COMPAT="${REQUESTED_COPILOT_COMPAT:-${DREAMING_ENABLE_COPILOT_COMPAT:-1}}"
 DREAMING_REPO_ROOT="${REQUESTED_REPO_ROOT:-${DREAMING_REPO_ROOT:-$DEFAULT_REPO_ROOT}}"
 DREAMING_RECEIPT_FILE="${REQUESTED_RECEIPT_FILE:-${DREAMING_RECEIPT_FILE:-}}"
@@ -229,7 +239,8 @@ fi
 export_runtime_env() {
   export DREAMING_REPO_ROOT DREAMING_SHARED_SKILLS_ROOT DREAMING_DATA_DIR
   export DREAMING_STATE_DIR DREAMING_SKILLS_ROOT DREAMING_DEPS_DIR
-  export DREAMING_ADAPTER_CONFIG DREAMING_ENABLE_COPILOT_COMPAT
+  export DREAMING_ADAPTER_CONFIG DREAMING_ADAPTER_CONFIG_MANAGED
+  export DREAMING_ENABLE_COPILOT_COMPAT
   export DREAMING_CONFIG_FILE DREAMING_CONFIG_POINTER DREAMING_RECEIPT_FILE
   export DREAMING_SHARED_BUNDLE_ID DREAMING_SHARED_SOURCE_KIND
   export DREAMING_SHARED_PROTOCOL DREAMING_SHARED_REVISION
@@ -559,6 +570,20 @@ for role, suffix in (
         isinstance(value, str) and value.endswith(suffix) for value in argv
     ):
         raise SystemExit(0)
+for role in ("sources", "executors", "publishers"):
+    entries = config.get(role, {})
+    if not isinstance(entries, dict):
+        continue
+    for entry in entries.values():
+        argv = entry.get("argv", []) if isinstance(entry, dict) else []
+        if isinstance(argv, list) and any(
+            isinstance(value, str)
+            and value.endswith(
+                "/skills/skill-review/scripts/dreaming-vendor-adapter.py"
+            )
+            for value in argv
+        ):
+            raise SystemExit(0)
 for role, suffix in (
     ("estate_census", "/scripts/ssh-estate-census.py"),
     ("estate_curator", "/scripts/ssh-estate-curator.py"),
@@ -576,21 +601,36 @@ PY
 configure_native_adapters() {
   local generated="$DREAMING_STATE_DIR/adapters.json" candidate status
   if [[ -n "$REQUESTED_ADAPTER_CONFIG" ]]; then
+    DREAMING_ADAPTER_CONFIG_MANAGED=0
     return 0
   fi
   if [[ "$REQUESTED_ADAPTER_DESIRED_STATE" == "1" ]]; then
     DREAMING_ADAPTER_CONFIG="$generated"
+    DREAMING_ADAPTER_CONFIG_MANAGED=1
   elif [[ -n "$DREAMING_ADAPTER_CONFIG" ]]; then
-    if native_adapter_is_managed "$DREAMING_ADAPTER_CONFIG"; then
-      :
-    else
-      status=$?
-      [[ "$status" == "1" ]] && return 0
-      return "$status"
+    if [[ "$DREAMING_ADAPTER_CONFIG_MANAGED" == "0" ]]; then
+      return 0
+    fi
+    if [[ "$DREAMING_ADAPTER_CONFIG_MANAGED" != "1" ]]; then
+      if [[ "$DREAMING_ADAPTER_CONFIG" != "$generated" ]]; then
+        DREAMING_ADAPTER_CONFIG_MANAGED=0
+        return 0
+      fi
+      if native_adapter_is_managed "$DREAMING_ADAPTER_CONFIG"; then
+        DREAMING_ADAPTER_CONFIG_MANAGED=1
+      else
+        status=$?
+        if [[ "$status" == "1" ]]; then
+          DREAMING_ADAPTER_CONFIG_MANAGED=0
+          return 0
+        fi
+        return "$status"
+      fi
     fi
   elif [[ "$REQUESTED_NATIVE_ADAPTERS" == "1" ||
           "$DREAMING_ENABLE_COPILOT_COMPAT" == "0" ]]; then
     DREAMING_ADAPTER_CONFIG="$generated"
+    DREAMING_ADAPTER_CONFIG_MANAGED=1
   else
     return 0
   fi

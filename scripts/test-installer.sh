@@ -662,6 +662,44 @@ native_hash="$(shasum -a 256 "$NATIVE_ADAPTERS" | awk '{print $1}')"
 )
 [[ "$(shasum -a 256 "$NATIVE_ADAPTERS" | awk '{print $1}')" == "$native_hash" ]] ||
   { echo "ordinary reinstall rewrote persisted adapter config" >&2; exit 1; }
+cp "$NATIVE_ADAPTERS" "$NATIVE/managed-adapters.before-local-upgrade.json"
+cp "$NATIVE/config.env" "$NATIVE/config.before-local-upgrade.env"
+python3 - "$NATIVE_ADAPTERS" "$NATIVE/config.env" "$ROOT" <<'PY'
+import json
+import pathlib
+import sys
+
+adapters = pathlib.Path(sys.argv[1])
+config_env = pathlib.Path(sys.argv[2])
+local_adapter = str(
+    pathlib.Path(sys.argv[3])
+    / "skills/skill-review/scripts/dreaming-vendor-adapter.py"
+)
+config = json.loads(adapters.read_text(encoding="utf-8"))
+for role in ("sources", "executors", "publishers"):
+    for entry in config.get(role, {}).values():
+        entry["argv"][1] = local_adapter
+config.pop("estate_census", None)
+config.pop("estate_curator", None)
+adapters.write_text(
+    json.dumps(config, indent=2, sort_keys=True) + "\n",
+    encoding="utf-8",
+)
+lines = [
+    line
+    for line in config_env.read_text(encoding="utf-8").splitlines()
+    if not line.startswith("DREAMING_ADAPTER_CONFIG_MANAGED=")
+]
+config_env.write_text("\n".join(lines) + "\n", encoding="utf-8")
+PY
+(
+  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  run_native_persisted install >/dev/null
+)
+grep -Eq "^DREAMING_ADAPTER_CONFIG_MANAGED='?1'?$" "$NATIVE/config.env" ||
+  { echo "legacy local adapter ownership was not upgraded" >&2; exit 1; }
+cp "$NATIVE/managed-adapters.before-local-upgrade.json" "$NATIVE_ADAPTERS"
+cp "$NATIVE/config.before-local-upgrade.env" "$NATIVE/config.env"
 (
   export DREAMING_SESSION_SOURCES=copilot
   export DREAMING_REVIEW_EXECUTORS=copilot
@@ -809,7 +847,18 @@ if config["publishers"]["codex"].get("timeout") != 90:
     raise SystemExit(f"publisher timeout does not cover native publication: {config!r}")
 PY
 EXTERNAL_CONFIG="$NATIVE/external-adapters.json"
-printf '{"externally_managed":true}\n' > "$EXTERNAL_CONFIG"
+cat > "$EXTERNAL_CONFIG" <<JSON
+{
+  "estate_curator": {
+    "argv": [
+      "/usr/bin/python3",
+      "$ROOT/scripts/ssh-estate-curator.py",
+      "--custom-external-route"
+    ]
+  },
+  "externally_managed": true
+}
+JSON
 external_hash="$(shasum -a 256 "$EXTERNAL_CONFIG" | awk '{print $1}')"
 (
   export DREAMING_ADAPTER_CONFIG="$EXTERNAL_CONFIG"
@@ -823,6 +872,14 @@ external_hash="$(shasum -a 256 "$EXTERNAL_CONFIG" | awk '{print $1}')"
 )
 [[ "$(shasum -a 256 "$EXTERNAL_CONFIG" | awk '{print $1}')" == "$external_hash" ]] ||
   { echo "installer overwrote externally managed adapter config" >&2; exit 1; }
+(
+  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  run_native_persisted install >/dev/null
+)
+[[ "$(shasum -a 256 "$EXTERNAL_CONFIG" | awk '{print $1}')" == "$external_hash" ]] ||
+  { echo "persisted reinstall overwrote external estate adapter config" >&2; exit 1; }
+grep -Eq "^DREAMING_ADAPTER_CONFIG_MANAGED='?0'?$" "$NATIVE/config.env" ||
+  { echo "external adapter ownership was not persisted" >&2; exit 1; }
 echo "PASS  desired adapter state regenerates only when explicitly requested"
 
 (

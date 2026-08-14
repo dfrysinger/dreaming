@@ -448,6 +448,14 @@ def materialize() -> dict[str, Any]:
             lines.append(
                 f"DREAMING_ADAPTER_CONFIG={shell_quote(str(canonical(Path(adapter_config))))}"
             )
+            managed = os.environ.get("DREAMING_ADAPTER_CONFIG_MANAGED", "")
+            if managed not in {"0", "1"}:
+                raise DependencyError(
+                    "DREAMING_ADAPTER_CONFIG_MANAGED must be 0 or 1"
+                )
+            lines.append(
+                f"DREAMING_ADAPTER_CONFIG_MANAGED={shell_quote(managed)}"
+            )
         if public is not None:
             lines.append(f"SKILLS_REPO_ROOT={shell_quote(str(public))}")
         atomic_write(config, "\n".join(lines) + "\n")
