@@ -112,6 +112,7 @@ class Fixture:
         runtime_before = self.runtime_inventory()
         request_payload = {
             "schema_version": 1,
+            "protocol": "dreaming.plugin-settings",
             "operation_id": "fixture-disable",
             "action": "disable",
             "plugin": self.plugin,
@@ -191,6 +192,7 @@ class Fixture:
         ledger = module.load_ledger(self.transactions)
         payload = {
             "schema_version": 1,
+            "protocol": "dreaming.plugin-settings",
             "operation_id": operation_id,
             "action": "restore",
             "plugin": self.plugin,
@@ -315,6 +317,7 @@ class StackFixture:
         ledger = module.load_ledger(self.transactions)
         payload = {
             "schema_version": 1,
+            "protocol": "dreaming.plugin-settings",
             "operation_id": operation_id,
             "action": "disable",
             "plugin": plugin,
@@ -360,6 +363,7 @@ class StackFixture:
         ledger = module.load_ledger(self.transactions)
         payload = {
             "schema_version": 1,
+            "protocol": "dreaming.plugin-settings",
             "operation_id": operation_id,
             "action": "restore",
             "plugin": plugin,
@@ -416,6 +420,25 @@ class PluginSettingsTransactionTest(unittest.TestCase):
                     ],
                     False,
                 )
+
+    def test_qualification_is_scoped_to_source_type_and_copilot_version(
+        self,
+    ) -> None:
+        fixture = Fixture(self.root / "source-scope")
+        request = copy.deepcopy(fixture.request)
+        request["plugin"] = {
+            "plugin_id": "other@market",
+            "source_identity": "installed:market/other",
+            "version": "2.0.0",
+            "source_type": "marketplace",
+            "settings_key": "other@market",
+        }
+        module.validate_qualification(fixture.qualification, request)
+        request["copilot_version"] = "later"
+        with self.assertRaisesRegex(
+            module.SettingsError, "plugin-source-unqualified"
+        ):
+            module.validate_qualification(fixture.qualification, request)
 
     def test_absent_key_is_enabled_only_with_matching_runtime_proof(self) -> None:
         fixture = Fixture(self.root / "absent", prior_present=False)

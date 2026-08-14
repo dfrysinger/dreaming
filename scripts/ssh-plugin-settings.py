@@ -21,6 +21,13 @@ class TransportError(RuntimeError):
     pass
 
 
+def positive_int(value: str) -> int:
+    parsed = int(value)
+    if parsed < 1:
+        raise argparse.ArgumentTypeError("must be a positive integer")
+    return parsed
+
+
 def sha256_file(path: Path) -> str:
     value = hashlib.sha256()
     with path.open("rb") as handle:
@@ -34,7 +41,9 @@ def emit(value: dict[str, Any], status: int) -> None:
     raise SystemExit(status)
 
 
-def identity(args: argparse.Namespace) -> dict[str, str]:
+def identity(
+    args: argparse.Namespace,
+) -> tuple[dict[str, str], dict[str, Path]]:
     try:
         receiver_id = (
             Path(args.receiver_id_file)
@@ -45,13 +54,11 @@ def identity(args: argparse.Namespace) -> dict[str, str]:
         )
     except OSError as error:
         raise TransportError("receiver-identity-missing") from error
-    paths = {
-        "receiver_sha256": Path(__file__).resolve(),
-        "transaction_sha256": Path(args.transaction_script).expanduser().resolve(),
-        "runtime_verifier_sha256": Path(
-            args.runtime_verifier
-        ).expanduser().resolve(),
-        "estate_sha256": Path(args.estate_script).expanduser().resolve(),
+    inputs = {
+        "receiver_sha256": Path(__file__),
+        "transaction_sha256": Path(args.transaction_script).expanduser(),
+        "runtime_verifier_sha256": Path(args.runtime_verifier).expanduser(),
+        "estate_sha256": Path(args.estate_script).expanduser(),
     }
     expected = {
         "receiver_sha256": args.expected_receiver_sha,
@@ -62,24 +69,29 @@ def identity(args: argparse.Namespace) -> dict[str, str]:
     if receiver_id != args.expected_receiver_id:
         raise TransportError("receiver-identity-mismatch")
     result = {"receiver_id": receiver_id}
-    for key, path in paths.items():
-        if path.is_symlink() or not path.is_file():
+    resolved: dict[str, Path] = {}
+    for key, path in inputs.items():
+        if path.is_symlink():
             raise TransportError("receiver-code-unavailable")
-        result[key] = sha256_file(path)
+        resolved[key] = path.resolve()
+        if not resolved[key].is_file():
+            raise TransportError("receiver-code-unavailable")
+        result[key] = sha256_file(resolved[key])
         if result[key] != expected[key]:
             raise TransportError("receiver-code-mismatch")
-    return result
+    return result, resolved
 
 
 def transaction_command(
     args: argparse.Namespace,
     request_path: str,
+    paths: dict[str, Path],
 ) -> list[str]:
     runtime = [
         args.runtime_python,
-        args.runtime_verifier,
+        str(paths["runtime_verifier_sha256"]),
         "--estate-script",
-        args.estate_script,
+        str(paths["estate_sha256"]),
         "--expected-settings",
         args.settings,
         "--target-host-id",
@@ -93,7 +105,7 @@ def transaction_command(
     ]
     return [
         args.transaction_python,
-        args.transaction_script,
+        str(paths["transaction_sha256"]),
         args.action,
         "--request",
         request_path,
@@ -126,7 +138,7 @@ def parse_single_result(stdout: bytes) -> dict[str, Any]:
 
 
 def receive(args: argparse.Namespace) -> None:
-    receiver = identity(args)
+    receiver, paths = identity(args)
     raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
     if not raw or len(raw) > MAX_REQUEST_BYTES:
         raise TransportError("request-size-invalid")
@@ -142,7 +154,9 @@ def receive(args: argparse.Namespace) -> None:
             request.flush()
             request.seek(0)
             process = subprocess.run(
-                transaction_command(args, f"/dev/fd/{request.fileno()}"),
+                transaction_command(
+                    args, f"/dev/fd/{request.fileno()}", paths
+                ),
                 capture_output=True,
                 check=False,
                 timeout=args.timeout,
@@ -213,6 +227,8 @@ def remote_command(args: argparse.Namespace) -> list[str]:
         "BatchMode=yes",
         "-o",
         "ConnectTimeout=15",
+        "-o",
+        "StrictHostKeyChecking=yes",
         "--",
         args.host,
         shlex.join(receiver),
@@ -224,9 +240,16 @@ def local(args: argparse.Namespace) -> None:
         raise TransportError("receiver-host-invalid")
     if sha256_file(Path(__file__).resolve()) != args.expected_local_sha:
         raise TransportError("local-proxy-code-mismatch")
-    raw = Path(args.request).read_bytes()
-    if not raw or len(raw) > MAX_REQUEST_BYTES:
+    request = Path(args.request)
+    if (
+        request.is_symlink()
+        or not request.is_file()
+        or request.stat().st_size < 1
+        or request.stat().st_size > MAX_REQUEST_BYTES
+    ):
         raise TransportError("request-size-invalid")
+    with request.open("rb") as handle:
+        raw = handle.read(MAX_REQUEST_BYTES + 1)
     try:
         process = subprocess.run(
             remote_command(args),
@@ -277,7 +300,7 @@ def receiver_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-transaction-sha", required=True)
     parser.add_argument("--expected-runtime-verifier-sha", required=True)
     parser.add_argument("--expected-estate-sha", required=True)
-    parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--timeout", type=positive_int, default=300)
     return parser
 
 
@@ -311,7 +334,7 @@ def local_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-transaction-sha", required=True)
     parser.add_argument("--expected-runtime-verifier-sha", required=True)
     parser.add_argument("--expected-estate-sha", required=True)
-    parser.add_argument("--timeout", type=int, default=300)
+    parser.add_argument("--timeout", type=positive_int, default=300)
     return parser
 
 
@@ -319,6 +342,7 @@ def main() -> None:
     try:
         if "--receive" in sys.argv[1:]:
             receive(receiver_parser().parse_args())
+            return
         local(local_parser().parse_args())
     except (TransportError, OSError) as error:
         emit(

@@ -551,6 +551,7 @@ class MacOSSwapper:
 def validate_request(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "schema_version",
+        "protocol",
         "operation_id",
         "action",
         "plugin",
@@ -569,6 +570,7 @@ def validate_request(value: Any) -> dict[str, Any]:
     evidence = value.get("evidence")
     if (
         value.get("schema_version") != SCHEMA_VERSION
+        or value.get("protocol") != "dreaming.plugin-settings"
         or value.get("action") != "disable"
         or not valid_safe_id(value.get("operation_id"))
         or not isinstance(value.get("copilot_version"), str)
@@ -625,6 +627,7 @@ def validate_request(value: Any) -> dict[str, Any]:
 def validate_restore_request(value: Any) -> dict[str, Any]:
     if not isinstance(value, dict) or set(value) != {
         "schema_version",
+        "protocol",
         "operation_id",
         "action",
         "plugin",
@@ -644,6 +647,7 @@ def validate_restore_request(value: Any) -> dict[str, Any]:
     evidence = value.get("evidence")
     if (
         value.get("schema_version") != SCHEMA_VERSION
+        or value.get("protocol") != "dreaming.plugin-settings"
         or value.get("action") != "restore"
         or not valid_safe_id(value.get("operation_id"))
         or not isinstance(value.get("copilot_version"), str)
@@ -1712,6 +1716,8 @@ def main() -> None:
         "--runtime-verifier", required=True, nargs=argparse.REMAINDER
     )
     args = parser.parse_args()
+    if not args.runtime_verifier:
+        parser.error("--runtime-verifier must be the final non-empty command")
     try:
         settings_path = Path(
             os.path.abspath(os.path.expanduser(args.settings))

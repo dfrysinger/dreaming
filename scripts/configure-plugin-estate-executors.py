@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import fcntl
 import json
 import os
 import tempfile
@@ -172,6 +173,12 @@ def configure(args: argparse.Namespace) -> dict[str, str]:
             "curator_state",
         },
     )
+    digests = (
+        args.expected_receiver_sha,
+        args.expected_transaction_sha,
+        args.expected_runtime_verifier_sha,
+        args.expected_estate_sha,
+    )
     if (
         set(executors.get("executors", {})) != ACTIONS
         or set(authority.get("adapters", {})) != ACTIONS
@@ -180,6 +187,20 @@ def configure(args: argparse.Namespace) -> dict[str, str]:
         or not args.adapter.is_file()
         or args.proxy.is_symlink()
         or not args.proxy.is_file()
+        or not args.adapter.is_absolute()
+        or not args.proxy.is_absolute()
+        or not Path(args.python).is_absolute()
+        or Path(args.python).is_symlink()
+        or not Path(args.python).is_file()
+        or not args.host
+        or args.host.startswith("-")
+        or args.timeout < 1
+        or any(
+            len(value) != 64
+            or any(character not in "0123456789abcdef" for character in value)
+            for value in digests
+        )
+        or not Path(authority["halt_switch"]).is_file()
     ):
         raise ConfigError("estate-action-config-invalid")
     for kind, action in (
@@ -189,6 +210,11 @@ def configure(args: argparse.Namespace) -> dict[str, str]:
         executors["executors"][kind] = {
             "argv": plugin_argv(args, action),
             "timeout": args.timeout + 30,
+        }
+        authority["receivers"][kind] = {
+            "executor_receiver": None,
+            "receiver_id": args.expected_receiver_id,
+            "receiver_sha256": "sha256:" + args.expected_receiver_sha,
         }
     executors["config_sha256"] = digest(
         {
@@ -221,10 +247,14 @@ def configure(args: argparse.Namespace) -> dict[str, str]:
             if key != "config_sha256"
         }
     )
-    executor_mode = args.executors_config.stat().st_mode & 0o777
-    authority_mode = args.authority_config.stat().st_mode & 0o777
-    atomic_json(args.executors_config, executors, executor_mode)
-    atomic_json(args.authority_config, authority, authority_mode)
+    executor_mode = args.executors_config.stat().st_mode & 0o7777
+    authority_mode = args.authority_config.stat().st_mode & 0o7777
+    lock_path = args.authority_config.parent / ".configure.lock"
+    lock_descriptor = os.open(lock_path, os.O_RDWR | os.O_CREAT, 0o600)
+    with os.fdopen(lock_descriptor, "r+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        atomic_json(args.executors_config, executors, executor_mode)
+        atomic_json(args.authority_config, authority, authority_mode)
     return {
         "executors_config_sha256": executors["config_sha256"],
         "authority_config_sha256": authority["config_sha256"],

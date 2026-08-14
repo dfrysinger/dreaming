@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.util
 import json
 import sys
@@ -30,9 +31,13 @@ def load_estate(path: Path) -> Any:
 
 
 def inventory(args: argparse.Namespace) -> dict[str, Any]:
-    settings = Path(args.settings).expanduser().resolve()
-    expected_settings = Path(args.expected_settings).expanduser().resolve()
-    if settings != expected_settings or settings.is_symlink() or not settings.is_file():
+    settings_input = Path(args.settings).expanduser()
+    expected_input = Path(args.expected_settings).expanduser()
+    if settings_input.is_symlink() or expected_input.is_symlink():
+        raise InventoryError("settings identity mismatch")
+    settings = settings_input.resolve()
+    expected_settings = expected_input.resolve()
+    if settings != expected_settings or not settings.is_file():
         raise InventoryError("settings identity mismatch")
     collector = load_estate(Path(args.estate_script).expanduser().resolve())
     try:
@@ -54,6 +59,19 @@ def inventory(args: argparse.Namespace) -> dict[str, Any]:
     if len(plugins) != 1:
         raise InventoryError("plugin identity is unavailable")
     plugin = plugins[0]
+    scope = census.get("scope")
+    unresolved = census.get("unresolved_mappings")
+    evidence = census.get("evidence")
+    if (
+        not isinstance(scope, dict)
+        or scope.get("complete") is not True
+        or unresolved != []
+        or not isinstance(evidence, dict)
+        or evidence.get("settings_path") != str(settings)
+        or evidence.get("settings_sha256")
+        != hashlib.sha256(settings.read_bytes()).hexdigest()
+    ):
+        raise InventoryError("estate census is incomplete")
     package_identity = {
         key: plugin.get(key)
         for key in ("plugin_id", "source_identity", "version")
@@ -77,7 +95,40 @@ def inventory(args: argparse.Namespace) -> dict[str, Any]:
             and item.get("canonical_capability_id") in enabled_ids
         }
     )
-    evidence = census.get("evidence")
+    package_ids_by_plugin: dict[str, set[str]] = {}
+    for package in census.get("plugins", []):
+        if not isinstance(package, dict) or package.get("enabled") is not True:
+            continue
+        capabilities = package.get("capabilities")
+        if (
+            not isinstance(capabilities, dict)
+            or capabilities.get("complete") is not True
+            or capabilities.get("inventory_errors") != []
+        ):
+            raise InventoryError("plugin capability inventory is incomplete")
+        package_id = package.get("plugin_id")
+        if not isinstance(package_id, str) or not package_id:
+            raise InventoryError("plugin capability inventory is malformed")
+        values: set[str] = set()
+        for kind in ("agents", "hooks", "lsp_servers", "mcp_servers", "skills"):
+            items = capabilities.get(kind)
+            if not isinstance(items, list) or not all(
+                isinstance(item, str) and item for item in items
+            ):
+                raise InventoryError("plugin capability inventory is malformed")
+            values.update(
+                f"plugin-package:{package_id}:{kind}:{item}" for item in items
+            )
+        package_ids_by_plugin[package_id] = values
+    package_estate_ids = (
+        set().union(*package_ids_by_plugin.values())
+        if package_ids_by_plugin
+        else set()
+    )
+    enabled_ids.update(package_estate_ids)
+    owned_ids = sorted(
+        set(owned_ids) | package_ids_by_plugin.get(args.plugin_id, set())
+    )
     copilot_version = (
         evidence.get("copilot_version") if isinstance(evidence, dict) else None
     )

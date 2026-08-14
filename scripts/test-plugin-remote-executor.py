@@ -130,7 +130,7 @@ def test_inventory(root: Path, estate: Path) -> None:
         "plugin@direct",
     ]
     process = run(command)
-    assert process.returncode == 0, process.stderr
+    assert process.returncode == 0, (process.stdout, process.stderr)
     value = output(process)
     assert value == {
         "schema_version": 1,
@@ -141,8 +141,19 @@ def test_inventory(root: Path, estate: Path) -> None:
             "version": "v1",
         },
         "plugin_enabled": True,
-        "owned_capability_ids": ["plugin:a", "plugin:b"],
-        "estate_capability_ids": ["personal:x", "plugin:a", "plugin:b"],
+        "owned_capability_ids": [
+            "plugin-package:plugin@direct:agents:./agent.md",
+            "plugin-package:plugin@direct:skills:./skill",
+            "plugin:a",
+            "plugin:b",
+        ],
+        "estate_capability_ids": [
+            "personal:x",
+            "plugin-package:plugin@direct:agents:./agent.md",
+            "plugin-package:plugin@direct:skills:./skill",
+            "plugin:a",
+            "plugin:b",
+        ],
     }
     settings.write_text('{"enabledPlugins":{"plugin@direct":false}}\n')
     value = output(run(command))
@@ -342,7 +353,92 @@ print(json.dumps({
     assert settings.read_bytes() == before
 
 
+def test_qualification_recovery(root: Path) -> None:
+    fixture = root / "qualification-failure"
+    fixture.mkdir()
+    settings = fixture / "settings.json"
+    settings.write_text('{"enabledPlugins":{"fixture@market":true}}\n')
+    settings.chmod(0o600)
+    runtime = fixture / "runtime.py"
+    write(
+        runtime,
+        """import argparse
+import json
+from pathlib import Path
+parser = argparse.ArgumentParser()
+parser.add_argument("--settings", required=True)
+parser.add_argument("--plugin-id", required=True)
+args = parser.parse_args()
+document = json.load(open(args.settings))
+enabled = document["enabledPlugins"].get("fixture@market", True) is not False
+counter = Path(args.settings).with_suffix(".disabled-count")
+if not enabled:
+    count = int(counter.read_text()) + 1 if counter.exists() else 1
+    counter.write_text(str(count))
+    if count > 1:
+        raise SystemExit(2)
+owned = ["plugin:fixture"] if enabled else []
+print(json.dumps({
+    "schema_version": 1,
+    "copilot_version": "1.2.3",
+    "plugin_identity": {
+        "plugin_id": args.plugin_id,
+        "source_identity": "installed:market/fixture",
+        "version": "v1",
+    },
+    "plugin_enabled": enabled,
+    "owned_capability_ids": owned,
+    "estate_capability_ids": ["personal:x", *owned],
+}))
+""",
+    )
+    recovery = fixture / "recovery.json"
+    command = [
+        sys.executable,
+        str(QUALIFIER),
+        "--transaction-script",
+        str(TRANSACTION),
+        "--settings",
+        str(settings),
+        "--transaction-root",
+        str(fixture / "transactions"),
+        "--qualification-root",
+        str(fixture / "qualifications"),
+        "--lock",
+        str(fixture / "lock"),
+        "--recovery-state",
+        str(recovery),
+        "--plugin-id",
+        "fixture@market",
+        "--source-identity",
+        "installed:market/fixture",
+        "--version",
+        "v1",
+        "--source-type",
+        "marketplace",
+        "--settings-key",
+        "fixture@market",
+        "--copilot-version",
+        "1.2.3",
+        "--runtime-verifier",
+        sys.executable,
+        str(runtime),
+    ]
+    process = run(command)
+    assert process.returncode == 2
+    assert output(process)["error"]["code"] == "qualification-restore-required"
+    assert recovery.is_file()
+    state = json.loads(recovery.read_text())
+    provisional = Path(state["qualification_root"])
+    assert provisional.is_dir()
+    assert list(provisional.glob("*.json"))
+    assert json.loads(settings.read_text())["enabledPlugins"][
+        "fixture@market"
+    ] is False
+
+
 def test_configuration(root: Path) -> None:
+    python = str(Path(sys.executable).resolve())
     actions = (
         "personal_archive",
         "personal_restore",
@@ -412,7 +508,7 @@ def test_configuration(root: Path) -> None:
         "--adapter",
         str(ROOT / "estate-action-adapter.py"),
         "--python",
-        sys.executable,
+        python,
         "--proxy",
         str(PROXY),
         "--ssh-bin",
@@ -466,11 +562,13 @@ def test_configuration(root: Path) -> None:
     assert set(first) == {
         "authority_config_sha256",
         "executors_config_sha256",
-    }
+    }, first
     configured = json.loads(executors.read_text())
     argv = configured["executors"]["plugin_disable"]["argv"]
-    assert argv[0:2] == [sys.executable, str(PROXY)]
+    assert argv[0:2] == [python, str(PROXY)]
     assert argv[argv.index("--expected-local-sha") + 1] == digest(PROXY)
+    restore_argv = configured["executors"]["plugin_restore"]["argv"]
+    assert restore_argv[restore_argv.index("--action") + 1] == "restore"
     before = (executors.read_bytes(), authority.read_bytes())
     output(run(command))
     assert (executors.read_bytes(), authority.read_bytes()) == before
@@ -479,26 +577,49 @@ def test_configuration(root: Path) -> None:
 def main() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
+        (root / "halt").touch()
         write(root / "receiver-id", "receiver-one\n")
         (root / "settings.json").write_text("{}\n")
         estate = root / "estate.py"
         write(
             estate,
-            """import json
+            """import hashlib
+import json
 from pathlib import Path
 class EstateError(RuntimeError):
     pass
 def collect(config):
-    enabled = json.loads((Path(config["target_home"]) / "settings.json").read_text()).get("enabledPlugins", {}).get("plugin@direct", True)
+    settings = Path(config["target_home"]) / "settings.json"
+    enabled = json.loads(settings.read_text()).get("enabledPlugins", {}).get("plugin@direct", True)
     owned = ["plugin:a", "plugin:b"] if enabled else []
     return {
-        "plugins": [{"plugin_id": "plugin@direct", "source_identity": "source", "version": "v1", "enabled": enabled}],
+        "scope": {"complete": True},
+        "unresolved_mappings": [],
+        "plugins": [{
+            "plugin_id": "plugin@direct",
+            "source_identity": "source",
+            "version": "v1",
+            "enabled": enabled,
+            "capabilities": {
+                "complete": True,
+                "inventory_errors": [],
+                "agents": ["./agent.md"],
+                "hooks": [],
+                "lsp_servers": [],
+                "mcp_servers": [],
+                "skills": ["./skill"],
+            },
+        }],
         "physical_instances": [
             {"root_class": "plugin", "owner": "plugin@direct", "canonical_capability_id": "plugin:a"},
             {"root_class": "plugin", "owner": "plugin@direct", "canonical_capability_id": "plugin:b"},
         ],
         "enabled_instances": [{"canonical_capability_id": item} for item in owned + ["personal:x"]],
-        "evidence": {"copilot_version": "1.2.3"},
+        "evidence": {
+            "copilot_version": "1.2.3",
+            "settings_path": str(settings.resolve()),
+            "settings_sha256": hashlib.sha256(settings.read_bytes()).hexdigest(),
+        },
     }
 """,
         )
@@ -522,6 +643,7 @@ print(json.dumps({"ok": True, "result": {"action": args.action, "request": reque
         test_receiver(root, estate, transaction)
         test_local_ssh(root, estate, transaction)
         test_qualification(root)
+        test_qualification_recovery(root)
         test_configuration(root)
     print("plugin remote executor tests: PASS")
 
