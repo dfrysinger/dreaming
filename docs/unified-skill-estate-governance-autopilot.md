@@ -72,11 +72,11 @@ met.
   `renamex_np(..., RENAME_SWAP)` to retain the exact displaced settings inode;
   unsupported volumes and unqualified plugin source classes remain
   report-only.
-- **Current phase:** implement complete estate-action evidence binding and
-  trusted mini-side dispatch (CHK-07). CHK-02 through CHK-06 are complete;
-  installed reversible proof remains intentionally deferred until pending
-  actions bind every required authority input and execute through the trusted
-  receiver boundary.
+- **Current phase:** expose truthful complete-estate action, freshness,
+  receipt, disable, restore, and recovery state in the dashboard (CHK-08).
+  CHK-02 through CHK-07 are complete; installed reversible proof remains
+  intentionally deferred until the dashboard can report every resulting state
+  without becoming an authority source.
 - **Implementation order:** census and identity model; estate dashboard and
   unresolved mappings; evaluation and recommendations; remote personal-skill
   archive/restore; atomic settings transaction and source qualification;
@@ -86,8 +86,9 @@ met.
   installed adapter upgrades, provenance authority matrix, sealed retry-safe
   remote personal-skill archive/restore receiver, complete report-only plugin
   capability gate, source-qualified lossless atomic settings disable
-  transaction, and conflict-safe ordered plugin restore ledger. CHK-06 is
-  commit `9713f83`. Never push these commits.
+  transaction, conflict-safe ordered plugin restore ledger, and curator-owned
+  evidence-bound estate action dispatch. CHK-06 is commit `9713f83`; CHK-07 is
+  commit `8d0d61e`. Never push these commits.
 - **Installed state:** the Mac mini completed managed install, self-test, and
   enable for `a4e270b`. The halt switch is absent, the self-test exit code is
   `0`, the dashboard is running, and the remote source, publisher, executors,
@@ -119,6 +120,14 @@ met.
   CLI restore. Three bounded two-family review rounds closed every material
   finding, including whole-ledger loss detection through an external sealed
   anchor.
+- **CHK-07 closure:** 16 deterministic tests exercised current authoritative
+  evidence binding for census, target, dependencies, model, routing,
+  portfolio, policy, proposed estate, receiver, adapter, and halt state;
+  configured authority roots; exact inner-target and receiver joins;
+  concurrent retry safety; malformed and non-UTF-8 adapter output; and
+  dual-fence recovery after persistence failures. Curator and SSH receiver
+  regression suites passed. Bounded two-family review and finding-scoped
+  closure found no remaining material defect.
 - **Completion authority:** only the design's named Definition of Done; do not
   substitute partial unit checks, dashboard rendering, or one successful
   mutation for the complete installed two-host proof.
