@@ -89,11 +89,14 @@ met.
   evidence-bound estate action dispatch, and truthful read-only action,
   receipt, provenance, freshness, and recovery reporting. CHK-06 is commit
   `9713f83`; CHK-07 is commit `8d0d61e`; CHK-08 is commit `f59d564`. Never
-  push these commits.
+  push these commits. Commit `105642b` adds the authority-bound inner-executor
+  bridge, and `5ff87c2` keeps the installed dashboard action check executable.
 - **Installed state:** the Mac mini completed managed install, self-test, and
-  enable for `a4e270b`. The halt switch is absent, the self-test exit code is
-  `0`, the dashboard is running, and the remote source, publisher, executors,
-  and receiver-bound `estate_census` adapter are present.
+  enable for clean candidate `5ff87c2` at activation generation
+  `20260814T110611Z-install-3742`. The halt switch is absent, the self-test
+  result is zero failures, the dashboard is running, and the remote source,
+  publisher, executors, receiver-bound census adapter, and governed action
+  bridge are present.
 - **Live-proof status:** the first installed two-host census passed with a
   content-addressed receipt and complete reconciliation: 93 effective skill
   instances, 107 physical instances, 14 physical-only instances, five plugin
@@ -101,7 +104,10 @@ met.
   Independent collection equivalence, restart persistence, dashboard privacy,
   and receiver/collector identity mismatch failures have passed. Stale-state
   reporting, reversible installed mutation, before/final estate equality, and
-  rollback remain before the complete installed proof can pass.
+  rollback remain before the complete installed proof can pass. A fresh
+  fixture-inclusive census on `5ff87c2` reports 94 effective instances, 108
+  physical instances, 14 physical-only instances, five plugin packages, three
+  enabled plugin packages, and zero unresolved runtime skills.
 - **CHK-04 closure:** the final MacBook live proof found five plugin packages,
   three enabled packages, complete capability inventories, and zero unresolved
   mappings. The estate suite passed 44 tests; core, receiver transport,
@@ -121,14 +127,16 @@ met.
   CLI restore. Three bounded two-family review rounds closed every material
   finding, including whole-ledger loss detection through an external sealed
   anchor.
-- **CHK-07 closure:** 16 deterministic tests exercised current authoritative
+- **CHK-07 closure:** 17 deterministic tests exercised current authoritative
   evidence binding for census, target, dependencies, model, routing,
   portfolio, policy, proposed estate, receiver, adapter, and halt state;
   configured authority roots; exact inner-target and receiver joins;
   concurrent retry safety; malformed and non-UTF-8 adapter output; and
   dual-fence recovery after persistence failures. Curator and SSH receiver
   regression suites passed. Bounded two-family review and finding-scoped
-  closure found no remaining material defect.
+  closure found no remaining material defect. The installed action bridge also
+  passed five focused tests covering all action kinds, request immutability,
+  plugin envelopes, and configuration drift.
 - **CHK-08 closure:** the Estate API now verifies census receipts and receiver
   identities end to end, delegates action verification to the canonical
   CHK-07 validator, distinguishes current, historical, stale, running,
