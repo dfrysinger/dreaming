@@ -80,8 +80,12 @@ met.
   `renamex_np(..., RENAME_SWAP)` to retain the exact displaced settings inode;
   unsupported volumes and unqualified plugin source classes remain
   report-only.
-- **Current phase:** final critical-lane validation and installed
-  certification. CHK-02 through CHK-10 are complete.
+- **Current phase:** final installed whole-estate proof. The reviewed
+  `1baee42` candidate passed managed installation and self-test, then the first
+  forced scheduled review exposed a scheduler integration defect: multi-host
+  mode replaced the agent-owned curator pass with a self-test no-op. The local
+  successor restores the real `scheduled-live` curator pass while retaining
+  the memory-roll no-op.
 - **Implementation order:** census and identity model; estate dashboard and
   unresolved mappings; evaluation and recommendations; remote personal-skill
   archive/restore; atomic settings transaction and source qualification;
@@ -111,11 +115,13 @@ met.
   records sanitized whole-estate recommendations for the dashboard, and turns
   the weekly mini curator into the standing-approved scheduled-live estate
   review.
-- **Installed state:** the Mac mini completed managed install, self-test, and
-  enable for clean candidate `dbcc76a` at activation generation
-  `20260814T132425Z-install-19412`. The self-test result is zero failures, the
-  dashboard is running, and the remote source, publisher, executors,
-  receiver-bound census adapter, and governed action bridge are present.
+- **Installed state:** the Mac mini completed managed install and self-test for
+  clean candidate `1baee42` at activation generation
+  `20260814T191600Z-install-37690`. The self-test result is zero failures. The
+  installation was resumed only through `scripts/install.sh enable`; the halt
+  switch is inactive, the dashboard is running, and the remote source,
+  publisher, executors, receiver-bound census adapter, and governed action
+  bridge are present.
 - **Live-proof status:** CHK-09 passed. The installed Mac mini collected a
   complete fixture-inclusive census, archived the real MacBook fixture through
   the governed receiver, returned the identical result on retry, restored the
@@ -149,9 +155,12 @@ met.
   in a complete sealed census, derives authority instead of trusting callers,
   and replaces prior target decisions across census changes. Three bounded
   two-family review rounds closed all material activation findings. The final
-  local   recommendation test passes. The complete final local daemon self-test also
-  passes with zero failures; the halt-switch warning is expected while the
-  reviewed build awaits installed-mini certification.
+  local recommendation test passes. The complete final local daemon self-test
+  also passes with zero failures. Installed certification then found that
+  `daemon-pass.sh` still classified every non-consolidation multi-host pass as
+  `standalone-noop`, so the curator prompt never ran. The successor candidate
+  routes `skills-prune` through the real bounded Copilot pass and adds a
+  deterministic regression proving the `scheduled-live` prompt is invoked.
 - **CHK-04 closure:** the final MacBook live proof found five plugin packages,
   three enabled packages, complete capability inventories, and zero unresolved
   mappings. The estate suite passed 44 tests; core, receiver transport,

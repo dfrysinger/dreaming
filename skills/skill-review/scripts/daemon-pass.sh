@@ -38,13 +38,24 @@ if [[ -n "${DREAMING_ADAPTER_CONFIG:-}" ]]; then
       echo "DREAM_PASS_RESULT: ok standalone=$SESSION_NAME" | tee -a "$LOG"
       exit 0
     fi
-  elif "$SCRIPT_DIR/dreaming-core.py" selftest | tee -a "$LOG" |
-      grep -q '"ok": true'; then
-    echo "DREAM_PASS_RESULT: ok standalone-noop=$SESSION_NAME" | tee -a "$LOG"
-    exit 0
+  elif [[ "$SESSION_NAME" == "skills-roll" ]]; then
+    if "$SCRIPT_DIR/dreaming-core.py" selftest | tee -a "$LOG" |
+        grep -q '"ok": true'; then
+      echo "DREAM_PASS_RESULT: ok standalone-noop=$SESSION_NAME" | tee -a "$LOG"
+      exit 0
+    fi
+  elif [[ "$SESSION_NAME" != "skills-prune" ]]; then
+    echo "daemon-pass.sh: unsupported standalone pass $SESSION_NAME" >&2
+    exit 2
+  else
+    # Estate curation remains an agent-owned pass even when the deterministic
+    # multi-host core owns transcript consolidation.
+    :
   fi
-  echo "daemon-pass.sh: standalone core failed for $SESSION_NAME" >&2
-  exit 1
+  if [[ "$SESSION_NAME" != "skills-prune" ]]; then
+    echo "daemon-pass.sh: standalone core failed for $SESSION_NAME" >&2
+    exit 1
+  fi
 fi
 
 dreaming_build_plugin_args || exit 1

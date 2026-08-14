@@ -171,7 +171,7 @@ else
 fi
 
 for script in daemon-pass.sh daemon-run.sh daemon-lock.sh daemon-lock.py \
-  dreaming-run.sh dreaming-state.py test-dreaming-daemon.sh \
+  dreaming-run.sh dreaming-state.py test-daemon-pass.sh test-dreaming-daemon.sh \
   test-process-cleanup.sh \
   dreaming-core.py test-dreaming-core.sh dreaming-estate.py \
   test-dreaming-estate.sh dreaming-vendor-adapter.py \
@@ -234,6 +234,11 @@ if run_isolated_test "$SCRIPT_DIR/test-dreaming-daemon.sh" --quick >>"$RESULT" 2
   ok "deterministic dreaming checks"
 else
   bad "deterministic dreaming checks"
+fi
+if run_isolated_test "$SCRIPT_DIR/test-daemon-pass.sh" >>"$RESULT" 2>&1; then
+  ok "scheduled curator pass checks"
+else
+  bad "scheduled curator pass checks"
 fi
 if run_isolated_test "$SCRIPT_DIR/test-process-cleanup.sh" >>"$RESULT" 2>&1; then
   ok "nested process cleanup checks"
