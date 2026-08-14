@@ -627,6 +627,34 @@ if (
 ):
     raise SystemExit(f"upgrade did not add the disabled estate curator route: {config!r}")
 PY
+python3 - "$NATIVE_ADAPTERS" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+config = json.load(open(path, encoding="utf-8"))
+argv = config["estate_curator"]["argv"]
+argv[argv.index("--expected-curator-sha") + 1] = "0" * 64
+with open(path, "w", encoding="utf-8") as handle:
+    json.dump(config, handle, indent=2, sort_keys=True)
+    handle.write("\n")
+PY
+(
+  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  run_native_persisted install >/dev/null
+)
+python3 - "$NATIVE_ADAPTERS" "$ROOT/skills/skill-curator/scripts/curator-run.py" <<'PY'
+import hashlib
+import json
+import pathlib
+import sys
+
+config = json.load(open(sys.argv[1], encoding="utf-8"))
+argv = config["estate_curator"]["argv"]
+actual = hashlib.sha256(pathlib.Path(sys.argv[2]).read_bytes()).hexdigest()
+if argv[argv.index("--expected-curator-sha") + 1] != actual:
+    raise SystemExit("ordinary reinstall retained a stale estate curator digest")
+PY
 native_hash="$(shasum -a 256 "$NATIVE_ADAPTERS" | awk '{print $1}')"
 (
   export DREAMING_COPILOT_BIN="$FAKE_COPILOT"

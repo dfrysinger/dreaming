@@ -537,7 +537,7 @@ sync_plugin() {
     "$COPILOT" plugin install dfrysinger/dreaming
 }
 
-native_adapter_needs_upgrade() {
+native_adapter_is_managed() {
   /usr/bin/python3 - "$1" <<'PY'
 import json
 import sys
@@ -548,17 +548,22 @@ except (OSError, json.JSONDecodeError) as error:
     raise SystemExit(f"existing adapter config is invalid: {error}")
 if not isinstance(config, dict):
     raise SystemExit("existing adapter config must be an object")
-if (
-    isinstance(config.get("estate_census"), dict)
-    and isinstance(config.get("estate_curator"), dict)
-):
-    raise SystemExit(1)
 for role, suffix in (
     ("sources", "/scripts/ssh-session-source.py"),
     ("publishers", "/scripts/ssh-skill-publisher.py"),
 ):
     entries = config.get(role, {})
     entry = entries.get("copilot") if isinstance(entries, dict) else None
+    argv = entry.get("argv", []) if isinstance(entry, dict) else []
+    if isinstance(argv, list) and any(
+        isinstance(value, str) and value.endswith(suffix) for value in argv
+    ):
+        raise SystemExit(0)
+for role, suffix in (
+    ("estate_census", "/scripts/ssh-estate-census.py"),
+    ("estate_curator", "/scripts/ssh-estate-curator.py"),
+):
+    entry = config.get(role, {})
     argv = entry.get("argv", []) if isinstance(entry, dict) else []
     if isinstance(argv, list) and any(
         isinstance(value, str) and value.endswith(suffix) for value in argv
@@ -576,7 +581,7 @@ configure_native_adapters() {
   if [[ "$REQUESTED_ADAPTER_DESIRED_STATE" == "1" ]]; then
     DREAMING_ADAPTER_CONFIG="$generated"
   elif [[ -n "$DREAMING_ADAPTER_CONFIG" ]]; then
-    if native_adapter_needs_upgrade "$DREAMING_ADAPTER_CONFIG"; then
+    if native_adapter_is_managed "$DREAMING_ADAPTER_CONFIG"; then
       :
     else
       status=$?
