@@ -706,8 +706,6 @@ def validate_qualification(
         "status",
         "source_type",
         "copilot_version",
-        "plugin_id",
-        "settings_key",
         "disable_verified",
         "restore_verified",
         "qualification_sha256",
@@ -724,8 +722,6 @@ def validate_qualification(
         or qualification.get("status") != "qualified"
         or qualification.get("source_type") != plugin["source_type"]
         or qualification.get("copilot_version") != request["copilot_version"]
-        or qualification.get("plugin_id") != plugin["plugin_id"]
-        or qualification.get("settings_key") != plugin["settings_key"]
         or qualification.get("disable_verified") is not True
         or qualification.get("restore_verified") is not True
         or qualification.get("qualification_sha256") != hash_json(payload)
@@ -1712,7 +1708,9 @@ def main() -> None:
     parser.add_argument("--qualification-root", required=True)
     parser.add_argument("--lock", required=True)
     parser.add_argument("--recovery-state", required=True)
-    parser.add_argument("--runtime-verifier", required=True, nargs="+")
+    parser.add_argument(
+        "--runtime-verifier", required=True, nargs=argparse.REMAINDER
+    )
     args = parser.parse_args()
     try:
         settings_path = Path(

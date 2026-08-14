@@ -98,8 +98,6 @@ class Fixture:
             "status": "qualified",
             "source_type": source_type,
             "copilot_version": "1.0.80",
-            "plugin_id": self.plugin["plugin_id"],
-            "settings_key": self.plugin["settings_key"],
             "disable_verified": True,
             "restore_verified": True,
         }
@@ -275,8 +273,6 @@ class StackFixture:
                 "status": "qualified",
                 "source_type": "marketplace",
                 "copilot_version": "1.0.80",
-                "plugin_id": plugin["plugin_id"],
-                "settings_key": plugin["settings_key"],
                 "disable_verified": True,
                 "restore_verified": True,
             }

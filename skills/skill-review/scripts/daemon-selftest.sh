@@ -187,6 +187,10 @@ for script in install.sh dreaming-deps.py test-shared-deps.sh \
   ssh-estate-census.py test-ssh-estate-census.py \
   estate-action.py estate-action-adapter.py \
   test-estate-action.py test-estate-action-adapter.py \
+  plugin-settings-transaction.py plugin-runtime-inventory.py \
+  qualify-plugin-settings.py ssh-plugin-settings.py \
+  configure-plugin-estate-executors.py \
+  test-plugin-settings-transaction.py test-plugin-remote-executor.py \
   dreaming-enqueue.sh test-copilot-migration.sh \
   transfer-dreaming-host.py test-transfer-dreaming-host.sh \
   cutover-dreaming-host.py test-cutover-dreaming-host.sh \
@@ -331,6 +335,16 @@ if run_isolated_test "$ROOT_SCRIPT_DIR/test-estate-action-adapter.py" >>"$RESULT
   ok "deterministic estate action adapter checks"
 else
   bad "deterministic estate action adapter checks"
+fi
+if run_isolated_test "$ROOT_SCRIPT_DIR/test-plugin-settings-transaction.py" >>"$RESULT" 2>&1; then
+  ok "deterministic plugin settings transaction checks"
+else
+  bad "deterministic plugin settings transaction checks"
+fi
+if run_isolated_test "$ROOT_SCRIPT_DIR/test-plugin-remote-executor.py" >>"$RESULT" 2>&1; then
+  ok "deterministic plugin remote executor checks"
+else
+  bad "deterministic plugin remote executor checks"
 fi
 if run_isolated_test "$ROOT_SCRIPT_DIR/test-copilot-migration.sh" >>"$RESULT" 2>&1; then
   ok "deterministic Copilot migration checks"
