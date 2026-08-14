@@ -213,7 +213,7 @@ process = subprocess.run(
 )
 sys.stdout.buffer.write(process.stdout)
 sys.stderr.buffer.write(process.stderr)
-raise SystemExit(process.returncode)
+raise SystemExit(0)
 """,
         0o700,
     )
@@ -270,6 +270,10 @@ raise SystemExit(process.returncode)
     process = run(command)
     assert process.returncode == 0, process.stderr
     assert output(process)["result"]["request"]["marker"] == "over-ssh"
+    request.write_text('{"action":"disable","force_fail":true}\n')
+    rejected = run(command)
+    assert rejected.returncode == 2
+    assert output(rejected)["error"]["code"] == "fixture-rejected"
 
 
 def test_qualification(root: Path) -> None:

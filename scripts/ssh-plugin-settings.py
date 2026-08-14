@@ -270,7 +270,6 @@ def local(args: argparse.Namespace) -> None:
         or receiver.get("runtime_verifier_sha256")
         != args.expected_runtime_verifier_sha
         or receiver.get("estate_sha256") != args.expected_estate_sha
-        or (process.returncode == 0) != (result["ok"] is True)
     ):
         raise TransportError("remote-result-invalid")
     emit(result, 0 if result["ok"] else 2)
