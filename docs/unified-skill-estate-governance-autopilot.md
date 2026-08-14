@@ -72,23 +72,24 @@ met.
   `renamex_np(..., RENAME_SWAP)` to retain the exact displaced settings inode;
   unsupported volumes and unqualified plugin source classes remain
   report-only.
-- **Current phase:** expose truthful complete-estate action, freshness,
-  receipt, disable, restore, and recovery state in the dashboard (CHK-08).
-  CHK-02 through CHK-07 are complete; installed reversible proof remains
-  intentionally deferred until the dashboard can report every resulting state
-  without becoming an authority source.
+- **Current phase:** install the current candidate and complete the reversible
+  two-host census, mutation, reconciliation, restoration, and equality proof
+  (CHK-09). CHK-02 through CHK-08 are complete.
 - **Implementation order:** census and identity model; estate dashboard and
   unresolved mappings; evaluation and recommendations; remote personal-skill
   archive/restore; atomic settings transaction and source qualification;
-  plugin disable/restore; installed two-host proof and rollback.
+  plugin disable/restore; dashboard truthfulness; installed two-host proof and
+  rollback.
 - **Implemented candidate:** local commits `79bf9b0`, `9cde88e`, `a4e270b`,
   `ef677e2`, `edab92c`, `d5587e3`, and `d5b8fd8` provide the bounded census,
   installed adapter upgrades, provenance authority matrix, sealed retry-safe
   remote personal-skill archive/restore receiver, complete report-only plugin
   capability gate, source-qualified lossless atomic settings disable
   transaction, conflict-safe ordered plugin restore ledger, and curator-owned
-  evidence-bound estate action dispatch. CHK-06 is commit `9713f83`; CHK-07 is
-  commit `8d0d61e`. Never push these commits.
+  evidence-bound estate action dispatch, and truthful read-only action,
+  receipt, provenance, freshness, and recovery reporting. CHK-06 is commit
+  `9713f83`; CHK-07 is commit `8d0d61e`; CHK-08 is commit `f59d564`. Never
+  push these commits.
 - **Installed state:** the Mac mini completed managed install, self-test, and
   enable for `a4e270b`. The halt switch is absent, the self-test exit code is
   `0`, the dashboard is running, and the remote source, publisher, executors,
@@ -128,6 +129,18 @@ met.
   dual-fence recovery after persistence failures. Curator and SSH receiver
   regression suites passed. Bounded two-family review and finding-scoped
   closure found no remaining material defect.
+- **CHK-08 closure:** the Estate API now verifies census receipts and receiver
+  identities end to end, delegates action verification to the canonical
+  CHK-07 validator, distinguishes current, historical, stale, running,
+  committed, rejected, rolled-back, recovery-required, halted, paused,
+  protected, and unknown states, and exposes only sanitized identities and
+  receipt hashes. The UI reports plugin and personal-skill decisions without
+  offering mutation controls. Twelve focused action-reporting checks, 114
+  dashboard integration checks, 54 dashboard contract checks, and the 16
+  CHK-07 authority regressions passed. Two-family discovery and
+  finding-scoped closure resolved malformed-state HTTP failures,
+  cross-source recommendation attribution, and plugin-source reporting with
+  no remaining material defect.
 - **Completion authority:** only the design's named Definition of Done; do not
   substitute partial unit checks, dashboard rendering, or one successful
   mutation for the complete installed two-host proof.
