@@ -72,18 +72,19 @@ met.
   `renamex_np(..., RENAME_SWAP)` to retain the exact displaced settings inode;
   unsupported volumes and unqualified plugin source classes remain
   report-only.
-- **Current phase:** implement the complete report-only plugin capability gate
-  (CHK-04). CHK-02 and the receiver-side CHK-03 transaction are complete;
-  mini-side action planning, dispatch, and installed reversible proof remain
-  intentionally deferred until the complete evidence-binding path exists.
+- **Current phase:** implement the source-qualified atomic settings disable
+  transaction (CHK-05). CHK-02 through CHK-04 are complete; mini-side action
+  planning, dispatch, and installed reversible proof remain intentionally
+  deferred until the complete evidence-binding and settings-ledger path exists.
 - **Implementation order:** census and identity model; estate dashboard and
   unresolved mappings; evaluation and recommendations; remote personal-skill
   archive/restore; atomic settings transaction and source qualification;
   plugin disable/restore; installed two-host proof and rollback.
 - **Implemented candidate:** local commits `79bf9b0`, `9cde88e`, `a4e270b`,
-  `ef677e2`, and `edab92c` provide the bounded census, installed adapter
-  upgrades, provenance authority matrix, and sealed retry-safe remote
-  personal-skill archive/restore receiver. Never push these commits.
+  `ef677e2`, `edab92c`, and `d5587e3` provide the bounded census, installed
+  adapter upgrades, provenance authority matrix, sealed retry-safe remote
+  personal-skill archive/restore receiver, and complete report-only plugin
+  capability gate. Never push these commits.
 - **Installed state:** the Mac mini completed managed install, self-test, and
   enable for `a4e270b`. The halt switch is absent, the self-test exit code is
   `0`, the dashboard is running, and the remote source, publisher, executors,
@@ -96,6 +97,12 @@ met.
   and receiver/collector identity mismatch failures have passed. Stale-state
   reporting, reversible installed mutation, before/final estate equality, and
   rollback remain before the complete installed proof can pass.
+- **CHK-04 closure:** the final MacBook live proof found five plugin packages,
+  three enabled packages, complete capability inventories, and zero unresolved
+  mappings. The estate suite passed 44 tests; core, receiver transport,
+  dashboard, and dashboard-contract suites passed. Two-family fix verification
+  found no CHK-04 blocker. Trusted execution-anchor enforcement remains owned
+  by CHK-07 rather than the report-only evaluator.
 - **Completion authority:** only the design's named Definition of Done; do not
   substitute partial unit checks, dashboard rendering, or one successful
   mutation for the complete installed two-host proof.
