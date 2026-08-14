@@ -5,8 +5,11 @@ from __future__ import annotations
 
 import argparse
 import hashlib
+import importlib.machinery
 import importlib.util
 import json
+import os
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -17,10 +20,24 @@ class InventoryError(RuntimeError):
 
 
 def load_estate(path: Path) -> Any:
-    if path.is_symlink() or not path.is_file():
-        raise InventoryError("estate collector is unavailable")
-    specification = importlib.util.spec_from_file_location(
-        "plugin_runtime_estate", path
+    descriptor_path = str(path).startswith("/dev/fd/")
+    if descriptor_path:
+        try:
+            descriptor = int(str(path).removeprefix("/dev/fd/"))
+            if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                raise OSError("not a regular file")
+        except (OSError, ValueError) as error:
+            raise InventoryError("estate collector is unavailable") from error
+        source = str(path)
+    else:
+        if path.is_symlink() or not path.is_file():
+            raise InventoryError("estate collector is unavailable")
+        source = str(path.resolve())
+    loader = importlib.machinery.SourceFileLoader(
+        "plugin_runtime_estate", source
+    )
+    specification = importlib.util.spec_from_loader(
+        "plugin_runtime_estate", loader
     )
     if specification is None or specification.loader is None:
         raise InventoryError("estate collector is unavailable")
@@ -39,7 +56,7 @@ def inventory(args: argparse.Namespace) -> dict[str, Any]:
     expected_settings = expected_input.resolve()
     if settings != expected_settings or not settings.is_file():
         raise InventoryError("settings identity mismatch")
-    collector = load_estate(Path(args.estate_script).expanduser().resolve())
+    collector = load_estate(Path(args.estate_script).expanduser())
     try:
         census = collector.collect(
             {

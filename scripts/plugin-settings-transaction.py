@@ -703,9 +703,12 @@ def validate_restore_request(value: Any) -> dict[str, Any]:
 
 
 def validate_qualification(
-    qualification: dict[str, Any], request: dict[str, Any]
+    qualification: dict[str, Any],
+    request: dict[str, Any],
+    *,
+    allow_version_drift: bool = False,
 ) -> None:
-    if set(qualification) != {
+    current_fields = {
         "schema_version",
         "status",
         "source_type",
@@ -713,7 +716,13 @@ def validate_qualification(
         "disable_verified",
         "restore_verified",
         "qualification_sha256",
-    }:
+    }
+    legacy_fields = current_fields | {"plugin_id", "settings_key"}
+    qualification_fields = set(qualification)
+    if (
+        qualification_fields != current_fields
+        and qualification_fields != legacy_fields
+    ):
         raise SettingsError("plugin-source-unqualified")
     payload = {
         key: item
@@ -725,7 +734,19 @@ def validate_qualification(
         qualification.get("schema_version") != SCHEMA_VERSION
         or qualification.get("status") != "qualified"
         or qualification.get("source_type") != plugin["source_type"]
-        or qualification.get("copilot_version") != request["copilot_version"]
+        or (
+            not allow_version_drift
+            and qualification.get("copilot_version")
+            != request["copilot_version"]
+        )
+        or (
+            qualification_fields == legacy_fields
+            and (
+                qualification.get("plugin_id") != plugin["plugin_id"]
+                or qualification.get("settings_key")
+                != plugin["settings_key"]
+            )
+        )
         or qualification.get("disable_verified") is not True
         or qualification.get("restore_verified") is not True
         or qualification.get("qualification_sha256") != hash_json(payload)
@@ -1357,7 +1378,11 @@ def execute_restore(
         qualification_root / f"{request['qualification_sha256']}.json",
         "plugin-source-unqualified",
     )
-    validate_qualification(qualification, request)
+    # A committed disable remains reversible after Copilot upgrades. The
+    # disable receipt below binds this exact qualification to the action.
+    validate_qualification(
+        qualification, request, allow_version_drift=True
+    )
     if transaction_root.is_symlink():
         raise SettingsError("settings-transaction-root-invalid")
     transaction_root.mkdir(parents=True, exist_ok=True)
@@ -1675,8 +1700,17 @@ def execute_restore(
 def command_runtime_verifier(
     command: list[str], settings_path: Path, request: dict[str, Any]
 ) -> RuntimeVerifier:
+    inherited_descriptors = tuple(
+        int(value.removeprefix("/dev/fd/"))
+        for value in command
+        if value.startswith("/dev/fd/")
+        and value.removeprefix("/dev/fd/").isdigit()
+    )
+
     def verify() -> dict[str, Any]:
         try:
+            for descriptor in inherited_descriptors:
+                os.lseek(descriptor, 0, os.SEEK_SET)
             process = subprocess.run(
                 [
                     *command,
@@ -1689,6 +1723,7 @@ def command_runtime_verifier(
                 capture_output=True,
                 text=True,
                 timeout=120,
+                pass_fds=inherited_descriptors,
             )
         except (OSError, subprocess.SubprocessError) as error:
             raise SettingsError("plugin-runtime-inventory-failed") from error

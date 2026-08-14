@@ -70,12 +70,18 @@ met.
   final settings concurrency finding with no remaining material findings. The
   post-live installer review also passed after closing persisted external
   configuration ownership and pre-marker local-adapter upgrade regressions.
+  The final remote plugin executor completed its real two-host marketplace
+  disable/restore proof. The required post-live dual implementation review
+  passed after closing qualification interruption fencing, Copilot-version
+  restore drift, verified-code pathname replacement, and repeated descriptor
+  execution. The autonomous scheduled-curator activation slice is under its
+  final bounded review.
 - **Settings decision:** plugin mutation uses same-directory macOS
   `renamex_np(..., RENAME_SWAP)` to retain the exact displaced settings inode;
   unsupported volumes and unqualified plugin source classes remain
   report-only.
-- **Current phase:** complete the private-boundary and public-output proof
-  (CHK-10). CHK-02 through CHK-09 are complete.
+- **Current phase:** final critical-lane validation and installed
+  certification. CHK-02 through CHK-10 are complete.
 - **Implementation order:** census and identity model; estate dashboard and
   unresolved mappings; evaluation and recommendations; remote personal-skill
   archive/restore; atomic settings transaction and source qualification;
@@ -95,6 +101,16 @@ met.
   `5060ed4` refreshes managed executable bindings during reinstall. Commit
   `dbcc76a` persists adapter ownership so ordinary reinstalls refresh only
   installer-managed configuration.
+  Commit `9057937` enforces private public-output boundaries. Commits
+  `065dae5`, `cfd6793`, and `8e561ae` add and harden the receiver-bound remote
+  plugin settings executor, complete runtime capability inventory, reversible
+  source qualification, sealed configuration rebinding, and forced-command
+  SSH result handling. The current uncommitted final delta preserves a
+  qualification-wide recovery fence, keeps committed disables restorable
+  across Copilot upgrades, executes the exact verified remote code descriptors,
+  records sanitized whole-estate recommendations for the dashboard, and turns
+  the weekly mini curator into the standing-approved scheduled-live estate
+  review.
 - **Installed state:** the Mac mini completed managed install, self-test, and
   enable for clean candidate `dbcc76a` at activation generation
   `20260814T132425Z-install-19412`. The self-test result is zero failures, the
@@ -112,6 +128,30 @@ met.
   labels remain unloaded, and no worker is running. The temporary fixture was
   then removed in personal-skill commit `c77d91e`, while its archive and restore
   evidence remains recoverable in Git history and the CHK-09 receipts.
+- **Plugin action closure:** Copilot 1.0.80 marketplace settings semantics were
+  qualified by reversibly disabling and restoring `deep@deep`; both direct
+  key forms tested for the direct-install source class failed runtime
+  qualification and therefore remain report-only. The Mac mini then
+  authorized and dispatched a real governed marketplace disable through the
+  pinned SSH receiver. Runtime inventory proved the plugin disabled and all
+  34 owned skill and agent capabilities absent. The same authorization retry
+  returned the identical receipt. The governed restore returned the identical
+  result on retry, restored settings SHA-256
+  `e19e8213712215b212ff334e8a98371e9b2d1fe4e09fdc40b4110dc915fd8125`
+  exactly, restored the plugin runtime, and left no recovery fence.
+- **Scheduled governance activation:** the weekly curator prompt now reviews
+  every current MacBook personal capability and plugin package. It may execute
+  only machine-authorized actions through the sealed estate authority, never
+  asks for human confirmation, leaves protected and unknown targets
+  recommendation-only, and writes sanitized keep/protect/recommend decisions
+  to `estate-action-ledger.json` so the dashboard represents the entire review
+  even when no mutation is eligible. The writer accepts only targets present
+  in a complete sealed census, derives authority instead of trusting callers,
+  and replaces prior target decisions across census changes. Three bounded
+  two-family review rounds closed all material activation findings. The final
+  local   recommendation test passes. The complete final local daemon self-test also
+  passes with zero failures; the halt-switch warning is expected while the
+  reviewed build awaits installed-mini certification.
 - **CHK-04 closure:** the final MacBook live proof found five plugin packages,
   three enabled packages, complete capability inventories, and zero unresolved
   mappings. The estate suite passed 44 tests; core, receiver transport,

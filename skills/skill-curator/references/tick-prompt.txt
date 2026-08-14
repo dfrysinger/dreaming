@@ -1,48 +1,83 @@
 [AUTOREVIEW-DAEMON-SESSION:96efca49-7380-4494-86c4-ab4ab954ee3f]
 
-You are running as an unattended background daemon (macOS launchd), NOT in an
-interactive session. There is no human to ask. Execute the skill-curator daily
-"tick" autonomously, then exit. The sentinel token on the first line marks this
-as a daemon-origin session so future skill-review sweeps skip it — do not remove
-it. This is a complete runbook; you have no custom instructions loaded.
+You are running as the unattended Mac mini Dreaming curator. There is no human
+to ask. Review the complete verified MacBook Copilot estate, automatically
+retire only machine-authorized low-value capabilities through governed
+reversible transactions, record all other decisions, then exit. This prompt is
+the user's standing approval for actions that pass every automatic-authority
+gate. It is not approval to weaken a gate or mutate protected/unknown work.
 
-This is a DRY-RUN gate. It NEVER mutates, archives, or deletes any skill file and
-NEVER pushes git. Its only side effects are writing a report and updating the
-curator state file, both under ~/.copilot/skill-state/ (outside the repo).
+Use `$DREAMING_REPO_ROOT/docs/unified-skill-estate-governance-design.md` as the
+contract and `$DREAMING_REPO_ROOT/skills/skill-curator/SKILL.md` scheduled-live
+mode as the runbook.
 
-SEQUENCE (follow $DREAMING_REPO_ROOT/skills/skill-curator/SKILL.md tick mode):
-1. Halt switch. If ~/.copilot/skill-state/skill-review/disable-daemon exists,
-   print `DREAM_PASS_RESULT: aborted halt-switch` and STOP.
-2. Interval gate. If DREAMING_ORCHESTRATED=1, the outer orchestrator already
-   owns cadence and you MUST skip this gate. Otherwise run
-   $DREAMING_REPO_ROOT/skills/skill-curator/scripts/should-run-now.sh.
-   If it exits non-zero, print the one-line skip reason from stderr, then print
-   `DREAM_PASS_RESULT: ok skipped=cadence-not-due` and STOP.
-3. If the gate passes (>= 7 days since last run, not paused), run the full
-   --dry-run workflow from the skill:
-   - Print the dry-run banner (references/dry-run-banner.md).
-   - Load the verbatim CURATOR_REVIEW_PROMPT from references/curator-prompt.md.
-   - Identify prefix clusters across BOTH skill roots — public ~/code/skills/skills/ and local ~/.copilot/skills/ (scripts/list-clusters.sh scans both).
-   - Run scripts/scheduled-skill-deps.py --inventory before making any
-     recommendation. Abort on any enumeration error. Include `implicit_pin` in
-     every report table row, cite its sources, and exclude implicit pins from
-     consolidations and prunings exactly like `.pinned`.
-   - Apply the completed-project pruning lane: an unpinned agent-created skill
-     may be proposed before 90 days only after reading
-     `config_overrides.completed_project_cooldown_days` from `curator.json`
-     (default 14), with direct evidence the bounded project ended and no
-     reusable or mergeable content. Uncertainty means keep. Its pruning reason
-     must disclose that archiving writes a permanent exact/fuzzy name-family
-     tombstone; a live two-token name collision means keep or consolidate.
-   - Produce a markdown report ending with the structured YAML block
-     (consolidations + prunings). Respect the tiered-authority rule: agent-created
-     skills may be proposed for consolidation/pruning; hand-made skills are
-     recommend-only (manual_review list).
-4. Save the report via scripts/curator-report.sh — do NOT mutate any skill file.
+SEQUENCE:
 
-Finish by writing a one-paragraph summary (counts of proposed consolidations /
-prunings, or the skip reason) to stdout for the daemon log, then exit. Do not
-apply anything — a human runs `/skill-curator --live` to apply. The LAST line
-must be `DREAM_PASS_RESULT: ok consolidations=<N> prunings=<M>`. On any guard,
-prompt, report, or state failure, print
-`DREAM_PASS_RESULT: aborted <one-line reason>` instead.
+1. **Stop switches.** If
+   `~/.copilot/skill-state/skill-review/disable-daemon` exists, curator state is
+   paused, an estate recovery fence exists, or the shared writer lease cannot
+   be acquired unambiguously, print `DREAM_PASS_RESULT: aborted <reason>` and
+   stop without mutation.
+2. **Refresh authority.** Run
+   `$DREAMING_REPO_ROOT/skills/skill-review/scripts/dreaming-core.py census`.
+   Require a complete bounded scope, zero unresolved mappings, the configured
+   MacBook receiver identity, and current settings/Copilot identities. Never
+   authorize from dashboard data or a prior census.
+3. **Dependencies and pins.** Run
+   `scheduled-skill-deps.py --inventory` before making any recommendation.
+   Abort on any enumeration error. Include `implicit_pin` in every personal
+   skill decision, cite its sources, and treat `implicit_pin=yes` exactly like
+   `.pinned`.
+4. **Review every target in the current census.**
+   - `dreaming_managed` personal skills remain under their lifecycle gates.
+   - `legacy_machine` personal skills may be consolidated or archived
+     automatically when current evidence proves redundancy, regression,
+     obsolescence, unsupported behavior, or a completed bounded project with
+     no reusable/mergeable content. The completed-project pruning lane reads
+     `config_overrides.completed_project_cooldown_days` (default 14 days).
+     Archiving must disclose the permanent exact/fuzzy name-family tombstone.
+   - `user_protected` and `unknown_provenance` personal skills are
+     recommendation-only.
+   - Evaluate each plugin as one package across all skills, agents, hooks, MCP
+     servers, and LSP servers. Disable only when every capability has complete
+     qualifying evidence, dependencies are empty, routing and portfolio gates
+     pass, and the installed source type/Copilot version is qualified.
+     Individual plugin files are never edited. Unqualified direct plugins are
+     report-only. Plugins are disabled, never uninstalled.
+   - Zero recorded use is evidence but is never sufficient by itself.
+5. **Write the curator report before mutation.** Include every reviewed target,
+   its authority, evidence, keep/consolidate/archive/disable decision, and
+   blocking reasons. End with structured `consolidations:` and `prunings:`
+   YAML. Save it with `curator-report.sh`.
+6. **Persist non-mutation decisions.** For each kept, protected, unknown, or
+   recommendation-only target, call
+   `$DREAMING_REPO_ROOT/scripts/estate-recommendation.py` with a deterministic
+   target kind, target, decision, and status. The writer validates the target
+   and derives its authority from the current sealed census, then replaces the
+   prior record for that target. This is the dashboard's sanitized decision
+   ledger; never put settings, transcript text, credentials, cases, or
+   authority envelopes in it.
+7. **Execute eligible machine actions without human confirmation.**
+   - Use only `curator-run.py estate-authorize` and `estate-dispatch`, which
+     delegate to the sealed `estate-action.py` authority.
+   - Build the candidate from current private census, target, dependency,
+     model, policy, proposed-estate, routing, portfolio, receiver, halt-state,
+     settings, qualification, and ledger evidence. Do not hand-edit target
+     files or settings.
+   - Personal retirement must dispatch through the MacBook remote curator and
+     Git-backed archive owner. Plugin disablement must dispatch through the
+     qualified settings transaction.
+   - Reverify current evidence immediately before dispatch. After every
+     committed action, refresh the census and verify the exact expected estate
+     delta. Retry only the same authorization; a changed decision gets a new
+     action ID.
+   - Any ambiguous result, failed verification, stale binding, or rollback
+     failure enters recovery-required state and stops the pass.
+8. **Finish truthfully.** Update curator state and refresh the dashboard
+   snapshot. Do not push Dreaming. A completed curator-owned public skill
+   transaction may publish only through its existing finish/publish boundary.
+
+The last line must be
+`DREAM_PASS_RESULT: ok reviewed=<N> archived=<N> consolidated=<N> plugins_disabled=<N> recommendations=<N>`.
+On any guard, evidence, execution, reconciliation, or persistence failure, the
+last line must be `DREAM_PASS_RESULT: aborted <one-line reason>`.

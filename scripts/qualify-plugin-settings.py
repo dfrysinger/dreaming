@@ -60,6 +60,8 @@ def qualification(module: Any, args: argparse.Namespace) -> dict[str, Any]:
     qualification_root.mkdir(parents=True, exist_ok=True)
     os.chmod(qualification_root, 0o700)
     output = qualification_root / f"{record['qualification_sha256']}.json"
+    if recovery.exists():
+        raise QualificationError("qualification-recovery-required")
     preimage = module.read_regular(settings, "settings-preimage-invalid")
     document = module.settings_document(preimage)
     enabled = document.get("enabledPlugins") or {}
@@ -102,13 +104,27 @@ def qualification(module: Any, args: argparse.Namespace) -> dict[str, Any]:
     provisional_root.mkdir(mode=0o700)
     provisional = provisional_root / output.name
     module.immutable_json(provisional, record)
+    transaction_recovery = provisional_root / "transaction-recovery.json"
+    initial_ledger = module.load_ledger(root)
+    disable_operation_id = f"qualify-{uuid.uuid4().hex}"
+    module.atomic_json(
+        recovery,
+        {
+            "schema_version": module.SCHEMA_VERSION,
+            "status": "qualification_active",
+            "disable_operation_id": disable_operation_id,
+            "qualification_sha256": record["qualification_sha256"],
+            "qualification_root": str(provisional_root),
+            "transaction_recovery": str(transaction_recovery),
+        },
+    )
     disabled: dict[str, Any] | None = None
+    restored_verified = False
     try:
-        ledger = module.load_ledger(root)
         disable_payload = {
             "schema_version": module.SCHEMA_VERSION,
             "protocol": "dreaming.plugin-settings",
-            "operation_id": f"qualify-{uuid.uuid4().hex}",
+            "operation_id": disable_operation_id,
             "action": "disable",
             "plugin": plugin,
             "copilot_version": args.copilot_version,
@@ -121,7 +137,7 @@ def qualification(module: Any, args: argparse.Namespace) -> dict[str, Any]:
                 "prior_key_present": prior_present,
                 "prior_key_value": prior_value,
                 "runtime_before_sha256": module.hash_json(runtime_before),
-                "ledger_sha256": ledger["ledger_sha256"],
+                "ledger_sha256": initial_ledger["ledger_sha256"],
             },
             "evidence": {
                 "census_sha256": evidence_sha,
@@ -138,7 +154,7 @@ def qualification(module: Any, args: argparse.Namespace) -> dict[str, Any]:
             transaction_root=root,
             qualification_root=provisional_root,
             lock_path=lock,
-            recovery_state=recovery,
+            recovery_state=transaction_recovery,
             runtime_verifier=runtime_verifier,
             swapper=module.MacOSSwapper(),
         )
@@ -151,6 +167,18 @@ def qualification(module: Any, args: argparse.Namespace) -> dict[str, Any]:
                     or "failed"
                 )
             )
+        module.atomic_json(
+            recovery,
+            {
+                "schema_version": module.SCHEMA_VERSION,
+                "status": "qualification_restore_required",
+                "disable_operation_id": disable_operation_id,
+                "disable_receipt_sha256": disabled["receipt_sha256"],
+                "qualification_sha256": record["qualification_sha256"],
+                "qualification_root": str(provisional_root),
+                "transaction_recovery": str(transaction_recovery),
+            },
+        )
         disabled_state = module.read_regular(settings, "settings-preimage-invalid")
         ledger = module.load_ledger(root)
         disabled_runtime_sha = disabled["runtime_after_sha256"]
@@ -186,7 +214,7 @@ def qualification(module: Any, args: argparse.Namespace) -> dict[str, Any]:
             transaction_root=root,
             qualification_root=provisional_root,
             lock_path=lock,
-            recovery_state=recovery,
+            recovery_state=transaction_recovery,
             runtime_verifier=runtime_verifier,
             swapper=module.MacOSSwapper(),
         )
@@ -210,6 +238,7 @@ def qualification(module: Any, args: argparse.Namespace) -> dict[str, Any]:
             != module.hash_json(runtime_before)
         ):
             raise QualificationError("qualification-restore-mismatch")
+        restored_verified = True
     except (
         QualificationError,
         module.SettingsError,
@@ -218,25 +247,44 @@ def qualification(module: Any, args: argparse.Namespace) -> dict[str, Any]:
         TypeError,
         ValueError,
     ) as error:
-        if disabled is not None and disabled.get("ok") is True:
-            if not recovery.exists():
-                module.atomic_json(
-                    recovery,
-                    {
-                        "schema_version": module.SCHEMA_VERSION,
-                        "status": "qualification_restore_required",
-                        "disable_receipt_sha256": disabled[
-                            "receipt_sha256"
-                        ],
-                        "qualification_root": str(provisional_root),
-                    },
-                )
+        if restored_verified:
+            module.remove_file(recovery)
+            shutil.rmtree(provisional_root)
+            raise
+        current_ledger = module.load_ledger(root)
+        try:
+            current = module.read_regular(
+                settings, "settings-preimage-invalid"
+            )
+            current_runtime = module.validate_runtime(
+                runtime_verifier(), base_request
+            )
+            unchanged = (
+                current.data == preimage.data
+                and current.mode == preimage.mode
+                and module.hash_json(current_runtime)
+                == module.hash_json(runtime_before)
+                and current_ledger["ledger_sha256"]
+                == initial_ledger["ledger_sha256"]
+                and not transaction_recovery.exists()
+            )
+        except (
+            module.SettingsError,
+            KeyError,
+            OSError,
+            TypeError,
+            ValueError,
+        ):
+            unchanged = False
+        if not unchanged:
             raise QualificationError(
                 "qualification-restore-required"
             ) from error
+        module.remove_file(recovery)
         shutil.rmtree(provisional_root)
         raise
     module.atomic_json(output, record)
+    module.remove_file(recovery)
     shutil.rmtree(provisional_root)
     return {
         "ok": True,

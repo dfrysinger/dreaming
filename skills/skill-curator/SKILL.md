@@ -49,6 +49,9 @@ This skill does NOT touch:
 
 # Live consolidation pass (mutates skill files + git commits)
 /skill-curator --live
+
+# Unattended Mac mini review of the governed MacBook estate
+/skill-curator scheduled-live
 ```
 
 ## Procedure
@@ -180,6 +183,36 @@ orchestrator bypasses it because one shared cadence governs all three passes.
     published run pushes a normal revert rather than rewriting history.
 12. Update curator state: `last_run_at`, `run_count++`, `last_run_summary` = "consolidated N, pruned M".
 
+### Mode: `scheduled-live`
+
+This is the unattended Mac mini estate-governance path. The user's standing
+authorization applies only to machine-authorized targets that pass every
+current evidence gate. It removes any interactive confirmation; it does not
+weaken provenance, dependency, evaluation, halt, recovery, or restore
+requirements.
+
+1. Refresh the receiver-bound MacBook census with `dreaming-core.py census`.
+   Require complete bounded scope and zero unresolved mappings.
+2. Run `scheduled-skill-deps.py --inventory`; any ambiguity aborts the pass.
+3. Review every current personal capability and plugin package under
+   `docs/unified-skill-estate-governance-design.md`.
+4. Save the full report before mutation. Persist every keep, protected,
+   unknown, or recommendation-only result with
+   `scripts/estate-recommendation.py` so the dashboard shows the whole review,
+   not only executed actions.
+5. For eligible `legacy_machine` personal skills, dispatch the sealed
+   `personal_archive` or `personal_restore` estate action to the MacBook.
+   Never mutate the mini's mirror as a substitute for the receiver action.
+6. For eligible plugins, evaluate the complete package capability gate and
+   dispatch only a source-qualified `plugin_disable` or receipt-bound
+   `plugin_restore` action. Never edit or uninstall plugin contents.
+7. Use only `curator-run.py estate-authorize`, `estate-verify`, and
+   `estate-dispatch` for remote estate mutations. Recollect the census after
+   each commit and stop on stale, ambiguous, rolled-back, or recovery-required
+   state.
+8. Protected and unknown-provenance targets remain recommendation-only
+   regardless of the report's prose.
+
 ## Hard rules (non-negotiable)
 
 1. **Only touch skills in the two managed roots** (`~/code/skills/skills/` and `~/.copilot/skills/`). Other plugins' skills are off-limits.
@@ -197,7 +230,7 @@ orchestrator bypasses it because one shared cadence governs all three passes.
 6. **Pairwise distinctness is not the bar.** The bar is: "would a human maintainer write this as N separate skills, or as one skill with N labeled subsections?" Lean toward umbrella.
 7. **`keep` is legitimate only when the skill is already a class-level umbrella.** "Narrow but distinct" is a reason to demote, not a reason to keep.
 8. **Tiered authority by provenance.** A skill is *agent-created* when its directory contains a `.agent-created` marker (written by skill-review). Authority differs by tier:
-   - **Agent-created skills** are within the curator's autonomous authority. Dry-run may place them in `consolidations:` / `prunings:`, and `--live` may archive or absorb them when machine authorization passes. Archiving an agent-created skill writes a tombstone (via `archive-skill.sh`) so skill-review will not recreate it.
+   - **Agent-created skills** are within the curator's autonomous authority. Dry-run may place them in `consolidations:` / `prunings:`, and `--live` or `scheduled-live` may archive or absorb them when machine authorization passes. Archiving an agent-created skill writes a tombstone (via `archive-skill.sh`) so skill-review will not recreate it.
    - **Hand-made skills** (no `.agent-created` marker) are **recommend-only**. The curator may surface them in a separate `manual_review:` list with a rationale, but MUST NOT put them in `consolidations:` / `prunings:` or mutate them automatically. A hand-made destination also remains manual.
 
 

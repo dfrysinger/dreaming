@@ -6,7 +6,9 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import shlex
+import stat
 import subprocess
 import sys
 import tempfile
@@ -28,12 +30,51 @@ def positive_int(value: str) -> int:
     return parsed
 
 
-def sha256_file(path: Path) -> str:
+def sha256_descriptor(descriptor: int) -> str:
     value = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            value.update(chunk)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    for chunk in iter(lambda: os.read(descriptor, 1024 * 1024), b""):
+        value.update(chunk)
+    os.lseek(descriptor, 0, os.SEEK_SET)
     return value.hexdigest()
+
+
+def sha256_file(path: Path) -> str:
+    descriptor = open_regular(path, "receiver-code-unavailable")
+    try:
+        return sha256_descriptor(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def open_regular(path: Path, error: str) -> int:
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(
+        os, "O_NOFOLLOW", 0
+    )
+    try:
+        descriptor = os.open(path, flags)
+        if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+            raise OSError("not a regular file")
+        return descriptor
+    except OSError as cause:
+        try:
+            os.close(descriptor)
+        except (NameError, OSError):
+            pass
+        raise TransportError(error) from cause
+
+
+def read_receiver_id(path: Path) -> str:
+    descriptor = open_regular(path, "receiver-identity-missing")
+    try:
+        raw = os.read(descriptor, 1024)
+        if len(raw) == 1024:
+            raise TransportError("receiver-identity-missing")
+        return raw.decode("ascii").strip()
+    except (OSError, UnicodeDecodeError) as cause:
+        raise TransportError("receiver-identity-missing") from cause
+    finally:
+        os.close(descriptor)
 
 
 def emit(value: dict[str, Any], status: int) -> None:
@@ -43,17 +84,8 @@ def emit(value: dict[str, Any], status: int) -> None:
 
 def identity(
     args: argparse.Namespace,
-) -> tuple[dict[str, str], dict[str, Path]]:
-    try:
-        receiver_id = (
-            Path(args.receiver_id_file)
-            .expanduser()
-            .resolve()
-            .read_text(encoding="ascii")
-            .strip()
-        )
-    except OSError as error:
-        raise TransportError("receiver-identity-missing") from error
+) -> tuple[dict[str, str], dict[str, int]]:
+    receiver_id = read_receiver_id(Path(args.receiver_id_file).expanduser())
     inputs = {
         "receiver_sha256": Path(__file__),
         "transaction_sha256": Path(args.transaction_script).expanduser(),
@@ -69,29 +101,36 @@ def identity(
     if receiver_id != args.expected_receiver_id:
         raise TransportError("receiver-identity-mismatch")
     result = {"receiver_id": receiver_id}
-    resolved: dict[str, Path] = {}
-    for key, path in inputs.items():
-        if path.is_symlink():
-            raise TransportError("receiver-code-unavailable")
-        resolved[key] = path.resolve()
-        if not resolved[key].is_file():
-            raise TransportError("receiver-code-unavailable")
-        result[key] = sha256_file(resolved[key])
-        if result[key] != expected[key]:
-            raise TransportError("receiver-code-mismatch")
-    return result, resolved
+    descriptors: dict[str, int] = {}
+    try:
+        for key, path in inputs.items():
+            descriptors[key] = open_regular(
+                path, "receiver-code-unavailable"
+            )
+            result[key] = sha256_descriptor(descriptors[key])
+            if result[key] != expected[key]:
+                raise TransportError("receiver-code-mismatch")
+        return result, descriptors
+    except (OSError, TransportError):
+        for descriptor in descriptors.values():
+            os.close(descriptor)
+        raise
 
 
 def transaction_command(
     args: argparse.Namespace,
     request_path: str,
-    paths: dict[str, Path],
+    descriptors: dict[str, int],
 ) -> list[str]:
+    paths = {
+        key: f"/dev/fd/{descriptor}"
+        for key, descriptor in descriptors.items()
+    }
     runtime = [
         args.runtime_python,
-        str(paths["runtime_verifier_sha256"]),
+        paths["runtime_verifier_sha256"],
         "--estate-script",
-        str(paths["estate_sha256"]),
+        paths["estate_sha256"],
         "--expected-settings",
         args.settings,
         "--target-host-id",
@@ -105,7 +144,7 @@ def transaction_command(
     ]
     return [
         args.transaction_python,
-        str(paths["transaction_sha256"]),
+        paths["transaction_sha256"],
         args.action,
         "--request",
         request_path,
@@ -138,36 +177,43 @@ def parse_single_result(stdout: bytes) -> dict[str, Any]:
 
 
 def receive(args: argparse.Namespace) -> None:
-    receiver, paths = identity(args)
-    raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
-    if not raw or len(raw) > MAX_REQUEST_BYTES:
-        raise TransportError("request-size-invalid")
     try:
-        value = json.loads(raw)
-    except (UnicodeDecodeError, json.JSONDecodeError) as error:
-        raise TransportError("request-malformed") from error
-    if not isinstance(value, dict) or value.get("action") != args.action:
-        raise TransportError("request-action-mismatch")
-    try:
-        with tempfile.TemporaryFile() as request:
-            request.write(raw)
-            request.flush()
-            request.seek(0)
-            process = subprocess.run(
-                transaction_command(
-                    args, f"/dev/fd/{request.fileno()}", paths
-                ),
-                capture_output=True,
-                check=False,
-                timeout=args.timeout,
-                pass_fds=(request.fileno(),),
-            )
-    except (OSError, subprocess.SubprocessError) as error:
-        raise TransportError("transaction-execution-failed") from error
-    result = parse_single_result(process.stdout)
-    if (process.returncode == 0) != (result["ok"] is True):
-        raise TransportError("transaction-status-mismatch")
-    emit({**result, "receiver": receiver}, 0 if result["ok"] else 2)
+        receiver, descriptors = identity(args)
+        raw = sys.stdin.buffer.read(MAX_REQUEST_BYTES + 1)
+        if not raw or len(raw) > MAX_REQUEST_BYTES:
+            raise TransportError("request-size-invalid")
+        try:
+            value = json.loads(raw)
+        except (UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise TransportError("request-malformed") from error
+        if not isinstance(value, dict) or value.get("action") != args.action:
+            raise TransportError("request-action-mismatch")
+        try:
+            with tempfile.TemporaryFile() as request:
+                request.write(raw)
+                request.flush()
+                request.seek(0)
+                process = subprocess.run(
+                    transaction_command(
+                        args, f"/dev/fd/{request.fileno()}", descriptors
+                    ),
+                    capture_output=True,
+                    check=False,
+                    timeout=args.timeout,
+                    pass_fds=(
+                        request.fileno(),
+                        *descriptors.values(),
+                    ),
+                )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise TransportError("transaction-execution-failed") from error
+        result = parse_single_result(process.stdout)
+        if (process.returncode == 0) != (result["ok"] is True):
+            raise TransportError("transaction-status-mismatch")
+        emit({**result, "receiver": receiver}, 0 if result["ok"] else 2)
+    finally:
+        for descriptor in locals().get("descriptors", {}).values():
+            os.close(descriptor)
 
 
 def remote_command(args: argparse.Namespace) -> list[str]:

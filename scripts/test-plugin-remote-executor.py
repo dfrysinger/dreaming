@@ -60,6 +60,8 @@ def receive_command(
     estate: Path,
     *,
     receiver_sha: str | None = None,
+    runtime: Path = INVENTORY,
+    transaction_python: str = sys.executable,
 ) -> list[str]:
     return [
         sys.executable,
@@ -68,13 +70,13 @@ def receive_command(
         "--action",
         "disable",
         "--transaction-python",
-        sys.executable,
+        transaction_python,
         "--transaction-script",
         str(transaction),
         "--runtime-python",
         sys.executable,
         "--runtime-verifier",
-        str(INVENTORY),
+        str(runtime),
         "--estate-script",
         str(estate),
         "--settings",
@@ -102,7 +104,7 @@ def receive_command(
         "--expected-transaction-sha",
         digest(transaction),
         "--expected-runtime-verifier-sha",
-        digest(INVENTORY),
+        digest(runtime),
         "--expected-estate-sha",
         digest(estate),
     ]
@@ -160,6 +162,22 @@ def test_inventory(root: Path, estate: Path) -> None:
     assert value["plugin_enabled"] is False
     assert value["owned_capability_ids"] == []
     assert value["estate_capability_ids"] == ["personal:x"]
+    estate_descriptor = os.open(estate, os.O_RDONLY)
+    try:
+        descriptor_command = [
+            *command[: command.index("--estate-script") + 1],
+            f"/dev/fd/{estate_descriptor}",
+            *command[command.index("--estate-script") + 2 :],
+        ]
+        process = subprocess.run(
+            descriptor_command,
+            capture_output=True,
+            check=False,
+            pass_fds=(estate_descriptor,),
+        )
+    finally:
+        os.close(estate_descriptor)
+    assert process.returncode == 0, (process.stdout, process.stderr)
     bad = run([*command[:-4], "--settings", str(root / "other.json"), "--plugin-id", "plugin@direct"])
     assert bad.returncode == 2
     assert output(bad)["error"]["code"] == "settings identity mismatch"
@@ -193,6 +211,87 @@ def test_receiver(root: Path, estate: Path, transaction: Path) -> None:
     assert failure["ok"] is False
     assert failure["error"]["code"] == "fixture-rejected"
     assert failure["receiver"]["receiver_id"] == "receiver-one"
+
+
+def test_receiver_executes_verified_descriptors(root: Path) -> None:
+    fixture = root / "descriptor-race"
+    fixture.mkdir()
+    write(fixture / "receiver-id", "receiver-one\n")
+    write(fixture / "settings.json", "{}\n")
+    estate = fixture / "estate.py"
+    runtime = fixture / "runtime.py"
+    transaction = fixture / "transaction.py"
+    write(estate, "trusted-estate\n")
+    write(
+        runtime,
+        """import argparse
+import json
+parser = argparse.ArgumentParser()
+parser.add_argument("--estate-script", required=True)
+args, _ = parser.parse_known_args()
+print(json.dumps({"estate": open(args.estate_script).read().strip()}))
+""",
+    )
+    write(
+        transaction,
+        """import argparse
+import json
+import os
+import subprocess
+parser = argparse.ArgumentParser()
+parser.add_argument("action")
+parser.add_argument("--runtime-verifier", nargs=argparse.REMAINDER)
+args, _ = parser.parse_known_args()
+descriptors = tuple(
+    int(value.removeprefix("/dev/fd/"))
+    for value in args.runtime_verifier
+    if value.startswith("/dev/fd/")
+)
+process = subprocess.run(
+    args.runtime_verifier,
+    capture_output=True,
+    check=False,
+    pass_fds=descriptors,
+)
+print(json.dumps({
+    "ok": process.returncode == 0,
+    "result": json.loads(process.stdout),
+}))
+""",
+    )
+    wrapper = fixture / "python-wrapper.py"
+    replacements = {
+        str(transaction): "raise SystemExit('replacement transaction ran')\n",
+        str(runtime): "raise SystemExit('replacement runtime ran')\n",
+        str(estate): "replacement-estate\n",
+    }
+    write(
+        wrapper,
+        f"""#!/usr/bin/env python3
+import os
+import sys
+replacements = {replacements!r}
+for path, value in replacements.items():
+    temporary = path + ".replacement"
+    with open(temporary, "w") as handle:
+        handle.write(value)
+    os.replace(temporary, path)
+os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])
+""",
+        0o700,
+    )
+    process = run(
+        receive_command(
+            fixture,
+            transaction,
+            estate,
+            runtime=runtime,
+            transaction_python=str(wrapper),
+        ),
+        stdin=b'{"action":"disable"}',
+    )
+    assert process.returncode == 0, (process.stdout, process.stderr)
+    assert output(process)["result"]["estate"] == "trusted-estate"
 
 
 def test_local_ssh(root: Path, estate: Path, transaction: Path) -> None:
@@ -441,6 +540,104 @@ print(json.dumps({
     ] is False
 
 
+def test_qualification_interruption_fence(root: Path) -> None:
+    fixture = root / "qualification-interruption"
+    fixture.mkdir()
+    settings = fixture / "settings.json"
+    settings.write_text('{"enabledPlugins":{"fixture@market":true}}\n')
+    settings.chmod(0o600)
+    runtime = fixture / "runtime.py"
+    write(
+        runtime,
+        """import argparse
+import json
+parser = argparse.ArgumentParser()
+parser.add_argument("--settings", required=True)
+parser.add_argument("--plugin-id", required=True)
+args = parser.parse_args()
+enabled = json.load(open(args.settings))["enabledPlugins"].get(
+    "fixture@market", True
+) is not False
+owned = ["plugin:fixture"] if enabled else []
+print(json.dumps({
+    "schema_version": 1,
+    "copilot_version": "1.2.3",
+    "plugin_identity": {
+        "plugin_id": args.plugin_id,
+        "source_identity": "installed:market/fixture",
+        "version": "v1",
+    },
+    "plugin_enabled": enabled,
+    "owned_capability_ids": owned,
+    "estate_capability_ids": ["personal:x", *owned],
+}))
+""",
+    )
+    wrapper = fixture / "interrupting-transaction.py"
+    write(
+        wrapper,
+        f"""import importlib.util
+import os
+import sys
+spec = importlib.util.spec_from_file_location("real_transaction", {str(TRANSACTION)!r})
+real = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = real
+spec.loader.exec_module(real)
+for name in dir(real):
+    if not name.startswith("__"):
+        globals()[name] = getattr(real, name)
+real_execute_disable = real.execute_disable
+def execute_disable(**arguments):
+    real_execute_disable(**arguments)
+    os._exit(91)
+""",
+    )
+    recovery = fixture / "recovery.json"
+    command = [
+        sys.executable,
+        str(QUALIFIER),
+        "--transaction-script",
+        str(wrapper),
+        "--settings",
+        str(settings),
+        "--transaction-root",
+        str(fixture / "transactions"),
+        "--qualification-root",
+        str(fixture / "qualifications"),
+        "--lock",
+        str(fixture / "lock"),
+        "--recovery-state",
+        str(recovery),
+        "--plugin-id",
+        "fixture@market",
+        "--source-identity",
+        "installed:market/fixture",
+        "--version",
+        "v1",
+        "--source-type",
+        "marketplace",
+        "--settings-key",
+        "fixture@market",
+        "--copilot-version",
+        "1.2.3",
+        "--runtime-verifier",
+        sys.executable,
+        str(runtime),
+    ]
+    process = run(command)
+    assert process.returncode == 91
+    state = json.loads(recovery.read_text())
+    assert state["status"] == "qualification_active"
+    assert state["disable_operation_id"].startswith("qualify-")
+    assert json.loads(settings.read_text())["enabledPlugins"][
+        "fixture@market"
+    ] is False
+    ledger = json.loads(
+        (fixture / "transactions" / "ledger" / "current.json").read_text()
+    )
+    assert len(ledger["active_disables"]) == 1
+
+
 def test_configuration(root: Path) -> None:
     python = str(Path(sys.executable).resolve())
     actions = (
@@ -645,9 +842,11 @@ print(json.dumps({"ok": True, "result": {"action": args.action, "request": reque
         )
         test_inventory(root, estate)
         test_receiver(root, estate, transaction)
+        test_receiver_executes_verified_descriptors(root)
         test_local_ssh(root, estate, transaction)
         test_qualification(root)
         test_qualification_recovery(root)
+        test_qualification_interruption_fence(root)
         test_configuration(root)
     print("plugin remote executor tests: PASS")
 

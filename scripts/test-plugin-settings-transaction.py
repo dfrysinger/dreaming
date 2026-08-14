@@ -440,6 +440,28 @@ class PluginSettingsTransactionTest(unittest.TestCase):
         ):
             module.validate_qualification(fixture.qualification, request)
 
+    def test_legacy_qualification_remains_bound_to_its_plugin(self) -> None:
+        fixture = Fixture(self.root / "legacy-qualification")
+        payload = {
+            key: value
+            for key, value in fixture.qualification.items()
+            if key != "qualification_sha256"
+        }
+        payload["plugin_id"] = fixture.plugin["plugin_id"]
+        payload["settings_key"] = fixture.plugin["settings_key"]
+        legacy = {
+            **payload,
+            "qualification_sha256": module.hash_json(payload),
+        }
+        request = copy.deepcopy(fixture.request)
+        request["qualification_sha256"] = legacy["qualification_sha256"]
+        module.validate_qualification(legacy, request)
+        request["plugin"]["plugin_id"] = "other@market"
+        with self.assertRaisesRegex(
+            module.SettingsError, "plugin-source-unqualified"
+        ):
+            module.validate_qualification(legacy, request)
+
     def test_absent_key_is_enabled_only_with_matching_runtime_proof(self) -> None:
         fixture = Fixture(self.root / "absent", prior_present=False)
         result = fixture.execute()
@@ -525,6 +547,74 @@ class PluginSettingsTransactionTest(unittest.TestCase):
         self.assertEqual(
             module.load_ledger(fixture.transactions)["active_disables"], []
         )
+
+    def test_restore_survives_copilot_version_drift(self) -> None:
+        fixture = Fixture(self.root / "restore-version-drift")
+        disabled = fixture.execute()
+        request = fixture.restore_request(disabled)
+        request["copilot_version"] = "1.0.81"
+
+        def current_runtime() -> dict:
+            value = fixture.runtime_inventory()
+            value["copilot_version"] = "1.0.81"
+            return value
+
+        request["expected"]["runtime_before_sha256"] = module.hash_json(
+            current_runtime()
+        )
+        request["request_sha256"] = module.hash_json(
+            {
+                key: value
+                for key, value in request.items()
+                if key != "request_sha256"
+            }
+        )
+        restored = fixture.restore(
+            request, runtime_verifier=current_runtime
+        )
+        self.assertTrue(restored["ok"])
+        self.assertEqual(fixture.settings.read_bytes(), fixture.before_bytes)
+
+    def test_runtime_verifier_rewinds_inherited_code_descriptors(self) -> None:
+        fixture = Fixture(self.root / "runtime-descriptors")
+        estate = fixture.root / "estate.py"
+        runtime = fixture.root / "runtime.py"
+        estate.write_text("trusted-estate\n", encoding="utf-8")
+        runtime.write_text(
+            """import argparse
+import json
+parser = argparse.ArgumentParser()
+parser.add_argument("--estate-script", required=True)
+parser.add_argument("--settings", required=True)
+parser.add_argument("--plugin-id", required=True)
+args = parser.parse_args()
+print(json.dumps({
+    "estate": open(args.estate_script).read().strip(),
+    "plugin_id": args.plugin_id,
+}))
+""",
+            encoding="utf-8",
+        )
+        runtime_descriptor = os.open(runtime, os.O_RDONLY)
+        estate_descriptor = os.open(estate, os.O_RDONLY)
+        try:
+            verifier = module.command_runtime_verifier(
+                [
+                    sys.executable,
+                    f"/dev/fd/{runtime_descriptor}",
+                    "--estate-script",
+                    f"/dev/fd/{estate_descriptor}",
+                ],
+                fixture.settings,
+                fixture.request,
+            )
+            first = verifier()
+            second = verifier()
+        finally:
+            os.close(runtime_descriptor)
+            os.close(estate_descriptor)
+        self.assertEqual(first, second)
+        self.assertEqual(first["estate"], "trusted-estate")
 
     def test_restore_preserves_unrelated_current_edits(self) -> None:
         fixture = Fixture(self.root / "restore-unrelated")
