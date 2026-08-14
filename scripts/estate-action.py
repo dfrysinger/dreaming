@@ -145,10 +145,19 @@ def load_authority_config(path: Path) -> dict[str, Any]:
         receiver = receivers[kind]
         if (
             not isinstance(adapter, dict)
-            or set(adapter) != {"path", "sha256"}
+            or set(adapter) != {"argv", "path", "sha256"}
             or not isinstance(adapter.get("path"), str)
             or not Path(adapter["path"]).is_absolute()
             or not SHA256_RE.fullmatch(str(adapter.get("sha256")))
+            or not isinstance(adapter.get("argv"), list)
+            or not adapter["argv"]
+            or any(
+                not isinstance(item, str) or not item
+                for item in adapter["argv"]
+            )
+            or adapter["argv"][0] != adapter["path"]
+            or adapter["argv"].count("{request}") != 1
+            or adapter["argv"].count("{authorization}") != 1
             or not isinstance(receiver, dict)
             or set(receiver)
             != {
@@ -184,6 +193,13 @@ def configured_adapter(config: dict[str, Any], kind: str) -> Path:
     ):
         raise ActionError("estate-action-adapter-untrusted")
     return path
+
+
+def configured_adapter_argv(
+    config: dict[str, Any], kind: str
+) -> list[str]:
+    configured_adapter(config, kind)
+    return list(config["adapters"][kind]["argv"])
 
 
 def evidence_object_path(
@@ -563,9 +579,11 @@ def authorize(
     if candidate["evidence"] != current_evidence:
         raise ActionError("estate-action-evidence-not-current")
     expected_adapter = configured_adapter(config, candidate["action"]["kind"])
+    expected_argv = configured_adapter_argv(
+        config, candidate["action"]["kind"]
+    )
     if (
-        not candidate.get("executor", {}).get("argv")
-        or candidate["executor"]["argv"][0] != str(expected_adapter)
+        candidate.get("executor", {}).get("argv") != expected_argv
         or candidate.get("action", {}).get("adapter_sha256")
         != file_digest(expected_adapter)
         or candidate["evidence"]["receiver"]["value"]
@@ -602,8 +620,11 @@ def verify_authority(
     }:
         raise ActionError("estate-action-config-changed")
     adapter = configured_adapter(config, authorization["action"]["kind"])
+    expected_argv = configured_adapter_argv(
+        config, authorization["action"]["kind"]
+    )
     if (
-        str(adapter) != authorization["executor"]["argv"][0]
+        authorization["executor"]["argv"] != expected_argv
         or file_digest(adapter) != authorization["action"]["adapter_sha256"]
         or authorization["evidence"]["receiver"]["value"]
         != {

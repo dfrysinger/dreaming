@@ -47,6 +47,15 @@ class Fixture:
         self.counter = root / "adapter-count"
         self.adapter = root / "adapter.py"
         self._write_adapter()
+        self.executor_argv = [
+            str(self.adapter),
+            "--request",
+            "{request}",
+            "--authorization",
+            "{authorization}",
+            "--counter",
+            str(self.counter),
+        ]
         self.kind = kind
         self.target_inventory = module.digest(
             [{"path": "SKILL.md", "sha256": "a" * 64}]
@@ -93,15 +102,7 @@ class Fixture:
             "executor": {
                 "protocol": module.ACTION_CONTRACTS[kind]["protocol"],
                 "request": self.executor_request,
-                "argv": [
-                    str(self.adapter),
-                    "--request",
-                    "{request}",
-                    "--authorization",
-                    "{authorization}",
-                    "--counter",
-                    str(self.counter),
-                ],
+                "argv": self.executor_argv,
             },
         }
         self.authorization = module.authorize(
@@ -272,6 +273,11 @@ class Fixture:
                 kind: {
                     "path": str(self.adapter),
                     "sha256": module.file_digest(self.adapter),
+                    "argv": (
+                        self.candidate["executor"]["argv"]
+                        if hasattr(self, "candidate")
+                        else self.executor_argv
+                    ),
                 }
                 for kind in module.ACTION_CONTRACTS
             },
@@ -511,6 +517,17 @@ class EstateActionTest(unittest.TestCase):
         candidate = copy.deepcopy(fixture.candidate)
         candidate["executor"]["argv"][0] = str(other)
         candidate["action"]["adapter_sha256"] = module.file_digest(other)
+        with self.assertRaisesRegex(
+            module.ActionError, "estate-action-adapter-untrusted"
+        ):
+            module.authorize(candidate, fixture.config_path)
+
+    def test_authorizer_requires_the_configured_adapter_argv(self) -> None:
+        fixture = Fixture(self.root / "adapter-argv-authority")
+        candidate = copy.deepcopy(fixture.candidate)
+        candidate["executor"]["argv"].extend(
+            ["--config", str(fixture.root / "self-sealed.json")]
+        )
         with self.assertRaisesRegex(
             module.ActionError, "estate-action-adapter-untrusted"
         ):

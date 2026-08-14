@@ -184,6 +184,8 @@ for script in install.sh dreaming-deps.py test-shared-deps.sh \
   manage-instructions.sh configure-adapters.py migrate-copilot-state.py \
   ssh-session-source.py ssh-skill-publisher.py test-ssh-skill-publisher.py \
   ssh-estate-census.py test-ssh-estate-census.py \
+  estate-action.py estate-action-adapter.py \
+  test-estate-action.py test-estate-action-adapter.py \
   dreaming-enqueue.sh test-copilot-migration.sh \
   transfer-dreaming-host.py test-transfer-dreaming-host.sh \
   cutover-dreaming-host.py test-cutover-dreaming-host.sh \
@@ -318,6 +320,16 @@ if run_isolated_test "$ROOT_SCRIPT_DIR/test-ssh-estate-census.py" >>"$RESULT" 2>
   ok "deterministic SSH estate census checks"
 else
   bad "deterministic SSH estate census checks"
+fi
+if run_isolated_test "$ROOT_SCRIPT_DIR/test-estate-action.py" >>"$RESULT" 2>&1; then
+  ok "deterministic estate action authority checks"
+else
+  bad "deterministic estate action authority checks"
+fi
+if run_isolated_test "$ROOT_SCRIPT_DIR/test-estate-action-adapter.py" >>"$RESULT" 2>&1; then
+  ok "deterministic estate action adapter checks"
+else
+  bad "deterministic estate action adapter checks"
 fi
 if run_isolated_test "$ROOT_SCRIPT_DIR/test-copilot-migration.sh" >>"$RESULT" 2>&1; then
   ok "deterministic Copilot migration checks"
