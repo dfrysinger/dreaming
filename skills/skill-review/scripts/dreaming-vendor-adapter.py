@@ -18,7 +18,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import tomllib
 import unicodedata
 from pathlib import Path
 from typing import Any, Iterable
@@ -4113,6 +4112,13 @@ def inventory_json(vendor: str) -> Any:
 
 
 def codex_marketplace_inventory() -> dict[str, list[dict[str, Any]]]:
+    try:
+        import tomllib
+    except ModuleNotFoundError as error:
+        raise AdapterError(
+            "publisher-inventory-unavailable",
+            "Python 3.11 or newer is required for Codex marketplace inventory",
+        ) from error
     codex_home = Path(
         os.environ.get("CODEX_HOME", Path.home() / ".codex")
     ).expanduser()

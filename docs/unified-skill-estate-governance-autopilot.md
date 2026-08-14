@@ -74,18 +74,22 @@ met.
   disable/restore proof. The required post-live dual implementation review
   passed after closing qualification interruption fencing, Copilot-version
   restore drift, verified-code pathname replacement, and repeated descriptor
-  execution. The autonomous scheduled-curator activation slice is under its
-  final bounded review.
+  execution. Final implementation review for the scheduled whole-estate
+  pipeline remains gated on a passing installed scheduled-live receipt for the
+  exact successor candidate.
 - **Settings decision:** plugin mutation uses same-directory macOS
   `renamex_np(..., RENAME_SWAP)` to retain the exact displaced settings inode;
   unsupported volumes and unqualified plugin source classes remain
   report-only.
-- **Current phase:** final installed whole-estate proof. The reviewed
-  `1baee42` candidate passed managed installation and self-test, then the first
-  forced scheduled review exposed a scheduler integration defect: multi-host
-  mode replaced the agent-owned curator pass with a self-test no-op. The local
-  successor restores the real `scheduled-live` curator pass while retaining
-  the memory-roll no-op.
+- **Current phase:** final installed whole-estate proof. Candidate `57befad`
+  passed managed installation and deterministic certification, then its first
+  forced scheduled review reached the real weekly pipeline and failed closed
+  during consolidation. Both configured review executors exited before
+  emitting their JSON contract because the Apple Command Line Tools Python
+  lacks `tomllib`. The local successor scopes that optional parser dependency
+  to Codex marketplace inventory, adds an import-time regression for executor
+  doctor startup without `tomllib`, and passes the complete local daemon
+  self-test with zero failures.
 - **Implementation order:** census and identity model; estate dashboard and
   unresolved mappings; evaluation and recommendations; remote personal-skill
   archive/restore; atomic settings transaction and source qualification;
@@ -109,19 +113,21 @@ met.
   `065dae5`, `cfd6793`, and `8e561ae` add and harden the receiver-bound remote
   plugin settings executor, complete runtime capability inventory, reversible
   source qualification, sealed configuration rebinding, and forced-command
-  SSH result handling. The current uncommitted final delta preserves a
-  qualification-wide recovery fence, keeps committed disables restorable
-  across Copilot upgrades, executes the exact verified remote code descriptors,
-  records sanitized whole-estate recommendations for the dashboard, and turns
-  the weekly mini curator into the standing-approved scheduled-live estate
-  review.
-- **Installed state:** the Mac mini completed managed install and self-test for
-  clean candidate `1baee42` at activation generation
-  `20260814T191600Z-install-37690`. The self-test result is zero failures. The
-  installation was resumed only through `scripts/install.sh enable`; the halt
-  switch is inactive, the dashboard is running, and the remote source,
-  publisher, executors, receiver-bound census adapter, and governed action
-  bridge are present.
+  SSH result handling. Commit `1baee42` preserves a qualification-wide recovery
+  fence, keeps committed disables restorable across Copilot upgrades, executes
+  the exact verified remote code descriptors, records sanitized whole-estate
+  recommendations for the dashboard, and turns the weekly mini curator into
+  the standing-approved scheduled-live estate review. Commit `a196efb` routes
+  `skills-prune` through that curator, and `57befad` fixes its installed
+  scheduler regression. The local uncommitted successor contains only the
+  executor compatibility fix and its focused regression.
+- **Installed state:** the Mac mini completed managed install and deterministic
+  certification for clean candidate `57befad` at activation generation
+  `20260814T205621Z-install-36959`. It was resumed only through
+  `scripts/install.sh enable`; the halt switch is inactive, the dashboard is
+  running, and the remote source, publisher, executors, receiver-bound census
+  adapter, and governed action bridge are present. Its scheduled-live receipt
+  is failed, so it is not an accepted final candidate.
 - **Live-proof status:** CHK-09 passed. The installed Mac mini collected a
   complete fixture-inclusive census, archived the real MacBook fixture through
   the governed receiver, returned the identical result on retry, restored the
@@ -158,9 +164,21 @@ met.
   local recommendation test passes. The complete final local daemon self-test
   also passes with zero failures. Installed certification then found that
   `daemon-pass.sh` still classified every non-consolidation multi-host pass as
-  `standalone-noop`, so the curator prompt never ran. The successor candidate
-  routes `skills-prune` through the real bounded Copilot pass and adds a
+  `standalone-noop`, so the curator prompt never ran. Candidate `57befad`
+  routes `skills-prune` through the real bounded Copilot pass and includes a
   deterministic regression proving the `scheduled-live` prompt is invoked.
+- **Scheduled-live gate:** the forced weekly run for installed candidate
+  `57befad` completed a fresh MacBook census of 93 canonical capabilities, 93
+  effective instances, 107 physical instances, 14 physical-only instances,
+  five plugin packages, three enabled plugin packages, and zero unresolved
+  runtime skills. Consolidation then rejected both review executors as
+  `empty-adapter-output`, producing 25 `no-allowed-executor` failures before
+  curation or mutation. No estate mutation occurred. The earliest verified
+  divergence was the adapter's unconditional import of `tomllib` under the
+  configured Apple Python. The successor keeps executor startup independent of
+  that unrelated inventory parser while retaining explicit fail-closed
+  behavior when Codex marketplace inventory itself requires an unavailable
+  parser.
 - **CHK-04 closure:** the final MacBook live proof found five plugin packages,
   three enabled packages, complete capability inventories, and zero unresolved
   mappings. The estate suite passed 44 tests; core, receiver transport,

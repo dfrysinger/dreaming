@@ -665,6 +665,25 @@ print(json.dumps({"ok": True}))
         self.assertIn("--settings", claude_run)
         self.assertEqual(claude_run[claude_run.index("--settings") + 1], "{}")
 
+    def test_executor_doctor_does_not_require_tomllib(self):
+        blocked_stdlib = self.case / "blocked-stdlib"
+        blocked_stdlib.mkdir()
+        (blocked_stdlib / "tomllib.py").write_text(
+            "raise ModuleNotFoundError(\"tomllib is unavailable\")\n"
+        )
+        environment = {
+            **self.env,
+            "PYTHONPATH": str(blocked_stdlib),
+        }
+        doctor = self.run_adapter(
+            "copilot",
+            "review-executor",
+            "doctor",
+            environment=environment,
+        )
+        self.assertTrue(doctor["healthy"])
+        self.assertTrue(doctor["boundary_ready"])
+
     def test_executor_canonicalizes_tmp_alias(self):
         environment = {**self.env, "TMPDIR": "/tmp"}
         doctor = self.run_adapter(
