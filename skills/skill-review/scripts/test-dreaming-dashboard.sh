@@ -114,11 +114,24 @@ token_path.parent.mkdir(parents=True, exist_ok=True)
 token = "A" * 43
 token_path.write_text(token + "\n", encoding="ascii")
 token_path.chmod(0o600)
+private_sentinels = {
+    "settings": "CHK10-SETTINGS-PRIVATE-7d125afd",
+    "credential": "CHK10-CREDENTIAL-PRIVATE-9367f9cb",
+    "transcript": "CHK10-TRANSCRIPT-PRIVATE-451ea287",
+    "case": "CHK10-CASE-PRIVATE-cfe25112",
+    "authority": "CHK10-AUTHORITY-PRIVATE-0f89a614",
+}
+(state / "private-boundary-fixtures.json").write_text(
+    json.dumps(private_sentinels),
+    encoding="utf-8",
+)
 
 estate_snapshot = {
     "schema_version": 1,
     "host_id": "macbook-fixture",
     "collected_at": "2026-08-13T12:00:00+00:00",
+    "private_case": private_sentinels["case"],
+    "private_authority_receipt": private_sentinels["authority"],
     "scope": {
         "label": "Fixture bounded scope",
         "complete": True,
@@ -169,7 +182,12 @@ estate_snapshot = {
         "instance_id": "sha256:" + "1" * 64,
         "canonical_capability_id": "sha256:" + "2" * 64,
         "absolute_path": "/private/skill/path",
-        "files": [{"path": "secret", "sha256": "private-sentinel"}],
+        "files": [
+            {
+                "path": "secret",
+                "sha256": private_sentinels["credential"],
+            }
+        ],
         "provenance": {
             "status": "invalid",
             "basis": "private-provenance-sentinel",
@@ -213,7 +231,7 @@ estate_snapshot = {
     }],
     "evidence": {
         "settings_path": "/private/settings.json",
-        "settings_sha256": "private-settings-sentinel",
+        "settings_sha256": private_sentinels["settings"],
     },
 }
 estate_census = {
@@ -454,7 +472,15 @@ snapshot = {
     "qualified_session_id": "copilot:session-0000",
     "source_revision": "revision-0",
     "events": [
-        {"source_event_id": f"event-{index}", "kind": "message", "text": f"Transcript text {index}"}
+        {
+            "source_event_id": f"event-{index}",
+            "kind": "message",
+            "text": (
+                private_sentinels["transcript"]
+                if index == 3
+                else f"Transcript text {index}"
+            ),
+        }
         for index in range(7)
     ],
 }
@@ -765,11 +791,14 @@ try:
     check(request(f"/api/v1/skills?limit=10&cursor={isolated_cursor}")[0] == 200, "unrelated activity does not invalidate a skill cursor")
 
     status, _, body = request("/api/v1/skills/learned-skill-000/evidence?limit=100")
+    evidence_body = body
     evidence = json.loads(body)["data"]["items"][0]
     check(
         evidence["anchor_status"] == "exact"
-        and [item["source_event_id"] for item in evidence["events"] if item["highlighted"]] == ["event-3"],
-        "evidence returns exact highlighted retained context",
+        and [item["source_event_id"] for item in evidence["events"] if item["highlighted"]] == ["event-3"]
+        and private_sentinels["transcript"] not in body.decode()
+        and "Transcript text" not in body.decode(),
+        "evidence returns exact highlighted metadata without transcript text",
     )
     envelope_path = skills / "learned-skill-000/.agent-created.json"
     original_envelope = envelope_path.read_text(encoding="utf-8")
@@ -804,7 +833,16 @@ try:
     )
     envelope_path.write_text(original_envelope, encoding="utf-8")
     status, _, body = request(f"/api/v1/transcripts/{snapshot_digest}")
-    check(status == 200 and b"Transcript text 3" in body, "valid canonical snapshot digest opens transcript")
+    transcript_body = body
+    transcript_payload = json.loads(body)["data"]
+    check(
+        status == 200
+        and transcript_payload["event_count"] == 7
+        and transcript_payload["events"][3]["source_event_id"] == "event-3"
+        and private_sentinels["transcript"] not in body.decode()
+        and "Transcript text" not in body.decode(),
+        "valid canonical snapshot exposes transcript metadata without transcript text",
+    )
     for invalid in (
         "../queue",
         snapshot_digest.upper(),
@@ -821,12 +859,73 @@ try:
     malformed_digest = "d" * 64
     (data / "snapshots" / f"{malformed_digest}.json").write_text("{", encoding="utf-8")
     check(request(f"/api/v1/transcripts/{malformed_digest}")[0] == 422, "malformed snapshot JSON is rejected")
+    for invalid_events in (
+        [None],
+        [{"source_event_id": "event-only", "kind": "message", "text": 123}],
+        [
+            {"source_event_id": "duplicate", "kind": "message", "text": "one"},
+            {"source_event_id": "duplicate", "kind": "message", "text": "two"},
+        ],
+    ):
+        invalid_snapshot = {
+            **snapshot,
+            "events": invalid_events,
+        }
+        invalid_bytes = json.dumps(
+            invalid_snapshot,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode()
+        invalid_digest = hashlib.sha256(invalid_bytes).hexdigest()
+        invalid_path = data / "snapshots" / f"{invalid_digest}.json"
+        invalid_path.write_bytes(invalid_bytes + b"\n")
+        check(
+            request(f"/api/v1/transcripts/{invalid_digest}")[0] == 422,
+            "malformed snapshot event metadata is rejected",
+        )
+        invalid_path.unlink()
+    nullable_snapshot = {
+        **snapshot,
+        "events": [
+            {
+                "source_event_id": "nullable-text",
+                "kind": "message",
+                "text": None,
+            }
+        ],
+    }
+    nullable_bytes = json.dumps(
+        nullable_snapshot,
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode()
+    nullable_digest = hashlib.sha256(nullable_bytes).hexdigest()
+    nullable_path = data / "snapshots" / f"{nullable_digest}.json"
+    nullable_path.write_bytes(nullable_bytes + b"\n")
+    check(
+        request(f"/api/v1/transcripts/{nullable_digest}")[0] == 200,
+        "nullable transcript text allowed by the producer remains valid metadata",
+    )
+    nullable_path.unlink()
     oversized_digest = "e" * 64
     (data / "snapshots" / f"{oversized_digest}.json").write_bytes(b"x" * (dashboard.MAX_SNAPSHOT_BYTES + 1))
     check(request(f"/api/v1/transcripts/{oversized_digest}")[0] == 422, "oversized snapshot is rejected")
 
+    private_boundary_bodies = [evidence_body, transcript_body]
     for route in ("/api/v1/overview", "/api/v1/estate", "/api/v1/activity", "/api/v1/system", "/api/v1/health"):
-        check(request(route)[0] == 200, f"{route} returns schema-v1 data")
+        route_status, _, route_body = request(route)
+        check(route_status == 200, f"{route} returns schema-v1 data")
+        private_boundary_bodies.append(route_body)
+    check(
+        all(
+            sentinel not in payload.decode()
+            for payload in private_boundary_bodies
+            for sentinel in private_sentinels.values()
+        ),
+        "dashboard serializers redact settings, credentials, transcripts, cases, and authority records",
+    )
     _, _, estate_body = request("/api/v1/estate")
     estate_view = json.loads(estate_body)["data"]
     check(
@@ -861,8 +960,10 @@ try:
         all(
             sentinel not in estate_body.decode()
             for sentinel in (
-                "private-settings-sentinel",
-                "private-sentinel",
+                private_sentinels["settings"],
+                private_sentinels["credential"],
+                private_sentinels["case"],
+                private_sentinels["authority"],
                 "/private/settings",
                 "/private/plugin/path",
                 "/private/skill/path",

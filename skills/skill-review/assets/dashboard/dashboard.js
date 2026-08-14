@@ -413,12 +413,12 @@ async function renderSkill(name) {
 async function renderEvidence(name, anchor) {
   const data = await api(`/api/v1/skills/${encodeURIComponent(name)}/evidence?limit=100`);
   view.innerHTML = `<a class="link back" href="#skill/${encodeURIComponent(name)}">← Back to ${esc(name)}</a>
-    ${header(`${name} evidence`, "Saved findings with the exact retained transcript context when an anchor exists.")}
+    ${header(`${name} evidence`, "Saved findings with retained transcript anchors; transcript text remains private.")}
     <div class="evidence-stack">${data.items.map(item => `
       <article class="evidence" id="${esc(item.id)}"><header><div><h2>${esc(item.summary)}</h2><div class="muted">Dream: ${esc(item.dream_name)} · ${relative(item.observed_at)} · ${esc(item.evidence_kind)}</div></div><div>${badge(item.source || "Unknown CLI")} ${badge(item.independence)}</div></header>
       ${item.anchor_status !== "exact" ? `<div class="notice">${item.anchor_status === "historical-unanchored" ? "Historical evidence · no exact event anchor is retained." : "The retained evidence anchor is invalid or unavailable."}</div>` : ""}
-      <div class="events">${item.events.map(event => `<div class="event ${event.highlighted ? "focus" : ""}"><small>${esc(event.kind)} · ${esc(event.source_event_id)}</small><p>${esc(event.text)}</p></div>`).join("")}</div>
-      ${item.snapshot_sha256 ? `<div class="action-pad"><button class="control" data-transcript="${esc(item.snapshot_sha256)}">Open transcript</button></div>` : ""}
+      <div class="events">${item.events.map(event => `<div class="event ${event.highlighted ? "focus" : ""}"><small>${esc(event.kind)} · ${esc(event.source_event_id)}</small><p>Transcript text retained privately.</p></div>`).join("")}</div>
+      ${item.snapshot_sha256 ? `<div class="action-pad"><button class="control" data-transcript="${esc(item.snapshot_sha256)}">Open transcript metadata</button></div>` : ""}
       </article>`).join("")}</div>`;
   document.querySelectorAll("[data-transcript]").forEach(button => button.addEventListener("click", () => {
     location.hash = `transcript/${button.dataset.transcript}`;
@@ -430,8 +430,8 @@ async function renderTranscript(digest) {
   const data = await api(`/api/v1/transcripts/${digest}`);
   const events = data.events || [];
   view.innerHTML = `<button class="link back" id="transcript-back">← Back to evidence</button>
-    ${header("Retained transcript", "The exact bounded normalized snapshot Dreaming reviewed.")}
-    <article class="panel"><div class="events">${events.map(event => `<div class="event"><small>${esc(event.kind)} · ${esc(event.source_event_id)}</small><p>${esc(event.text)}</p></div>`).join("")}</div></article>`;
+    ${header("Retained transcript metadata", "Event identity is visible; transcript text remains private.")}
+    <article class="panel"><div class="events">${events.map(event => `<div class="event"><small>${esc(event.kind)} · ${esc(event.source_event_id)}</small><p>Transcript text retained privately.</p></div>`).join("")}</div></article>`;
   document.getElementById("transcript-back").addEventListener("click", () => history.back());
 }
 

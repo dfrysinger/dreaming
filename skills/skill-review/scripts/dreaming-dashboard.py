@@ -1063,6 +1063,31 @@ class DashboardData:
             raise DashboardError(422, "snapshot_invalid", "Snapshot digest does not match")
         if not isinstance(snapshot.get("events"), list):
             raise DashboardError(422, "snapshot_invalid", "Snapshot events are invalid")
+        event_ids = []
+        for event in snapshot["events"]:
+            if (
+                not isinstance(event, dict)
+                or not isinstance(event.get("source_event_id"), str)
+                or not event["source_event_id"]
+                or not isinstance(event.get("kind"), str)
+                or not event["kind"]
+                or (
+                    event.get("text") is not None
+                    and not isinstance(event.get("text"), str)
+                )
+            ):
+                raise DashboardError(
+                    422,
+                    "snapshot_invalid",
+                    "Snapshot event is invalid",
+                )
+            event_ids.append(event["source_event_id"])
+        if len(event_ids) != len(set(event_ids)):
+            raise DashboardError(
+                422,
+                "snapshot_invalid",
+                "Snapshot event identities are not unique",
+            )
         return snapshot
 
     def evidence(self, name: str, params: dict[str, list[str]]) -> dict[str, Any]:
@@ -1135,10 +1160,10 @@ class DashboardData:
                             )
                         )
                     events = [
-                        {
-                            **snapshot["events"][position],
-                            "highlighted": position in indexes,
-                        }
+                        self._public_snapshot_event(
+                            snapshot["events"][position],
+                            highlighted=position in indexes,
+                        )
                         for position in sorted(selected)
                     ]
                     anchor_status = "exact"
@@ -1183,7 +1208,32 @@ class DashboardData:
         return catalog.get(session_id, fallback_name(session_id))
 
     def transcript(self, digest: str) -> dict[str, Any]:
-        return self._snapshot(digest)
+        snapshot = self._snapshot(digest)
+        return {
+            "schema_version": 1,
+            "snapshot_sha256": digest,
+            "source_revision": safe_text(snapshot.get("source_revision"), 500),
+            "event_count": len(snapshot["events"]),
+            "events": [
+                self._public_snapshot_event(event)
+                for event in snapshot["events"]
+                if isinstance(event, dict)
+            ],
+        }
+
+    @staticmethod
+    def _public_snapshot_event(
+        event: dict[str, Any],
+        *,
+        highlighted: bool | None = None,
+    ) -> dict[str, Any]:
+        public = {
+            "source_event_id": safe_text(event.get("source_event_id"), 500),
+            "kind": safe_text(event.get("kind"), 100),
+        }
+        if highlighted is not None:
+            public["highlighted"] = highlighted
+        return public
 
     def _candidate_records_root(self) -> Path:
         return self.paths.candidate_records or (

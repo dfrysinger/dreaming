@@ -181,6 +181,7 @@ done
 ROOT_SCRIPT_DIR="$REPO/scripts"
 for script in install.sh dreaming-deps.py test-shared-deps.sh \
   test-headless-roots.sh test-installer.sh test-repository-boundary.sh \
+  validate-private-boundary.py test-private-boundary.py \
   manage-instructions.sh configure-adapters.py migrate-copilot-state.py \
   ssh-session-source.py ssh-skill-publisher.py test-ssh-skill-publisher.py \
   ssh-estate-census.py test-ssh-estate-census.py \
@@ -350,6 +351,11 @@ if run_isolated_test "$ROOT_SCRIPT_DIR/test-repository-boundary.sh" >>"$RESULT" 
   ok "repository boundary checks"
 else
   bad "repository boundary checks"
+fi
+if run_isolated_test "$ROOT_SCRIPT_DIR/test-private-boundary.py" >>"$RESULT" 2>&1; then
+  ok "private boundary checks"
+else
+  bad "private boundary checks"
 fi
 if run_isolated_test node "$ROOT_SCRIPT_DIR/validate-plugin-manifests.mjs" >>"$RESULT" 2>&1; then
   ok "plugin manifest consistency"
