@@ -72,8 +72,8 @@ met.
   `renamex_np(..., RENAME_SWAP)` to retain the exact displaced settings inode;
   unsupported volumes and unqualified plugin source classes remain
   report-only.
-- **Current phase:** implement the source-qualified atomic settings disable
-  transaction (CHK-05). CHK-02 through CHK-04 are complete; mini-side action
+- **Current phase:** implement the ordered conflict-safe plugin settings
+  restore ledger (CHK-06). CHK-02 through CHK-05 are complete; mini-side action
   planning, dispatch, and installed reversible proof remain intentionally
   deferred until the complete evidence-binding and settings-ledger path exists.
 - **Implementation order:** census and identity model; estate dashboard and
@@ -81,10 +81,11 @@ met.
   archive/restore; atomic settings transaction and source qualification;
   plugin disable/restore; installed two-host proof and rollback.
 - **Implemented candidate:** local commits `79bf9b0`, `9cde88e`, `a4e270b`,
-  `ef677e2`, `edab92c`, and `d5587e3` provide the bounded census, installed
-  adapter upgrades, provenance authority matrix, sealed retry-safe remote
-  personal-skill archive/restore receiver, and complete report-only plugin
-  capability gate. Never push these commits.
+  `ef677e2`, `edab92c`, `d5587e3`, and `d5b8fd8` provide the bounded census,
+  installed adapter upgrades, provenance authority matrix, sealed retry-safe
+  remote personal-skill archive/restore receiver, complete report-only plugin
+  capability gate, and source-qualified lossless atomic settings disable
+  transaction. Never push these commits.
 - **Installed state:** the Mac mini completed managed install, self-test, and
   enable for `a4e270b`. The halt switch is absent, the self-test exit code is
   `0`, the dashboard is running, and the remote source, publisher, executors,
@@ -103,6 +104,12 @@ met.
   dashboard, and dashboard-contract suites passed. Two-family fix verification
   found no CHK-04 blocker. Trusted execution-anchor enforcement remains owned
   by CHK-07 rather than the report-only evaluator.
+- **CHK-05 closure:** 19 deterministic tests exercised real macOS
+  `RENAME_SWAP`, marketplace/direct qualification, absent-key semantics,
+  restrictive umasks, stale and malformed settings, unsupported volumes,
+  write and runtime failures, rename races, old-file-descriptor writes,
+  rollback races, missing staged names, and recovery retention failures.
+  Three bounded two-family review rounds closed every material finding.
 - **Completion authority:** only the design's named Definition of Done; do not
   substitute partial unit checks, dashboard rendering, or one successful
   mutation for the complete installed two-host proof.
