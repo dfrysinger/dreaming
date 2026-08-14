@@ -19,6 +19,7 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 SCRIPT_DIR = Path(sys.argv[1]).resolve()
 REPO = SCRIPT_DIR.parents[2]
@@ -49,6 +50,11 @@ class EstateCensusTest(unittest.TestCase):
             encoding="utf-8",
         )
         return skill
+
+    def assert_blocked(self, result: dict, reason: str) -> None:
+        self.assertFalse(result["eligible_for_disablement"])
+        self.assertEqual(result["decision"], "keep")
+        self.assertIn(reason, result["blocking_reasons"])
 
     def root(
         self,
@@ -136,6 +142,201 @@ class EstateCensusTest(unittest.TestCase):
 
     def sealed(self, payload: dict, field: str) -> dict:
         return {**payload, field: module.digest(payload)}
+
+    def plugin_gate_fixture(self) -> dict:
+        hook = {"type": "command", "bash": "true"}
+        return {
+            "plugin_id": "fixture@market",
+            "source_identity": "installed:market/fixture",
+            "version": "1.0.0",
+            "enabled": True,
+            "capabilities": {
+                "complete": True,
+                "unknown_metadata": [],
+                "inventory_errors": [],
+                "skills": ["./skills/one", "./skills/two"],
+                "agents": ["./agents/reviewer.md"],
+                "hooks": [
+                    f"./hooks/hooks.json#sessionStart[0]@{module.digest(hook)}"
+                ],
+                "mcp_servers": ["./.mcp.json#fixture"],
+                "lsp_servers": ["./.lsp.json#python"],
+            },
+        }
+
+    def plugin_gate_evidence(self, plugin: dict) -> dict:
+        capability_ids, reasons = module.plugin_capability_ids(
+            plugin["capabilities"]
+        )
+        self.assertEqual(reasons, [])
+        identity_sha256 = module.digest(module.plugin_identity(plugin))
+        inventory_sha256 = module.digest(plugin["capabilities"])
+        census_snapshot = {
+            "schema_version": 1,
+            "host_id": "fixture-macbook",
+            "collected_at": "2026-01-01T00:00:00+00:00",
+            "scope": {
+                "label": "fixture",
+                "complete": True,
+                "registered_context_ids": ["user"],
+                "outside_context_ids": [],
+            },
+            "totals": {},
+            "authority_counts": {},
+            "root_class_counts": {},
+            "contexts": [
+                {
+                    "id": "user",
+                    "complete": True,
+                    "unresolved_count": 0,
+                }
+            ],
+            "physical_instances": [],
+            "enabled_instances": [],
+            "unresolved_mappings": [],
+            "evidence": {},
+            "plugins": [plugin],
+        }
+        current_estate_sha256 = module.digest(census_snapshot)
+        census = {
+            **census_snapshot,
+            "snapshot_sha256": current_estate_sha256,
+        }
+        census_receipt = {
+            "schema_version": 1,
+            "snapshot_sha256": current_estate_sha256,
+            "receiver": {
+                "receiver_id": "fixture-receiver",
+                "receiver_sha256": "a" * 64,
+                "collector_sha256": "b" * 64,
+            },
+            "census": census,
+        }
+        proposed_snapshot = {
+            "schema_version": 1,
+            "current_estate_sha256": current_estate_sha256,
+            "disabled_plugin_identity_sha256": identity_sha256,
+            "removed_capability_ids": capability_ids,
+        }
+        proposed_estate_sha256 = module.digest(proposed_snapshot)
+
+        def receipt(kind: str) -> dict:
+            payload = {
+                "kind": kind,
+                "plugin_identity_sha256": identity_sha256,
+                "current_estate_sha256": current_estate_sha256,
+                "proposed_estate_sha256": proposed_estate_sha256,
+                "removed_capability_ids": capability_ids,
+                "result": "passed",
+            }
+            return {
+                "status": "passed",
+                "payload": payload,
+                "sha256": module.digest(payload),
+            }
+
+        return {
+            "authority": {
+                "current_receipt_sha256": module.digest(census_receipt),
+                "expected_census_host_id": "fixture-macbook",
+                "expected_receiver": dict(census_receipt["receiver"]),
+            },
+            "current_census_receipt": {
+                "receipt_sha256": module.digest(census_receipt),
+                "receipt": census_receipt,
+            },
+            "capability_evaluations": [
+                {
+                    "capability_id": capability_id,
+                    "disposition": (
+                        "redundant"
+                        if capability_id.startswith("skills:")
+                        else "superseded"
+                    ),
+                    "evidence_complete": True,
+                    "plugin_identity_sha256": identity_sha256,
+                    "capability_inventory_sha256": inventory_sha256,
+                    "current_estate_sha256": current_estate_sha256,
+                }
+                for capability_id in capability_ids
+            ],
+            "dependency_inventory": {
+                "complete": True,
+                "plugin_identity_sha256": identity_sha256,
+                "current_estate_sha256": current_estate_sha256,
+                **{
+                    field: []
+                    for field in module.PLUGIN_DEPENDENCY_CLASSES
+                },
+            },
+            "proposed_estate": {
+                "complete": True,
+                "current_estate_sha256": current_estate_sha256,
+                "proposed_estate_sha256": proposed_estate_sha256,
+                "removed_capability_ids": capability_ids,
+                "plugin_identity_sha256": identity_sha256,
+                "capability_inventory_sha256": inventory_sha256,
+                "snapshot": proposed_snapshot,
+                "routing": receipt("routing"),
+                "portfolio": receipt("portfolio"),
+            },
+        }
+
+    def reseal_census_receipt(self, evidence: dict) -> str:
+        receipt_wrapper = evidence["current_census_receipt"]
+        receipt = receipt_wrapper["receipt"]
+        census = receipt["census"]
+        snapshot = {
+            key: value for key, value in census.items() if key != "snapshot_sha256"
+        }
+        census_sha256 = module.digest(snapshot)
+        census["snapshot_sha256"] = census_sha256
+        receipt["snapshot_sha256"] = census_sha256
+        receipt_sha256 = module.digest(receipt)
+        receipt_wrapper["receipt_sha256"] = receipt_sha256
+        evidence["authority"]["current_receipt_sha256"] = receipt_sha256
+        return census_sha256
+
+    def rebind_plugin_gate_evidence(
+        self, plugin: dict, evidence: dict
+    ) -> None:
+        capability_ids, _ = module.plugin_capability_ids(plugin["capabilities"])
+        identity_sha256 = module.digest(module.plugin_identity(plugin))
+        inventory_sha256 = module.digest(plugin["capabilities"])
+        census_sha256 = self.reseal_census_receipt(evidence)
+        for evaluation in evidence["capability_evaluations"]:
+            evaluation["plugin_identity_sha256"] = identity_sha256
+            evaluation["capability_inventory_sha256"] = inventory_sha256
+            evaluation["current_estate_sha256"] = census_sha256
+        dependencies = evidence["dependency_inventory"]
+        dependencies["plugin_identity_sha256"] = identity_sha256
+        dependencies["current_estate_sha256"] = census_sha256
+        proposed = evidence["proposed_estate"]
+        proposed["current_estate_sha256"] = census_sha256
+        proposed["removed_capability_ids"] = capability_ids
+        proposed["plugin_identity_sha256"] = identity_sha256
+        proposed["capability_inventory_sha256"] = inventory_sha256
+        proposed["snapshot"] = {
+            "schema_version": 1,
+            "current_estate_sha256": census_sha256,
+            "disabled_plugin_identity_sha256": identity_sha256,
+            "removed_capability_ids": capability_ids,
+        }
+        proposed["proposed_estate_sha256"] = module.digest(proposed["snapshot"])
+        for kind in ("routing", "portfolio"):
+            payload = {
+                "kind": kind,
+                "plugin_identity_sha256": identity_sha256,
+                "current_estate_sha256": census_sha256,
+                "proposed_estate_sha256": proposed["proposed_estate_sha256"],
+                "removed_capability_ids": capability_ids,
+                "result": "passed",
+            }
+            proposed[kind] = {
+                "status": "passed",
+                "payload": payload,
+                "sha256": module.digest(payload),
+            }
 
     def test_chk01_reconciles_physical_and_effective_estate(self) -> None:
         personal = self.case / "personal"
@@ -767,9 +968,25 @@ class EstateCensusTest(unittest.TestCase):
         (plugin / "agents").mkdir()
         (plugin / "agents/reviewer.md").write_text("fixture", encoding="utf-8")
         (plugin / "hooks").mkdir()
-        (plugin / "hooks/hooks.json").write_text("{}", encoding="utf-8")
+        (plugin / "hooks/hooks.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "hooks": {
+                        "sessionStart": [
+                            {"type": "command", "bash": "true"}
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
         (plugin / ".mcp.json").write_text(
             json.dumps({"mcpServers": {"fixture": {"command": "true"}}}),
+            encoding="utf-8",
+        )
+        (plugin / ".lsp.json").write_text(
+            json.dumps({"lspServers": {"python": {"command": "true"}}}),
             encoding="utf-8",
         )
         capabilities = module.plugin_capabilities(
@@ -779,13 +996,736 @@ class EstateCensusTest(unittest.TestCase):
                 "version": "1.0.0",
                 "skills": ["./skills/one"],
                 "agents": ["./agents"],
+                "hooks": "./hooks/hooks.json",
+                "mcpServers": "./.mcp.json",
+                "lspServers": "./.lsp.json",
             },
         )
         self.assertTrue(capabilities["complete"])
         self.assertEqual(capabilities["skills"], ["./skills/one"])
-        self.assertEqual(capabilities["agents"], ["./agents"])
-        self.assertEqual(capabilities["hooks"], ["./hooks/hooks.json"])
-        self.assertEqual(capabilities["mcp_servers"], [".mcp.json#fixture"])
+        self.assertEqual(capabilities["agents"], ["./agents/reviewer.md"])
+        self.assertEqual(
+            capabilities["hooks"],
+            [
+                "./hooks/hooks.json#sessionStart[0]@"
+                + module.digest({"type": "command", "bash": "true"})
+            ],
+        )
+        self.assertEqual(
+            capabilities["mcp_servers"], ["./.mcp.json#fixture"]
+        )
+        self.assertEqual(capabilities["lsp_servers"], ["./.lsp.json#python"])
+
+    def test_plugin_capabilities_fail_closed_on_unknown_metadata(self) -> None:
+        plugin = self.case / "plugin"
+        self.skill(plugin / "skills", "one")
+        capabilities = module.plugin_capabilities(
+            plugin,
+            {
+                "name": "fixture",
+                "version": "1.0.0",
+                "skills": "./skills",
+                "commands": ["./commands/one.md"],
+            },
+        )
+        self.assertFalse(capabilities["complete"])
+        self.assertEqual(capabilities["unknown_metadata"], ["commands"])
+
+    def test_plugin_capabilities_merge_declared_and_conventional_files(
+        self,
+    ) -> None:
+        plugin = self.case / "plugin"
+        (plugin / "hooks").mkdir(parents=True)
+        (plugin / "custom").mkdir()
+        default_hook = {"type": "command", "bash": "default"}
+        custom_hook = {"type": "command", "bash": "custom"}
+        for path, event, hook in (
+            (plugin / "hooks/hooks.json", "sessionStart", default_hook),
+            (plugin / "custom/hooks.json", "sessionEnd", custom_hook),
+        ):
+            path.write_text(
+                json.dumps({"version": 1, "hooks": {event: [hook]}}),
+                encoding="utf-8",
+            )
+        (plugin / ".mcp.json").write_text(
+            json.dumps(
+                {"mcpServers": {"default": {"command": "default"}}}
+            ),
+            encoding="utf-8",
+        )
+        (plugin / "custom/mcp.json").write_text(
+            json.dumps({"custom": {"command": "custom"}}),
+            encoding="utf-8",
+        )
+        capabilities = module.plugin_capabilities(
+            plugin,
+            {
+                "name": "fixture",
+                "version": "1.0.0",
+                "hooks": "./custom/hooks.json",
+                "mcpServers": "./custom/mcp.json",
+            },
+        )
+        self.assertTrue(capabilities["complete"])
+        self.assertEqual(len(capabilities["hooks"]), 2)
+        self.assertEqual(
+            capabilities["mcp_servers"],
+            ["./.mcp.json#default", "./custom/mcp.json#custom"],
+        )
+
+    def test_plugin_capabilities_retain_implicit_hooks_and_mcp_only(
+        self,
+    ) -> None:
+        plugin = self.case / "plugin"
+        (plugin / "hooks").mkdir(parents=True)
+        hook = {"type": "command", "bash": "true"}
+        (plugin / "hooks/hooks.json").write_text(
+            json.dumps({"version": 1, "hooks": {"sessionStart": [hook]}}),
+            encoding="utf-8",
+        )
+        (plugin / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"fixture": {"command": "true"}}}),
+            encoding="utf-8",
+        )
+        (plugin / ".lsp.json").write_text(
+            json.dumps({"lspServers": {"python": {"command": "true"}}}),
+            encoding="utf-8",
+        )
+        capabilities = module.plugin_capabilities(
+            plugin, {"name": "fixture", "version": "1.0.0"}
+        )
+        self.assertTrue(capabilities["complete"])
+        self.assertEqual(len(capabilities["hooks"]), 1)
+        self.assertEqual(
+            capabilities["mcp_servers"], ["./.mcp.json#fixture"]
+        )
+        self.assertEqual(capabilities["lsp_servers"], [])
+
+    def test_plugin_capability_paths_fail_closed(self) -> None:
+        plugin = self.case / "plugin"
+        plugin.mkdir()
+        outside = self.case / "outside.md"
+        outside.write_text("fixture", encoding="utf-8")
+        with self.assertRaises(module.EstateError):
+            module.plugin_declared_files(plugin, ["../outside.md"], "agents")
+
+        (plugin / "agents-link").symlink_to(outside)
+        with self.assertRaises(module.EstateError):
+            module.plugin_declared_files(
+                plugin, ["./agents-link"], "agents"
+            )
+
+        agents = plugin / "agents"
+        agents.mkdir()
+        (agents / "linked.md").symlink_to(outside)
+        with self.assertRaises(module.EstateError):
+            module.plugin_declared_files(plugin, ["./agents"], "agents")
+        capabilities = module.plugin_capabilities(
+            plugin,
+            {
+                "name": "fixture",
+                "version": "1.0.0",
+                "agents": "\0",
+            },
+        )
+        self.assertFalse(capabilities["complete"])
+
+    def test_plugin_capability_paths_accept_symlinked_ancestor(self) -> None:
+        real = self.case / "real"
+        plugin = real / "fixture"
+        self.skill(plugin / "skills", "one")
+        alias = self.case / "market"
+        alias.symlink_to(real)
+        capabilities = module.plugin_capabilities(
+            alias / "fixture",
+            {
+                "name": "fixture",
+                "version": "1.0.0",
+                "skills": "./skills",
+            },
+        )
+        self.assertTrue(capabilities["complete"])
+        self.assertEqual(capabilities["skills"], ["./skills/one"])
+
+    def test_plugin_capability_scan_errors_fail_closed(self) -> None:
+        plugin = self.case / "plugin"
+        (plugin / "agents").mkdir(parents=True)
+        with mock.patch.object(
+            module.os, "walk", side_effect=OSError("fixture scan failure")
+        ):
+            with self.assertRaises(module.EstateError):
+                module.plugin_declared_files(
+                    plugin, ["./agents"], "agents"
+                )
+
+    def test_plugin_capability_duplicate_declarations_are_preserved(
+        self,
+    ) -> None:
+        plugin = self.case / "plugin"
+        self.skill(plugin / "skills", "one")
+        capabilities = module.plugin_capabilities(
+            plugin,
+            {
+                "name": "fixture",
+                "version": "1.0.0",
+                "skills": ["./skills/one", "./skills/one"],
+            },
+        )
+        self.assertEqual(
+            capabilities["skills"], ["./skills/one", "./skills/one"]
+        )
+        _, reasons = module.plugin_capability_ids(capabilities)
+        self.assertIn("skills_inventory_duplicated", reasons)
+
+    def test_plugin_server_configs_reject_ambiguous_or_malformed_data(
+        self,
+    ) -> None:
+        plugin = self.case / "plugin"
+        plugin.mkdir()
+        malformed_values = (
+            {"mcpServers": {"mcpServers": {"command": "true"}}},
+            {"mcpServers": {"": {"command": "true"}}},
+            {"mcpServers": {"fixture": None}},
+            {"mcpServers": {"fixture#other": {"command": "true"}}},
+        )
+        for manifest in malformed_values:
+            with self.subTest(manifest=manifest):
+                capabilities = module.plugin_capabilities(
+                    plugin,
+                    {
+                        "name": "fixture",
+                        "version": "1.0.0",
+                        **manifest,
+                    },
+                )
+                self.assertFalse(capabilities["complete"])
+        (plugin / "servers.json").write_text(
+            json.dumps(
+                {
+                    "mcpServers": {"one": {"command": "one"}},
+                    "two": {"command": "two"},
+                }
+            ),
+            encoding="utf-8",
+        )
+        capabilities = module.plugin_capabilities(
+            plugin,
+            {
+                "name": "fixture",
+                "version": "1.0.0",
+                "mcpServers": "./servers.json",
+            },
+        )
+        self.assertFalse(capabilities["complete"])
+
+    def test_plugin_hooks_require_structured_definitions(self) -> None:
+        plugin = self.case / "plugin"
+        plugin.mkdir()
+        (plugin / "hooks.json").write_text(
+            json.dumps(
+                {"version": 1, "hooks": {"sessionStart": [{"bash": "true"}]}}
+            ),
+            encoding="utf-8",
+        )
+        capabilities = module.plugin_capabilities(
+            plugin,
+            {
+                "name": "fixture",
+                "version": "1.0.0",
+                "hooks": "./hooks.json",
+            },
+        )
+        self.assertFalse(capabilities["complete"])
+
+    def test_plugin_capabilities_do_not_fallback_after_declared_failure(
+        self,
+    ) -> None:
+        plugin = self.case / "plugin"
+        (plugin / "hooks").mkdir(parents=True)
+        hook = {"type": "command", "bash": "default"}
+        (plugin / "hooks/hooks.json").write_text(
+            json.dumps({"version": 1, "hooks": {"sessionStart": [hook]}}),
+            encoding="utf-8",
+        )
+        (plugin / ".mcp.json").write_text(
+            json.dumps({"mcpServers": {"default": {"command": "true"}}}),
+            encoding="utf-8",
+        )
+        capabilities = module.plugin_capabilities(
+            plugin,
+            {
+                "name": "fixture",
+                "version": "1.0.0",
+                "hooks": "./missing-hooks.json",
+                "mcpServers": "./missing-mcp.json",
+            },
+        )
+        self.assertFalse(capabilities["complete"])
+        self.assertEqual(capabilities["hooks"], [])
+        self.assertEqual(capabilities["mcp_servers"], [])
+
+    def test_plugin_capability_identifiers_are_validated(self) -> None:
+        plugin = self.plugin_gate_fixture()
+        plugin["capabilities"]["agents"] = [" arbitrary\nvalue "]
+        _, reasons = module.plugin_capability_ids(plugin["capabilities"])
+        self.assertIn("agents_identifier_malformed", reasons)
+
+    def test_chk04_all_redundant_plugin_is_reported_eligible(self) -> None:
+        plugin = self.plugin_gate_fixture()
+        result = module.evaluate_plugin_capability_gate(
+            plugin, self.plugin_gate_evidence(plugin)
+        )
+        self.assertTrue(result["eligible_for_disablement"])
+        self.assertEqual(result["decision"], "disable_eligible")
+        self.assertEqual(result["blocking_reasons"], [])
+
+    def test_chk04_requires_exact_capability_evaluation_coverage(self) -> None:
+        cases = ("missing", "duplicate", "unknown")
+        for case in cases:
+            with self.subTest(case=case):
+                plugin = self.plugin_gate_fixture()
+                evidence = self.plugin_gate_evidence(plugin)
+                if case == "missing":
+                    evidence["capability_evaluations"].pop()
+                    reason = "capability_evaluations_incomplete"
+                elif case == "duplicate":
+                    evidence["capability_evaluations"].append(
+                        dict(evidence["capability_evaluations"][0])
+                    )
+                    reason = "capability_evaluation_duplicated"
+                else:
+                    unknown = dict(evidence["capability_evaluations"][0])
+                    unknown["capability_id"] = "agents:./agents/unknown.md"
+                    evidence["capability_evaluations"].append(unknown)
+                    reason = "capability_evaluation_unknown"
+                self.assert_blocked(
+                    module.evaluate_plugin_capability_gate(plugin, evidence),
+                    reason,
+                )
+
+    def test_chk04_rejects_disposition_class_crossovers(self) -> None:
+        for prefix, disposition in (
+            ("skills:", "superseded"),
+            ("agents:", "regressing"),
+        ):
+            with self.subTest(prefix=prefix):
+                plugin = self.plugin_gate_fixture()
+                evidence = self.plugin_gate_evidence(plugin)
+                evaluation = next(
+                    item
+                    for item in evidence["capability_evaluations"]
+                    if item["capability_id"].startswith(prefix)
+                )
+                evaluation["disposition"] = disposition
+                self.assert_blocked(
+                    module.evaluate_plugin_capability_gate(plugin, evidence),
+                    "capability_retained_or_unknown",
+                )
+
+    def test_chk04_rejects_unknown_top_level_evidence(self) -> None:
+        plugin = self.plugin_gate_fixture()
+        evidence = self.plugin_gate_evidence(plugin)
+        evidence["dependency_inventory_v2"] = {"pins": ["fixture"]}
+        self.assert_blocked(
+            module.evaluate_plugin_capability_gate(plugin, evidence),
+            "plugin_evidence_malformed",
+        )
+
+    def test_chk04_requires_unique_plugin_settings_keys(self) -> None:
+        plugin = self.plugin_gate_fixture()
+        evidence = self.plugin_gate_evidence(plugin)
+        duplicate = {
+            **plugin,
+            "source_identity": "installed:other/fixture",
+            "version": "2.0.0",
+        }
+        evidence["current_census_receipt"]["receipt"]["census"][
+            "plugins"
+        ].append(duplicate)
+        self.rebind_plugin_gate_evidence(plugin, evidence)
+        self.assert_blocked(
+            module.evaluate_plugin_capability_gate(plugin, evidence),
+            "current_census_plugin_settings_key_duplicated",
+        )
+
+    def test_chk04_requires_authoritative_census_and_receiver(self) -> None:
+        mutations = {
+            "current_census_receipt_not_authoritative": lambda evidence: evidence[
+                "authority"
+            ].__setitem__("current_receipt_sha256", "sha256:" + ("f" * 64)),
+            "current_census_host_mismatch": lambda evidence: evidence[
+                "authority"
+            ].__setitem__("expected_census_host_id", "other-host"),
+            "current_census_receiver_mismatch": lambda evidence: evidence[
+                "authority"
+            ]["expected_receiver"].__setitem__("receiver_id", "other-receiver"),
+            "current_census_authority_malformed": lambda evidence: evidence[
+                "authority"
+            ]["expected_receiver"].__setitem__("receiver_sha256", "not-a-hash"),
+        }
+        for reason, mutate in mutations.items():
+            with self.subTest(reason=reason):
+                plugin = self.plugin_gate_fixture()
+                evidence = self.plugin_gate_evidence(plugin)
+                mutate(evidence)
+                self.assert_blocked(
+                    module.evaluate_plugin_capability_gate(plugin, evidence),
+                    reason,
+                )
+
+    def test_chk04_requires_canonical_complete_census_contexts(self) -> None:
+        mutations = (
+            lambda census: census.pop("totals"),
+            lambda census: census["contexts"][0].__setitem__(
+                "complete", False
+            ),
+            lambda census: census["scope"].__setitem__(
+                "outside_context_ids", ["unregistered-project"]
+            ),
+        )
+        for mutate in mutations:
+            with self.subTest(mutation=mutate):
+                plugin = self.plugin_gate_fixture()
+                evidence = self.plugin_gate_evidence(plugin)
+                census = evidence["current_census_receipt"]["receipt"][
+                    "census"
+                ]
+                mutate(census)
+                self.rebind_plugin_gate_evidence(plugin, evidence)
+                self.assert_blocked(
+                    module.evaluate_plugin_capability_gate(plugin, evidence),
+                    "current_census_malformed",
+                )
+
+    def test_chk04_rejects_census_receipt_and_snapshot_tampering(self) -> None:
+        plugin = self.plugin_gate_fixture()
+        evidence = self.plugin_gate_evidence(plugin)
+        evidence["current_census_receipt"]["receipt_sha256"] = (
+            "sha256:" + ("f" * 64)
+        )
+        result = module.evaluate_plugin_capability_gate(plugin, evidence)
+        self.assert_blocked(result, "current_census_receipt_malformed")
+        self.assertIsNone(result["capability_inventory_sha256"])
+
+        evidence = self.plugin_gate_evidence(plugin)
+        evidence["current_census_receipt"]["receipt"]["census"][
+            "host_id"
+        ] = "tampered-host"
+        self.assert_blocked(
+            module.evaluate_plugin_capability_gate(plugin, evidence),
+            "current_census_receipt_malformed",
+        )
+
+    def test_chk04_binds_capability_and_dependency_evidence(self) -> None:
+        mutations = {
+            "capability_evidence_plugin_mismatch": lambda evidence: evidence[
+                "capability_evaluations"
+            ][0].__setitem__("plugin_identity_sha256", "sha256:" + ("f" * 64)),
+            "capability_evidence_inventory_mismatch": lambda evidence: evidence[
+                "capability_evaluations"
+            ][0].__setitem__(
+                "capability_inventory_sha256", "sha256:" + ("f" * 64)
+            ),
+            "capability_evidence_census_mismatch": lambda evidence: evidence[
+                "capability_evaluations"
+            ][0].__setitem__("current_estate_sha256", "sha256:" + ("f" * 64)),
+            "dependency_inventory_plugin_mismatch": lambda evidence: evidence[
+                "dependency_inventory"
+            ].__setitem__("plugin_identity_sha256", "sha256:" + ("f" * 64)),
+            "dependency_inventory_census_mismatch": lambda evidence: evidence[
+                "dependency_inventory"
+            ].__setitem__("current_estate_sha256", "sha256:" + ("f" * 64)),
+        }
+        for reason, mutate in mutations.items():
+            with self.subTest(reason=reason):
+                plugin = self.plugin_gate_fixture()
+                evidence = self.plugin_gate_evidence(plugin)
+                mutate(evidence)
+                self.assert_blocked(
+                    module.evaluate_plugin_capability_gate(plugin, evidence),
+                    reason,
+                )
+
+    def test_chk04_rejects_untyped_capability_binding_output(self) -> None:
+        plugin = self.plugin_gate_fixture()
+        evidence = self.plugin_gate_evidence(plugin)
+        evidence["capability_evaluations"][0]["plugin_identity_sha256"] = {
+            "bad": True
+        }
+        result = module.evaluate_plugin_capability_gate(plugin, evidence)
+        self.assert_blocked(
+            result, "capability_evaluation_binding_malformed"
+        )
+        malformed_id = evidence["capability_evaluations"][0]["capability_id"]
+        self.assertNotIn(
+            malformed_id,
+            {
+                evaluation["capability_id"]
+                for evaluation in result["capability_evaluations"]
+            },
+        )
+
+    def test_chk04_requires_complete_dependency_and_inventory_evidence(
+        self,
+    ) -> None:
+        plugin = self.plugin_gate_fixture()
+        evidence = self.plugin_gate_evidence(plugin)
+        evidence["dependency_inventory"]["complete"] = False
+        self.assert_blocked(
+            module.evaluate_plugin_capability_gate(plugin, evidence),
+            "dependency_inventory_incomplete",
+        )
+
+        plugin = self.plugin_gate_fixture()
+        evidence = self.plugin_gate_evidence(plugin)
+        plugin["capabilities"]["complete"] = False
+        plugin["capabilities"]["inventory_errors"] = ["fixture failure"]
+        self.rebind_plugin_gate_evidence(plugin, evidence)
+        self.assert_blocked(
+            module.evaluate_plugin_capability_gate(plugin, evidence),
+            "capability_inventory_errors",
+        )
+
+    def test_chk04_reports_dependencies_even_with_other_malformed_classes(
+        self,
+    ) -> None:
+        plugin = self.plugin_gate_fixture()
+        evidence = self.plugin_gate_evidence(plugin)
+        dependencies = evidence["dependency_inventory"]
+        dependencies["pins"] = "malformed"
+        dependencies["ambiguous"] = ["fixture dependency"]
+        result = module.evaluate_plugin_capability_gate(plugin, evidence)
+        self.assert_blocked(result, "dependency_pins_malformed")
+        self.assertIn("plugin_has_dependencies", result["blocking_reasons"])
+        self.assertEqual(
+            result["dependency_inventory_sha256"],
+            module.digest(dependencies),
+        )
+
+    def test_chk04_requires_verified_proposed_estate_preimage(self) -> None:
+        plugin = self.plugin_gate_fixture()
+        evidence = self.plugin_gate_evidence(plugin)
+        evidence["proposed_estate"]["snapshot"][
+            "removed_capability_ids"
+        ] = []
+        self.assert_blocked(
+            module.evaluate_plugin_capability_gate(plugin, evidence),
+            "proposed_estate_preimage_mismatch",
+        )
+
+    def test_chk04_proposed_estate_fail_closed_matrix(self) -> None:
+        def set_current_mismatch(evidence: dict) -> None:
+            evidence["proposed_estate"]["current_estate_sha256"] = (
+                "sha256:" + ("f" * 64)
+            )
+
+        def set_removal_mismatch(evidence: dict) -> None:
+            evidence["proposed_estate"]["removed_capability_ids"] = []
+
+        def tamper_receipt(evidence: dict) -> None:
+            evidence["proposed_estate"]["portfolio"]["sha256"] = (
+                "sha256:" + ("f" * 64)
+            )
+
+        cases = {
+            "proposed_estate_incomplete": lambda evidence: evidence[
+                "proposed_estate"
+            ].__setitem__("complete", False),
+            "current_estate_census_mismatch": set_current_mismatch,
+            "proposed_estate_removal_mismatch": set_removal_mismatch,
+            "proposed_estate_portfolio_failed": tamper_receipt,
+            "proposed_estate_routing_failed": lambda evidence: evidence[
+                "proposed_estate"
+            ]["routing"].__setitem__("status", "failed"),
+            "proposed_estate_plugin_mismatch": lambda evidence: evidence[
+                "proposed_estate"
+            ].__setitem__("plugin_identity_sha256", "sha256:" + ("f" * 64)),
+            "proposed_estate_inventory_mismatch": lambda evidence: evidence[
+                "proposed_estate"
+            ].__setitem__(
+                "capability_inventory_sha256", "sha256:" + ("f" * 64)
+            ),
+        }
+        for reason, mutate in cases.items():
+            with self.subTest(reason=reason):
+                plugin = self.plugin_gate_fixture()
+                evidence = self.plugin_gate_evidence(plugin)
+                mutate(evidence)
+                self.assert_blocked(
+                    module.evaluate_plugin_capability_gate(plugin, evidence),
+                    reason,
+                )
+
+    def test_chk04_decision_receipts_bind_every_identity(self) -> None:
+        fields = (
+            "plugin_identity_sha256",
+            "current_estate_sha256",
+            "proposed_estate_sha256",
+            "removed_capability_ids",
+        )
+        for kind in ("routing", "portfolio"):
+            for field in fields:
+                with self.subTest(kind=kind, field=field):
+                    plugin = self.plugin_gate_fixture()
+                    evidence = self.plugin_gate_evidence(plugin)
+                    receipt = evidence["proposed_estate"][kind]
+                    payload = receipt["payload"]
+                    payload[field] = (
+                        []
+                        if field == "removed_capability_ids"
+                        else "sha256:" + ("f" * 64)
+                    )
+                    receipt["sha256"] = module.digest(payload)
+                    self.assert_blocked(
+                        module.evaluate_plugin_capability_gate(
+                            plugin, evidence
+                        ),
+                        f"proposed_estate_{kind}_failed",
+                    )
+
+    def test_chk04_malformed_estate_hashes_do_not_leak_types(self) -> None:
+        plugin = self.plugin_gate_fixture()
+        evidence = self.plugin_gate_evidence(plugin)
+        evidence["proposed_estate"]["current_estate_sha256"] = {"bad": True}
+        evidence["proposed_estate"]["proposed_estate_sha256"] = 42
+        result = module.evaluate_plugin_capability_gate(plugin, evidence)
+        self.assert_blocked(result, "current_estate_identity_malformed")
+        self.assertIn(
+            "proposed_estate_identity_malformed", result["blocking_reasons"]
+        )
+        self.assertIsNone(result["current_estate_sha256"])
+        self.assertIsNone(result["proposed_estate_sha256"])
+
+    def test_chk04_report_only_cli_emits_evaluation(self) -> None:
+        plugin = self.plugin_gate_fixture()
+        request = self.case / "plugin-evaluation.json"
+        request.write_text(
+            json.dumps(
+                {
+                    "plugin": plugin,
+                    "evidence": self.plugin_gate_evidence(plugin),
+                }
+            ),
+            encoding="utf-8",
+        )
+        before = {
+            path.relative_to(self.case).as_posix(): path.read_bytes()
+            for path in self.case.rglob("*")
+            if path.is_file()
+        }
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(MODULE_PATH),
+                "evaluate-plugin",
+                "--input",
+                str(request),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        output = json.loads(result.stdout)
+        self.assertTrue(output["ok"])
+        self.assertTrue(output["evaluation"]["eligible_for_disablement"])
+        self.assertNotIn("census", output)
+        after = {
+            path.relative_to(self.case).as_posix(): path.read_bytes()
+            for path in self.case.rglob("*")
+            if path.is_file()
+        }
+        self.assertEqual(after, before)
+
+    def test_chk04_mixed_valuable_plugin_stays_enabled(self) -> None:
+        plugin = self.plugin_gate_fixture()
+        evidence = self.plugin_gate_evidence(plugin)
+        skill = next(
+            item
+            for item in evidence["capability_evaluations"]
+            if item["capability_id"].startswith("skills:")
+        )
+        skill["disposition"] = "valuable"
+        result = module.evaluate_plugin_capability_gate(plugin, evidence)
+        self.assert_blocked(result, "capability_retained_or_unknown")
+
+    def test_chk04_unknown_non_skill_capability_stays_enabled(self) -> None:
+        plugin = self.plugin_gate_fixture()
+        evidence = self.plugin_gate_evidence(plugin)
+        agent = next(
+            item
+            for item in evidence["capability_evaluations"]
+            if item["capability_id"].startswith("agents:")
+        )
+        agent["evidence_complete"] = False
+        result = module.evaluate_plugin_capability_gate(plugin, evidence)
+        self.assert_blocked(result, "capability_evidence_incomplete")
+
+    def test_chk04_unknown_capability_metadata_stays_enabled(self) -> None:
+        plugin = self.plugin_gate_fixture()
+        evidence = self.plugin_gate_evidence(plugin)
+        plugin["capabilities"]["complete"] = False
+        plugin["capabilities"]["unknown_metadata"] = ["commands"]
+        self.rebind_plugin_gate_evidence(plugin, evidence)
+        result = module.evaluate_plugin_capability_gate(plugin, evidence)
+        self.assert_blocked(result, "unknown_capability_metadata")
+
+    def test_chk04_missing_capability_inventory_fields_stay_enabled(self) -> None:
+        for field in ("unknown_metadata", "inventory_errors"):
+            with self.subTest(field=field):
+                plugin = self.plugin_gate_fixture()
+                evidence = self.plugin_gate_evidence(plugin)
+                del plugin["capabilities"][field]
+                self.rebind_plugin_gate_evidence(plugin, evidence)
+                result = module.evaluate_plugin_capability_gate(plugin, evidence)
+                self.assert_blocked(result, "capability_inventory_malformed")
+
+    def test_chk04_plugin_must_resolve_from_current_census(self) -> None:
+        plugin = self.plugin_gate_fixture()
+        evidence = self.plugin_gate_evidence(plugin)
+        receipt = evidence["current_census_receipt"]["receipt"]
+        receipt["census"]["plugins"] = []
+        self.rebind_plugin_gate_evidence(plugin, evidence)
+        result = module.evaluate_plugin_capability_gate(plugin, evidence)
+        self.assert_blocked(result, "current_census_plugin_unresolved")
+
+    def test_chk04_malformed_census_scope_stays_enabled(self) -> None:
+        for malformed_scope in (None, []):
+            with self.subTest(malformed_scope=malformed_scope):
+                plugin = self.plugin_gate_fixture()
+                evidence = self.plugin_gate_evidence(plugin)
+                receipt = evidence["current_census_receipt"]["receipt"]
+                receipt["census"]["scope"] = malformed_scope
+                self.rebind_plugin_gate_evidence(plugin, evidence)
+                result = module.evaluate_plugin_capability_gate(plugin, evidence)
+                self.assert_blocked(result, "current_census_malformed")
+
+    def test_chk04_explicit_dependency_stays_enabled(self) -> None:
+        plugin = self.plugin_gate_fixture()
+        evidence = self.plugin_gate_evidence(plugin)
+        evidence["dependency_inventory"]["explicit_dependencies"] = [
+            "skill:consumer"
+        ]
+        result = module.evaluate_plugin_capability_gate(plugin, evidence)
+        self.assert_blocked(result, "plugin_has_dependencies")
+
+    def test_chk04_pin_and_runtime_dependency_classes_stay_enabled(self) -> None:
+        for dependency_class in module.PLUGIN_DEPENDENCY_CLASSES[1:]:
+            with self.subTest(dependency_class=dependency_class):
+                plugin = self.plugin_gate_fixture()
+                evidence = self.plugin_gate_evidence(plugin)
+                evidence["dependency_inventory"][dependency_class] = [
+                    f"{dependency_class}:fixture"
+                ]
+                result = module.evaluate_plugin_capability_gate(plugin, evidence)
+                self.assert_blocked(result, "plugin_has_dependencies")
+
+    def test_chk04_failing_proposed_estate_stays_enabled(self) -> None:
+        plugin = self.plugin_gate_fixture()
+        evidence = self.plugin_gate_evidence(plugin)
+        evidence["proposed_estate"]["portfolio"]["status"] = "failed"
+        result = module.evaluate_plugin_capability_gate(plugin, evidence)
+        self.assert_blocked(result, "proposed_estate_portfolio_failed")
 
     def test_plugin_list_parser_fails_closed(self) -> None:
         self.assertEqual(

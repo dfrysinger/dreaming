@@ -33,10 +33,54 @@ AUTHORITIES = {
     "user_protected",
 }
 SHA256_ID_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
+HEX_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 GIT_COMMIT_RE = re.compile(r"^[0-9a-f]{40}$")
 LEGACY_POLICY_VERSION = 1
 LEGACY_PROOF_VERSION = 1
 LEGACY_PROOF_KIND = "legacy_git_creation"
+PLUGIN_CAPABILITY_CLASSES = (
+    "skills",
+    "agents",
+    "hooks",
+    "mcp_servers",
+    "lsp_servers",
+)
+PLUGIN_METADATA_FIELDS = {
+    "$schema",
+    "author",
+    "compatibility",
+    "description",
+    "displayName",
+    "engines",
+    "homepage",
+    "keywords",
+    "license",
+    "name",
+    "repository",
+    "version",
+}
+PLUGIN_SKILL_DISABLE_STATES = {
+    "obsolete",
+    "redundant",
+    "regressing",
+    "unsupported",
+}
+PLUGIN_NON_SKILL_DISABLE_STATES = {
+    "declared_unnecessary",
+    "superseded",
+    "unused_complete_telemetry",
+}
+PLUGIN_DEPENDENCY_CLASSES = (
+    "explicit_dependencies",
+    "pins",
+    "durable_prompts",
+    "scheduled_jobs",
+    "mcp_configurations",
+    "agent_selections",
+    "hook_configurations",
+    "lsp_configurations",
+    "ambiguous",
+)
 
 
 class EstateError(RuntimeError):
@@ -1036,66 +1080,833 @@ def installed_plugin_names(output: str) -> set[str]:
     return names
 
 
+def plugin_relative_path(package_root: Path, value: str) -> tuple[Path, str]:
+    try:
+        resolved_root = package_root.resolve()
+        unresolved = resolved_root / value
+        relative_parts = unresolved.relative_to(resolved_root).parts
+        current = resolved_root
+        for part in relative_parts:
+            current = current / part
+            if current.is_symlink():
+                raise EstateError(f"plugin capability is symlinked: {value}")
+        candidate = unresolved.resolve()
+    except EstateError:
+        raise
+    except (OSError, ValueError) as error:
+        raise EstateError(f"plugin capability path is invalid: {value}") from error
+    if resolved_root not in candidate.parents:
+        raise EstateError(f"plugin capability escapes package root: {value}")
+    relative = candidate.relative_to(resolved_root).as_posix()
+    if "#" in relative:
+        raise EstateError(f"plugin capability path contains reserved '#': {value}")
+    return candidate, f"./{relative}"
+
+
+def plugin_manifest_paths(value: Any) -> list[str] | None:
+    if isinstance(value, str) and value:
+        return [value]
+    if isinstance(value, list) and all(
+        isinstance(item, str) and item for item in value
+    ):
+        return value
+    return None
+
+
+def plugin_declared_files(
+    package_root: Path,
+    values: list[str],
+    capability_class: str,
+) -> list[str]:
+    discovered: list[str] = []
+    for value in values:
+        path, relative = plugin_relative_path(package_root, value)
+        try:
+            if not path.exists():
+                raise EstateError(f"plugin capability path is missing: {value}")
+            if path.is_file():
+                if capability_class == "skills":
+                    raise EstateError(
+                        f"plugin skill capability must be a directory: {value}"
+                    )
+                discovered.append(relative)
+                continue
+            if not path.is_dir():
+                raise EstateError(f"plugin capability path is unsupported: {value}")
+
+            walked: list[Path] = []
+
+            def walk_error(error: OSError) -> None:
+                raise EstateError(
+                    f"plugin capability directory is unreadable: {value}"
+                ) from error
+
+            for directory, directory_names, file_names in os.walk(
+                path, followlinks=False, onerror=walk_error
+            ):
+                directory_path = Path(directory)
+                for name in sorted(directory_names):
+                    child = directory_path / name
+                    if child.is_symlink():
+                        raise EstateError(
+                            f"plugin capability is symlinked: {child}"
+                        )
+                    walked.append(child)
+                for name in sorted(file_names):
+                    child = directory_path / name
+                    if child.is_symlink():
+                        raise EstateError(
+                            f"plugin capability is symlinked: {child}"
+                        )
+                    walked.append(child)
+
+            if capability_class == "skills":
+                candidates = [path, *(child for child in walked if child.is_dir())]
+                for candidate in candidates:
+                    skill_file = candidate / "SKILL.md"
+                    if skill_file.is_symlink():
+                        raise EstateError(
+                            f"plugin capability is symlinked: {skill_file}"
+                        )
+                    if skill_file.is_file():
+                        discovered.append(
+                            f"./{candidate.relative_to(package_root.resolve()).as_posix()}"
+                        )
+            else:
+                discovered.extend(
+                    f"./{child.relative_to(package_root.resolve()).as_posix()}"
+                    for child in walked
+                    if child.is_file()
+                )
+        except EstateError:
+            raise
+        except (OSError, ValueError) as error:
+            raise EstateError(f"plugin capability path is invalid: {value}") from error
+    return sorted(discovered)
+
+
+def plugin_server_names(
+    value: Any,
+    *,
+    field: str,
+    source: str,
+    allow_wrapper: bool,
+) -> list[str]:
+    if not isinstance(value, dict):
+        raise EstateError(f"plugin {field} {source} is malformed")
+    if field in value:
+        if not allow_wrapper or set(value) != {field}:
+            raise EstateError(f"plugin {field} {source} is ambiguous")
+        servers = value[field]
+    else:
+        servers = value
+    if not isinstance(servers, dict):
+        raise EstateError(f"plugin {field} {source} is malformed")
+    names: list[str] = []
+    for name, definition in sorted(servers.items()):
+        if (
+            not isinstance(name, str)
+            or not name
+            or "#" in name
+            or not isinstance(definition, dict)
+            or not definition
+        ):
+            raise EstateError(f"plugin {field} {source} is malformed")
+        names.append(name)
+    return names
+
+
+def plugin_named_config_capabilities(
+    package_root: Path,
+    value: Any,
+    field: str,
+) -> list[str]:
+    if isinstance(value, dict):
+        return [
+            f"manifest#{name}"
+            for name in plugin_server_names(
+                value,
+                field=field,
+                source="metadata",
+                allow_wrapper=False,
+            )
+        ]
+    paths = plugin_manifest_paths(value)
+    if paths is None:
+        raise EstateError(f"plugin {field} metadata is malformed")
+    capabilities: list[str] = []
+    for raw_path in paths:
+        path, relative = plugin_relative_path(package_root, raw_path)
+        config = read_json_file(path)
+        capabilities.extend(
+            f"{relative}#{name}"
+            for name in plugin_server_names(
+                config,
+                field=field,
+                source=f"config: {raw_path}",
+                allow_wrapper=True,
+            )
+        )
+    return sorted(capabilities)
+
+
+def plugin_hook_capabilities(package_root: Path, value: Any) -> list[str]:
+    paths = plugin_manifest_paths(value)
+    if paths is None:
+        raise EstateError("plugin hooks metadata is malformed")
+    capabilities: list[str] = []
+    for raw_path in paths:
+        path, relative = plugin_relative_path(package_root, raw_path)
+        config = read_json_file(path)
+        if not isinstance(config, dict) or not isinstance(config.get("hooks"), dict):
+            raise EstateError(f"plugin hooks config is malformed: {raw_path}")
+        for event, hooks in sorted(config["hooks"].items()):
+            if (
+                not isinstance(event, str)
+                or not event
+                or "#" in event
+                or not isinstance(hooks, list)
+                or not all(
+                    isinstance(hook, dict)
+                    and hook
+                    and isinstance(hook.get("type"), str)
+                    and hook["type"]
+                    for hook in hooks
+                )
+            ):
+                raise EstateError(f"plugin hooks config is malformed: {raw_path}")
+            capabilities.extend(
+                f"{relative}#{event}[{index}]@{digest(hook)}"
+                for index, hook in enumerate(hooks)
+            )
+    return sorted(capabilities)
+
+
 def plugin_capabilities(
     package_root: Path, manifest: dict[str, Any]
 ) -> dict[str, Any]:
     capabilities: dict[str, list[str]] = {
-        "skills": [],
-        "agents": [],
-        "hooks": [],
-        "mcp_servers": [],
-        "lsp_servers": [],
+        capability_class: [] for capability_class in PLUGIN_CAPABILITY_CLASSES
     }
     complete = True
-    manifest_fields = {
-        "skills": "skills",
-        "agents": "agents",
-        "hooks": "hooks",
-        "mcpServers": "mcp_servers",
-        "lspServers": "lsp_servers",
-    }
-    for field, target in manifest_fields.items():
+    errors: list[str] = []
+    failed: set[str] = set()
+    unknown_metadata = sorted(
+        set(manifest)
+        - PLUGIN_METADATA_FIELDS
+        - {"skills", "agents", "hooks", "mcpServers", "lspServers"}
+    )
+    for field, capability_class in (("skills", "skills"), ("agents", "agents")):
         value = manifest.get(field)
         if value is None:
             continue
-        if not isinstance(value, list) or not all(
-            isinstance(item, str) and item for item in value
-        ):
+        paths = plugin_manifest_paths(value)
+        if paths is None:
             complete = False
+            failed.add(capability_class)
+            errors.append(f"malformed_{field}_metadata")
             continue
-        capabilities[target].extend(value)
-
-    if not capabilities["skills"] and (package_root / "skills").is_dir():
-        capabilities["skills"] = [
-            f"./skills/{path.name}"
-            for path in sorted((package_root / "skills").iterdir())
-            if path.is_dir() and (path / "SKILL.md").is_file()
-        ]
-    if not capabilities["agents"] and (package_root / "agents").is_dir():
-        capabilities["agents"] = [
-            f"./agents/{path.name}"
-            for path in sorted((package_root / "agents").iterdir())
-            if path.is_file()
-        ]
-    if (package_root / "hooks/hooks.json").is_file():
-        capabilities["hooks"].append("./hooks/hooks.json")
-    if (package_root / ".mcp.json").is_file():
-        value = read_json_file(package_root / ".mcp.json")
-        if not isinstance(value, dict):
+        try:
+            capabilities[capability_class] = plugin_declared_files(
+                package_root, paths, capability_class
+            )
+        except EstateError as error:
             complete = False
-        else:
-            servers = value.get("mcpServers", value)
-            if not isinstance(servers, dict):
-                complete = False
-            else:
-                capabilities["mcp_servers"].extend(
-                    f".mcp.json#{name}" for name in sorted(servers)
-                )
-    for values in capabilities.values():
-        values[:] = sorted(set(values))
+            failed.add(capability_class)
+            errors.append(str(error))
+    for field, capability_class in (
+        ("mcpServers", "mcp_servers"),
+        ("lspServers", "lsp_servers"),
+    ):
+        value = manifest.get(field)
+        if value is None:
+            continue
+        try:
+            capabilities[capability_class] = plugin_named_config_capabilities(
+                package_root, value, field
+            )
+        except EstateError as error:
+            complete = False
+            failed.add(capability_class)
+            errors.append(str(error))
+    if manifest.get("hooks") is not None:
+        try:
+            capabilities["hooks"] = plugin_hook_capabilities(
+                package_root, manifest["hooks"]
+            )
+        except EstateError as error:
+            complete = False
+            failed.add("hooks")
+            errors.append(str(error))
+
+    fallback = {
+        "skills": package_root / "skills",
+        "agents": package_root / "agents",
+    }
+    for capability_class, path in fallback.items():
+        if capability_class in failed or not path.is_dir():
+            continue
+        try:
+            fallback_values = plugin_declared_files(
+                package_root, [f"./{path.name}"], capability_class
+            )
+            capabilities[capability_class].extend(
+                item
+                for item in fallback_values
+                if item not in capabilities[capability_class]
+            )
+        except EstateError as error:
+            complete = False
+            errors.append(str(error))
+    if (
+        "hooks" not in failed
+        and (package_root / "hooks/hooks.json").is_file()
+    ):
+        try:
+            fallback_values = plugin_hook_capabilities(
+                package_root, ["./hooks/hooks.json"]
+            )
+            capabilities["hooks"].extend(
+                item for item in fallback_values if item not in capabilities["hooks"]
+            )
+        except EstateError as error:
+            complete = False
+            errors.append(str(error))
+    if (
+        "mcp_servers" not in failed
+        and (package_root / ".mcp.json").is_file()
+    ):
+        try:
+            fallback_values = plugin_named_config_capabilities(
+                package_root, "./.mcp.json", "mcpServers"
+            )
+            capabilities["mcp_servers"].extend(
+                item
+                for item in fallback_values
+                if item not in capabilities["mcp_servers"]
+            )
+        except EstateError as error:
+            complete = False
+            errors.append(str(error))
+    if unknown_metadata:
+        complete = False
     return {
         "complete": complete,
-        **capabilities,
+        "unknown_metadata": unknown_metadata,
+        "inventory_errors": sorted(set(errors)),
+        **{
+            capability_class: sorted(values)
+            for capability_class, values in capabilities.items()
+        },
+    }
+
+
+def plugin_identity(plugin: dict[str, Any]) -> dict[str, str] | None:
+    identity = {
+        field: plugin.get(field)
+        for field in ("plugin_id", "source_identity", "version")
+    }
+    if not all(isinstance(value, str) and value for value in identity.values()):
+        return None
+    return identity
+
+
+def valid_plugin_capability_identifier(
+    capability_class: str, identifier: str
+) -> bool:
+    if (
+        identifier != identifier.strip()
+        or any(ord(character) < 32 for character in identifier)
+    ):
+        return False
+    if capability_class in {"skills", "agents"}:
+        return re.fullmatch(r"\./[^#]+", identifier) is not None
+    if capability_class == "hooks":
+        return (
+            re.fullmatch(
+                r"\./[^#]+#[^#\[\]@]+\[[0-9]+\]@sha256:[0-9a-f]{64}",
+                identifier,
+            )
+            is not None
+        )
+    return (
+        re.fullmatch(r"(?:manifest|\./[^#]+)#[^#]+", identifier)
+        is not None
+    )
+
+
+def plugin_capability_ids(capabilities: Any) -> tuple[list[str], list[str]]:
+    reasons: list[str] = []
+    if not isinstance(capabilities, dict):
+        return [], ["capability_inventory_malformed"]
+    expected_fields = {
+        "complete",
+        "unknown_metadata",
+        "inventory_errors",
+        *PLUGIN_CAPABILITY_CLASSES,
+    }
+    if set(capabilities) != expected_fields:
+        reasons.append("capability_inventory_malformed")
+    if capabilities.get("complete") is not True:
+        reasons.append("capability_inventory_incomplete")
+    unknown = capabilities.get("unknown_metadata")
+    errors = capabilities.get("inventory_errors")
+    if not isinstance(unknown, list) or not all(
+        isinstance(item, str) and item for item in unknown
+    ):
+        reasons.append("unknown_capability_metadata_malformed")
+    elif unknown:
+        reasons.append("unknown_capability_metadata")
+    if not isinstance(errors, list) or not all(
+        isinstance(item, str) and item for item in errors
+    ):
+        reasons.append("capability_inventory_errors_malformed")
+    elif errors:
+        reasons.append("capability_inventory_errors")
+    capability_ids: list[str] = []
+    for capability_class in PLUGIN_CAPABILITY_CLASSES:
+        values = capabilities.get(capability_class)
+        if not isinstance(values, list) or not all(
+            isinstance(item, str) and item for item in values
+        ):
+            reasons.append(f"{capability_class}_inventory_malformed")
+            continue
+        if not all(
+            valid_plugin_capability_identifier(capability_class, item)
+            for item in values
+        ):
+            reasons.append(f"{capability_class}_identifier_malformed")
+        if len(values) != len(set(values)):
+            reasons.append(f"{capability_class}_inventory_duplicated")
+        capability_ids.extend(
+            f"{capability_class}:{item}" for item in sorted(set(values))
+        )
+    if not capability_ids:
+        reasons.append("empty_capability_inventory")
+    return sorted(capability_ids), reasons
+
+
+def current_census_plugin(
+    value: Any, target_plugin: dict[str, Any], authority: Any
+) -> tuple[dict[str, Any] | None, str, list[str]]:
+    reasons: list[str] = []
+    if not isinstance(authority, dict) or set(authority) != {
+        "current_receipt_sha256",
+        "expected_census_host_id",
+        "expected_receiver",
+    }:
+        reasons.append("current_census_authority_malformed")
+        authority = {}
+    expected_receiver = authority.get("expected_receiver")
+    if (
+        not isinstance(expected_receiver, dict)
+        or set(expected_receiver)
+        != {"collector_sha256", "receiver_id", "receiver_sha256"}
+        or not isinstance(expected_receiver.get("receiver_id"), str)
+        or not expected_receiver["receiver_id"]
+        or not HEX_SHA256_RE.fullmatch(
+            str(expected_receiver.get("receiver_sha256"))
+        )
+        or not HEX_SHA256_RE.fullmatch(
+            str(expected_receiver.get("collector_sha256"))
+        )
+    ):
+        reasons.append("current_census_authority_malformed")
+        expected_receiver = {}
+    if not SHA256_ID_RE.fullmatch(
+        str(authority.get("current_receipt_sha256"))
+    ):
+        reasons.append("current_census_authority_malformed")
+    if (
+        not isinstance(authority.get("expected_census_host_id"), str)
+        or not authority.get("expected_census_host_id")
+    ):
+        reasons.append("current_census_authority_malformed")
+
+    if not isinstance(value, dict) or set(value) != {
+        "receipt_sha256",
+        "receipt",
+    }:
+        return None, "", ["current_census_receipt_malformed"]
+    receipt = value.get("receipt")
+    receipt_sha256 = value.get("receipt_sha256")
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != {
+            "schema_version",
+            "snapshot_sha256",
+            "receiver",
+            "census",
+        }
+        or receipt.get("schema_version") != 1
+        or not SHA256_ID_RE.fullmatch(str(receipt_sha256))
+        or digest(receipt) != receipt_sha256
+    ):
+        return None, "", ["current_census_receipt_malformed"]
+    if authority.get("current_receipt_sha256") != receipt_sha256:
+        reasons.append("current_census_receipt_not_authoritative")
+    census = receipt.get("census")
+    snapshot_sha256 = receipt.get("snapshot_sha256")
+    if not isinstance(census, dict):
+        return None, "", ["current_census_malformed"]
+    snapshot = {
+        key: item for key, item in census.items() if key != "snapshot_sha256"
+    }
+    if (
+        census.get("schema_version") != 1
+        or set(census)
+        != {
+            "schema_version",
+            "host_id",
+            "collected_at",
+            "scope",
+            "totals",
+            "authority_counts",
+            "root_class_counts",
+            "contexts",
+            "physical_instances",
+            "enabled_instances",
+            "unresolved_mappings",
+            "evidence",
+            "plugins",
+            "snapshot_sha256",
+        }
+        or not SHA256_ID_RE.fullmatch(str(snapshot_sha256))
+        or census.get("snapshot_sha256") != snapshot_sha256
+        or digest(snapshot) != snapshot_sha256
+    ):
+        reasons.append("current_census_malformed")
+    if census.get("host_id") != authority.get("expected_census_host_id"):
+        reasons.append("current_census_host_mismatch")
+    scope = census.get("scope")
+    contexts = census.get("contexts")
+    if (
+        not isinstance(scope, dict)
+        or set(scope)
+        != {
+            "label",
+            "complete",
+            "registered_context_ids",
+            "outside_context_ids",
+        }
+        or not isinstance(scope.get("registered_context_ids"), list)
+        or not all(
+            isinstance(item, str) and item
+            for item in scope.get("registered_context_ids", [])
+        )
+        or not isinstance(scope.get("outside_context_ids"), list)
+        or not isinstance(contexts, list)
+        or not all(
+            isinstance(context, dict)
+            and isinstance(context.get("id"), str)
+            and context.get("complete") is True
+            and context.get("unresolved_count") == 0
+            for context in contexts
+        )
+        or sorted(scope.get("registered_context_ids", []))
+        != sorted(context["id"] for context in contexts)
+        or scope.get("outside_context_ids")
+    ):
+        reasons.append("current_census_malformed")
+    elif scope.get("complete") is not True:
+        reasons.append("current_census_incomplete")
+    receiver = receipt.get("receiver")
+    if (
+        not isinstance(receiver, dict)
+        or set(receiver)
+        != {"collector_sha256", "receiver_id", "receiver_sha256"}
+        or not isinstance(receiver.get("receiver_id"), str)
+        or not receiver["receiver_id"]
+        or not HEX_SHA256_RE.fullmatch(str(receiver.get("receiver_sha256")))
+        or not HEX_SHA256_RE.fullmatch(str(receiver.get("collector_sha256")))
+    ):
+        reasons.append("current_census_receiver_malformed")
+    elif receiver != expected_receiver:
+        reasons.append("current_census_receiver_mismatch")
+    target_identity = plugin_identity(target_plugin)
+    plugins = census.get("plugins")
+    if target_identity is None or not isinstance(plugins, list):
+        reasons.append("current_census_plugins_malformed")
+        return None, str(snapshot_sha256 or ""), reasons
+    identities = [
+        plugin_identity(candidate)
+        for candidate in plugins
+        if isinstance(candidate, dict)
+    ]
+    if (
+        len(identities) != len(plugins)
+        or any(identity is None for identity in identities)
+        or len({digest(identity) for identity in identities})
+        != len(identities)
+    ):
+        reasons.append("current_census_plugins_malformed")
+    plugin_ids = [
+        identity["plugin_id"]
+        for identity in identities
+        if identity is not None
+    ]
+    if len(plugin_ids) != len(set(plugin_ids)):
+        reasons.append("current_census_plugin_settings_key_duplicated")
+    matches = [
+        plugin
+        for plugin in plugins
+        if isinstance(plugin, dict) and plugin_identity(plugin) == target_identity
+    ]
+    if len(matches) != 1:
+        reasons.append("current_census_plugin_unresolved")
+        return None, str(snapshot_sha256 or ""), reasons
+    if matches[0] != target_plugin:
+        reasons.append("current_census_plugin_mismatch")
+    return matches[0], str(snapshot_sha256 or ""), reasons
+
+
+def passing_plugin_decision_receipt(
+    value: Any,
+    *,
+    kind: str,
+    identity_sha256: str,
+    current_estate_sha256: str,
+    proposed_estate_sha256: str,
+    removed_capability_ids: list[str],
+) -> bool:
+    if not isinstance(value, dict) or set(value) != {"status", "payload", "sha256"}:
+        return False
+    payload = value.get("payload")
+    expected = {
+        "kind": kind,
+        "plugin_identity_sha256": identity_sha256,
+        "current_estate_sha256": current_estate_sha256,
+        "proposed_estate_sha256": proposed_estate_sha256,
+        "removed_capability_ids": removed_capability_ids,
+        "result": "passed",
+    }
+    return (
+        value.get("status") == "passed"
+        and payload == expected
+        and value.get("sha256") == digest(expected)
+    )
+
+
+def evaluate_plugin_capability_gate(
+    plugin: dict[str, Any], evidence: dict[str, Any]
+) -> dict[str, Any]:
+    reasons: list[str] = []
+    if not isinstance(evidence, dict) or set(evidence) != {
+        "authority",
+        "current_census_receipt",
+        "capability_evaluations",
+        "dependency_inventory",
+        "proposed_estate",
+    }:
+        reasons.append("plugin_evidence_malformed")
+        evidence = evidence if isinstance(evidence, dict) else {}
+    current_plugin, census_sha256, census_reasons = current_census_plugin(
+        evidence.get("current_census_receipt"),
+        plugin,
+        evidence.get("authority"),
+    )
+    reasons.extend(census_reasons)
+    authoritative_plugin = current_plugin if current_plugin is not None else plugin
+    identity = plugin_identity(authoritative_plugin)
+    if identity is None:
+        identity = {}
+        reasons.append("plugin_identity_incomplete")
+    identity_sha256 = digest(identity)
+    if authoritative_plugin.get("enabled") is not True:
+        reasons.append("plugin_not_enabled")
+    capability_ids, inventory_reasons = plugin_capability_ids(
+        authoritative_plugin.get("capabilities")
+    )
+    reasons.extend(inventory_reasons)
+    evaluated_inventory_sha256 = digest(
+        authoritative_plugin.get("capabilities")
+    )
+    capability_inventory_sha256 = (
+        evaluated_inventory_sha256 if current_plugin is not None else None
+    )
+
+    evaluations = evidence.get("capability_evaluations")
+    accepted: list[dict[str, Any]] = []
+    seen: set[str] = set()
+    if not isinstance(evaluations, list):
+        reasons.append("capability_evaluations_malformed")
+        evaluations = []
+    for evaluation in evaluations:
+        if not isinstance(evaluation, dict) or set(evaluation) != {
+            "capability_id",
+            "disposition",
+            "evidence_complete",
+            "plugin_identity_sha256",
+            "capability_inventory_sha256",
+            "current_estate_sha256",
+        }:
+            reasons.append("capability_evaluation_malformed")
+            continue
+        capability_id = evaluation["capability_id"]
+        disposition = evaluation["disposition"]
+        if not isinstance(capability_id, str) or not capability_id:
+            reasons.append("capability_evaluation_identity_malformed")
+            continue
+        if capability_id in seen:
+            reasons.append("capability_evaluation_duplicated")
+            continue
+        seen.add(capability_id)
+        if capability_id not in capability_ids:
+            reasons.append("capability_evaluation_unknown")
+            continue
+        binding_fields = (
+            "plugin_identity_sha256",
+            "capability_inventory_sha256",
+            "current_estate_sha256",
+        )
+        if not all(
+            isinstance(evaluation[field], str)
+            and SHA256_ID_RE.fullmatch(evaluation[field])
+            for field in binding_fields
+        ):
+            reasons.append("capability_evaluation_binding_malformed")
+            continue
+        capability_class = capability_id.split(":", 1)[0]
+        allowed = (
+            PLUGIN_SKILL_DISABLE_STATES
+            if capability_class == "skills"
+            else PLUGIN_NON_SKILL_DISABLE_STATES
+        )
+        if evaluation["evidence_complete"] is not True:
+            reasons.append("capability_evidence_incomplete")
+        if evaluation["plugin_identity_sha256"] != identity_sha256:
+            reasons.append("capability_evidence_plugin_mismatch")
+        if (
+            evaluation["capability_inventory_sha256"]
+            != evaluated_inventory_sha256
+        ):
+            reasons.append("capability_evidence_inventory_mismatch")
+        if evaluation["current_estate_sha256"] != census_sha256:
+            reasons.append("capability_evidence_census_mismatch")
+        if not isinstance(disposition, str) or disposition not in allowed:
+            reasons.append("capability_retained_or_unknown")
+        accepted.append(dict(evaluation))
+    if seen != set(capability_ids):
+        reasons.append("capability_evaluations_incomplete")
+
+    dependency_evidence = evidence.get("dependency_inventory")
+    dependencies = dependency_evidence
+    expected_dependency_fields = {
+        "complete",
+        "plugin_identity_sha256",
+        "current_estate_sha256",
+        *PLUGIN_DEPENDENCY_CLASSES,
+    }
+    if (
+        not isinstance(dependencies, dict)
+        or set(dependencies) != expected_dependency_fields
+    ):
+        reasons.append("dependency_inventory_malformed")
+        dependencies = {}
+    else:
+        for field in PLUGIN_DEPENDENCY_CLASSES:
+            if not isinstance(dependencies[field], list) or not all(
+                isinstance(item, str) and item for item in dependencies[field]
+            ):
+                reasons.append(f"dependency_{field}_malformed")
+        if dependencies["complete"] is not True:
+            reasons.append("dependency_inventory_incomplete")
+        if dependencies["plugin_identity_sha256"] != identity_sha256:
+            reasons.append("dependency_inventory_plugin_mismatch")
+        if dependencies["current_estate_sha256"] != census_sha256:
+            reasons.append("dependency_inventory_census_mismatch")
+        if any(
+            isinstance(dependencies[field], list) and dependencies[field]
+            for field in PLUGIN_DEPENDENCY_CLASSES
+        ):
+            reasons.append("plugin_has_dependencies")
+
+    proposed = evidence.get("proposed_estate")
+    current_estate_sha256 = ""
+    proposed_estate_sha256 = ""
+    if not isinstance(proposed, dict) or set(proposed) != {
+        "complete",
+        "current_estate_sha256",
+        "proposed_estate_sha256",
+        "removed_capability_ids",
+        "plugin_identity_sha256",
+        "capability_inventory_sha256",
+        "snapshot",
+        "routing",
+        "portfolio",
+    }:
+        reasons.append("proposed_estate_malformed")
+        proposed = {}
+    else:
+        current_estate_value = proposed["current_estate_sha256"]
+        proposed_estate_value = proposed["proposed_estate_sha256"]
+        if proposed["complete"] is not True:
+            reasons.append("proposed_estate_incomplete")
+        if (
+            not isinstance(current_estate_value, str)
+            or not SHA256_ID_RE.fullmatch(current_estate_value)
+        ):
+            reasons.append("current_estate_identity_malformed")
+        else:
+            current_estate_sha256 = current_estate_value
+        if current_estate_sha256 and current_estate_sha256 != census_sha256:
+            reasons.append("current_estate_census_mismatch")
+        if (
+            not isinstance(proposed_estate_value, str)
+            or not SHA256_ID_RE.fullmatch(proposed_estate_value)
+        ):
+            reasons.append("proposed_estate_identity_malformed")
+        else:
+            proposed_estate_sha256 = proposed_estate_value
+        if (
+            proposed_estate_sha256
+            and digest(proposed["snapshot"]) != proposed_estate_sha256
+        ):
+            reasons.append("proposed_estate_preimage_mismatch")
+        if proposed["plugin_identity_sha256"] != identity_sha256:
+            reasons.append("proposed_estate_plugin_mismatch")
+        if (
+            proposed["capability_inventory_sha256"]
+            != evaluated_inventory_sha256
+        ):
+            reasons.append("proposed_estate_inventory_mismatch")
+        expected_snapshot = {
+            "schema_version": 1,
+            "current_estate_sha256": current_estate_sha256,
+            "disabled_plugin_identity_sha256": identity_sha256,
+            "removed_capability_ids": capability_ids,
+        }
+        if proposed["snapshot"] != expected_snapshot:
+            reasons.append("proposed_estate_snapshot_malformed")
+        if proposed["removed_capability_ids"] != capability_ids:
+            reasons.append("proposed_estate_removal_mismatch")
+        for kind in ("routing", "portfolio"):
+            if not passing_plugin_decision_receipt(
+                proposed[kind],
+                kind=kind,
+                identity_sha256=identity_sha256,
+                current_estate_sha256=current_estate_sha256,
+                proposed_estate_sha256=proposed_estate_sha256,
+                removed_capability_ids=capability_ids,
+            ):
+                reasons.append(f"proposed_estate_{kind}_failed")
+
+    blocking_reasons = sorted(set(reasons))
+    return {
+        "schema_version": 1,
+        "plugin_identity": identity,
+        "plugin_identity_sha256": identity_sha256,
+        "capability_inventory_sha256": capability_inventory_sha256,
+        "capability_ids": capability_ids,
+        "capability_evaluations": sorted(
+            accepted, key=lambda item: item["capability_id"]
+        ),
+        "dependency_inventory_sha256": digest(dependency_evidence),
+        "current_estate_sha256": current_estate_sha256 or None,
+        "proposed_estate_sha256": proposed_estate_sha256 or None,
+        "eligible_for_disablement": not blocking_reasons,
+        "decision": "disable_eligible" if not blocking_reasons else "keep",
+        "blocking_reasons": blocking_reasons,
     }
 
 
@@ -1115,14 +1926,42 @@ def discover_plugin_roots(
         for row in runtime_skills
         if row.get("source") == "plugin" and isinstance(row.get("path"), str)
     ]
-    for marketplace in sorted(installed_root.iterdir()):
-        if marketplace.name.startswith(".") or not marketplace.is_dir():
+    try:
+        marketplaces = sorted(installed_root.iterdir())
+    except OSError as error:
+        raise EstateError(
+            f"cannot enumerate installed plugin root: {installed_root}"
+        ) from error
+    for marketplace in marketplaces:
+        if marketplace.name.startswith("."):
             continue
-        for package_root in sorted(marketplace.iterdir()):
-            if package_root.is_symlink() or not package_root.is_dir():
-                continue
+        try:
+            if not marketplace.is_dir():
+                raise EstateError(
+                    f"unsafe plugin marketplace directory: {marketplace}"
+                )
+            packages = sorted(marketplace.iterdir())
+        except EstateError:
+            raise
+        except OSError as error:
+            raise EstateError(
+                f"cannot enumerate plugin marketplace: {marketplace}"
+            ) from error
+        for package_root in packages:
             try:
-                manifest, manifest_path = plugin_manifest(package_root)
+                if package_root.is_symlink() or not package_root.is_dir():
+                    raise EstateError(
+                        f"unsafe installed plugin package: {package_root}"
+                    )
+            except EstateError:
+                raise
+            except OSError as error:
+                raise EstateError(
+                    f"cannot inspect installed plugin package: {package_root}"
+                ) from error
+            try:
+                resolved_package_root = package_root.resolve()
+                manifest, manifest_path = plugin_manifest(resolved_package_root)
                 name = manifest.get("name")
                 version = manifest.get("version")
                 if not isinstance(name, str) or not name:
@@ -1137,9 +1976,10 @@ def discover_plugin_roots(
                     if "@" in name
                     else f"{name}@{marketplace.name}"
                 )
-                capabilities = plugin_capabilities(package_root, manifest)
+                capabilities = plugin_capabilities(resolved_package_root, manifest)
                 runtime_enabled = any(
-                    path == package_root or package_root in path.parents
+                    path == resolved_package_root
+                    or resolved_package_root in path.parents
                     for path in runtime_paths
                 )
                 cli_enabled = (
@@ -1152,13 +1992,13 @@ def discover_plugin_roots(
                         "name": name,
                         "version": version,
                         "source_identity": source_identity,
-                        "package_root": str(package_root.resolve()),
+                        "package_root": str(resolved_package_root),
                         "manifest_path": manifest_path,
                         "enabled": runtime_enabled or cli_enabled,
                         "capabilities": capabilities,
                     }
                 )
-                skills_root = package_root / "skills"
+                skills_root = resolved_package_root / "skills"
                 if skills_root.is_dir():
                     roots.append(
                         {
@@ -1178,20 +2018,20 @@ def discover_plugin_roots(
                             },
                         }
                     )
-            except EstateError as error:
+            except (EstateError, OSError, ValueError) as error:
                 plugins.append(
                     {
                         "plugin_id": None,
                         "source_identity": (
                             f"installed:{marketplace.name}/{package_root.name}"
                         ),
-                        "package_root": str(package_root.resolve()),
+                        "package_root": str(package_root),
                         "enabled": any(
                             path == package_root or package_root in path.parents
                             for path in runtime_paths
                         ),
                         "capabilities": {"complete": False},
-                        "error": str(error),
+                        "error": str(error) or error.__class__.__name__,
                     }
                 )
     return roots, plugins
@@ -1442,10 +2282,23 @@ def main() -> None:
     fixture.add_argument("--input", required=True)
     collect_parser = subcommands.add_parser("collect")
     collect_parser.add_argument("--config", required=True)
+    plugin_parser = subcommands.add_parser("evaluate-plugin")
+    plugin_parser.add_argument("--input", required=True)
     args = parser.parse_args()
     try:
         if args.command == "collect":
             result = collect(load_object(Path(args.config).expanduser().resolve()))
+        elif args.command == "evaluate-plugin":
+            request = load_object(Path(args.input).expanduser().resolve())
+            if (
+                set(request) != {"plugin", "evidence"}
+                or not isinstance(request["plugin"], dict)
+                or not isinstance(request["evidence"], dict)
+            ):
+                raise EstateError("plugin evaluation input is malformed")
+            result = evaluate_plugin_capability_gate(
+                request["plugin"], request["evidence"]
+            )
         else:
             source = load_object(Path(args.input).expanduser().resolve())
             result = reconcile(
@@ -1458,7 +2311,8 @@ def main() -> None:
     except (EstateError, KeyError, TypeError) as error:
         print(json.dumps({"ok": False, "error": str(error)}, sort_keys=True))
         raise SystemExit(2)
-    print(json.dumps({"ok": True, "census": result}, sort_keys=True))
+    output_key = "evaluation" if args.command == "evaluate-plugin" else "census"
+    print(json.dumps({"ok": True, output_key: result}, sort_keys=True))
 
 
 if __name__ == "__main__":
