@@ -7,6 +7,7 @@ import argparse
 import base64
 import hashlib
 import hmac
+import importlib.util
 import io
 import json
 import os
@@ -2453,9 +2454,352 @@ class DashboardData:
             "activity": activity,
         }
 
+    def _estate_actions(self) -> dict[str, Any]:
+        config_path = self.paths.state / "estate-action/config.json"
+        if not config_path.exists():
+            return {
+                "status": "unavailable",
+                "available": False,
+                "stale": None,
+                "recovery_required": False,
+                "running": False,
+                "halted": None,
+                "paused": None,
+                "writers_blocked": True,
+                "total": 0,
+                "items": [],
+                "message": "Estate action authority is not configured.",
+            }
+        try:
+            authority_path = self.paths.repo / "scripts/estate-action.py"
+            if authority_path.is_symlink() or not authority_path.is_file():
+                raise ValueError("authority implementation")
+            specification = importlib.util.spec_from_file_location(
+                "dreaming_dashboard_estate_action", authority_path
+            )
+            if specification is None or specification.loader is None:
+                raise ValueError("authority implementation")
+            authority_tool = importlib.util.module_from_spec(specification)
+            try:
+                specification.loader.exec_module(authority_tool)
+            except Exception as error:
+                raise ValueError("authority implementation") from error
+            config = authority_tool.load_authority_config(config_path)
+            current = authority_tool.load_current_evidence(config)
+            state_root = Path(str(config["state_root"]))
+            halt_switch = Path(str(config["halt_switch"]))
+            recovery_state = Path(str(config["recovery_state"]))
+            curator_state_path = Path(str(config["curator_state"]))
+            if state_root.is_symlink() or not state_root.is_dir():
+                raise ValueError("configured action state")
+            curator_state = authority_tool.load_object(
+                curator_state_path, "estate-action-curator-state-invalid"
+            )
+            if not isinstance(curator_state.get("paused"), bool):
+                raise ValueError("curator state")
+
+            items: list[dict[str, Any]] = []
+            malformed = False
+            for operation_root in sorted(state_root.iterdir()):
+                if not operation_root.is_dir() or operation_root.is_symlink():
+                    continue
+                try:
+                    authorization = authority_tool.load_object(
+                        operation_root / "authorization.json",
+                        "estate-action-state-invalid",
+                    )
+                    authorization = authority_tool.validate_authorization(
+                        authorization
+                    )
+                    index = authority_tool.load_object(
+                        operation_root / "index.json",
+                        "estate-action-state-invalid",
+                    )
+                    action = authorization.get("action")
+                    evidence = authorization.get("evidence")
+                    executor = authorization.get("executor")
+                    if (
+                        authorization["action_id"] != operation_root.name
+                        or set(index)
+                        not in (
+                            {
+                                "schema_version",
+                                "action_id",
+                                "authorization_sha256",
+                                "phase",
+                            },
+                            {
+                                "schema_version",
+                                "action_id",
+                                "authorization_sha256",
+                                "phase",
+                                "result_sha256",
+                            },
+                        )
+                        or index.get("schema_version") != 1
+                        or index.get("action_id") != operation_root.name
+                        or index.get("authorization_sha256")
+                        != authorization["authorization_sha256"]
+                    ):
+                        raise ValueError("operation identity")
+                    config_current = (
+                        authorization["authority"]["config_sha256"]
+                        == config["config_sha256"]
+                        and authorization["authority"]["evidence_root"]
+                        == config["evidence_root"]
+                    )
+                    if config_current:
+                        adapter_path = authority_tool.configured_adapter(
+                            config, action["kind"]
+                        )
+                        if (
+                            action["adapter_sha256"]
+                            != authority_tool.file_digest(adapter_path)
+                            or executor["argv"][0] != str(adapter_path)
+                            or evidence["receiver"]["value"]
+                            != {
+                                **config["receivers"][action["kind"]],
+                                "adapter_sha256": action[
+                                    "adapter_sha256"
+                                ],
+                            }
+                        ):
+                            raise ValueError("current action bindings")
+                    stale_labels = sorted(
+                        [
+                            label
+                            for label, wrapper in current.items()
+                            if evidence[label]["sha256"]
+                            != wrapper["sha256"]
+                        ]
+                        + ([] if config_current else ["configuration"])
+                    )
+                    phase = index.get("phase")
+                    if phase not in {
+                        "running",
+                        "committed",
+                        "rejected",
+                        "rolled_back",
+                        "recovery_required",
+                    }:
+                        raise ValueError("operation phase")
+                    result_sha256 = None
+                    if phase in {
+                        "committed",
+                        "rejected",
+                        "rolled_back",
+                        "recovery_required",
+                    }:
+                        if "result_sha256" not in index:
+                            raise ValueError("result identity")
+                        result = authority_tool.load_result(
+                            operation_root, index
+                        )
+                        result = authority_tool.result_payload(
+                            result, authorization
+                        )
+                        if result["status"] != phase:
+                            raise ValueError("result seal")
+                        result_sha256 = result["result_sha256"]
+                    request_target = (
+                        executor["request"].get("target")
+                        if action["kind"].startswith("personal_")
+                        else executor["request"].get("plugin")
+                    )
+                    target = evidence["target"]["value"]
+                    display_name = (
+                        request_target.get("skill")
+                        if action["kind"].startswith("personal_")
+                        else request_target.get("plugin_id")
+                    )
+                    items.append(
+                        {
+                            "action_id": safe_text(
+                                operation_root.name, 100
+                            ),
+                            "kind": action["kind"],
+                            "target": safe_text(display_name, 200),
+                            "authority": safe_text(
+                                target.get("authority")
+                                if isinstance(target, dict)
+                                else None,
+                                80,
+                            ),
+                            "decision": safe_text(
+                                target.get("decision")
+                                if isinstance(target, dict)
+                                else None,
+                                80,
+                            ),
+                            "status": phase,
+                            "stale": (
+                                phase == "running" and bool(stale_labels)
+                            ),
+                            "evidence_state": (
+                                "stale"
+                                if phase == "running" and stale_labels
+                                else "historical"
+                                if stale_labels
+                                else "current"
+                            ),
+                            "stale_evidence": stale_labels,
+                            "receipt_sha256": (
+                                result_sha256
+                                if isinstance(result_sha256, str)
+                                else None
+                            ),
+                            "at": datetime.fromtimestamp(
+                                (operation_root / "index.json").stat().st_mtime,
+                                timezone.utc,
+                            ).isoformat(),
+                        }
+                    )
+                except (
+                    authority_tool.ActionError,
+                    DashboardError,
+                    OSError,
+                    TypeError,
+                    ValueError,
+                    KeyError,
+                ):
+                    malformed = True
+
+            known_ids = {item["action_id"] for item in items}
+            for item in self._list("estate-action-ledger.json"):
+                if not isinstance(item, dict):
+                    malformed = True
+                    continue
+                record_payload = {
+                    key: value
+                    for key, value in item.items()
+                    if key != "record_sha256"
+                }
+                action_id = safe_text(item.get("action_id"), 100)
+                status = safe_text(item.get("status"), 80)
+                target_kind = safe_text(item.get("target_kind"), 40)
+                if (
+                    set(item)
+                    != {
+                        "action_id",
+                        "target",
+                        "authority",
+                        "decision",
+                        "status",
+                        "target_kind",
+                        "at",
+                        "record_sha256",
+                    }
+                    or item.get("record_sha256")
+                    != sha(record_payload)
+                    or not action_id
+                    or action_id in known_ids
+                    or target_kind not in {"personal_skill", "plugin"}
+                    or status
+                    not in {
+                        "recommended",
+                        "kept",
+                        "protected",
+                        "unknown",
+                    }
+                ):
+                    malformed = True
+                    continue
+                items.append(
+                    {
+                        "action_id": action_id,
+                        "kind": "recommendation",
+                        "target_kind": target_kind,
+                        "target": safe_text(item.get("target"), 200),
+                        "authority": safe_text(item.get("authority"), 80),
+                        "decision": safe_text(item.get("decision"), 80),
+                        "status": status,
+                        "stale": item.get("stale") is True,
+                        "evidence_state": "recommendation",
+                        "stale_evidence": [],
+                        "receipt_sha256": None,
+                        "at": item.get("at"),
+                    }
+                )
+            items.sort(
+                key=lambda item: (
+                    parse_time(item.get("at")) or 0,
+                    item["action_id"],
+                ),
+                reverse=True,
+            )
+            local_recovery = state_root / "recovery-required.json"
+            paused = curator_state.get("paused") is True
+            halted = halt_switch.exists()
+            running = any(item["status"] == "running" for item in items)
+            recovery_required = (
+                recovery_state.exists()
+                or local_recovery.exists()
+                or any(
+                    item["status"] == "recovery_required"
+                    for item in items
+                )
+            )
+            stale = any(item["stale"] for item in items)
+            status = (
+                "invalid"
+                if malformed
+                else "recovery required"
+                if recovery_required
+                else "stale"
+                if stale
+                else "running"
+                if running
+                else "paused"
+                if paused
+                else "halted"
+                if halted
+                else "current"
+            )
+            return {
+                "status": status,
+                "available": not malformed,
+                "stale": stale,
+                "recovery_required": recovery_required,
+                "running": running,
+                "halted": halted,
+                "paused": paused,
+                "writers_blocked": (
+                    recovery_required or running or halted or paused
+                ),
+                "total": len(items),
+                "items": items,
+                "message": (
+                    "Estate action state is malformed."
+                    if malformed
+                    else None
+                ),
+            }
+        except (
+            DashboardError,
+            OSError,
+            RuntimeError,
+            TypeError,
+            ValueError,
+            KeyError,
+        ):
+            return {
+                "status": "invalid",
+                "available": False,
+                "stale": None,
+                "recovery_required": False,
+                "running": False,
+                "halted": None,
+                "paused": None,
+                "writers_blocked": True,
+                "total": 0,
+                "items": [],
+                "message": "Estate action state is malformed.",
+            }
+
     def estate(self, summary_only: bool = False) -> dict[str, Any]:
         current_path = self.paths.state / "estate-census-current.json"
         recovery_path = self.paths.state / "estate-recovery-required.json"
+        actions = self._estate_actions()
         if not current_path.exists():
             return {
                 "status": "unavailable",
@@ -2465,6 +2809,7 @@ class DashboardData:
                 "collected_at": None,
                 "totals": None,
                 "recovery_required": recovery_path.exists(),
+                "actions": actions,
                 "message": "No estate census has been recorded.",
             }
         try:
@@ -2522,6 +2867,45 @@ class DashboardData:
                     "Estate census receipt is unavailable",
                     ["estate census receipt"],
                 )
+            receipt = self._json(
+                receipt_path, None, "estate census receipt"
+            )
+            receiver = (
+                receipt.get("receiver")
+                if isinstance(receipt, dict)
+                else None
+            )
+            if (
+                not isinstance(receipt, dict)
+                or set(receipt)
+                != {"schema_version", "snapshot_sha256", "receiver", "census"}
+                or receipt.get("schema_version") != 1
+                or receipt.get("snapshot_sha256") != snapshot_sha256
+                or receipt.get("census") != census
+                or sha(receipt) != current["receipt_sha256"]
+                or not isinstance(receiver, dict)
+                or set(receiver)
+                != {
+                    "receiver_id",
+                    "receiver_sha256",
+                    "collector_sha256",
+                }
+                or not isinstance(receiver.get("receiver_id"), str)
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(receiver.get("receiver_sha256", "")),
+                )
+                or not re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(receiver.get("collector_sha256", "")),
+                )
+            ):
+                raise DashboardError(
+                    503,
+                    "estate_invalid",
+                    "Estate census receipt is invalid",
+                    ["estate census receipt"],
+                )
         except DashboardError as error:
             return {
                 "status": "invalid",
@@ -2531,6 +2915,7 @@ class DashboardData:
                 "collected_at": None,
                 "totals": None,
                 "recovery_required": recovery_path.exists(),
+                "actions": actions,
                 "message": error.message,
             }
 
@@ -2541,14 +2926,18 @@ class DashboardData:
             and time.time() - collected_epoch <= 24 * 60 * 60
         )
         complete = census.get("scope", {}).get("complete") is True
-        recovery_required = recovery_path.exists()
+        recovery_required = (
+            recovery_path.exists() or actions["recovery_required"]
+        )
         status = (
             "recovery required"
             if recovery_required
+            else "invalid"
+            if actions["status"] == "invalid"
             else "incomplete"
             if not complete
             else "stale"
-            if not fresh
+            if not fresh or actions["status"] == "stale"
             else "current"
         )
         base = {
@@ -2558,6 +2947,24 @@ class DashboardData:
             "fresh": fresh,
             "collected_at": collected_at,
             "snapshot_sha256": snapshot_sha256,
+            "receipt_sha256": current["receipt_sha256"],
+            "receiver": {
+                "id": safe_text(receiver["receiver_id"], 200),
+                "receiver_sha256": receiver["receiver_sha256"],
+                "collector_sha256": receiver["collector_sha256"],
+            },
+            "settings_sha256": (
+                census.get("evidence", {}).get("settings_sha256")
+                if re.fullmatch(
+                    r"[0-9a-f]{64}",
+                    str(
+                        census.get("evidence", {}).get(
+                            "settings_sha256", ""
+                        )
+                    ),
+                )
+                else None
+            ),
             "totals": census.get("totals")
             if isinstance(census.get("totals"), dict)
             else None,
@@ -2579,6 +2986,7 @@ class DashboardData:
                 ],
             },
             "recovery_required": recovery_required,
+            "actions": actions,
             "read_only": True,
             "authorizes_actions": False,
         }
@@ -2588,6 +2996,33 @@ class DashboardData:
         authority = {name: 0 for name in sorted(ESTATE_AUTHORITIES)}
         root_classes = {name: 0 for name in sorted(ESTATE_ROOT_CLASSES)}
         instances: list[dict[str, Any]] = []
+
+        def latest_action(
+            target: str | None, prefix: str
+        ) -> dict[str, Any] | None:
+            if not target:
+                return None
+            return next(
+                (
+                    item
+                    for item in actions["items"]
+                    if item.get("target") == target
+                    and (
+                        str(item.get("kind", "")).startswith(prefix)
+                        or (
+                            item.get("kind") == "recommendation"
+                            and item.get("target_kind")
+                            == (
+                                "personal_skill"
+                                if prefix == "personal_"
+                                else "plugin"
+                            )
+                        )
+                    )
+                ),
+                None,
+            )
+
         for item in census.get("physical_instances", []):
             if not isinstance(item, dict):
                 continue
@@ -2600,13 +3035,64 @@ class DashboardData:
             owner = item.get("owner")
             if isinstance(owner, str) and owner.startswith("/"):
                 owner = "local configured root"
+            package = item.get("package")
+            source = item.get("source_identity")
+            if not isinstance(source, str) and isinstance(package, dict):
+                source = package.get("source_identity") or package.get(
+                    "plugin_id"
+                )
+            if not isinstance(source, str):
+                source = root_class
+            skill_name = safe_text(item.get("skill_name"), 200)
+            provenance = item.get("provenance")
+            provenance_status = (
+                provenance.get("status")
+                if isinstance(provenance, dict)
+                and provenance.get("status")
+                in {"verified", "protected", "insufficient", "invalid"}
+                else "unknown"
+            )
+            decision = latest_action(skill_name, "personal_")
             instances.append(
                 {
-                    "skill_name": safe_text(item.get("skill_name"), 200),
+                    "skill_name": skill_name,
                     "root_class": root_class,
                     "authority": authority_name,
                     "physical_only": item.get("physical_only") is True,
+                    "effective_state": (
+                        "physical only"
+                        if item.get("physical_only") is True
+                        else "enabled"
+                    ),
                     "owner": safe_text(owner, 200),
+                    "source": safe_text(source, 200),
+                    "provenance_status": provenance_status,
+                    "evaluation_state": safe_text(
+                        item.get("evaluation_state"), 80
+                    ),
+                    "usage_complete": (
+                        item.get("usage_complete")
+                        if isinstance(item.get("usage_complete"), bool)
+                        else None
+                    ),
+                    "dependencies_complete": (
+                        item.get("dependencies_complete")
+                        if isinstance(
+                            item.get("dependencies_complete"), bool
+                        )
+                        else None
+                    ),
+                    "latest_decision": (
+                        {
+                            "decision": decision["decision"],
+                            "status": decision["status"],
+                            "receipt_sha256": decision[
+                                "receipt_sha256"
+                            ],
+                        }
+                        if decision
+                        else None
+                    ),
                     "instance_id": safe_text(item.get("instance_id"), 80),
                     "canonical_capability_id": safe_text(
                         item.get("canonical_capability_id"), 80
@@ -2676,6 +3162,8 @@ class DashboardData:
             if not isinstance(plugin, dict):
                 continue
             capabilities = plugin.get("capabilities")
+            plugin_id = safe_text(plugin.get("plugin_id"), 200)
+            decision = latest_action(plugin_id, "plugin_")
             capability_counts = None
             if isinstance(capabilities, dict):
                 capability_counts = {
@@ -2691,7 +3179,7 @@ class DashboardData:
                 }
             plugins.append(
                 {
-                    "plugin_id": safe_text(plugin.get("plugin_id"), 200),
+                    "plugin_id": plugin_id,
                     "name": safe_text(plugin.get("name"), 200),
                     "version": safe_text(plugin.get("version"), 80),
                     "source_identity": safe_text(
@@ -2703,19 +3191,23 @@ class DashboardData:
                         and capabilities.get("complete") is True
                     ),
                     "capability_counts": capability_counts,
+                    "latest_decision": (
+                        {
+                            "decision": decision["decision"],
+                            "kind": decision["kind"],
+                            "status": decision["status"],
+                            "evidence_state": decision[
+                                "evidence_state"
+                            ],
+                            "receipt_sha256": decision[
+                                "receipt_sha256"
+                            ],
+                        }
+                        if decision
+                        else None
+                    ),
                 }
             )
-        decisions = [
-            {
-                "action_id": safe_text(item.get("action_id"), 100),
-                "target": safe_text(item.get("target"), 200),
-                "decision": safe_text(item.get("decision"), 80),
-                "status": safe_text(item.get("status"), 80),
-                "at": item.get("at"),
-            }
-            for item in self._list("estate-action-ledger.json")
-            if isinstance(item, dict)
-        ]
         return {
             **base,
             "authority_counts": dict(sorted(authority.items())),
@@ -2724,7 +3216,7 @@ class DashboardData:
             "unresolved_mappings": unresolved,
             "plugins": plugins,
             "instances": instances,
-            "decisions": decisions,
+            "decisions": actions["items"],
         }
 
     def _backlog_history(self) -> list[dict[str, Any]]:

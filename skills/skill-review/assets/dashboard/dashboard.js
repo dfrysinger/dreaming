@@ -189,17 +189,26 @@ async function renderOverview() {
 async function renderEstate() {
   const data = await api("/api/v1/estate");
   const totals = data.totals || {};
+  const actions = data.actions || {status:"unavailable", total:0, items:[]};
   const capabilityTotal = plugin => Object.values(plugin.capability_counts || {}).reduce((sum, value) => sum + Number(value || 0), 0);
+  const actionPanel = `<article class="panel full-span"><div class="panel-head"><h2>Governance decisions and actions</h2><span>${badge(actions.status)} · ${number(actions.total)} recorded</span></div>
+    ${actions.message ? `<div class="notice">${esc(actions.message)}</div>` : ""}
+    ${actions.recovery_required ? `<div class="notice"><strong>Recovery required:</strong> automatic estate changes are blocked until the recorded action state is reconciled.</div>` : ""}
+    <table><thead><tr><th>Target</th><th>Authority</th><th>Decision</th><th>Action</th><th>State</th><th>Evidence</th><th>Receipt</th><th>Observed</th></tr></thead><tbody>
+      ${(actions.items || []).map(item => `<tr><td>${esc(item.target || "Unknown target")}</td><td>${badge(item.authority || "unknown")}</td><td>${esc(item.decision || "not recorded")}</td><td>${esc((item.kind || "recommendation").replaceAll("_"," "))}</td><td>${badge(item.status)}</td><td>${badge(item.evidence_state || (item.stale ? "stale" : "current"))}</td><td>${esc(item.receipt_sha256 ? `${item.receipt_sha256.slice(0,18)}…` : "none")}</td><td>${relative(item.at)}</td></tr>`).join("") || `<tr><td colspan="8">No governed decisions or actions recorded.</td></tr>`}
+    </tbody></table></article>`;
   view.innerHTML = `${header("Skill estate", "The complete bounded MacBook Copilot inventory. This view is read-only and never authorizes an action.", badge(data.status))}
-    ${!data.available ? `<div class="notice">${esc(data.message)}</div>` : `
+    ${!data.available ? `<div class="notice">${esc(data.message)}</div><div class="grid split">${actionPanel}</div>` : `
     <div class="grid metrics">
       <article class="card"><div class="label">Physical instances</div><div class="metric">${number(totals.physical_instances)}</div><div class="submetric">${number(totals.physical_only_instances)} inactive, cached, or stale</div></article>
       <article class="card"><div class="label">Enabled instances</div><div class="metric">${number(totals.effective_instances)}</div><div class="submetric">${number(totals.canonical_capabilities)} canonical capabilities</div></article>
       <article class="card"><div class="label">Unresolved mappings</div><div class="metric">${number(totals.unresolved_runtime_skills)}</div><div class="submetric">${data.complete ? "Bounded census complete" : "Automatic removal blocked"}</div></article>
       <article class="card"><div class="label">Plugin packages</div><div class="metric">${number(totals.plugin_packages)}</div><div class="submetric">${number(totals.enabled_plugin_packages)} effectively enabled</div></article>
       <article class="card"><div class="label">Freshness</div><div class="metric">${data.fresh ? "Current" : "Stale"}</div><div class="submetric">Collected ${relative(data.collected_at)}</div></article>
+      <article class="card"><div class="label">Governance actions</div><div class="metric">${number(actions.total)}</div><div class="submetric">${esc(actions.status)} · receipts are verification-only</div></article>
     </div>
     <div class="notice"><strong>Bounded scope:</strong> ${esc(data.scope?.label)} Registered: ${esc((data.scope?.registered_context_ids || []).join(", ") || "none")}. Outside claim: ${esc((data.scope?.outside_context_ids || []).join(", ") || "none")}.</div>
+    <div class="notice"><strong>Verified source:</strong> receiver ${esc(data.receiver?.id || "unavailable")} · census receipt ${esc(data.receipt_sha256 ? `${data.receipt_sha256.slice(0,18)}…` : "unavailable")} · settings ${esc(data.settings_sha256 ? `${data.settings_sha256.slice(0,16)}…` : "hash unavailable")}.</div>
     <div class="grid split">
       <article class="panel"><div class="panel-head"><h2>Authority and provenance</h2></div><table><thead><tr><th>Class</th><th>Physical instances</th></tr></thead><tbody>
         ${Object.entries(data.authority_counts || {}).map(([name,count]) => `<tr><td>${badge(name)}</td><td>${number(count)}</td></tr>`).join("") || `<tr><td colspan="2">Unavailable</td></tr>`}
@@ -207,11 +216,12 @@ async function renderEstate() {
       <article class="panel"><div class="panel-head"><h2>Runtime contexts</h2></div><table><thead><tr><th>Context</th><th>Scope</th><th>Mapped</th><th>Status</th></tr></thead><tbody>
         ${(data.contexts || []).map(item => `<tr><td>${esc(item.id)}</td><td>${item.inside_completeness_claim ? "Inside claim" : "Outside claim"}</td><td>${number(item.mapped_skill_count)} / ${number(item.runtime_skill_count)}</td><td>${badge(item.complete === null ? "outside scope" : item.complete ? "complete" : "incomplete")}</td></tr>`).join("")}
       </tbody></table></article>
-      <article class="panel full-span"><div class="panel-head"><h2>Plugins and complete capability sets</h2></div><table><thead><tr><th>Plugin</th><th>Version</th><th>State</th><th>Skills</th><th>Agents</th><th>Hooks</th><th>MCP</th><th>LSP</th><th>Inventory</th></tr></thead><tbody>
-        ${(data.plugins || []).map(item => `<tr><td>${esc(item.plugin_id)}</td><td>${esc(item.version)}</td><td>${badge(item.enabled ? "enabled" : "disabled")}</td><td>${number(item.capability_counts?.skills)}</td><td>${number(item.capability_counts?.agents)}</td><td>${number(item.capability_counts?.hooks)}</td><td>${number(item.capability_counts?.mcp_servers)}</td><td>${number(item.capability_counts?.lsp_servers)}</td><td>${badge(item.capability_inventory_complete ? `complete · ${capabilityTotal(item)}` : "incomplete")}</td></tr>`).join("")}
+      ${actionPanel}
+      <article class="panel full-span"><div class="panel-head"><h2>Plugins and complete capability sets</h2></div><table><thead><tr><th>Plugin</th><th>Version</th><th>State</th><th>Skills</th><th>Agents</th><th>Hooks</th><th>MCP</th><th>LSP</th><th>Inventory</th><th>Latest governance</th><th>Receipt</th></tr></thead><tbody>
+        ${(data.plugins || []).map(item => `<tr><td>${esc(item.plugin_id)}</td><td>${esc(item.version)}</td><td>${badge(item.enabled ? "enabled" : "disabled")}</td><td>${number(item.capability_counts?.skills)}</td><td>${number(item.capability_counts?.agents)}</td><td>${number(item.capability_counts?.hooks)}</td><td>${number(item.capability_counts?.mcp_servers)}</td><td>${number(item.capability_counts?.lsp_servers)}</td><td>${badge(item.capability_inventory_complete ? `complete · ${capabilityTotal(item)}` : "incomplete")}</td><td>${item.latest_decision ? `${esc(item.latest_decision.decision || item.latest_decision.kind)} · ${badge(item.latest_decision.status)}` : "Not recorded"}</td><td>${esc(item.latest_decision?.receipt_sha256 ? `${item.latest_decision.receipt_sha256.slice(0,18)}…` : "none")}</td></tr>`).join("")}
       </tbody></table></article>
-      <article class="panel full-span"><div class="panel-head"><h2>Physical skill instances</h2><span>${number((data.instances || []).length)} shown</span></div><table><thead><tr><th>Skill</th><th>Root class</th><th>Authority</th><th>Effective state</th><th>Owner</th></tr></thead><tbody>
-        ${(data.instances || []).map(item => `<tr><td>${esc(item.skill_name)}</td><td>${esc(item.root_class)}</td><td>${badge(item.authority)}</td><td>${badge(item.physical_only ? "physical only" : "enabled")}</td><td>${esc(item.owner)}</td></tr>`).join("")}
+      <article class="panel full-span"><div class="panel-head"><h2>Physical skill instances</h2><span>${number((data.instances || []).length)} shown</span></div><table><thead><tr><th>Skill</th><th>Source</th><th>Authority</th><th>Provenance</th><th>Effective state</th><th>Owner</th><th>Evaluation</th><th>Usage</th><th>Dependencies</th><th>Latest decision</th></tr></thead><tbody>
+        ${(data.instances || []).map(item => `<tr><td>${esc(item.skill_name)}</td><td>${esc(item.source || item.root_class)}</td><td>${badge(item.authority)}</td><td>${badge(item.provenance_status)}</td><td>${badge(item.effective_state)}</td><td>${esc(item.owner)}</td><td>${badge(item.evaluation_state || "not recorded")}</td><td>${badge(item.usage_complete === null ? "not recorded" : item.usage_complete ? "complete" : "incomplete")}</td><td>${badge(item.dependencies_complete === null ? "not recorded" : item.dependencies_complete ? "complete" : "incomplete")}</td><td>${item.latest_decision ? `${esc(item.latest_decision.decision)} · ${badge(item.latest_decision.status)}` : "Not recorded"}</td></tr>`).join("")}
       </tbody></table></article>
     </div>`}`;
 }

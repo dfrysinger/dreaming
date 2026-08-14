@@ -30,6 +30,13 @@ spec = importlib.util.spec_from_file_location("dreaming_dashboard", script)
 dashboard = importlib.util.module_from_spec(spec)
 sys.modules[spec.name] = dashboard
 spec.loader.exec_module(dashboard)
+action_spec = importlib.util.spec_from_file_location(
+    "estate_action_dashboard_fixture",
+    repo / "scripts/test-estate-action.py",
+)
+estate_action_test = importlib.util.module_from_spec(action_spec)
+sys.modules[action_spec.name] = estate_action_test
+action_spec.loader.exec_module(estate_action_test)
 
 passes = 0
 def check(value, message):
@@ -71,6 +78,12 @@ check(
     "candidate views conspicuously show shadow authority, identity, recurrence, freshness, and gates",
 )
 check(
+    "Governance decisions and actions" in javascript
+    and "Recovery required:" in javascript
+    and "receipts are verification-only" in javascript,
+    "estate view conspicuously reports action, receipt, and recovery state",
+)
+check(
     not any(
         token in javascript
         for token in (
@@ -81,6 +94,19 @@ check(
         )
     ),
     "candidate browser views expose no mutation controls",
+)
+check(
+    not any(
+        token in javascript
+        for token in (
+            'fetch("/api/v1/estate", {method:',
+            "Disable plugin",
+            "Archive skill",
+            "Restore plugin",
+            "Restore skill",
+        )
+    ),
+    "estate browser view exposes no mutation controls",
 )
 for path in (state, control, orchestrator / "runs", data / "snapshots", skills):
     path.mkdir(parents=True, exist_ok=True)
@@ -112,7 +138,7 @@ estate_snapshot = {
         "cli_builtin": 0,
         "dreaming_managed": 0,
         "legacy_machine": 0,
-        "plugin_managed": 0,
+        "plugin_managed": 1,
         "unknown_provenance": 1,
         "user_protected": 0,
     },
@@ -121,7 +147,7 @@ estate_snapshot = {
         "custom": 0,
         "dreaming_publisher": 0,
         "personal": 1,
-        "plugin": 0,
+        "plugin": 1,
         "project": 0,
     },
     "contexts": [{
@@ -149,6 +175,23 @@ estate_snapshot = {
             "basis": "private-provenance-sentinel",
             "private_evidence_path": "/private/provenance/path",
         },
+    }, {
+        "skill_name": "plugin-skill",
+        "root_class": "plugin",
+        "authority": "plugin_managed",
+        "physical_only": False,
+        "owner": "fixture@market",
+        "package": {
+            "plugin_id": "fixture@market",
+            "source_identity": "installed:market/fixture",
+            "version": "1.0.0",
+        },
+        "provenance": {
+            "status": "verified",
+            "basis": "exact_plugin_identity",
+        },
+        "instance_id": "sha256:" + "3" * 64,
+        "canonical_capability_id": "sha256:" + "4" * 64,
     }],
     "enabled_instances": [],
     "unresolved_mappings": [],
@@ -200,6 +243,51 @@ estate_receipts.mkdir()
         "snapshot_sha256": estate_census["snapshot_sha256"],
         "census": estate_census,
     }),
+    encoding="utf-8",
+)
+
+action_fixture = estate_action_test.Fixture(
+    root / "estate-action-fixture", "plugin_disable"
+)
+action_fixture.dispatch()
+action_config_path = state / "estate-action/config.json"
+action_config_path.parent.mkdir(parents=True)
+action_config_path.write_bytes(action_fixture.config_path.read_bytes())
+decision_records = []
+for payload in (
+    {
+        "action_id": "protected-fixture",
+        "target": "human-skill",
+        "authority": "user_protected",
+        "decision": "keep",
+        "status": "protected",
+        "target_kind": "personal_skill",
+        "at": "2026-08-13T12:00:00Z",
+    },
+    {
+        "action_id": "unknown-fixture",
+        "target": "mystery-skill",
+        "authority": "unknown_provenance",
+        "decision": "investigate",
+        "status": "unknown",
+        "target_kind": "personal_skill",
+        "at": "2026-08-13T12:00:00Z",
+    },
+    {
+        "action_id": "same-name-personal-fixture",
+        "target": "fixture@market",
+        "authority": "user_protected",
+        "decision": "keep",
+        "status": "protected",
+        "target_kind": "personal_skill",
+        "at": "2099-08-13T12:00:00Z",
+    },
+):
+    decision_records.append(
+        {**payload, "record_sha256": dashboard.sha(payload)}
+    )
+(state / "estate-action-ledger.json").write_text(
+    json.dumps(decision_records),
     encoding="utf-8",
 )
 
@@ -747,11 +835,24 @@ try:
             "cli_builtin": 0,
             "dreaming_managed": 0,
             "legacy_machine": 0,
-            "plugin_managed": 0,
+            "plugin_managed": 1,
             "unknown_provenance": 1,
             "user_protected": 0,
         }
         and estate_view["plugins"][0]["capability_counts"]["skills"] == 1
+        and estate_view["plugins"][0]["latest_decision"]["status"]
+        == "committed"
+        and estate_view["instances"][0]["provenance_status"] == "invalid"
+        and estate_view["instances"][0]["source"] == "personal"
+        and estate_view["instances"][1]["source"]
+        == "installed:market/fixture"
+        and estate_view["receiver"]["id"] == "macbook-fixture"
+        and estate_view["receipt_sha256"] == estate_receipt_sha
+        and estate_view["actions"]["status"] == "current"
+        and estate_view["actions"]["total"] == 4
+        and {
+            item["status"] for item in estate_view["actions"]["items"]
+        } == {"committed", "protected", "unknown"}
         and estate_view["read_only"] is True
         and estate_view["authorizes_actions"] is False,
         "estate API reports bounded totals, authority, and plugin capability inventory",
@@ -771,6 +872,77 @@ try:
         ),
         "estate API excludes private settings, file inventories, and local roots",
     )
+    original_estate_current = (
+        state / "estate-census-current.json"
+    ).read_bytes()
+    variant_receipts = []
+
+    def record_estate_variant(snapshot):
+        census = {
+            **snapshot,
+            "snapshot_sha256": dashboard.sha(snapshot),
+        }
+        receipt = {
+            "schema_version": 1,
+            "snapshot_sha256": census["snapshot_sha256"],
+            "receiver": estate_receipt["receiver"],
+            "census": census,
+        }
+        receipt_sha256 = dashboard.sha(receipt)
+        receipt_path = (
+            estate_receipts
+            / f"{receipt_sha256.removeprefix('sha256:')}.json"
+        )
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        variant_receipts.append(receipt_path)
+        (state / "estate-census-current.json").write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "receipt_sha256": receipt_sha256,
+                    "snapshot_sha256": census["snapshot_sha256"],
+                    "census": census,
+                }
+            ),
+            encoding="utf-8",
+        )
+
+    stale_snapshot = dict(estate_snapshot)
+    stale_snapshot["collected_at"] = "2000-01-01T00:00:00Z"
+    record_estate_variant(stale_snapshot)
+    _, _, stale_body = request("/api/v1/estate")
+    check(
+        json.loads(stale_body)["data"]["status"] == "stale",
+        "estate API labels a valid old census stale",
+    )
+    incomplete_snapshot = json.loads(json.dumps(estate_snapshot))
+    incomplete_snapshot["scope"]["complete"] = False
+    record_estate_variant(incomplete_snapshot)
+    _, _, incomplete_body = request("/api/v1/estate")
+    check(
+        json.loads(incomplete_body)["data"]["status"] == "incomplete",
+        "estate API labels an incomplete census without synthesizing totals",
+    )
+    (state / "estate-census-current.json").write_text(
+        "{", encoding="utf-8"
+    )
+    _, _, invalid_estate_body = request("/api/v1/estate")
+    check(
+        json.loads(invalid_estate_body)["data"]["status"] == "invalid",
+        "estate API labels malformed census state invalid",
+    )
+    (state / "estate-census-current.json").write_bytes(
+        original_estate_current
+    )
+    estate_recovery = state / "estate-recovery-required.json"
+    estate_recovery.write_text("{}", encoding="utf-8")
+    _, _, recovery_estate_body = request("/api/v1/estate")
+    check(
+        json.loads(recovery_estate_body)["data"]["status"]
+        == "recovery required",
+        "estate API makes recovery-required state conspicuous",
+    )
+    estate_recovery.unlink()
     _, _, activity_body = request("/api/v1/activity")
     activity = json.loads(activity_body)["data"]["items"]
     scheduled = next(item for item in activity if item["id"] == "run-1")
@@ -925,6 +1097,8 @@ queue.pop()
 (data / "snapshots" / f"{symlink_digest}.json").unlink()
 (data / "snapshots" / f"{malformed_digest}.json").unlink()
 (data / "snapshots" / f"{oversized_digest}.json").unlink()
+for receipt_path in variant_receipts:
+    receipt_path.unlink()
 check(manifest(state, control, orchestrator, data, skills) == before, "complete dashboard browsing is read-only")
 print(f"== result: {passes} checks passed ==")
 PY
