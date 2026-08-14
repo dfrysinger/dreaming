@@ -42,6 +42,7 @@ ESTATE_CLASSIFIER = Path(
         SCRIPT_DIR.parent.parent / "skill-review/scripts/dreaming-estate.py",
     )
 )
+ESTATE_ACTION_TOOL = SCRIPT_DIR.parents[2] / "scripts/estate-action.py"
 RESTORE_TOOL = Path(
     os.environ.get(
         "CURATOR_RESTORE_TOOL",
@@ -60,12 +61,46 @@ PUBLIC_MANIFESTS = (
 MAX_REPORT_AGE = timedelta(days=7)
 AGE_ONLY_PRUNING_DAYS = 90
 PROVENANCE_MODULE: Any | None = None
+ESTATE_ACTION_MODULE: Any | None = None
 REMOTE_PROTOCOL = "dreaming.estate-curator"
 REMOTE_SCHEMA_VERSION = 1
 
 
 class RunError(RuntimeError):
     pass
+
+
+def estate_action_module() -> Any:
+    global ESTATE_ACTION_MODULE
+    if ESTATE_ACTION_MODULE is None:
+        if ESTATE_ACTION_TOOL.is_symlink() or not ESTATE_ACTION_TOOL.is_file():
+            raise RunError("estate action authority is unavailable")
+        spec = importlib.util.spec_from_file_location(
+            "dreaming_estate_action", ESTATE_ACTION_TOOL
+        )
+        if spec is None or spec.loader is None:
+            raise RunError("estate action authority is unavailable")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        try:
+            spec.loader.exec_module(module)
+        except (OSError, ImportError) as error:
+            raise RunError("estate action authority is unavailable") from error
+        ESTATE_ACTION_MODULE = module
+    return ESTATE_ACTION_MODULE
+
+
+def estate_action_config_path() -> Path:
+    review_state = Path(
+        os.environ.get(
+            "SKILLS_REVIEW_STATE_DIR",
+            Path.home() / ".copilot/skill-state/skill-review",
+        )
+    ).expanduser()
+    path = review_state / "estate-action/config.json"
+    if path.is_symlink() or not path.is_file():
+        raise RunError("estate action configuration is unavailable")
+    return path.resolve()
 
 
 def now_iso() -> str:
@@ -2980,6 +3015,60 @@ def command_rollback(args: argparse.Namespace) -> int:
         raise
 
 
+def command_estate_authorize(args: argparse.Namespace) -> int:
+    module = estate_action_module()
+    try:
+        candidate = module.load_object(
+            Path(args.candidate), "estate-action-candidate-invalid"
+        )
+        authorization = module.authorize(
+            candidate, estate_action_config_path()
+        )
+        module.immutable_json(Path(args.output), authorization)
+    except module.ActionError as error:
+        raise RunError(error.code) from error
+    print(json.dumps({"ok": True, "authorization": authorization}))
+    return 0
+
+
+def command_estate_verify(args: argparse.Namespace) -> int:
+    module = estate_action_module()
+    try:
+        authorization = module.validate_authorization(
+            module.load_object(
+                Path(args.authorization),
+                "estate-action-authorization-invalid",
+            )
+        )
+        module.verify_current_evidence(
+            authorization,
+            module.verify_authority(
+                authorization, estate_action_config_path()
+            ),
+        )
+    except module.ActionError as error:
+        raise RunError(error.code) from error
+    print(json.dumps({"ok": True, "authorization": authorization}))
+    return 0
+
+
+def command_estate_dispatch(args: argparse.Namespace) -> int:
+    module = estate_action_module()
+    try:
+        result = module.dispatch(
+            module.load_object(
+                Path(args.authorization),
+                "estate-action-authorization-invalid",
+            ),
+            config_path=estate_action_config_path(),
+            timeout=args.timeout,
+        )
+    except module.ActionError as error:
+        raise RunError(error.code) from error
+    print(json.dumps({"ok": result["ok"], "result": result}))
+    return 0 if result["ok"] else 2
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser()
     sub = root.add_subparsers(dest="command", required=True)
@@ -3041,6 +3130,20 @@ def parser() -> argparse.ArgumentParser:
     rollback = sub.add_parser("rollback")
     rollback.add_argument("--run", required=True)
     rollback.set_defaults(func=command_rollback)
+
+    estate_authorize = sub.add_parser("estate-authorize")
+    estate_authorize.add_argument("--candidate", required=True)
+    estate_authorize.add_argument("--output", required=True)
+    estate_authorize.set_defaults(func=command_estate_authorize)
+
+    estate_verify = sub.add_parser("estate-verify")
+    estate_verify.add_argument("--authorization", required=True)
+    estate_verify.set_defaults(func=command_estate_verify)
+
+    estate_dispatch = sub.add_parser("estate-dispatch")
+    estate_dispatch.add_argument("--authorization", required=True)
+    estate_dispatch.add_argument("--timeout", type=int, default=300)
+    estate_dispatch.set_defaults(func=command_estate_dispatch)
     return root
 
 
