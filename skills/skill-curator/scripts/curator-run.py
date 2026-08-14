@@ -42,7 +42,9 @@ ESTATE_CLASSIFIER = Path(
         SCRIPT_DIR.parent.parent / "skill-review/scripts/dreaming-estate.py",
     )
 )
-ESTATE_ACTION_TOOL = SCRIPT_DIR.parents[2] / "scripts/estate-action.py"
+ESTATE_ACTION_TOOL = (
+    SCRIPT_DIR.parents[2] / "scripts" / "estate-action.py"
+)
 RESTORE_TOOL = Path(
     os.environ.get(
         "CURATOR_RESTORE_TOOL",
