@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import os
@@ -128,6 +129,7 @@ class Fixture:
                 "prior_key_present": prior_present,
                 "prior_key_value": True if prior_present else None,
                 "runtime_before_sha256": module.hash_json(runtime_before),
+                "ledger_sha256": module.empty_ledger()["ledger_sha256"],
             },
             "evidence": {
                 "census_sha256": "a" * 64,
@@ -182,6 +184,219 @@ class Fixture:
         }
         arguments.update(overrides)
         return module.execute_disable(**arguments)
+
+    def restore_request(
+        self, disable_result: dict, operation_id: str = "fixture-restore"
+    ) -> dict:
+        state = module.read_regular(self.settings, "fixture")
+        runtime_before = self.runtime_inventory()
+        ledger = module.load_ledger(self.transactions)
+        payload = {
+            "schema_version": 1,
+            "operation_id": operation_id,
+            "action": "restore",
+            "plugin": self.plugin,
+            "copilot_version": "1.0.80",
+            "qualification_sha256": self.qualification[
+                "qualification_sha256"
+            ],
+            "restores_receipt_sha256": disable_result["receipt_sha256"],
+            "expected": {
+                "settings_sha256": state.sha256,
+                "settings_device": state.device,
+                "settings_inode": state.inode,
+                "settings_mode": state.mode,
+                "runtime_before_sha256": module.hash_json(runtime_before),
+                "ledger_sha256": ledger["ledger_sha256"],
+            },
+            "evidence": {
+                "census_sha256": "c" * 64,
+                "capability_inventory_sha256": "d" * 64,
+            },
+        }
+        return {**payload, "request_sha256": module.hash_json(payload)}
+
+    def restore(self, request: dict, **overrides):
+        arguments = {
+            "request": request,
+            "settings_path": self.settings,
+            "transaction_root": self.transactions,
+            "qualification_root": self.qualifications,
+            "lock_path": self.lock,
+            "recovery_state": self.recovery,
+            "runtime_verifier": self.runtime_inventory,
+            "swapper": module.MacOSSwapper(),
+            "quiet_interval": 0,
+        }
+        arguments.update(overrides)
+        return module.execute_restore(**arguments)
+
+
+class StackFixture:
+    def __init__(self, root: Path) -> None:
+        self.root = root
+        root.mkdir(parents=True)
+        self.settings = root / "settings.json"
+        self.transactions = root / "transactions"
+        self.qualifications = root / "qualifications"
+        self.lock = root / "settings.lock"
+        self.recovery = root / "recovery/state.json"
+        self.transactions.mkdir()
+        self.qualifications.mkdir()
+        self.plugins = {
+            name: {
+                "plugin_id": f"{name}@market",
+                "source_identity": f"installed:market/{name}",
+                "version": "1.0.0",
+                "source_type": "marketplace",
+                "settings_key": f"{name}@market",
+            }
+            for name in ("alpha", "beta")
+        }
+        self.initial_bytes = (
+            json.dumps(
+                {
+                    "enabledPlugins": {
+                        "alpha@market": True,
+                        "beta@market": True,
+                    },
+                    "unrelated": {"preserve": True},
+                },
+                indent=2,
+            ).encode()
+            + b"\n"
+        )
+        self.settings.write_bytes(self.initial_bytes)
+        os.chmod(self.settings, 0o600)
+        self.qualification_by_name: dict[str, dict] = {}
+        for name, plugin in self.plugins.items():
+            payload = {
+                "schema_version": 1,
+                "status": "qualified",
+                "source_type": "marketplace",
+                "copilot_version": "1.0.80",
+                "plugin_id": plugin["plugin_id"],
+                "settings_key": plugin["settings_key"],
+                "disable_verified": True,
+                "restore_verified": True,
+            }
+            qualification = {
+                **payload,
+                "qualification_sha256": module.hash_json(payload),
+            }
+            self.qualification_by_name[name] = qualification
+            (self.qualifications / f"{qualification['qualification_sha256']}.json").write_text(
+                json.dumps(qualification), encoding="utf-8"
+            )
+
+    def inventory(self, name: str) -> dict:
+        document = json.loads(self.settings.read_text())
+        enabled = document.get("enabledPlugins", {})
+        estate = ["builtin:base"]
+        for plugin_name, plugin in self.plugins.items():
+            if enabled.get(plugin["settings_key"]) is not False:
+                estate.append(f"plugin:{plugin_name}")
+        plugin = self.plugins[name]
+        disabled = enabled.get(plugin["settings_key"]) is False
+        owned = [] if disabled else [f"plugin:{name}"]
+        return {
+            "schema_version": 1,
+            "copilot_version": "1.0.80",
+            "plugin_identity": {
+                field: plugin[field]
+                for field in ("plugin_id", "source_identity", "version")
+            },
+            "plugin_enabled": not disabled,
+            "owned_capability_ids": owned,
+            "estate_capability_ids": estate,
+        }
+
+    def request(self, name: str, operation_id: str) -> dict:
+        plugin = self.plugins[name]
+        qualification = self.qualification_by_name[name]
+        state = module.read_regular(self.settings, "fixture")
+        runtime = self.inventory(name)
+        ledger = module.load_ledger(self.transactions)
+        payload = {
+            "schema_version": 1,
+            "operation_id": operation_id,
+            "action": "disable",
+            "plugin": plugin,
+            "copilot_version": "1.0.80",
+            "qualification_sha256": qualification["qualification_sha256"],
+            "expected": {
+                "settings_sha256": state.sha256,
+                "settings_device": state.device,
+                "settings_inode": state.inode,
+                "settings_mode": state.mode,
+                "prior_key_present": True,
+                "prior_key_value": True,
+                "runtime_before_sha256": module.hash_json(runtime),
+                "ledger_sha256": ledger["ledger_sha256"],
+            },
+            "evidence": {
+                "census_sha256": "e" * 64,
+                "capability_inventory_sha256": "f" * 64,
+            },
+        }
+        return {**payload, "request_sha256": module.hash_json(payload)}
+
+    def disable(self, name: str, operation_id: str) -> dict:
+        return module.execute_disable(
+            request=self.request(name, operation_id),
+            settings_path=self.settings,
+            transaction_root=self.transactions,
+            qualification_root=self.qualifications,
+            lock_path=self.lock,
+            recovery_state=self.recovery,
+            runtime_verifier=lambda: self.inventory(name),
+            swapper=module.MacOSSwapper(),
+            quiet_interval=0,
+        )
+
+    def restore_request(
+        self, name: str, disabled: dict, operation_id: str
+    ) -> dict:
+        plugin = self.plugins[name]
+        qualification = self.qualification_by_name[name]
+        state = module.read_regular(self.settings, "fixture")
+        runtime = self.inventory(name)
+        ledger = module.load_ledger(self.transactions)
+        payload = {
+            "schema_version": 1,
+            "operation_id": operation_id,
+            "action": "restore",
+            "plugin": plugin,
+            "copilot_version": "1.0.80",
+            "qualification_sha256": qualification["qualification_sha256"],
+            "restores_receipt_sha256": disabled["receipt_sha256"],
+            "expected": {
+                "settings_sha256": state.sha256,
+                "settings_device": state.device,
+                "settings_inode": state.inode,
+                "settings_mode": state.mode,
+                "runtime_before_sha256": module.hash_json(runtime),
+                "ledger_sha256": ledger["ledger_sha256"],
+            },
+            "evidence": {
+                "census_sha256": "1" * 64,
+                "capability_inventory_sha256": "2" * 64,
+            },
+        }
+        return {**payload, "request_sha256": module.hash_json(payload)}
+
+    def restore(self, name: str, disabled: dict, operation_id: str) -> dict:
+        return module.execute_restore(
+            request=self.restore_request(name, disabled, operation_id),
+            settings_path=self.settings,
+            transaction_root=self.transactions,
+            qualification_root=self.qualifications,
+            lock_path=self.lock,
+            recovery_state=self.recovery,
+            runtime_verifier=lambda: self.inventory(name),
+            swapper=module.MacOSSwapper(),
+            quiet_interval=0,
+        )
 
 
 class PluginSettingsTransactionTest(unittest.TestCase):
@@ -253,7 +468,7 @@ class PluginSettingsTransactionTest(unittest.TestCase):
                 {
                     key: value
                     for key, value in result.items()
-                    if key not in {"ok", "receipt_sha256"}
+                    if key not in {"ok", "receipt_sha256", "ledger_after"}
                 }
             ),
         )
@@ -280,6 +495,200 @@ class PluginSettingsTransactionTest(unittest.TestCase):
         self.assertEqual(
             module.read_regular(fixture.settings, "fixture").mode, 0o644
         )
+
+    def test_restore_uncontended_round_trip_is_byte_exact(self) -> None:
+        fixture = Fixture(self.root / "restore-exact")
+        disabled = fixture.execute()
+        restored = fixture.restore(fixture.restore_request(disabled))
+        self.assertTrue(restored["ok"])
+        self.assertTrue(restored["exact_round_trip"])
+        self.assertEqual(fixture.settings.read_bytes(), fixture.before_bytes)
+        self.assertEqual(
+            module.load_ledger(fixture.transactions)["active_disables"], []
+        )
+
+    def test_restore_preserves_unrelated_current_edits(self) -> None:
+        fixture = Fixture(self.root / "restore-unrelated")
+        disabled = fixture.execute()
+        current = json.loads(fixture.settings.read_text())
+        current["editor"]["fontSize"] = 18
+        current["userEdit"] = {"preserve": True}
+        fixture.settings.write_text(
+            json.dumps(current, indent=4) + "\n", encoding="utf-8"
+        )
+        restored = fixture.restore(fixture.restore_request(disabled))
+        self.assertTrue(restored["ok"])
+        self.assertFalse(restored["exact_round_trip"])
+        final = json.loads(fixture.settings.read_text())
+        self.assertEqual(final["editor"]["fontSize"], 18)
+        self.assertEqual(final["userEdit"], {"preserve": True})
+        self.assertTrue(final["enabledPlugins"]["fixture@market"])
+
+    def test_restore_refuses_changed_target_key_without_mutation(self) -> None:
+        fixture = Fixture(self.root / "restore-conflict")
+        disabled = fixture.execute()
+        current = json.loads(fixture.settings.read_text())
+        current["enabledPlugins"]["fixture@market"] = True
+        fixture.settings.write_text(json.dumps(current), encoding="utf-8")
+        before = fixture.settings.read_bytes()
+        request = fixture.restore_request(disabled)
+        with self.assertRaisesRegex(
+            module.SettingsError, "settings-target-key-conflict"
+        ):
+            fixture.restore(request)
+        self.assertEqual(fixture.settings.read_bytes(), before)
+
+    def test_restore_runtime_failure_rolls_back_and_keeps_disable_active(
+        self,
+    ) -> None:
+        fixture = Fixture(self.root / "restore-runtime-failure")
+        disabled = fixture.execute()
+        disabled_bytes = fixture.settings.read_bytes()
+        request = fixture.restore_request(disabled)
+        calls = 0
+
+        def verifier() -> dict:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return fixture.runtime_inventory()
+            value = fixture.runtime_inventory()
+            value["plugin_enabled"] = False
+            value["owned_capability_ids"] = []
+            value["estate_capability_ids"] = ["builtin:base"]
+            return value
+
+        result = fixture.restore(request, runtime_verifier=verifier)
+        self.assertEqual(result["status"], "rolled_back")
+        self.assertEqual(result["cause"], "plugin-runtime-after-mismatch")
+        self.assertEqual(fixture.settings.read_bytes(), disabled_bytes)
+        ledger = module.load_ledger(fixture.transactions)
+        self.assertEqual(
+            ledger["active_disables"][-1]["receipt_sha256"],
+            disabled["receipt_sha256"],
+        )
+
+    def test_restore_rejects_tampered_receipt_and_ledger_chain(self) -> None:
+        receipt_fixture = Fixture(self.root / "restore-receipt-tamper")
+        disabled = receipt_fixture.execute()
+        receipt_path = (
+            receipt_fixture.transactions
+            / "ledger/receipts"
+            / f"{disabled['receipt_sha256']}.json"
+        )
+        receipt = json.loads(receipt_path.read_text())
+        receipt["before"]["key_present"] = False
+        receipt_path.write_text(json.dumps(receipt), encoding="utf-8")
+        before = receipt_fixture.settings.read_bytes()
+        with self.assertRaisesRegex(
+            module.SettingsError, "settings-ledger-receipt-invalid"
+        ):
+            receipt_fixture.restore(
+                receipt_fixture.restore_request(disabled)
+            )
+        self.assertEqual(receipt_fixture.settings.read_bytes(), before)
+
+        ledger_fixture = Fixture(self.root / "restore-ledger-tamper")
+        ledger_fixture.execute()
+        current_path = ledger_fixture.transactions / "ledger/current.json"
+        current = json.loads(current_path.read_text())
+        current["active_disables"] = []
+        payload = {
+            key: value
+            for key, value in current.items()
+            if key != "ledger_sha256"
+        }
+        current["ledger_sha256"] = module.hash_json(payload)
+        current_path.write_text(json.dumps(current), encoding="utf-8")
+        with self.assertRaisesRegex(
+            module.SettingsError, "settings-ledger-invalid"
+        ):
+            module.load_ledger(ledger_fixture.transactions)
+
+    def test_missing_or_symlinked_ledger_state_fails_closed(self) -> None:
+        missing = Fixture(self.root / "missing-ledger-head")
+        disabled = missing.execute()
+        restore_request = missing.restore_request(disabled)
+        (missing.transactions / "ledger/current.json").unlink()
+        before = missing.settings.read_bytes()
+        with self.assertRaisesRegex(
+            module.SettingsError, "settings-ledger-invalid"
+        ):
+            missing.restore(restore_request)
+        self.assertEqual(missing.settings.read_bytes(), before)
+
+        removed_tree = Fixture(self.root / "removed-ledger-tree")
+        disabled = removed_tree.execute()
+        restore_request = removed_tree.restore_request(disabled)
+        shutil.rmtree(removed_tree.transactions / "ledger")
+        before = removed_tree.settings.read_bytes()
+        with self.assertRaisesRegex(
+            module.SettingsError, "settings-ledger-invalid"
+        ):
+            removed_tree.restore(restore_request)
+        self.assertEqual(removed_tree.settings.read_bytes(), before)
+
+        symlinked = Fixture(self.root / "symlinked-ledger")
+        external = symlinked.root / "external-ledger"
+        external.mkdir()
+        (symlinked.transactions / "ledger").symlink_to(
+            external, target_is_directory=True
+        )
+        before = symlinked.settings.read_bytes()
+        with self.assertRaisesRegex(
+            module.SettingsError, "settings-ledger-invalid"
+        ):
+            symlinked.execute()
+        self.assertEqual(symlinked.settings.read_bytes(), before)
+        self.assertEqual(list(external.iterdir()), [])
+
+    def test_dot_operation_ids_cannot_escape_transaction_root(self) -> None:
+        for operation_id in (".", ".."):
+            fixture = Fixture(
+                self.root / f"unsafe-operation-{len(operation_id)}"
+            )
+            request = copy.deepcopy(fixture.request)
+            request["operation_id"] = operation_id
+            payload = {
+                key: value
+                for key, value in request.items()
+                if key != "request_sha256"
+            }
+            request["request_sha256"] = module.hash_json(payload)
+            before = fixture.settings.read_bytes()
+            with self.assertRaisesRegex(
+                module.SettingsError, "settings-request-malformed"
+            ):
+                fixture.execute(request=request)
+            self.assertEqual(fixture.settings.read_bytes(), before)
+
+    def test_restore_cannot_replay_completed_disable(self) -> None:
+        fixture = Fixture(self.root / "restore-replay")
+        disabled = fixture.execute()
+        first = fixture.restore(fixture.restore_request(disabled))
+        self.assertTrue(first["ok"])
+        replay = fixture.restore_request(disabled, "fixture-replay")
+        with self.assertRaisesRegex(
+            module.SettingsError, "settings-ledger-order-conflict"
+        ):
+            fixture.restore(replay)
+
+    def test_stacked_disables_restore_in_reverse_ledger_order(self) -> None:
+        fixture = StackFixture(self.root / "restore-stack")
+        alpha = fixture.disable("alpha", "disable-alpha")
+        beta = fixture.disable("beta", "disable-beta")
+        with self.assertRaisesRegex(
+            module.SettingsError, "settings-ledger-order-conflict"
+        ):
+            fixture.restore("alpha", alpha, "restore-alpha-too-early")
+        beta_restore = fixture.restore("beta", beta, "restore-beta")
+        self.assertTrue(beta_restore["ok"])
+        alpha_restore = fixture.restore("alpha", alpha, "restore-alpha")
+        self.assertTrue(alpha_restore["ok"])
+        self.assertEqual(fixture.settings.read_bytes(), fixture.initial_bytes)
+        ledger = module.load_ledger(fixture.transactions)
+        self.assertEqual(ledger["sequence"], 4)
+        self.assertEqual(ledger["active_disables"], [])
 
     def test_malformed_or_stale_settings_never_mutate(self) -> None:
         malformed = Fixture(self.root / "malformed")
@@ -708,6 +1117,41 @@ class PluginSettingsTransactionTest(unittest.TestCase):
                 "fixture@market"
             ]
         )
+        restore_request = fixture.restore_request(output["result"])
+        restore_request_path = fixture.root / "restore-request.json"
+        restore_request_path.write_text(
+            json.dumps(restore_request), encoding="utf-8"
+        )
+        restored = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT),
+                "restore",
+                "--request",
+                str(restore_request_path),
+                "--settings",
+                str(fixture.settings),
+                "--transaction-root",
+                str(fixture.transactions),
+                "--qualification-root",
+                str(fixture.qualifications),
+                "--lock",
+                str(fixture.lock),
+                "--recovery-state",
+                str(fixture.recovery),
+                "--runtime-verifier",
+                sys.executable,
+                str(verifier),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(
+            restored.returncode, 0, restored.stdout + restored.stderr
+        )
+        self.assertTrue(json.loads(restored.stdout)["ok"])
+        self.assertEqual(fixture.settings.read_bytes(), fixture.before_bytes)
 
     def test_cli_refuses_symlinked_settings_with_structured_error(self) -> None:
         fixture = Fixture(self.root / "cli-symlink")
