@@ -67,14 +67,15 @@ met.
   transcript processor, evaluator, catalog authority, and publisher; the
   MacBook is the transcript source and learned-skill destination.
 - **Review state:** the critical design passed dual review. Round 3 closed the
-  final settings concurrency finding with no remaining material findings.
+  final settings concurrency finding with no remaining material findings. The
+  post-live installer review also passed after closing persisted external
+  configuration ownership and pre-marker local-adapter upgrade regressions.
 - **Settings decision:** plugin mutation uses same-directory macOS
   `renamex_np(..., RENAME_SWAP)` to retain the exact displaced settings inode;
   unsupported volumes and unqualified plugin source classes remain
   report-only.
-- **Current phase:** install the current candidate and complete the reversible
-  two-host census, mutation, reconciliation, restoration, and equality proof
-  (CHK-09). CHK-02 through CHK-08 are complete.
+- **Current phase:** complete the private-boundary and public-output proof
+  (CHK-10). CHK-02 through CHK-09 are complete.
 - **Implementation order:** census and identity model; estate dashboard and
   unresolved mappings; evaluation and recommendations; remote personal-skill
   archive/restore; atomic settings transaction and source qualification;
@@ -90,24 +91,27 @@ met.
   receipt, provenance, freshness, and recovery reporting. CHK-06 is commit
   `9713f83`; CHK-07 is commit `8d0d61e`; CHK-08 is commit `f59d564`. Never
   push these commits. Commit `105642b` adds the authority-bound inner-executor
-  bridge, and `5ff87c2` keeps the installed dashboard action check executable.
+  bridge, `5ff87c2` keeps the installed dashboard action check executable, and
+  `5060ed4` refreshes managed executable bindings during reinstall. Commit
+  `dbcc76a` persists adapter ownership so ordinary reinstalls refresh only
+  installer-managed configuration.
 - **Installed state:** the Mac mini completed managed install, self-test, and
-  enable for clean candidate `5ff87c2` at activation generation
-  `20260814T110611Z-install-3742`. The halt switch is absent, the self-test
-  result is zero failures, the dashboard is running, and the remote source,
-  publisher, executors, receiver-bound census adapter, and governed action
-  bridge are present.
-- **Live-proof status:** the first installed two-host census passed with a
-  content-addressed receipt and complete reconciliation: 93 effective skill
-  instances, 107 physical instances, 14 physical-only instances, five plugin
-  packages, three enabled plugin packages, and zero unresolved runtime skills.
-  Independent collection equivalence, restart persistence, dashboard privacy,
-  and receiver/collector identity mismatch failures have passed. Stale-state
-  reporting, reversible installed mutation, before/final estate equality, and
-  rollback remain before the complete installed proof can pass. A fresh
-  fixture-inclusive census on `5ff87c2` reports 94 effective instances, 108
-  physical instances, 14 physical-only instances, five plugin packages, three
-  enabled plugin packages, and zero unresolved runtime skills.
+  enable for clean candidate `dbcc76a` at activation generation
+  `20260814T132425Z-install-19412`. The self-test result is zero failures, the
+  dashboard is running, and the remote source, publisher, executors,
+  receiver-bound census adapter, and governed action bridge are present.
+- **Live-proof status:** CHK-09 passed. The installed Mac mini collected a
+  complete fixture-inclusive census, archived the real MacBook fixture through
+  the governed receiver, returned the identical result on retry, restored the
+  fixture from its recorded Git source, and returned the identical restore
+  result on retry. Before and final inventories are equal after excluding
+  collection time: 94 effective instances, 108 physical instances, 14
+  physical-only instances, five plugin packages, three enabled plugin
+  packages, and zero unresolved runtime skills. Settings bytes and unrelated
+  dirty work were unchanged. The MacBook halt switch is restored, its Dreaming
+  labels remain unloaded, and no worker is running. The temporary fixture was
+  then removed in personal-skill commit `c77d91e`, while its archive and restore
+  evidence remains recoverable in Git history and the CHK-09 receipts.
 - **CHK-04 closure:** the final MacBook live proof found five plugin packages,
   three enabled packages, complete capability inventories, and zero unresolved
   mappings. The estate suite passed 44 tests; core, receiver transport,
@@ -149,6 +153,16 @@ met.
   finding-scoped closure resolved malformed-state HTTP failures,
   cross-source recommendation attribution, and plugin-source reporting with
   no remaining material defect.
+- **CHK-09 closure:** candidate `5060ed4` passed installed self-test and the
+  real two-host archive/restore round trip. The archive advanced the personal
+  skill repository from `08fb771` to `f122668`; restore advanced it to
+  `661c013` and reproduced tree digest
+  `b09c979ffbeda3f0b16b2bfff952d6cedb02b0093bcf5f05c54dcc50f1bf6233`.
+  Both same-ID retries were idempotent. Final census identity, provenance,
+  plugin, context, settings, and inventory data exactly matched the
+  fixture-inclusive baseline apart from collection time. A prior stale-binding
+  attempt and a symlink-executable attempt both failed before mutation and were
+  reconciled with the fixture bytes and Git state intact.
 - **Completion authority:** only the design's named Definition of Done; do not
   substitute partial unit checks, dashboard rendering, or one successful
   mutation for the complete installed two-host proof.
