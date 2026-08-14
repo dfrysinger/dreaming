@@ -72,10 +72,11 @@ met.
   `renamex_np(..., RENAME_SWAP)` to retain the exact displaced settings inode;
   unsupported volumes and unqualified plugin source classes remain
   report-only.
-- **Current phase:** implement the ordered conflict-safe plugin settings
-  restore ledger (CHK-06). CHK-02 through CHK-05 are complete; mini-side action
-  planning, dispatch, and installed reversible proof remain intentionally
-  deferred until the complete evidence-binding and settings-ledger path exists.
+- **Current phase:** implement complete estate-action evidence binding and
+  trusted mini-side dispatch (CHK-07). CHK-02 through CHK-06 are complete;
+  installed reversible proof remains intentionally deferred until pending
+  actions bind every required authority input and execute through the trusted
+  receiver boundary.
 - **Implementation order:** census and identity model; estate dashboard and
   unresolved mappings; evaluation and recommendations; remote personal-skill
   archive/restore; atomic settings transaction and source qualification;
@@ -84,8 +85,9 @@ met.
   `ef677e2`, `edab92c`, `d5587e3`, and `d5b8fd8` provide the bounded census,
   installed adapter upgrades, provenance authority matrix, sealed retry-safe
   remote personal-skill archive/restore receiver, complete report-only plugin
-  capability gate, and source-qualified lossless atomic settings disable
-  transaction. Never push these commits.
+  capability gate, source-qualified lossless atomic settings disable
+  transaction, and conflict-safe ordered plugin restore ledger. CHK-06 is
+  commit `9713f83`. Never push these commits.
 - **Installed state:** the Mac mini completed managed install, self-test, and
   enable for `a4e270b`. The halt switch is absent, the self-test exit code is
   `0`, the dashboard is running, and the remote source, publisher, executors,
@@ -110,6 +112,13 @@ met.
   write and runtime failures, rename races, old-file-descriptor writes,
   rollback races, missing staged names, and recovery retention failures.
   Three bounded two-family review rounds closed every material finding.
+- **CHK-06 closure:** 28 deterministic tests exercised sealed ledger ancestry,
+  reverse-order stacked restores, byte-exact uncontended restoration,
+  unrelated-edit preservation, target-key conflicts, runtime rollback, replay,
+  receipt and chain tampering, missing ledger state, symlink confinement, and
+  CLI restore. Three bounded two-family review rounds closed every material
+  finding, including whole-ledger loss detection through an external sealed
+  anchor.
 - **Completion authority:** only the design's named Definition of Done; do not
   substitute partial unit checks, dashboard rendering, or one successful
   mutation for the complete installed two-host proof.
