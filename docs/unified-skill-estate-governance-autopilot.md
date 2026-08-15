@@ -131,11 +131,12 @@ met.
   the shipped dashboard LaunchAgent root. Commit `c4ae5de` adds the fail-closed
   Copilot authentication canary and rejects both missing authentication and
   output that merely echoes the requested sentinel.
-- **Installed state:** the Mac mini is halted on clean candidate `c4ae5de` at
-  activation generation `20260815T084205Z-install-87029`. The installed
-  restricted doctor reports `authentication-required`, as intended. Exact
-  generation certification, enablement, and the forced weekly proof remain
-  gated on successful user authentication. The dashboard remains available.
+- **Installed state:** the Mac mini is halted on the activation containing
+  runtime successor `c4ae5de`; later baton-only commits do not change its
+  executable inputs. The installed restricted doctor reports
+  `authentication-required`, as intended. Exact-generation certification,
+  enablement, and the forced weekly proof remain gated on successful user
+  authentication. The dashboard remains available.
 - **Live-proof status:** CHK-09 passed. The installed Mac mini collected a
   complete fixture-inclusive census, archived the real MacBook fixture through
   the governed receiver, returned the identical result on retry, restored the
