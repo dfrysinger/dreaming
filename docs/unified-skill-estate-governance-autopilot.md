@@ -81,16 +81,16 @@ met.
   `renamex_np(..., RENAME_SWAP)` to retain the exact displaced settings inode;
   unsupported volumes and unqualified plugin source classes remain
   report-only.
-- **Current phase:** final installed whole-estate proof. Candidate `00a7765`
-  passed managed installation and deterministic certification at activation
-  generation `20260814T224919Z-install-16601`, closing the Apple system-Python
-  startup failure. Direct installed executor doctors then failed closed with
-  `executor-unavailable` because launchd and noninteractive SSH expose only
-  `/usr/bin:/bin:/usr/sbin:/sbin`, while generated adapter commands did not
-  retain the absolute Copilot and Codex binary paths discovered during
-  installation. The local successor pins those paths into every mini-local
-  adapter command, inherits them across later regeneration under a restricted
-  `PATH`, and passes the complete local daemon self-test with zero failures.
+- **Current phase:** final installed whole-estate proof. Installed candidate
+  `b167b6a` pins absolute Copilot and Codex paths into mini-local adapter
+  commands and preserves them across regeneration, but direct executor doctors
+  proved that doctor and real review execution ignored the configured
+  `--binary` argument and rediscovered executables from restricted launchd
+  `PATH`. The local successor selects the sealed configured binary in both
+  paths and prepends its directory to the child `PATH`, which also lets the
+  `/opt/homebrew/bin/codex` launcher resolve its colocated `node` dependency.
+  All 22 focused adapter tests and the complete local daemon self-test pass
+  with zero failures.
 - **Implementation order:** census and identity model; estate dashboard and
   unresolved mappings; evaluation and recommendations; remote personal-skill
   archive/restore; atomic settings transaction and source qualification;
@@ -122,15 +122,17 @@ met.
   `skills-prune` through that curator, and `57befad` fixes its installed
   scheduler regression. Commit `00a7765` scopes `tomllib` to Codex marketplace
   inventory and proves executor startup remains compatible with the installed
-  Apple Python. The local uncommitted successor contains only absolute local
-  executor binary pinning, persisted path inheritance, and focused installer
-  regressions for both behaviors.
+  Apple Python. Commit `b167b6a` adds persistent absolute binary pinning. The
+  local uncommitted successor makes doctor and run honor that pin, gives
+  script-based launchers access to dependencies beside the selected binary,
+  and proves the behavior under restricted `PATH`.
 - **Installed state:** the Mac mini completed managed install and deterministic
-  certification for clean candidate `00a7765` at activation generation
-  `20260814T224919Z-install-16601`. The halt switch remains active after direct
-  executor doctors exposed missing absolute binary paths. The dashboard is
-  running, and no estate mutation occurred. This installation is certified
-  deterministically but is not enabled or accepted as the final candidate.
+  certification for clean candidate `b167b6a` at activation generation
+  `20260815T000400Z-install-77335`. The halt switch remains active after direct
+  executor doctors exposed that runtime ignored the correctly pinned paths.
+  The dashboard is running, and no estate mutation occurred. This installation
+  is certified deterministically but is not enabled or accepted as the final
+  candidate.
 - **Live-proof status:** CHK-09 passed. The installed Mac mini collected a
   complete fixture-inclusive census, archived the real MacBook fixture through
   the governed receiver, returned the identical result on retry, restored the
@@ -181,12 +183,14 @@ met.
   configured Apple Python. The successor keeps executor startup independent of
   that unrelated inventory parser while retaining explicit fail-closed
   behavior when Codex marketplace inventory itself requires an unavailable
-  parser. Installed candidate `00a7765` closed that divergence, but direct
-  doctors then exposed the next boundary mismatch: configuration-time binary
-  discovery was not preserved for runtime. The next successor pins
-  `/Users/dfrysinger/.local/bin/copilot` and `/opt/homebrew/bin/codex` into
-  mini-local adapter commands and preserves those values during managed
-  regeneration even when `PATH` cannot rediscover them.
+  parser. Installed candidate `00a7765` closed that divergence. Candidate
+  `b167b6a` then preserved `/Users/dfrysinger/.local/bin/copilot` and
+  `/opt/homebrew/bin/codex` in generated commands, but doctor and run still
+  called ambient executable discovery instead of selecting `args.binary`.
+  The next successor closes that common root cause and prepends the selected
+  executable directory to the child `PATH`; exact sandbox reproduction showed
+  Copilot already succeeds and Codex reaches its launcher but needs
+  `/opt/homebrew/bin/node`.
 - **CHK-04 closure:** the final MacBook live proof found five plugin packages,
   three enabled packages, complete capability inventories, and zero unresolved
   mappings. The estate suite passed 44 tests; core, receiver transport,

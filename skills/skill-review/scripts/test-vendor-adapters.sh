@@ -79,6 +79,7 @@ class VendorAdapterTest(unittest.TestCase):
         *arguments,
         check=True,
         environment=None,
+        binary=None,
     ):
         source_root = {
             "copilot": self.case / "copilot",
@@ -96,9 +97,10 @@ class VendorAdapterTest(unittest.TestCase):
             str(source_root),
             "--quiet-seconds",
             "0",
-            command,
-            *map(str, arguments),
         ]
+        if binary is not None:
+            invocation.extend(["--binary", str(binary)])
+        invocation.extend([command, *map(str, arguments)])
         result = subprocess.run(
             invocation,
             env=environment or self.env,
@@ -683,6 +685,31 @@ print(json.dumps({"ok": True}))
         )
         self.assertTrue(doctor["healthy"])
         self.assertTrue(doctor["boundary_ready"])
+
+    def test_executor_uses_pinned_binary_under_restricted_path(self):
+        binary = self.case / "bin/copilot"
+        environment = {
+            **self.env,
+            "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+            "DREAMING_COPILOT_BIN": str(self.case / "missing-copilot"),
+        }
+        doctor = self.run_adapter(
+            "copilot",
+            "review-executor",
+            "doctor",
+            environment=environment,
+            binary=binary,
+        )
+        self.assertTrue(doctor["healthy"])
+        work = self.case / "executor-environment"
+        work.mkdir()
+        executor_environment = vendor_module.executor_environment(
+            "copilot", work, str(binary)
+        )
+        self.assertEqual(
+            executor_environment["PATH"].split(os.pathsep)[0],
+            str(binary.parent),
+        )
 
     def test_executor_canonicalizes_tmp_alias(self):
         environment = {**self.env, "TMPDIR": "/tmp"}

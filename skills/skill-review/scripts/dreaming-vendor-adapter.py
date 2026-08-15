@@ -1143,8 +1143,21 @@ def copilot_auth_token(credential_root: Path) -> str | None:
     return token
 
 
-def executor_environment(vendor: str, work: Path) -> dict[str, str]:
+def executor_environment(
+    vendor: str, work: Path, binary: str | None = None
+) -> dict[str, str]:
     environment = os.environ.copy()
+    if binary:
+        environment["PATH"] = os.pathsep.join(
+            dict.fromkeys(
+                [
+                    str(Path(binary).parent),
+                    *environment.get(
+                        "PATH", "/usr/bin:/bin:/usr/sbin:/sbin"
+                    ).split(os.pathsep),
+                ]
+            )
+        )
     real_home = Path.home()
     synthetic_home = work / "home"
     synthetic_home.mkdir()
@@ -1368,11 +1381,11 @@ def prove_boundary(
 
 
 def executor_doctor(args: argparse.Namespace) -> dict[str, Any]:
-    binary = executable(args.vendor)
+    binary = selected_executable(args.vendor, args.binary)
     probe_timeout = min(args.timeout, 60)
     with tempfile.TemporaryDirectory(prefix=f"dreaming-{args.vendor}-doctor-") as raw:
         work = Path(raw).resolve()
-        environment = executor_environment(args.vendor, work)
+        environment = executor_environment(args.vendor, work, binary)
         prove_boundary(work, environment, binary, args.deny_root, args.vendor)
         result = run_process(
             sandboxed_command(
@@ -1689,11 +1702,11 @@ def executor_run(args: argparse.Namespace) -> None:
         not draft_review and not isinstance(snapshot.get("events"), list)
     ):
         raise AdapterError("snapshot-invalid", args.snapshot)
-    binary = executable(args.vendor)
+    binary = selected_executable(args.vendor, args.binary)
     prompt = review_prompt(snapshot)
     with tempfile.TemporaryDirectory(prefix=f"dreaming-{args.vendor}-") as work:
         work_path = Path(work).resolve()
-        environment = executor_environment(args.vendor, work_path)
+        environment = executor_environment(args.vendor, work_path, binary)
         schema = work_path / "result-schema.json"
         active_schema = (
             {
