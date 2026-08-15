@@ -195,6 +195,16 @@ plistlib.dump(
     open(path,"wb"),
 )
 PY
+REAL_DASHBOARD_PLIST="$PLISTS/$PREFIX.dashboard.plist"
+python3 - "$REAL_DASHBOARD_PLIST" \
+  "$REPO_ROOT/skills/skill-review/scripts/dreaming-dashboard.py" <<'PY'
+import plistlib,sys
+path,run=sys.argv[1:]
+plistlib.dump(
+    {"Label":"com.fixture.dreaming.dashboard","ProgramArguments":[run]},
+    open(path,"wb"),
+)
+PY
 DREAMING_REPO_ROOT="$REPO_ROOT" \
 DREAMING_SHARED_SKILLS_ROOT="$SHARED_ROOT" \
 SKILLS_REPO_ROOT="$PUBLIC" \
@@ -208,6 +218,7 @@ import json,sys
 payload=json.load(open(sys.argv[1]))
 assert payload["complete"] is True
 assert any(path.endswith("/scripts/daemon-selftest.sh") for path in payload["scanned_files"])
+assert any(path.endswith("/scripts/dreaming-dashboard.py") for path in payload["scanned_files"])
 deps={row["skill"] for row in payload["dependencies"]}
 assert {"authenticated-browse","dual-review","writing-great-skills"} <= deps
 PY

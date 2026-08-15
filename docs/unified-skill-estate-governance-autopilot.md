@@ -82,15 +82,13 @@ met.
   unsupported volumes and unqualified plugin source classes remain
   report-only.
 - **Current phase:** final installed whole-estate proof. Installed successor
-  `ded281f` successfully handed the scheduler lease to prune, but forced run
-  `20260815T045745Z-23141` exposed the next contract gap: the curator used a
-  MacBook personal-skill mutation transaction merely to acquire its mini-local
-  whole-review lease, so receiver-only recovery configuration was unavailable.
-  The current local delta adds a dedicated estate-review session interface,
-  keeps mutation transactions separate, rechecks halt and recovery state on
-  renewal, and records completion before releasing the lease. Targeted curator
-  and scheduler suites pass, and the complete deterministic self-test passed
-  with zero failures.
+  `dfdbb04` reached the real curator, acquired dedicated estate session
+  `20260815T070206Z-e34af475`, and then aborted safely before recommendation or
+  mutation because dependency inventory interpreted a repository-level
+  `scripts/estate-action.py` path as skill-relative. The current successor
+  splits that dashboard path into separate components and adds shipped
+  LaunchAgent topology coverage. Focused suites and the complete deterministic
+  self-test pass with zero failures.
 - **Implementation order:** census and identity model; estate dashboard and
   unresolved mappings; evaluation and recommendations; remote personal-skill
   archive/restore; atomic settings transaction and source qualification;
@@ -126,20 +124,15 @@ met.
   later successors make doctor and run honor that pin, give script-based
   launchers access to dependencies beside the selected binary, and prove the
   behavior under restricted `PATH`.
-- **Latest successor:** commit `ded281f` releases the scheduler's writer lease
-  only at the prune boundary and requires the curator to acquire fresh
-  ownership. The current uncommitted delta adds
-  `estate-session-begin`, `estate-session-renew`, and
-  `estate-session-finish` for the mini-local whole-estate review. Session
-  acquisition fails closed on halt, pause, recovery, or contention without
-  constructing a remote mutation plan.
-- **Installed state:** the Mac mini is enabled on clean candidate `ded281f` at
-  activation generation `20260815T041111Z-install-74844`. Exact-generation
-  certification passed with zero failures; Copilot and Codex are healthy and
-  boundary-ready under restricted launchd `PATH`; the halt switch is inactive,
-  curator and memory state are unpaused, the dashboard is healthy, and no
+- **Latest successor:** commit `dfdbb04` provides the dedicated mini-local
+  estate-review session lifecycle. The current successor fixes the dashboard's
+  repository-level estate-action dependency reference and proves dependency
+  enumeration from the shipped dashboard LaunchAgent root.
+- **Installed state:** the Mac mini is enabled on clean candidate `dfdbb04` at
+  activation generation `20260815T060422Z-install-56610`. Exact-generation
+  certification passed with zero failures; the dashboard is healthy and no
   recovery fence exists. This installation is not the final candidate because
-  the live prune phase exposed the missing estate-review session interface.
+  the live prune phase exposed the dependency inventory path ambiguity.
 - **Live-proof status:** CHK-09 passed. The installed Mac mini collected a
   complete fixture-inclusive census, archived the real MacBook fixture through
   the governed receiver, returned the identical result on retry, restored the
@@ -198,16 +191,17 @@ met.
   executable directory to the child `PATH`; exact sandbox reproduction showed
   Copilot already succeeds and Codex reaches its launcher but needs
   `/opt/homebrew/bin/node`.
-- **Latest scheduled-live evidence:** installed successor `ded281f` completed
-  consolidation and roll in forced run `20260815T045745Z-23141`, released the
-  scheduler lease at the prune boundary, and entered the real curator. Prune
-  then aborted before census or mutation with
-  `recovery-state path is not configured`. The earliest verified divergence
-  was the curator's use of the remote personal-skill transaction initializer
-  as its whole-review lease. That initializer correctly requires receiver-only
-  `CURATOR_REMOTE_*` configuration and is not a mini-local lease API. The
-  current delta supplies the dedicated local review-session contract instead
-  of exporting receiver configuration into the agent shell.
+- **Latest scheduled-live evidence:** installed successor `dfdbb04` completed
+  consolidation and roll, released the scheduler lease at the prune boundary,
+  and acquired estate session `20260815T070206Z-e34af475`. Dependency inventory
+  then aborted with `missing relative estate-action.py reference`; the session
+  was finished as aborted, no recovery fence remains, and no mutation or
+  recommendation output was produced. The earliest verified divergence was
+  `dreaming-dashboard.py` joining the repository root with the literal
+  `scripts/estate-action.py`, which the skill dependency scanner correctly
+  interpreted as a skill-relative reference under its existing contract.
+  Splitting the path components preserves runtime behavior and removes that
+  false reference.
 - **CHK-04 closure:** the final MacBook live proof found five plugin packages,
   three enabled packages, complete capability inventories, and zero unresolved
   mappings. The estate suite passed 44 tests; core, receiver transport,

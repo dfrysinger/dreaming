@@ -2521,7 +2521,7 @@ class DashboardData:
                 "message": "Estate action authority is not configured.",
             }
         try:
-            authority_path = self.paths.repo / "scripts/estate-action.py"
+            authority_path = self.paths.repo / "scripts" / "estate-action.py"
             if authority_path.is_symlink() or not authority_path.is_file():
                 raise ValueError("authority implementation")
             specification = importlib.util.spec_from_file_location(
