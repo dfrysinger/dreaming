@@ -194,6 +194,9 @@ def adapter(
             "--role",
             role,
         ]
+        binary = executable(vendor)
+        if binary:
+            argv.extend(["--binary", binary])
     if role == "session-source":
         override = os.environ.get(f"DREAMING_{vendor.upper()}_SESSION_ROOT")
         if override:
@@ -360,6 +363,20 @@ def inherit_remote_copilot(existing: dict[str, object]) -> None:
                 os.environ[name] = value
 
 
+def inherit_local_binaries(existing: dict[str, object]) -> None:
+    for vendor in VENDORS:
+        name = f"DREAMING_{vendor.upper()}_BIN"
+        if name in os.environ:
+            continue
+        for role in ("executors", "sources", "publishers"):
+            entries = existing.get(role)
+            entry = entries.get(vendor) if isinstance(entries, dict) else None
+            binary = argv_value(entry, "--binary")
+            if binary is not None:
+                os.environ[name] = binary
+                break
+
+
 def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, object]:
     existing: dict[str, object] = {}
     if output.is_file():
@@ -370,6 +387,7 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
         if isinstance(loaded, dict):
             existing = loaded
     inherit_remote_copilot(existing)
+    inherit_local_binaries(existing)
     configured = {
         vendor
         for role in ("sources", "executors", "publishers")

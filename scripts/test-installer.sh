@@ -491,7 +491,7 @@ if calls != [["remove"]]:
 PY
 NATIVE_ADAPTERS="$NATIVE/dreaming-state/adapters.json"
 grep -q '"copilot"' "$NATIVE_ADAPTERS"
-python3 - "$NATIVE_ADAPTERS" <<'PY'
+python3 - "$NATIVE_ADAPTERS" "$FAKE_COPILOT" <<'PY'
 import json
 import sys
 
@@ -520,6 +520,9 @@ if config["executors"]["copilot"]["argv"][1].endswith(
     "/scripts/ssh-session-source.py"
 ):
     raise SystemExit("remote source configuration changed the local executor")
+executor = config["executors"]["copilot"]["argv"]
+if executor[executor.index("--binary") + 1] != sys.argv[2]:
+    raise SystemExit(f"local executor binary is not pinned: {executor!r}")
 publisher = config["publishers"]["copilot"]["argv"]
 if not publisher[1].endswith("/scripts/ssh-skill-publisher.py"):
     raise SystemExit(f"remote publisher proxy is missing: {publisher!r}")
@@ -605,12 +608,13 @@ PY
   export PATH="/usr/bin:/bin"
   run_native_persisted install >/dev/null
 )
-python3 - "$NATIVE_ADAPTERS" <<'PY'
+python3 - "$NATIVE_ADAPTERS" "$FAKE_COPILOT" <<'PY'
 import json
 import sys
 
 config = json.load(open(sys.argv[1], encoding="utf-8"))
 source = config["sources"]["copilot"]["argv"]
+executor = config["executors"]["copilot"]["argv"]
 publisher = config["publishers"]["copilot"]["argv"]
 estate = config.get("estate_census", {}).get("argv", [])
 curator = config.get("estate_curator", {})
@@ -618,6 +622,8 @@ if source[source.index("--host") + 1] != "fixture@fd7a:115c:a1e0::1":
     raise SystemExit(f"upgrade lost the inherited remote source: {source!r}")
 if publisher[publisher.index("--host") + 1] != "fixture-client@fd7a:115c:a1e0::3":
     raise SystemExit(f"upgrade lost the inherited remote publisher: {publisher!r}")
+if executor[executor.index("--binary") + 1] != sys.argv[2]:
+    raise SystemExit(f"upgrade lost the inherited executor binary: {executor!r}")
 if not estate or estate[estate.index("--host") + 1] != "fixture-client@fd7a:115c:a1e0::3":
     raise SystemExit(f"upgrade did not add the inherited estate census: {config!r}")
 if (
