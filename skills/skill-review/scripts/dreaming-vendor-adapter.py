@@ -1420,6 +1420,27 @@ def prove_boundary(
 
 
 def executor_doctor(args: argparse.Namespace) -> dict[str, Any]:
+    def contains_exact_string(value: Any, expected: str) -> bool:
+        if value == expected:
+            return True
+        if isinstance(value, dict):
+            return any(
+                contains_exact_string(item, expected) for item in value.values()
+            )
+        if isinstance(value, list):
+            return any(contains_exact_string(item, expected) for item in value)
+        return False
+
+    def output_contains_exact_string(output: str, expected: str) -> bool:
+        for line in output.splitlines():
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if contains_exact_string(value, expected):
+                return True
+        return False
+
     binary = selected_executable(args.vendor, args.binary)
     probe_timeout = min(args.timeout, 60)
     with tempfile.TemporaryDirectory(prefix=f"dreaming-{args.vendor}-doctor-") as raw:
@@ -1440,6 +1461,37 @@ def executor_doctor(args: argparse.Namespace) -> dict[str, Any]:
         )
         if result.returncode != 0:
             raise AdapterError("executor-unavailable", args.vendor)
+        if args.vendor == "copilot":
+            sentinel = "DREAMING_AUTH_OK"
+            authentication = run_process(
+                sandboxed_command(
+                    [
+                        binary,
+                        "-p",
+                        f"Reply with exactly: {sentinel}",
+                        "--allow-all-tools",
+                        "--available-tools=__dreaming_no_tools__",
+                        "--disable-builtin-mcps",
+                        "--no-custom-instructions",
+                        "--no-ask-user",
+                        "--no-remote",
+                        "--no-color",
+                        "--output-format",
+                        "json",
+                    ],
+                    work,
+                    binary,
+                    args.deny_root,
+                    args.vendor,
+                ),
+                environment,
+                probe_timeout,
+                cwd=work,
+            )
+            if authentication.returncode != 0 or not output_contains_exact_string(
+                authentication.stdout, sentinel
+            ):
+                raise AdapterError("authentication-required", args.vendor)
         if args.vendor == "claude":
             authentication = run_process(
                 sandboxed_command(

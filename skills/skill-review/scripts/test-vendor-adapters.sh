@@ -294,6 +294,19 @@ def write_codex_marketplace_config():
 if "--version" in args:
     print(vendor + " 1.0")
     raise SystemExit()
+if (
+    vendor == "copilot"
+    and "-p" in args
+    and any("DREAMING_AUTH_OK" in arg for arg in args)
+):
+    if os.environ.get("FAKE_COPILOT_AUTH_FAILURE") == "1":
+        print("authentication required", file=sys.stderr)
+        raise SystemExit(1)
+    if os.environ.get("FAKE_COPILOT_AUTH_ECHO_ONLY") == "1":
+        print(json.dumps({"prompt": next(arg for arg in args if "DREAMING_AUTH_OK" in arg)}))
+        raise SystemExit()
+    print(json.dumps({"result":"DREAMING_AUTH_OK"}))
+    raise SystemExit()
 if vendor == "claude" and args[:3] == ["auth", "status", "--json"]:
     print(json.dumps({"loggedIn": True}))
     raise SystemExit()
@@ -739,6 +752,36 @@ print(json.dumps({"ok": True}))
         )
         self.assertTrue(doctor["healthy"])
         self.assertTrue(doctor["boundary_ready"])
+
+    def test_copilot_executor_doctor_rejects_missing_authentication(self):
+        environment = {
+            **self.env,
+            "FAKE_COPILOT_AUTH_FAILURE": "1",
+        }
+        doctor = self.run_adapter(
+            "copilot",
+            "review-executor",
+            "doctor",
+            environment=environment,
+            check=False,
+        )
+        self.assertFalse(doctor["ok"])
+        self.assertEqual(doctor["error"]["code"], "authentication-required")
+
+    def test_copilot_executor_doctor_rejects_echoed_auth_prompt(self):
+        environment = {
+            **self.env,
+            "FAKE_COPILOT_AUTH_ECHO_ONLY": "1",
+        }
+        doctor = self.run_adapter(
+            "copilot",
+            "review-executor",
+            "doctor",
+            environment=environment,
+            check=False,
+        )
+        self.assertFalse(doctor["ok"])
+        self.assertEqual(doctor["error"]["code"], "authentication-required")
 
     def test_executor_uses_pinned_binary_under_restricted_path(self):
         binary = self.case / "bin/copilot"
