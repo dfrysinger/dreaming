@@ -81,14 +81,16 @@ met.
   `renamex_np(..., RENAME_SWAP)` to retain the exact displaced settings inode;
   unsupported volumes and unqualified plugin source classes remain
   report-only.
-- **Current phase:** final installed whole-estate proof. Installed successor
-  `dfdbb04` reached the real curator, acquired dedicated estate session
-  `20260815T070206Z-e34af475`, and then aborted safely before recommendation or
-  mutation because dependency inventory interpreted a repository-level
-  `scripts/estate-action.py` path as skill-relative. The current successor
-  splits that dashboard path into separate components and adds shipped
-  LaunchAgent topology coverage. Focused suites and the complete deterministic
-  self-test pass with zero failures.
+- **Current phase:** installed authentication gate before final whole-estate
+  proof. The dependency-inventory successor passed exact-generation
+  certification, then forced run `20260815T081229Z-71193` completed the census
+  and 24 transcript reviews before Copilot returned an empty result for the
+  next review. The earliest divergence was an absent Mac mini Copilot login
+  hidden by a doctor that checked availability but not authentication.
+  Successor `c4ae5de` fails closed with `authentication-required` through an
+  exact structured authentication canary. It is installed behind the halt
+  switch and is gated on the user completing Copilot login before its single
+  exact-generation certification run.
 - **Implementation order:** census and identity model; estate dashboard and
   unresolved mappings; evaluation and recommendations; remote personal-skill
   archive/restore; atomic settings transaction and source qualification;
@@ -124,15 +126,16 @@ met.
   later successors make doctor and run honor that pin, give script-based
   launchers access to dependencies beside the selected binary, and prove the
   behavior under restricted `PATH`.
-- **Latest successor:** commit `dfdbb04` provides the dedicated mini-local
-  estate-review session lifecycle. The current successor fixes the dashboard's
-  repository-level estate-action dependency reference and proves dependency
-  enumeration from the shipped dashboard LaunchAgent root.
-- **Installed state:** the Mac mini is enabled on clean candidate `dfdbb04` at
-  activation generation `20260815T060422Z-install-56610`. Exact-generation
-  certification passed with zero failures; the dashboard is healthy and no
-  recovery fence exists. This installation is not the final candidate because
-  the live prune phase exposed the dependency inventory path ambiguity.
+- **Latest successor:** commit `1d9efa9` fixes the dashboard's repository-level
+  estate-action dependency reference and proves dependency enumeration from
+  the shipped dashboard LaunchAgent root. Commit `c4ae5de` adds the fail-closed
+  Copilot authentication canary and rejects both missing authentication and
+  output that merely echoes the requested sentinel.
+- **Installed state:** the Mac mini is halted on clean candidate `c4ae5de` at
+  activation generation `20260815T084205Z-install-87029`. The installed
+  restricted doctor reports `authentication-required`, as intended. Exact
+  generation certification, enablement, and the forced weekly proof remain
+  gated on successful user authentication. The dashboard remains available.
 - **Live-proof status:** CHK-09 passed. The installed Mac mini collected a
   complete fixture-inclusive census, archived the real MacBook fixture through
   the governed receiver, returned the identical result on retry, restored the
