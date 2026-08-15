@@ -198,6 +198,23 @@ def adapter(
         if binary:
             argv.extend(["--binary", binary])
     if role == "session-source":
+        max_field_bytes = positive_integer("DREAMING_MAX_FIELD_BYTES", "64000")
+        max_events = positive_integer("DREAMING_MAX_EVENTS", "2000")
+        max_snapshot_bytes = positive_integer(
+            "DREAMING_MAX_SNAPSHOT_BYTES", "1000000"
+        )
+        if max_snapshot_bytes < 2:
+            raise ConfigError("DREAMING_MAX_SNAPSHOT_BYTES must be at least 2")
+        argv.extend(
+            [
+                "--max-field-bytes",
+                str(max_field_bytes),
+                "--max-events",
+                str(max_events),
+                "--max-snapshot-bytes",
+                str(max_snapshot_bytes),
+            ]
+        )
         override = os.environ.get(f"DREAMING_{vendor.upper()}_SESSION_ROOT")
         if override:
             argv.extend(["--source-root", str(Path(override).expanduser().resolve())])
@@ -515,6 +532,11 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
         "max_reviews_per_run": positive_integer(
             "DREAMING_MAX_REVIEWS_PER_RUN", "25"
         ),
+        "max_snapshot_bytes": positive_integer(
+            "DREAMING_MAX_SNAPSHOT_BYTES", "1000000"
+        ),
+        "max_events": positive_integer("DREAMING_MAX_EVENTS", "2000"),
+        "max_field_bytes": positive_integer("DREAMING_MAX_FIELD_BYTES", "64000"),
         "max_autonomous_session_age_days": 30,
         "allow_autonomous_skill_creation": False,
     }

@@ -299,6 +299,26 @@ def normalized_event(
     )
 
 
+def bounded_events(
+    events: list[dict[str, Any]],
+    max_events: int,
+    max_snapshot_bytes: int,
+) -> tuple[list[dict[str, Any]], bool]:
+    if max_events < 1 or max_snapshot_bytes < 2:
+        raise AdapterError("invalid-source-limit", "event and snapshot limits")
+    selected: list[dict[str, Any]] = []
+    encoded_bytes = 2
+    for event in reversed(events):
+        event_bytes = len(canonical(event))
+        projected = encoded_bytes + event_bytes + (1 if selected else 0)
+        if len(selected) >= max_events or projected > max_snapshot_bytes:
+            break
+        selected.append(event)
+        encoded_bytes = projected
+    selected.reverse()
+    return selected, len(selected) != len(events)
+
+
 def content_text(content: Any) -> str:
     if isinstance(content, str):
         return content
@@ -330,11 +350,21 @@ def source_defaults(vendor: str) -> Path:
 
 
 class NativeSource:
-    def __init__(self, vendor: str, root: Path, quiet_seconds: int, field_limit: int):
+    def __init__(
+        self,
+        vendor: str,
+        root: Path,
+        quiet_seconds: int,
+        field_limit: int,
+        max_events: int,
+        max_snapshot_bytes: int,
+    ):
         self.vendor = vendor
         self.root = strict_root(root)
         self.quiet_seconds = quiet_seconds
         self.field_limit = field_limit
+        self.max_events = max_events
+        self.max_snapshot_bytes = max_snapshot_bytes
 
     def records(self) -> list[dict[str, Any]]:
         if self.vendor == "copilot":
@@ -345,10 +375,17 @@ class NativeSource:
 
     def events(self, record: dict[str, Any]) -> tuple[list[dict[str, Any]], bool]:
         if self.vendor == "copilot":
-            return self._copilot_events(record)
-        if self.vendor == "claude":
-            return self._claude_events(record)
-        return self._codex_events(record)
+            events, truncated = self._copilot_events(record)
+        elif self.vendor == "claude":
+            events, truncated = self._claude_events(record)
+        else:
+            events, truncated = self._codex_events(record)
+        events, bounded = bounded_events(
+            events,
+            self.max_events,
+            self.max_snapshot_bytes,
+        )
+        return events, truncated or bounded
 
     def identity(self, record: dict[str, Any]) -> dict[str, Any]:
         events, truncated = self.events(record)
@@ -822,6 +859,8 @@ def source_command(args: argparse.Namespace) -> None:
         Path(args.source_root or source_defaults(args.vendor)),
         args.quiet_seconds,
         args.max_field_bytes,
+        args.max_events,
+        args.max_snapshot_bytes,
     )
     if args.command == "doctor":
         records = source.records()
@@ -4367,6 +4406,8 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--source-root")
     result.add_argument("--quiet-seconds", type=int, default=300)
     result.add_argument("--max-field-bytes", type=int, default=64_000)
+    result.add_argument("--max-events", type=int, default=2_000)
+    result.add_argument("--max-snapshot-bytes", type=int, default=1_000_000)
     result.add_argument("--timeout", type=int, default=600)
     result.add_argument("--token-budget", type=int, default=100_000)
     result.add_argument("--turn-budget", type=int, default=100_000)

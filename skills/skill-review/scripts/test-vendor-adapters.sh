@@ -80,6 +80,8 @@ class VendorAdapterTest(unittest.TestCase):
         check=True,
         environment=None,
         binary=None,
+        max_events=None,
+        max_snapshot_bytes=None,
     ):
         source_root = {
             "copilot": self.case / "copilot",
@@ -100,6 +102,10 @@ class VendorAdapterTest(unittest.TestCase):
         ]
         if binary is not None:
             invocation.extend(["--binary", str(binary)])
+        if max_events is not None:
+            invocation.extend(["--max-events", str(max_events)])
+        if max_snapshot_bytes is not None:
+            invocation.extend(["--max-snapshot-bytes", str(max_snapshot_bytes)])
         invocation.extend([command, *map(str, arguments)])
         result = subprocess.run(
             invocation,
@@ -474,6 +480,54 @@ print(json.dumps({"ok": True}))
                 [kind for kind in row if kind != "session_end"],
                 ["user_message", "assistant_message", "tool_call"],
             )
+
+    def test_source_render_keeps_bounded_latest_evidence(self):
+        events = self.case / "copilot/session/events.jsonl"
+        rows = [
+            {
+                "type": "user.message",
+                "data": {"content": f"message-{index}-" + ("x" * 400)},
+                "id": f"event-{index}",
+                "timestamp": f"2026-01-01T00:00:{index:02d}Z",
+            }
+            for index in range(10)
+        ]
+        rows.append(
+            {
+                "type": "session.shutdown",
+                "data": {"shutdownType": "complete"},
+                "id": "session-end",
+                "timestamp": "2026-01-01T00:01:00Z",
+            }
+        )
+        events.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        rendered = self.run_adapter(
+            "copilot",
+            "session-source",
+            "render",
+            "--session",
+            "copilot:session",
+            max_events=4,
+            max_snapshot_bytes=1_200,
+        )
+        inspected = self.run_adapter(
+            "copilot",
+            "session-source",
+            "inspect",
+            "--session",
+            "copilot:session",
+            max_events=4,
+            max_snapshot_bytes=1_200,
+        )
+        self.assertTrue(rendered["truncated"])
+        self.assertLessEqual(len(rendered["events"]), 4)
+        self.assertLessEqual(len(canonical(rendered["events"])), 1_200)
+        self.assertEqual(rendered["events"][-1]["source_event_id"], "session-end")
+        self.assertEqual(
+            inspected["session"]["snapshot_digest"],
+            vendor_module.sha(rendered["events"]),
+        )
+        self.assertEqual(inspected["session"]["event_frontier"], "session-end")
 
     def test_claude_title_scan_is_bounded_and_malformed_lines_fall_back(self):
         source = self.case / "claude/project"
@@ -1401,6 +1455,17 @@ print(json.dumps({"ok": True}))
         self.assertEqual(data["executor_order"], ["codex", "claude"])
         self.assertEqual(data["routes"], ["claude>codex", "codex>codex"])
         self.assertEqual(list(data["publishers"]), ["claude", "codex"])
+        self.assertEqual(data["max_snapshot_bytes"], 1_000_000)
+        self.assertEqual(data["max_events"], 2_000)
+        self.assertEqual(data["max_field_bytes"], 64_000)
+        for entry in data["sources"].values():
+            argv = entry["argv"]
+            self.assertEqual(argv[argv.index("--max-events") + 1], "2000")
+            self.assertEqual(
+                argv[argv.index("--max-snapshot-bytes") + 1],
+                "1000000",
+            )
+            self.assertEqual(argv[argv.index("--max-field-bytes") + 1], "64000")
         expected_roots = {
             str((self.case / "claude").resolve()),
             str((self.case / "codex").resolve()),
