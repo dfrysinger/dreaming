@@ -133,14 +133,24 @@ NAMES=(skills-consolidate skills-roll skills-prune)
 
 for index in 0 1 2; do
   pass="${PASSES[$index]}"
-  if ! skills_lock_renew "$LOCK_TOKEN"; then
-    log "lost writer lock before $pass"
-    append_pass "$pass" "not_started" "" "" "" "lock-lost"
-    if (( index < 2 )); then
-      mark_remaining "upstream-lock-lost" "${PASSES[@]:$((index + 1))}"
+  if (( index == 2 )); then
+    if ! skills_lock_release "$LOCK_TOKEN"; then
+      log "could not release scheduler writer lock before curator handoff"
+      append_pass "$pass" "not_started" "" "" "" "lock-handoff-failed"
+      record_terminal aborted "lock-handoff-before-$pass"
+      exit 1
     fi
-    record_terminal aborted "lock-lost-before-$pass"
-    exit 1
+    LOCK_TOKEN=""
+  else
+    if ! skills_lock_renew "$LOCK_TOKEN"; then
+      log "lost writer lock before $pass"
+      append_pass "$pass" "not_started" "" "" "" "lock-lost"
+      if (( index < 2 )); then
+        mark_remaining "upstream-lock-lost" "${PASSES[@]:$((index + 1))}"
+      fi
+      record_terminal aborted "lock-lost-before-$pass"
+      exit 1
+    fi
   fi
 
   if (( index == 1 )) && [[ "${DREAMING_FORCE_DUE:-0}" != "1" ]]; then
@@ -176,11 +186,26 @@ for index in 0 1 2; do
   pass_started="$(date -u -r "$pass_started_epoch" +%Y-%m-%dT%H:%M:%S+00:00)"
   pass_log="$LOG_DIR/${RUN_ID}-${pass}.log"
   log "starting $pass"
-  if DREAMING_ORCHESTRATED=1 DREAMING_PARENT_RUN_ID="$RUN_ID" \
-      SKILLS_LOCK_HELD_BY_PARENT=1 SKILLS_LOCK_TOKEN="$LOCK_TOKEN" \
-      SKILLS_LOCK_OWNER_PID="$$" \
-      SKILLS_LOCK_OWNER_IDENTITY="$(skills_process_identity "$$")" "$PASS_RUNNER" \
-      --prompt "${PROMPTS[$index]}" --name "${NAMES[$index]}" --log "$pass_log"; then
+  if (( index == 2 )); then
+    if DREAMING_ORCHESTRATED=1 DREAMING_PARENT_RUN_ID="$RUN_ID" \
+        "$PASS_RUNNER" \
+        --prompt "${PROMPTS[$index]}" --name "${NAMES[$index]}" --log "$pass_log"; then
+      pass_rc=0
+    else
+      pass_rc=$?
+    fi
+  else
+    if DREAMING_ORCHESTRATED=1 DREAMING_PARENT_RUN_ID="$RUN_ID" \
+        SKILLS_LOCK_HELD_BY_PARENT=1 SKILLS_LOCK_TOKEN="$LOCK_TOKEN" \
+        SKILLS_LOCK_OWNER_PID="$$" \
+        SKILLS_LOCK_OWNER_IDENTITY="$(skills_process_identity "$$")" "$PASS_RUNNER" \
+        --prompt "${PROMPTS[$index]}" --name "${NAMES[$index]}" --log "$pass_log"; then
+      pass_rc=0
+    else
+      pass_rc=$?
+    fi
+  fi
+  if (( pass_rc == 0 )); then
     pass_ended_epoch="${DREAMING_NOW_EPOCH:-$(date +%s)}"
     pass_ended="$(date -u -r "$pass_ended_epoch" +%Y-%m-%dT%H:%M:%S+00:00)"
     append_pass "$pass" "ok" "$pass_started" "$pass_ended" "$pass_log" ""

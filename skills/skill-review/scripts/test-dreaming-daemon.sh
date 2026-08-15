@@ -58,6 +58,15 @@ while [[ $# -gt 0 ]]; do
 done
 echo "$name" >> "$ORDER_FILE"
 echo "${DREAMING_PARENT_RUN_ID:-}" >> "$PARENT_FILE"
+if [[ "$name" == "skills-prune" ]]; then
+  [[ "${SKILLS_LOCK_HELD_BY_PARENT:-0}" != "1" ]]
+  [[ -z "${SKILLS_LOCK_TOKEN:-}" ]]
+  curator_token="$("$LOCK_SCRIPT" acquire --mode session --owner fake-curator)"
+  "$LOCK_SCRIPT" release "$curator_token"
+else
+  [[ "${SKILLS_LOCK_HELD_BY_PARENT:-0}" == "1" ]]
+  [[ -n "${SKILLS_LOCK_TOKEN:-}" ]]
+fi
 echo "DREAM_PASS_RESULT: ok fake=$name" > "$log"
 if [[ "${FAKE_HALT_AFTER:-}" == "$name" ]]; then
   mkdir -p "$SKILLS_STATE_DIR/skill-review"
@@ -78,6 +87,7 @@ new_case() {
   export SKILLS_REPO_ROOT="$CASE/catalog"
   mkdir -p "$SKILLS_REPO_ROOT/skills"
   export DREAMING_PASS_RUNNER="$FAKE_PASS"
+  export LOCK_SCRIPT="$SCRIPT_DIR/daemon-lock.sh"
   export DREAMING_MEMORY_STATE="$CASE/no-memory.json"
   export DREAMING_NOW_EPOCH="$NOW"
   export SKILLS_NOW_EPOCH="$NOW"
