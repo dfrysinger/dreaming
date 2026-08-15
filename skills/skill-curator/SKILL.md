@@ -193,6 +193,10 @@ requirements.
 
 1. Refresh the receiver-bound MacBook census with `dreaming-core.py census`.
    Require complete bounded scope and zero unresolved mappings.
+   Before refreshing, acquire the scheduled review lease with
+   `curator-run.py estate-session-begin`. Use `estate-session-renew` during
+   long reviews and always release it with `estate-session-finish`; do not
+   create a personal-skill transaction solely to hold this lease.
 2. Run `scheduled-skill-deps.py --inventory`; any ambiguity aborts the pass.
 3. Review every current personal capability and plugin package under
    `docs/unified-skill-estate-governance-design.md`.

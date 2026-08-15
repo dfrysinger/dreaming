@@ -184,6 +184,12 @@ def authorization_path(run_id: str) -> Path:
     return runs_dir() / f"{run_id}.authorization.json"
 
 
+def estate_session_path(run_id: str) -> Path:
+    if not re_safe_id(run_id):
+        raise RunError(f"invalid estate session id: {run_id}")
+    return runs_dir() / "estate-sessions" / f"{run_id}.json"
+
+
 def re_safe_id(value: str) -> bool:
     return bool(value) and all(ch.isalnum() or ch in "._-" for ch in value)
 
@@ -3071,6 +3077,89 @@ def command_estate_dispatch(args: argparse.Namespace) -> int:
     return 0 if result["ok"] else 2
 
 
+def command_estate_session_begin(args: argparse.Namespace) -> int:
+    switches = require_autonomous_switches_open()
+    recovery = estate_session_recovery_path()
+    if recovery.exists():
+        raise RunError("estate action recovery is required")
+    run_id = args.run_id or (
+        f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
+    )
+    path = estate_session_path(run_id)
+    if path.exists():
+        raise RunError(f"estate session already exists: {run_id}")
+    token = acquire_lock(f"estate-curator:{run_id}")
+    try:
+        atomic_write(
+            path,
+            {
+                "schema_version": 1,
+                "kind": "estate_review",
+                "run_id": run_id,
+                "status": "active",
+                "started_at": now_iso(),
+                "lock_token": token,
+                "lock_renewed_at": now_iso(),
+                "switches": switches,
+                "recovery_state": str(recovery),
+            },
+        )
+    except Exception:
+        lock_command("release", token, check=False)
+        raise
+    print(run_id)
+    return 0
+
+
+def load_estate_session(run_id: str) -> tuple[Path, dict[str, Any]]:
+    path = estate_session_path(run_id)
+    manifest = safe_json_file(path, "estate session")
+    if (
+        manifest.get("schema_version") != 1
+        or manifest.get("kind") != "estate_review"
+        or manifest.get("run_id") != run_id
+        or not isinstance(manifest.get("lock_token"), str)
+    ):
+        raise RunError("estate session is malformed")
+    return path, manifest
+
+
+def estate_session_recovery_path() -> Path:
+    config = safe_json_file(estate_action_config_path(), "estate action configuration")
+    recovery_value = config.get("recovery_state")
+    if not isinstance(recovery_value, str) or not recovery_value:
+        raise RunError("estate action recovery-state path is not configured")
+    return Path(recovery_value).expanduser().resolve()
+
+
+def command_estate_session_renew(args: argparse.Namespace) -> int:
+    path, manifest = load_estate_session(args.run)
+    if manifest.get("status") != "active":
+        raise RunError(f"cannot renew estate session in status {manifest.get('status')}")
+    switches = require_autonomous_switches_open()
+    recovery = estate_session_recovery_path()
+    if manifest.get("recovery_state") != str(recovery):
+        raise RunError("estate action recovery-state path changed")
+    if recovery.exists():
+        raise RunError("estate action recovery is required")
+    renew_lock(manifest)
+    manifest["switches"] = switches
+    atomic_write(path, manifest)
+    return 0
+
+
+def command_estate_session_finish(args: argparse.Namespace) -> int:
+    path, manifest = load_estate_session(args.run)
+    if manifest.get("status") != "active":
+        raise RunError(f"cannot finish estate session in status {manifest.get('status')}")
+    renew_lock(manifest)
+    manifest["status"] = args.status
+    manifest["finished_at"] = now_iso()
+    atomic_write(path, manifest)
+    release_lock(manifest)
+    return 0
+
+
 def parser() -> argparse.ArgumentParser:
     root = argparse.ArgumentParser()
     sub = root.add_subparsers(dest="command", required=True)
@@ -3146,6 +3235,21 @@ def parser() -> argparse.ArgumentParser:
     estate_dispatch.add_argument("--authorization", required=True)
     estate_dispatch.add_argument("--timeout", type=int, default=300)
     estate_dispatch.set_defaults(func=command_estate_dispatch)
+
+    estate_session_begin = sub.add_parser("estate-session-begin")
+    estate_session_begin.add_argument("--run-id")
+    estate_session_begin.set_defaults(func=command_estate_session_begin)
+
+    estate_session_renew = sub.add_parser("estate-session-renew")
+    estate_session_renew.add_argument("--run", required=True)
+    estate_session_renew.set_defaults(func=command_estate_session_renew)
+
+    estate_session_finish = sub.add_parser("estate-session-finish")
+    estate_session_finish.add_argument("--run", required=True)
+    estate_session_finish.add_argument(
+        "--status", choices=("complete", "aborted"), required=True
+    )
+    estate_session_finish.set_defaults(func=command_estate_session_finish)
     return root
 
 

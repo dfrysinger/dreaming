@@ -81,18 +81,16 @@ met.
   `renamex_np(..., RENAME_SWAP)` to retain the exact displaced settings inode;
   unsupported volumes and unqualified plugin source classes remain
   report-only.
-- **Current phase:** final installed whole-estate proof. Candidate `2dbe2a3`
-  bounded oversized normalized transcripts, passed exact-generation installed
-  certification, passed both restricted-PATH executor doctors, and was enabled
-  as generation `20260815T024441Z-install-6944`. Forced run
-  `20260815T033232Z-55034` then completed consolidation and roll before the
-  agent-owned curator aborted without mutation because the scheduler still
-  held the exclusive writer lease it required the curator to acquire. The
-  current local successor adds an explicit phase handoff: the scheduler owns
-  the lease through consolidation and roll, releases it immediately before
-  prune, and the curator must acquire its own fresh exclusive lease or abort
-  fail closed. The targeted scheduler suite proves that ownership transition,
-  pass order, contention behavior, and failure paths.
+- **Current phase:** final installed whole-estate proof. Installed successor
+  `ded281f` successfully handed the scheduler lease to prune, but forced run
+  `20260815T045745Z-23141` exposed the next contract gap: the curator used a
+  MacBook personal-skill mutation transaction merely to acquire its mini-local
+  whole-review lease, so receiver-only recovery configuration was unavailable.
+  The current local delta adds a dedicated estate-review session interface,
+  keeps mutation transactions separate, rechecks halt and recovery state on
+  renewal, and records completion before releasing the lease. Targeted curator
+  and scheduler suites pass, and the complete deterministic self-test passed
+  with zero failures.
 - **Implementation order:** census and identity model; estate dashboard and
   unresolved mappings; evaluation and recommendations; remote personal-skill
   archive/restore; atomic settings transaction and source qualification;
@@ -125,22 +123,23 @@ met.
   scheduler regression. Commit `00a7765` scopes `tomllib` to Codex marketplace
   inventory and proves executor startup remains compatible with the installed
   Apple Python. Commit `b167b6a` adds persistent absolute binary pinning. The
-  local uncommitted successor makes doctor and run honor that pin, gives
-  script-based launchers access to dependencies beside the selected binary,
-  and proves the behavior under restricted `PATH`.
-- **Latest successor:** commit `2dbe2a3` makes every transcript source emit the
-  newest contiguous normalized suffix within the configured 2,000-event and
-  1,000,000-byte boundaries while preserving source sequence numbers, terminal
-  evidence, truncation disclosure, and inspect/render digest agreement. The
-  current uncommitted delta corrects the scheduler-to-curator writer-lease
-  handoff exposed only after that successor reached the real prune phase.
-- **Installed state:** the Mac mini is enabled on clean candidate `2dbe2a3` at
-  activation generation `20260815T024441Z-install-6944`. Exact-generation
+  later successors make doctor and run honor that pin, give script-based
+  launchers access to dependencies beside the selected binary, and prove the
+  behavior under restricted `PATH`.
+- **Latest successor:** commit `ded281f` releases the scheduler's writer lease
+  only at the prune boundary and requires the curator to acquire fresh
+  ownership. The current uncommitted delta adds
+  `estate-session-begin`, `estate-session-renew`, and
+  `estate-session-finish` for the mini-local whole-estate review. Session
+  acquisition fails closed on halt, pause, recovery, or contention without
+  constructing a remote mutation plan.
+- **Installed state:** the Mac mini is enabled on clean candidate `ded281f` at
+  activation generation `20260815T041111Z-install-74844`. Exact-generation
   certification passed with zero failures; Copilot and Codex are healthy and
   boundary-ready under restricted launchd `PATH`; the halt switch is inactive,
   curator and memory state are unpaused, the dashboard is healthy, and no
   recovery fence exists. This installation is not the final candidate because
-  the live prune phase exposed the scheduler-to-curator lease handoff defect.
+  the live prune phase exposed the missing estate-review session interface.
 - **Live-proof status:** CHK-09 passed. The installed Mac mini collected a
   complete fixture-inclusive census, archived the real MacBook fixture through
   the governed receiver, returned the identical result on retry, restored the
@@ -199,17 +198,16 @@ met.
   executable directory to the child `PATH`; exact sandbox reproduction showed
   Copilot already succeeds and Codex reaches its launcher but needs
   `/opt/homebrew/bin/node`.
-- **Latest scheduled-live evidence:** installed successor `2dbe2a3` removed the
-  transcript boundary failure. Forced run `20260815T033232Z-55034` completed
-  consolidation successfully with the real executors and completed roll, then
-  aborted at prune before census or mutation because the outer scheduler's
-  live process lease correctly blocked the curator's attempted session lease.
-  The earliest verified divergence is the orchestration contract: prune was
-  launched with a parent-held environment that the isolated Copilot tool shell
-  cannot inherit, while its scheduled-live runbook independently requires a
-  fresh lease. The current successor releases the scheduler lease only at the
-  prune phase boundary; another owner winning that handoff still causes a
-  fail-closed curator abort.
+- **Latest scheduled-live evidence:** installed successor `ded281f` completed
+  consolidation and roll in forced run `20260815T045745Z-23141`, released the
+  scheduler lease at the prune boundary, and entered the real curator. Prune
+  then aborted before census or mutation with
+  `recovery-state path is not configured`. The earliest verified divergence
+  was the curator's use of the remote personal-skill transaction initializer
+  as its whole-review lease. That initializer correctly requires receiver-only
+  `CURATOR_REMOTE_*` configuration and is not a mini-local lease API. The
+  current delta supplies the dedicated local review-session contract instead
+  of exporting receiver configuration into the agent shell.
 - **CHK-04 closure:** the final MacBook live proof found five plugin packages,
   three enabled packages, complete capability inventories, and zero unresolved
   mappings. The estate suite passed 44 tests; core, receiver transport,

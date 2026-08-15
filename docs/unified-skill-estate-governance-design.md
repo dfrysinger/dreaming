@@ -434,8 +434,10 @@ restore operations for one plugin cannot be applied out of order.
 1. The mini scheduler acquires the existing writer lease for consolidation and
    roll. Immediately before the agent-owned curator phase, it releases that
    lease; the curator must acquire a fresh exclusive lease before census,
-   reporting, or mutation. If another owner wins the handoff race, curation
-   aborts fail closed.
+   reporting, or mutation through `curator-run.py estate-session-begin`, renew
+   it during the review, and release it through `estate-session-finish`. This
+   review lease is not a personal-skill mutation transaction. If another owner
+   wins the handoff race, curation aborts fail closed.
 2. It requests and verifies the MacBook census.
 3. It imports or refreshes estate records and authority classes.
 4. It schedules bounded evaluations and builds a proposed estate.

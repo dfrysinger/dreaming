@@ -17,7 +17,12 @@ SEQUENCE:
    `~/.copilot/skill-state/skill-review/disable-daemon` exists, curator state is
    paused, an estate recovery fence exists, or the shared writer lease cannot
    be acquired unambiguously, print `DREAM_PASS_RESULT: aborted <reason>` and
-   stop without mutation.
+   stop without mutation. Acquire the lease with
+   `curator-run.py estate-session-begin`; do not use `begin`, a remote request,
+   or a mutation plan merely to hold the review lease. Renew it with
+   `estate-session-renew` during long review work and always release it with
+   `estate-session-finish --status complete|aborted` before printing the final
+   sentinel.
 2. **Refresh authority.** Run
    `$DREAMING_REPO_ROOT/skills/skill-review/scripts/dreaming-core.py census`.
    Require a complete bounded scope, zero unresolved mappings, the configured

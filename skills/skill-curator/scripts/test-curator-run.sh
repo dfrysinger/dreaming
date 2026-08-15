@@ -82,8 +82,10 @@ init_fixture() {
   RUNS="$STATE/curator-runs"
   export SKILLS_REVIEW_STATE_DIR="$STATE"
   mkdir -p "$PUBLIC/skills" "$PUBLIC/.claude-plugin" \
-    "$PUBLIC/.codex-plugin" "$LOCAL" "$STATE" "$PLISTS"
+    "$PUBLIC/.codex-plugin" "$LOCAL" "$STATE/estate-action" "$PLISTS"
   printf '{"paused":false}\n' > "$CASE/curator.json"
+  printf '{"recovery_state":"%s"}\n' "$CASE/estate-recovery-required.json" \
+    > "$STATE/estate-action/config.json"
   git -C "$PUBLIC" init -q -b main
   git -C "$LOCAL" init -q -b main
   for root in "$PUBLIC" "$LOCAL"; do
@@ -124,6 +126,32 @@ run_curator() {
   CURATOR_DEPENDENCY_SCANNER="${CURATOR_DEPENDENCY_SCANNER:-$SCRIPT_DIR/scheduled-skill-deps.py}" \
   SKILLS_LOCK_DIR="$STATE/writer-lock.sqlite" \
     "$RUNNER" "$@"
+}
+
+test_estate_session_lease() {
+  local session
+  session="$(run_curator estate-session-begin --run-id estate-review-fixture)"
+  [[ "$session" == "estate-review-fixture" ]] ||
+    fail "estate session begin returned the wrong ID"
+  run_curator estate-session-renew --run "$session"
+  if run_curator estate-session-begin --run-id competing-estate-review >/dev/null 2>&1; then
+    fail "competing estate session acquired the writer lease"
+  fi
+  touch "$CASE/estate-recovery-required.json"
+  if run_curator estate-session-renew --run "$session" >/dev/null 2>&1; then
+    fail "estate session renewed while recovery was required"
+  fi
+  run_curator estate-session-finish --run "$session" --status aborted
+  rm -f "$CASE/estate-recovery-required.json"
+
+  run_curator estate-session-begin --run-id next-estate-review >/dev/null
+  run_curator estate-session-finish --run next-estate-review --status complete
+
+  touch "$CASE/estate-recovery-required.json"
+  if run_curator estate-session-begin --run-id fenced-estate-review >/dev/null 2>&1; then
+    fail "estate session began while recovery was required"
+  fi
+  rm -f "$CASE/estate-recovery-required.json"
 }
 
 archive_skill() {
@@ -1083,6 +1111,11 @@ fi
 rm -rf "$LOCAL/external-drift"
 run_curator rollback --run "$RUN_ID"
 echo "PASS: own inventory mutations revalidate while external drift is refused"
+
+CASE="$TMP/estate-session"
+init_fixture "$CASE"
+test_estate_session_lease
+echo "PASS: estate review session owns, renews, releases, and fences the writer lease"
 
 CASE="$TMP/ambiguous"
 init_fixture "$CASE"
