@@ -81,16 +81,16 @@ met.
   `renamex_np(..., RENAME_SWAP)` to retain the exact displaced settings inode;
   unsupported volumes and unqualified plugin source classes remain
   report-only.
-- **Current phase:** installed authentication gate before final whole-estate
-  proof. The dependency-inventory successor passed exact-generation
-  certification, then forced run `20260815T081229Z-71193` completed the census
-  and 24 transcript reviews before Copilot returned an empty result for the
-  next review. The earliest divergence was an absent Mac mini Copilot login
-  hidden by a doctor that checked availability but not authentication.
-  Successor `c4ae5de` fails closed with `authentication-required` through an
-  exact structured authentication canary. It is installed behind the halt
-  switch and is gated on the user completing Copilot login before its single
-  exact-generation certification run.
+- **Current phase:** bounded-snapshot successor installation before the final
+  whole-estate proof. The authenticated and certified `c4ae5de` generation was
+  enabled, then forced run `20260817T021221Z-93348` again completed the census
+  and 24 transcript reviews before the same 431 KB immutable snapshot produced
+  `malformed-executor-result`. Exact public-adapter replay reproduced the
+  failure, while replay of the newest contiguous 100 KB event suffix passed
+  with a complete structured result. Successor `7cc9b44` makes 100 KB the
+  shared source, generated-config, core, and dashboard boundary. It must be
+  installed behind the halt switch, certified once, enabled through the
+  managed installer, and proven by one complete forced weekly run.
 - **Implementation order:** census and identity model; estate dashboard and
   unresolved mappings; evaluation and recommendations; remote personal-skill
   archive/restore; atomic settings transaction and source qualification;
@@ -131,12 +131,12 @@ met.
   the shipped dashboard LaunchAgent root. Commit `c4ae5de` adds the fail-closed
   Copilot authentication canary and rejects both missing authentication and
   output that merely echoes the requested sentinel.
-- **Installed state:** the Mac mini is halted on the activation containing
-  runtime successor `c4ae5de`; later baton-only commits do not change its
-  executable inputs. The installed restricted doctor reports
-  `authentication-required`, as intended. Exact-generation certification,
-  enablement, and the forced weekly proof remain gated on successful user
-  authentication. The dashboard remains available.
+- **Installed state:** activation generation
+  `20260815T085144Z-install-91788` containing runtime successor `c4ae5de` is
+  enabled and authenticated. Later baton-only commits do not change its
+  executable inputs. The failed proof left every recovery fence absent and no
+  worker running. Executable successor `7cc9b44` is not installed or certified
+  yet. The dashboard remains available.
 - **Live-proof status:** CHK-09 passed. The installed Mac mini collected a
   complete fixture-inclusive census, archived the real MacBook fixture through
   the governed receiver, returned the identical result on retry, restored the
@@ -206,6 +206,15 @@ met.
   interpreted as a skill-relative reference under its existing contract.
   Splitting the path components preserves runtime behavior and removes that
   false reference.
+- **Bounded-snapshot evidence:** forced run `20260817T021221Z-93348` recorded a
+  complete 93-capability MacBook census and accepted 24 reviews before the
+  25th failed as `malformed-executor-result`. Roll and prune did not start; no
+  recommendation or estate mutation occurred; all three recovery fences were
+  absent afterward. The failing immutable snapshot contained 130 events and
+  431,333 bytes. Exact public-adapter replay failed, while its newest
+  contiguous 100 KB suffix retained 47 events and returned a complete
+  `discard` result. Targeted validation for successor `7cc9b44` passed 25
+  vendor-adapter tests, 36 core tests, and 120 dashboard checks.
 - **CHK-04 closure:** the final MacBook live proof found five plugin packages,
   three enabled packages, complete capability inventories, and zero unresolved
   mappings. The estate suite passed 44 tests; core, receiver transport,
