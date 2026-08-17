@@ -18,6 +18,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest import mock
 
@@ -961,6 +962,254 @@ class EstateCensusTest(unittest.TestCase):
                 contexts=[],
                 collected_at="fixture",
             )
+
+    def usage_census(self, mappings: list[tuple[str, str]]) -> dict:
+        snapshot = {
+            "schema_version": 1,
+            "host_id": "fixture-macbook",
+            "collected_at": "2026-08-17T18:00:00+00:00",
+            "scope": {"complete": True},
+            "enabled_instances": [
+                {
+                    "runtime_name": name,
+                    "runtime_enabled": True,
+                    "canonical_capability_id": capability_id,
+                }
+                for name, capability_id in mappings
+            ],
+        }
+        return {**snapshot, "snapshot_sha256": module.digest(snapshot)}
+
+    def write_usage_events(self, session: str, events: list[dict]) -> Path:
+        path = self.case / "sessions" / session / "events.jsonl"
+        path.parent.mkdir(parents=True)
+        path.write_text(
+            "".join(json.dumps(event) + "\n" for event in events),
+            encoding="utf-8",
+        )
+        return path
+
+    def usage_event(
+        self,
+        event_type: str,
+        timestamp: str,
+        *,
+        call_id: str = "call-1",
+        name: str = "fixture-skill",
+        success: bool = True,
+    ) -> dict:
+        data = {"toolCallId": call_id}
+        if event_type == "tool.execution_start":
+            data.update({"toolName": "skill", "arguments": {"skill": name}})
+        elif event_type == "tool.execution_complete":
+            data["success"] = success
+        return {"type": event_type, "timestamp": timestamp, "data": data}
+
+    def test_usage_aggregates_only_successful_correlated_skill_calls(self) -> None:
+        capability_id = "sha256:" + "1" * 64
+        self.write_usage_events(
+            "one",
+            [
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-16T10:00:00+00:00",
+                    call_id="success-1",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-16T10:00:01+00:00",
+                    call_id="success-1",
+                ),
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T10:00:00+00:00",
+                    call_id="failed",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T10:00:01+00:00",
+                    call_id="failed",
+                    success=False,
+                ),
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T11:00:00+00:00",
+                    call_id="success-2",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T11:00:01+00:00",
+                    call_id="success-2",
+                ),
+            ],
+        )
+        usage = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            self.case / "sessions",
+            collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
+            max_sessions=10,
+            max_bytes=100_000,
+        )
+        self.assertTrue(usage["coverage"]["complete"])
+        self.assertEqual(usage["coverage"]["sessions_scanned"], 1)
+        self.assertEqual(
+            usage["canonical_usage"],
+            [
+                {
+                    "canonical_capability_id": capability_id,
+                    "uses_7d": 2,
+                    "uses_30d": 2,
+                    "uses_90d": 2,
+                    "uses_total": 2,
+                    "last_successful_invocation": "2026-08-17T11:00:01+00:00",
+                }
+            ],
+        )
+        self.assertEqual(usage["unattributed"], [])
+
+    def test_usage_discards_invalid_sessions_and_never_scans_nested_artifacts(self) -> None:
+        capability_id = "sha256:" + "2" * 64
+        malformed = self.write_usage_events(
+            "malformed",
+            [
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T10:00:00+00:00",
+                )
+            ],
+        )
+        with malformed.open("a", encoding="utf-8") as handle:
+            handle.write("{\n")
+        nested = self.case / "sessions" / "container" / "files" / "retained"
+        nested.mkdir(parents=True)
+        (nested / "events.jsonl").write_text(
+            json.dumps(
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T10:00:01+00:00",
+                )
+            ),
+            encoding="utf-8",
+        )
+        usage = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            self.case / "sessions",
+            collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
+            max_sessions=10,
+            max_bytes=100_000,
+        )
+        self.assertFalse(usage["coverage"]["complete"])
+        self.assertEqual(usage["canonical_usage"][0]["uses_total"], 0)
+        self.assertEqual(len(usage["coverage"]["failures"]), 1)
+        failure = usage["coverage"]["failures"][0]
+        self.assertRegex(failure["session_id"], r"^sha256:[0-9a-f]{64}$")
+        self.assertNotEqual(
+            failure["session_id"], "malformed"
+        )
+        self.assertNotIn("events.jsonl", json.dumps(usage))
+
+    def test_usage_rejects_duplicate_future_and_ambiguous_attribution(self) -> None:
+        first_id = "sha256:" + "3" * 64
+        second_id = "sha256:" + "4" * 64
+        self.write_usage_events(
+            "duplicate",
+            [
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T10:00:00+00:00",
+                    call_id="duplicate",
+                ),
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T10:00:01+00:00",
+                    call_id="duplicate",
+                ),
+            ],
+        )
+        self.write_usage_events(
+            "future",
+            [
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-18T10:00:00+00:00",
+                    call_id="future",
+                )
+            ],
+        )
+        self.write_usage_events(
+            "ambiguous",
+            [
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T12:00:00+00:00",
+                    call_id="ambiguous",
+                    name="shared",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T12:00:01+00:00",
+                    call_id="ambiguous",
+                ),
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T13:00:00+00:00",
+                    call_id="missing",
+                    name="missing",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T13:00:01+00:00",
+                    call_id="missing",
+                ),
+            ],
+        )
+        usage = module.collect_usage(
+            self.usage_census(
+                [("shared", first_id), ("shared", second_id)]
+            ),
+            self.case / "sessions",
+            collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
+            max_sessions=10,
+            max_bytes=100_000,
+        )
+        self.assertFalse(usage["coverage"]["complete"])
+        self.assertEqual(
+            {(item["name"], item["reason"]) for item in usage["unattributed"]},
+            {("shared", "conflicting_mapping"), ("missing", "unmapped")},
+        )
+        self.assertTrue(
+            all(item["uses_total"] == 0 for item in usage["canonical_usage"])
+        )
+        self.assertEqual(len(usage["coverage"]["failures"]), 2)
+
+    def test_usage_bounds_are_incomplete_not_zero_evidence(self) -> None:
+        capability_id = "sha256:" + "5" * 64
+        for session in ("one", "two"):
+            self.write_usage_events(
+                session,
+                [
+                    self.usage_event(
+                        "tool.execution_start",
+                        "2026-08-17T10:00:00+00:00",
+                        call_id=session,
+                    ),
+                    self.usage_event(
+                        "tool.execution_complete",
+                        "2026-08-17T10:00:01+00:00",
+                        call_id=session,
+                    ),
+                ],
+            )
+        usage = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            self.case / "sessions",
+            collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
+            max_sessions=1,
+            max_bytes=100_000,
+        )
+        self.assertFalse(usage["coverage"]["complete"])
+        self.assertEqual(usage["coverage"]["bound_reached"], "max_sessions")
+        self.assertEqual(usage["canonical_usage"][0]["uses_total"], 1)
 
     def test_plugin_capabilities_cover_non_skill_surfaces(self) -> None:
         plugin = self.case / "plugin"

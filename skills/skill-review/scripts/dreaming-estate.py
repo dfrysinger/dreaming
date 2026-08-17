@@ -8,8 +8,10 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
+import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
@@ -965,6 +967,333 @@ def reconcile(
         "evidence": evidence or {},
     }
     return {**snapshot, "snapshot_sha256": digest(snapshot)}
+
+
+def normalize_skill_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    normalized = unicodedata.normalize("NFC", value).strip().casefold()
+    return normalized if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", normalized) else None
+
+
+def parse_usage_time(value: Any) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc)
+
+
+def opaque_session_id(name: str) -> str:
+    return "sha256:" + hashlib.sha256(name.encode("utf-8")).hexdigest()
+
+
+def parse_usage_session(
+    raw: bytes, *, collected_at: datetime
+) -> tuple[list[tuple[str, datetime]], datetime | None]:
+    starts: dict[str, str] = {}
+    completions: dict[str, tuple[bool, datetime]] = {}
+    earliest: datetime | None = None
+    try:
+        text = raw.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise EstateError("usage_session_invalid_utf8") from error
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        try:
+            event = json.loads(line)
+        except json.JSONDecodeError as error:
+            raise EstateError("usage_session_malformed_json") from error
+        if not isinstance(event, dict):
+            raise EstateError("usage_session_event_not_object")
+        timestamp = parse_usage_time(event.get("timestamp"))
+        if timestamp is None:
+            raise EstateError("usage_session_invalid_timestamp")
+        if timestamp > collected_at:
+            raise EstateError("usage_session_future_timestamp")
+        earliest = timestamp if earliest is None else min(earliest, timestamp)
+        event_type = event.get("type")
+        data = event.get("data")
+        if event_type == "tool.execution_start" and isinstance(data, dict):
+            if str(data.get("toolName", "")).casefold() != "skill":
+                continue
+            call_id = data.get("toolCallId")
+            arguments = data.get("arguments")
+            name = (
+                normalize_skill_name(arguments.get("skill"))
+                if isinstance(arguments, dict)
+                else None
+            )
+            if not isinstance(call_id, str) or not call_id or name is None:
+                raise EstateError("usage_session_invalid_skill_start")
+            if call_id in starts:
+                raise EstateError("usage_session_duplicate_skill_start")
+            starts[call_id] = name
+        elif event_type == "tool.execution_complete" and isinstance(data, dict):
+            call_id = data.get("toolCallId")
+            if not isinstance(call_id, str) or not call_id:
+                continue
+            if call_id in completions:
+                raise EstateError("usage_session_duplicate_completion")
+            completions[call_id] = (data.get("success") is True, timestamp)
+    successful = [
+        (name, completions[call_id][1])
+        for call_id, name in starts.items()
+        if call_id in completions and completions[call_id][0]
+    ]
+    return successful, earliest
+
+
+def usage_name_mappings(census: dict[str, Any]) -> dict[str, set[str]]:
+    mappings: dict[str, set[str]] = {}
+    for item in census.get("enabled_instances", []):
+        if not isinstance(item, dict) or item.get("runtime_enabled") is not True:
+            continue
+        name = normalize_skill_name(item.get("runtime_name"))
+        capability_id = item.get("canonical_capability_id")
+        if name is None or not isinstance(capability_id, str):
+            continue
+        mappings.setdefault(name, set()).add(capability_id)
+    return mappings
+
+
+def collect_usage(
+    census: dict[str, Any],
+    session_root: Path,
+    *,
+    collected_at: datetime,
+    max_sessions: int,
+    max_bytes: int,
+) -> dict[str, Any]:
+    mappings = usage_name_mappings(census)
+    counts: dict[str, Counter[str]] = {}
+    last_used: dict[str, datetime] = {}
+    unattributed: dict[tuple[str, str], Counter[str]] = {}
+    failures: list[dict[str, str]] = []
+    sessions_scanned = 0
+    bytes_scanned = 0
+    earliest_retained: datetime | None = None
+    complete = True
+    bound_reached: str | None = None
+
+    def fail(session: str, reason: str) -> None:
+        nonlocal complete
+        complete = False
+        failures.append({"session_id": opaque_session_id(session), "reason": reason})
+
+    try:
+        if session_root.is_symlink() or not session_root.is_dir():
+            raise OSError("session root is unavailable")
+        children = sorted(session_root.iterdir(), key=lambda path: path.name)
+    except OSError:
+        children = []
+        complete = False
+        failures.append(
+            {"session_id": opaque_session_id("session-root"), "reason": "session_root_unavailable"}
+        )
+
+    for session in children:
+        if session.is_symlink():
+            fail(session.name, "session_symlink")
+            continue
+        try:
+            if not session.is_dir():
+                continue
+        except OSError:
+            fail(session.name, "session_unreadable")
+            continue
+        events = session / "events.jsonl"
+        if events.is_symlink():
+            fail(session.name, "events_symlink")
+            continue
+        try:
+            before = events.stat()
+        except FileNotFoundError:
+            continue
+        except OSError:
+            fail(session.name, "events_unreadable")
+            continue
+        if not stat.S_ISREG(before.st_mode):
+            fail(session.name, "events_not_regular")
+            continue
+        if sessions_scanned >= max_sessions:
+            complete = False
+            bound_reached = "max_sessions"
+            break
+        if bytes_scanned + before.st_size > max_bytes:
+            complete = False
+            bound_reached = "max_bytes"
+            break
+        flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        try:
+            descriptor = os.open(events, flags)
+            try:
+                opened = os.fstat(descriptor)
+                if (
+                    not stat.S_ISREG(opened.st_mode)
+                    or opened.st_dev != before.st_dev
+                    or opened.st_ino != before.st_ino
+                    or opened.st_size != before.st_size
+                ):
+                    raise OSError("events changed before read")
+                with os.fdopen(descriptor, "rb", closefd=False) as handle:
+                    raw = handle.read(before.st_size + 1)
+                after = os.fstat(descriptor)
+                if (
+                    len(raw) != before.st_size
+                    or after.st_size != before.st_size
+                    or after.st_mtime_ns != before.st_mtime_ns
+                ):
+                    raise OSError("events changed during read")
+            finally:
+                os.close(descriptor)
+        except OSError:
+            fail(session.name, "events_changed_or_unreadable")
+            continue
+        sessions_scanned += 1
+        bytes_scanned += len(raw)
+        try:
+            successful, session_earliest = parse_usage_session(
+                raw, collected_at=collected_at
+            )
+        except EstateError as error:
+            fail(session.name, str(error))
+            continue
+        if session_earliest is not None:
+            earliest_retained = (
+                session_earliest
+                if earliest_retained is None
+                else min(earliest_retained, session_earliest)
+            )
+        session_counts: dict[str, Counter[str]] = {}
+        session_last: dict[str, datetime] = {}
+        session_unattributed: dict[tuple[str, str], Counter[str]] = {}
+        for name, timestamp in successful:
+            capability_ids = mappings.get(name, set())
+            age_seconds = (collected_at - timestamp).total_seconds()
+            windows = Counter(
+                {
+                    "uses_total": 1,
+                    "uses_7d": int(age_seconds <= 7 * 86400),
+                    "uses_30d": int(age_seconds <= 30 * 86400),
+                    "uses_90d": int(age_seconds <= 90 * 86400),
+                }
+            )
+            if len(capability_ids) == 1:
+                capability_id = next(iter(capability_ids))
+                session_counts.setdefault(capability_id, Counter()).update(windows)
+                session_last[capability_id] = max(
+                    timestamp, session_last.get(capability_id, timestamp)
+                )
+            else:
+                reason = "unmapped" if not capability_ids else "conflicting_mapping"
+                session_unattributed.setdefault((name, reason), Counter()).update(windows)
+        for capability_id, value in session_counts.items():
+            counts.setdefault(capability_id, Counter()).update(value)
+        for capability_id, value in session_last.items():
+            last_used[capability_id] = max(
+                value, last_used.get(capability_id, value)
+            )
+        for key, value in session_unattributed.items():
+            unattributed.setdefault(key, Counter()).update(value)
+
+    if unattributed:
+        complete = False
+    canonical_ids = sorted(
+        {
+            capability_id
+            for capability_ids in mappings.values()
+            for capability_id in capability_ids
+        }
+    )
+    usage_rows = []
+    for capability_id in canonical_ids:
+        value = counts.get(capability_id, Counter())
+        usage_rows.append(
+            {
+                "canonical_capability_id": capability_id,
+                "uses_7d": value["uses_7d"],
+                "uses_30d": value["uses_30d"],
+                "uses_90d": value["uses_90d"],
+                "uses_total": value["uses_total"],
+                "last_successful_invocation": (
+                    last_used[capability_id].isoformat()
+                    if capability_id in last_used
+                    else None
+                ),
+            }
+        )
+    snapshot = {
+        "schema_version": 1,
+        "host_id": census.get("host_id"),
+        "collected_at": census.get("collected_at"),
+        "census_snapshot_sha256": census.get("snapshot_sha256"),
+        "source": "copilot_local_session_state",
+        "coverage": {
+            "complete": complete,
+            "earliest_retained_event": (
+                earliest_retained.isoformat() if earliest_retained else None
+            ),
+            "sessions_scanned": sessions_scanned,
+            "bytes_scanned": bytes_scanned,
+            "max_sessions": max_sessions,
+            "max_bytes": max_bytes,
+            "bound_reached": bound_reached,
+            "failures": failures,
+        },
+        "canonical_usage": usage_rows,
+        "unattributed": [
+            {
+                "name": name,
+                "reason": reason,
+                "uses_7d": value["uses_7d"],
+                "uses_30d": value["uses_30d"],
+                "uses_90d": value["uses_90d"],
+                "uses_total": value["uses_total"],
+            }
+            for (name, reason), value in sorted(unattributed.items())
+        ],
+    }
+    return {**snapshot, "snapshot_sha256": digest(snapshot)}
+
+
+def collect_bundle(config: dict[str, Any]) -> dict[str, Any]:
+    census = collect(config)
+    collected_at = parse_usage_time(census.get("collected_at"))
+    if collected_at is None:
+        raise EstateError("census collected_at is invalid")
+    target_home = Path(config.get("target_home", Path.home())).expanduser().resolve()
+    session_root = Path(
+        config.get("copilot_session_root", target_home / ".copilot/session-state")
+    ).expanduser()
+    max_sessions = config.get("usage_max_sessions", 10_000)
+    max_bytes = config.get("usage_max_bytes", 1024 * 1024 * 1024)
+    if (
+        not isinstance(max_sessions, int)
+        or isinstance(max_sessions, bool)
+        or max_sessions < 1
+        or not isinstance(max_bytes, int)
+        or isinstance(max_bytes, bool)
+        or max_bytes < 1
+    ):
+        raise EstateError("usage bounds must be positive integers")
+    return {
+        "census": census,
+        "usage": collect_usage(
+            census,
+            session_root,
+            collected_at=collected_at,
+            max_sessions=max_sessions,
+            max_bytes=max_bytes,
+        ),
+    }
 
 
 def run_json(command: list[str], cwd: Path) -> Any:

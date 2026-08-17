@@ -607,6 +607,14 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
                 "DREAMING_COPILOT_ESTATE_BIN",
                 os.environ.get("DREAMING_COPILOT_BIN", "copilot"),
             ),
+            "--usage-max-sessions",
+            str(positive_integer("DREAMING_ESTATE_USAGE_MAX_SESSIONS", "10000")),
+            "--usage-max-bytes",
+            str(
+                positive_integer(
+                    "DREAMING_ESTATE_USAGE_MAX_BYTES", str(1024 * 1024 * 1024)
+                )
+            ),
             "--expected-receiver-id",
             estate_receiver_id,
             "--expected-receiver-sha",
@@ -626,6 +634,11 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
         if project_contexts:
             estate_argv.extend(
                 ["--remote-project-contexts-file", project_contexts]
+            )
+        session_root = os.environ.get("DREAMING_COPILOT_ESTATE_SESSION_ROOT")
+        if session_root:
+            estate_argv.extend(
+                ["--remote-copilot-session-root", session_root]
             )
         config["estate_census"] = {
             "argv": estate_argv,

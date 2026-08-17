@@ -183,6 +183,54 @@ class RuntimeTest(unittest.TestCase):
         )
         self.assertTrue(receipt.is_file())
 
+    def test_estate_usage_receipt_is_separate_and_census_bound(self) -> None:
+        core = self.core({("fake", "executor")})
+        census_snapshot = {
+            "schema_version": 1,
+            "host_id": "macbook",
+            "collected_at": "2026-08-17T18:00:00+00:00",
+            "scope": {"complete": True},
+        }
+        census = {
+            **census_snapshot,
+            "snapshot_sha256": runtime_module.digest(census_snapshot),
+        }
+        usage_snapshot = {
+            "schema_version": 1,
+            "host_id": census["host_id"],
+            "collected_at": census["collected_at"],
+            "census_snapshot_sha256": census["snapshot_sha256"],
+            "coverage": {"complete": True},
+            "canonical_usage": [],
+            "unattributed": [],
+        }
+        usage = {
+            **usage_snapshot,
+            "snapshot_sha256": runtime_module.digest(usage_snapshot),
+        }
+        receiver = {
+            "receiver_id": "fixture",
+            "receiver_sha256": "a" * 64,
+            "collector_sha256": "b" * 64,
+        }
+        core.record_estate_census(census, receiver)
+        first = core.record_estate_usage(usage, receiver, census)
+        second = core.record_estate_usage(usage, receiver, census)
+        self.assertEqual(first, second)
+        current = json.loads(self.paths.estate_usage_current.read_text())
+        self.assertEqual(
+            current["census_snapshot_sha256"], census["snapshot_sha256"]
+        )
+        self.assertTrue(self.paths.estate_current.is_file())
+        altered = dict(usage)
+        altered["host_id"] = "other-host"
+        altered_snapshot = {
+            key: value for key, value in altered.items() if key != "snapshot_sha256"
+        }
+        altered["snapshot_sha256"] = runtime_module.digest(altered_snapshot)
+        with self.assertRaisesRegex(RuntimeFailure, "census binding"):
+            core.record_estate_usage(altered, receiver, census)
+
     def initialize_git_repo(self) -> None:
         subprocess.run(
             ["git", "-C", str(self.paths.skills), "init", "-q"],

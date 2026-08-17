@@ -77,6 +77,50 @@ function badge(value) {
   return `<span class="badge ${className}">${esc(value)}</span>`;
 }
 
+function estateSource(item) {
+  if (item.root_class === "personal") return "Personal installation";
+  if (item.root_class === "plugin") return `Plugin · ${text(item.source, "unknown package")}`;
+  return text(item.source || item.root_class);
+}
+
+function authorityLabel(value) {
+  return ({
+    cli_builtin: "Built in",
+    dreaming_managed: "Dreaming managed",
+    legacy_machine: "Machine-created",
+    plugin_managed: "Plugin managed",
+    unknown_provenance: "Unknown; protected",
+    user_protected: "User protected",
+  })[value] || text(value).replaceAll("_", " ");
+}
+
+function originLabel(value) {
+  return ({
+    verified: "Verified origin",
+    protected: "Protected",
+    insufficient: "Not enough evidence",
+    invalid: "Invalid evidence",
+    unknown: "Unknown",
+  })[value] || text(value).replaceAll("_", " ");
+}
+
+function recentUse(item) {
+  if (item.usage_state === "unavailable") return badge("Usage unavailable");
+  const counts = `${number(item.uses_7d)} / ${number(item.uses_30d)} / ${number(item.uses_90d)}`;
+  if (item.usage_state === "incomplete") {
+    return item.uses_total > 0 ? `${esc(counts)} · ${badge("partial")}` : badge("Usage incomplete");
+  }
+  return esc(counts);
+}
+
+function lastUse(item) {
+  if (item.usage_state === "unavailable") return "Usage unavailable";
+  if (item.last_successful_invocation) {
+    return `${relative(item.last_successful_invocation)}${item.usage_state === "incomplete" ? " · partial" : ""}`;
+  }
+  return item.usage_state === "complete" ? "No use in retained history" : "Usage incomplete";
+}
+
 async function api(path) {
   if (!state.token) throw new Error("Open the dashboard with the dashboard-open installer command.");
   const response = await fetch(path, {
@@ -197,7 +241,8 @@ async function renderEstate() {
     <table><thead><tr><th>Target</th><th>Authority</th><th>Decision</th><th>Action</th><th>State</th><th>Evidence</th><th>Receipt</th><th>Observed</th></tr></thead><tbody>
       ${(actions.items || []).map(item => `<tr><td>${esc(item.target || "Unknown target")}</td><td>${badge(item.authority || "unknown")}</td><td>${esc(item.decision || "not recorded")}</td><td>${esc((item.kind || "recommendation").replaceAll("_"," "))}</td><td>${badge(item.status)}</td><td>${badge(item.evidence_state || (item.stale ? "stale" : "current"))}</td><td>${esc(item.receipt_sha256 ? `${item.receipt_sha256.slice(0,18)}…` : "none")}</td><td>${relative(item.at)}</td></tr>`).join("") || `<tr><td colspan="8">No governed decisions or actions recorded.</td></tr>`}
     </tbody></table></article>`;
-  view.innerHTML = `${header("Skill estate", "The complete bounded MacBook Copilot inventory. This view is read-only and never authorizes an action.", badge(data.status))}
+  const usage = data.usage || {status:"unavailable"};
+  view.innerHTML = `${header("Skill estate", "Enabled capabilities and diagnostic physical copies from the bounded MacBook Copilot inventory.", badge(data.status))}
     ${!data.available ? `<div class="notice">${esc(data.message)}</div><div class="grid split">${actionPanel}</div>` : `
     <div class="grid metrics">
       <article class="card"><div class="label">Physical instances</div><div class="metric">${number(totals.physical_instances)}</div><div class="submetric">${number(totals.physical_only_instances)} inactive, cached, or stale</div></article>
@@ -209,6 +254,8 @@ async function renderEstate() {
     </div>
     <div class="notice"><strong>Bounded scope:</strong> ${esc(data.scope?.label)} Registered: ${esc((data.scope?.registered_context_ids || []).join(", ") || "none")}. Outside claim: ${esc((data.scope?.outside_context_ids || []).join(", ") || "none")}.</div>
     <div class="notice"><strong>Verified source:</strong> receiver ${esc(data.receiver?.id || "unavailable")} · census receipt ${esc(data.receipt_sha256 ? `${data.receipt_sha256.slice(0,18)}…` : "unavailable")} · settings ${esc(data.settings_sha256 ? `${data.settings_sha256.slice(0,16)}…` : "hash unavailable")}.</div>
+    <div class="notice"><strong>Usage evidence:</strong> ${esc(usage.source || "Unavailable")} · ${badge(usage.status || "unavailable")} · collected ${usage.collected_at ? relative(usage.collected_at) : "not recorded"} · retained history starts ${usage.earliest_retained_event ? fullTime(usage.earliest_retained_event) : "unknown"} · ${number(usage.sessions_scanned)} sessions scanned. Missing or incomplete evidence is never shown as zero.</div>
+    <div class="notice"><strong>Personal means installation location, not authorship.</strong> Automation authority and origin evidence are shown separately.</div>
     <div class="grid split">
       <article class="panel"><div class="panel-head"><h2>Authority and provenance</h2></div><table><thead><tr><th>Class</th><th>Physical instances</th></tr></thead><tbody>
         ${Object.entries(data.authority_counts || {}).map(([name,count]) => `<tr><td>${badge(name)}</td><td>${number(count)}</td></tr>`).join("") || `<tr><td colspan="2">Unavailable</td></tr>`}
@@ -220,8 +267,11 @@ async function renderEstate() {
       <article class="panel full-span"><div class="panel-head"><h2>Plugins and complete capability sets</h2></div><table><thead><tr><th>Plugin</th><th>Version</th><th>State</th><th>Skills</th><th>Agents</th><th>Hooks</th><th>MCP</th><th>LSP</th><th>Inventory</th><th>Latest governance</th><th>Receipt</th></tr></thead><tbody>
         ${(data.plugins || []).map(item => `<tr><td>${esc(item.plugin_id)}</td><td>${esc(item.version)}</td><td>${badge(item.enabled ? "enabled" : "disabled")}</td><td>${number(item.capability_counts?.skills)}</td><td>${number(item.capability_counts?.agents)}</td><td>${number(item.capability_counts?.hooks)}</td><td>${number(item.capability_counts?.mcp_servers)}</td><td>${number(item.capability_counts?.lsp_servers)}</td><td>${badge(item.capability_inventory_complete ? `complete · ${capabilityTotal(item)}` : "incomplete")}</td><td>${item.latest_decision ? `${esc(item.latest_decision.decision || item.latest_decision.kind)} · ${badge(item.latest_decision.status)}` : "Not recorded"}</td><td>${esc(item.latest_decision?.receipt_sha256 ? `${item.latest_decision.receipt_sha256.slice(0,18)}…` : "none")}</td></tr>`).join("")}
       </tbody></table></article>
-      <article class="panel full-span"><div class="panel-head"><h2>Physical skill instances</h2><span>${number((data.instances || []).length)} shown</span></div><table><thead><tr><th>Skill</th><th>Source</th><th>Authority</th><th>Provenance</th><th>Effective state</th><th>Owner</th><th>Evaluation</th><th>Usage</th><th>Dependencies</th><th>Latest decision</th></tr></thead><tbody>
-        ${(data.instances || []).map(item => `<tr><td>${esc(item.skill_name)}</td><td>${esc(item.source || item.root_class)}</td><td>${badge(item.authority)}</td><td>${badge(item.provenance_status)}</td><td>${badge(item.effective_state)}</td><td>${esc(item.owner)}</td><td>${badge(item.evaluation_state || "not recorded")}</td><td>${badge(item.usage_complete === null ? "not recorded" : item.usage_complete ? "complete" : "incomplete")}</td><td>${badge(item.dependencies_complete === null ? "not recorded" : item.dependencies_complete ? "complete" : "incomplete")}</td><td>${item.latest_decision ? `${esc(item.latest_decision.decision)} · ${badge(item.latest_decision.status)}` : "Not recorded"}</td></tr>`).join("")}
+      <article class="panel full-span"><div class="panel-head"><h2>Enabled skills</h2><span>${number((data.enabled_skills || []).length)} canonical capabilities</span></div><table><thead><tr><th>Skill</th><th>Installed from</th><th>Automation authority</th><th>Origin evidence</th><th>Recent use (7d / 30d / 90d)</th><th>Last used</th><th>State</th><th>Latest decision</th></tr></thead><tbody>
+        ${(data.enabled_skills || []).map(item => `<tr><td>${esc(item.skill_name)}</td><td>${esc(estateSource(item))}</td><td>${badge(authorityLabel(item.authority))}</td><td>${badge(originLabel(item.provenance_status))}</td><td>${recentUse(item)}</td><td>${esc(lastUse(item))}</td><td>${badge(item.state)}</td><td>${item.latest_decision ? `${esc(item.latest_decision.decision)} · ${badge(item.latest_decision.status)}` : "Not recorded"}</td></tr>`).join("") || `<tr><td colspan="8">No enabled skills were mapped by the current census.</td></tr>`}
+      </tbody></table></article>
+      <article class="panel full-span"><div class="panel-head"><h2>Other physical copies</h2><span>${number((data.other_physical_copies || []).length)} diagnostic copies</span></div><table><thead><tr><th>Skill</th><th>Location</th><th>Reason</th><th>Automation authority</th><th>Origin evidence</th><th>Owner</th></tr></thead><tbody>
+        ${(data.other_physical_copies || []).map(item => `<tr><td>${esc(item.skill_name)}</td><td>${esc(estateSource(item))}</td><td>${esc(item.reason)}</td><td>${badge(authorityLabel(item.authority))}</td><td>${badge(originLabel(item.provenance_status))}</td><td>${esc(item.owner)}</td></tr>`).join("") || `<tr><td colspan="6">No inactive, cached, stale, or duplicate physical copies.</td></tr>`}
       </tbody></table></article>
     </div>`}`;
 }

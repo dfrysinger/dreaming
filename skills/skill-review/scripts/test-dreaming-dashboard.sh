@@ -152,14 +152,14 @@ estate_snapshot = {
         "dreaming_managed": 0,
         "legacy_machine": 0,
         "plugin_managed": 1,
-        "unknown_provenance": 1,
+        "unknown_provenance": 2,
         "user_protected": 0,
     },
     "root_class_counts": {
         "builtin": 0,
         "custom": 0,
         "dreaming_publisher": 0,
-        "personal": 1,
+        "personal": 2,
         "plugin": 1,
         "project": 0,
     },
@@ -210,8 +210,36 @@ estate_snapshot = {
         },
         "instance_id": "sha256:" + "3" * 64,
         "canonical_capability_id": "sha256:" + "4" * 64,
+    }, {
+        "skill_name": "fixture-skill",
+        "root_class": "personal",
+        "authority": "unknown_provenance",
+        "physical_only": True,
+        "owner": "/private/stale/path",
+        "instance_id": "sha256:" + "5" * 64,
+        "canonical_capability_id": "sha256:" + "6" * 64,
+        "provenance": {
+            "status": "insufficient",
+            "basis": "no_evidence",
+        },
     }],
-    "enabled_instances": [],
+    "enabled_instances": [{
+        "context_id": "user",
+        "runtime_name": "fixture-skill",
+        "runtime_source": "personal",
+        "runtime_enabled": True,
+        "instance_id": "sha256:" + "1" * 64,
+        "canonical_capability_id": "sha256:" + "2" * 64,
+        "authority": "unknown_provenance",
+    }, {
+        "context_id": "user",
+        "runtime_name": "plugin-skill",
+        "runtime_source": "plugin",
+        "runtime_enabled": True,
+        "instance_id": "sha256:" + "3" * 64,
+        "canonical_capability_id": "sha256:" + "4" * 64,
+        "authority": "plugin_managed",
+    }],
     "unresolved_mappings": [],
     "plugins": [{
         "plugin_id": "fixture@market",
@@ -260,6 +288,66 @@ estate_receipts.mkdir()
         "receipt_sha256": estate_receipt_sha,
         "snapshot_sha256": estate_census["snapshot_sha256"],
         "census": estate_census,
+    }),
+    encoding="utf-8",
+)
+usage_snapshot = {
+    "schema_version": 1,
+    "host_id": estate_snapshot["host_id"],
+    "collected_at": estate_snapshot["collected_at"],
+    "census_snapshot_sha256": estate_census["snapshot_sha256"],
+    "source": "copilot_local_session_state",
+    "coverage": {
+        "complete": True,
+        "earliest_retained_event": "2026-07-01T00:00:00+00:00",
+        "sessions_scanned": 12,
+        "bytes_scanned": 4096,
+        "max_sessions": 100,
+        "max_bytes": 100000,
+        "bound_reached": None,
+        "failures": [],
+    },
+    "canonical_usage": [{
+        "canonical_capability_id": "sha256:" + "2" * 64,
+        "uses_7d": 4,
+        "uses_30d": 5,
+        "uses_90d": 6,
+        "uses_total": 7,
+        "last_successful_invocation": "2026-08-13T11:00:00+00:00",
+    }, {
+        "canonical_capability_id": "sha256:" + "4" * 64,
+        "uses_7d": 0,
+        "uses_30d": 0,
+        "uses_90d": 0,
+        "uses_total": 0,
+        "last_successful_invocation": None,
+    }],
+    "unattributed": [],
+}
+estate_usage = {
+    **usage_snapshot,
+    "snapshot_sha256": dashboard.sha(usage_snapshot),
+}
+usage_receipt = {
+    "schema_version": 1,
+    "snapshot_sha256": estate_usage["snapshot_sha256"],
+    "census_snapshot_sha256": estate_census["snapshot_sha256"],
+    "receiver": estate_receipt["receiver"],
+    "usage": estate_usage,
+}
+usage_receipt_sha = dashboard.sha(usage_receipt)
+usage_receipts = state / "estate-usage-receipts"
+usage_receipts.mkdir()
+(usage_receipts / f"{usage_receipt_sha.removeprefix('sha256:')}.json").write_text(
+    json.dumps(usage_receipt), encoding="utf-8"
+)
+(state / "estate-usage-current.json").write_text(
+    json.dumps({
+        "schema_version": 1,
+        "receipt_sha256": usage_receipt_sha,
+        "snapshot_sha256": estate_usage["snapshot_sha256"],
+        "census_snapshot_sha256": estate_census["snapshot_sha256"],
+        "usage": estate_usage,
     }),
     encoding="utf-8",
 )
@@ -946,16 +1034,24 @@ try:
             "dreaming_managed": 0,
             "legacy_machine": 0,
             "plugin_managed": 1,
-            "unknown_provenance": 1,
+            "unknown_provenance": 2,
             "user_protected": 0,
         }
         and estate_view["plugins"][0]["capability_counts"]["skills"] == 1
         and estate_view["plugins"][0]["latest_decision"]["status"]
         == "committed"
-        and estate_view["instances"][0]["provenance_status"] == "invalid"
-        and estate_view["instances"][0]["source"] == "personal"
-        and estate_view["instances"][1]["source"]
+        and len(estate_view["enabled_skills"]) == 2
+        and len(estate_view["other_physical_copies"]) == 1
+        and estate_view["enabled_skills"][0]["skill_name"] == "fixture-skill"
+        and estate_view["enabled_skills"][0]["uses_7d"] == 4
+        and estate_view["enabled_skills"][0]["uses_30d"] == 5
+        and estate_view["enabled_skills"][0]["uses_90d"] == 6
+        and estate_view["enabled_skills"][0]["usage_state"] == "complete"
+        and estate_view["enabled_skills"][1]["source"]
         == "installed:market/fixture"
+        and estate_view["enabled_skills"][1]["uses_total"] == 0
+        and estate_view["usage"]["status"] == "complete"
+        and "uses_total" not in estate_view["other_physical_copies"][0]
         and estate_view["receiver"]["id"] == "macbook-fixture"
         and estate_view["receipt_sha256"] == estate_receipt_sha
         and estate_view["actions"]["status"] == "current"
@@ -984,6 +1080,82 @@ try:
         ),
         "estate API excludes private settings, file inventories, and local roots",
     )
+    original_usage_current = (state / "estate-usage-current.json").read_bytes()
+    (state / "estate-usage-current.json").unlink()
+    _, _, missing_usage_body = request("/api/v1/estate")
+    missing_usage = json.loads(missing_usage_body)["data"]
+    check(
+        missing_usage["available"] is True
+        and missing_usage["usage"]["status"] == "unavailable"
+        and all(
+            item["usage_state"] == "unavailable"
+            and item["uses_7d"] is None
+            for item in missing_usage["enabled_skills"]
+        ),
+        "missing usage keeps inventory visible without synthesizing zero",
+    )
+    (state / "estate-usage-current.json").write_bytes(original_usage_current)
+    tampered_usage_current = json.loads(original_usage_current)
+    tampered_usage_current["usage"]["canonical_usage"][0]["uses_7d"] = 99
+    (state / "estate-usage-current.json").write_text(
+        json.dumps(tampered_usage_current), encoding="utf-8"
+    )
+    _, _, tampered_usage_body = request("/api/v1/estate")
+    check(
+        json.loads(tampered_usage_body)["data"]["usage"]["status"]
+        == "unavailable",
+        "tampered usage receipt is unavailable rather than trusted",
+    )
+    (state / "estate-usage-current.json").write_bytes(original_usage_current)
+
+    incomplete_usage_snapshot = json.loads(json.dumps(usage_snapshot))
+    incomplete_usage_snapshot["coverage"]["complete"] = False
+    incomplete_usage_snapshot["coverage"]["failures"] = [{
+        "session_id": "sha256:" + "7" * 64,
+        "reason": "usage_session_malformed_json",
+    }]
+    incomplete_usage = {
+        **incomplete_usage_snapshot,
+        "snapshot_sha256": dashboard.sha(incomplete_usage_snapshot),
+    }
+    incomplete_usage_receipt = {
+        "schema_version": 1,
+        "snapshot_sha256": incomplete_usage["snapshot_sha256"],
+        "census_snapshot_sha256": estate_census["snapshot_sha256"],
+        "receiver": estate_receipt["receiver"],
+        "usage": incomplete_usage,
+    }
+    incomplete_usage_receipt_sha = dashboard.sha(incomplete_usage_receipt)
+    incomplete_usage_receipt_path = (
+        usage_receipts
+        / f"{incomplete_usage_receipt_sha.removeprefix('sha256:')}.json"
+    )
+    incomplete_usage_receipt_path.write_text(
+        json.dumps(incomplete_usage_receipt), encoding="utf-8"
+    )
+    (state / "estate-usage-current.json").write_text(
+        json.dumps({
+            "schema_version": 1,
+            "receipt_sha256": incomplete_usage_receipt_sha,
+            "snapshot_sha256": incomplete_usage["snapshot_sha256"],
+            "census_snapshot_sha256": estate_census["snapshot_sha256"],
+            "usage": incomplete_usage,
+        }),
+        encoding="utf-8",
+    )
+    _, _, incomplete_usage_body = request("/api/v1/estate")
+    incomplete_usage_view = json.loads(incomplete_usage_body)["data"]
+    check(
+        incomplete_usage_view["usage"]["status"] == "incomplete"
+        and all(
+            item["usage_state"] == "incomplete"
+            for item in incomplete_usage_view["enabled_skills"]
+        ),
+        "incomplete coverage remains distinct from complete zero usage",
+    )
+    (state / "estate-usage-current.json").write_bytes(original_usage_current)
+    incomplete_usage_receipt_path.unlink()
+
     original_estate_current = (
         state / "estate-census-current.json"
     ).read_bytes()

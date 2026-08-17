@@ -380,6 +380,14 @@ class RuntimePaths:
     def estate_receipts(self) -> Path:
         return self.state / "estate-census-receipts"
 
+    @property
+    def estate_usage_current(self) -> Path:
+        return self.state / "estate-usage-current.json"
+
+    @property
+    def estate_usage_receipts(self) -> Path:
+        return self.state / "estate-usage-receipts"
+
 
 class DreamingRuntime:
     def __init__(
@@ -479,6 +487,76 @@ class DreamingRuntime:
             "snapshot_sha256": snapshot_sha256,
             "complete": census.get("scope", {}).get("complete") is True,
             "totals": census.get("totals", {}),
+        }
+
+    def record_estate_usage(
+        self,
+        usage: dict[str, Any],
+        receiver: dict[str, Any],
+        census: dict[str, Any],
+    ) -> dict[str, Any]:
+        if usage.get("schema_version") != 1:
+            raise RuntimeFailure("estate-usage-invalid", "schema version")
+        snapshot_sha256 = usage.get("snapshot_sha256")
+        snapshot = {
+            key: value for key, value in usage.items() if key != "snapshot_sha256"
+        }
+        if not isinstance(snapshot_sha256, str) or digest(snapshot) != snapshot_sha256:
+            raise RuntimeFailure("estate-usage-invalid", "snapshot digest")
+        if (
+            usage.get("census_snapshot_sha256") != census.get("snapshot_sha256")
+            or usage.get("host_id") != census.get("host_id")
+            or usage.get("collected_at") != census.get("collected_at")
+        ):
+            raise RuntimeFailure("estate-usage-invalid", "census binding")
+        required_receiver = {
+            "receiver_id",
+            "receiver_sha256",
+            "collector_sha256",
+        }
+        if (
+            not isinstance(receiver, dict)
+            or not required_receiver.issubset(receiver)
+            or not all(
+                isinstance(receiver[key], str) and receiver[key]
+                for key in required_receiver
+            )
+        ):
+            raise RuntimeFailure("estate-usage-invalid", "receiver identity")
+        receipt = {
+            "schema_version": 1,
+            "snapshot_sha256": snapshot_sha256,
+            "census_snapshot_sha256": census["snapshot_sha256"],
+            "receiver": {
+                key: receiver[key] for key in sorted(required_receiver)
+            },
+            "usage": usage,
+        }
+        receipt_sha256 = digest(receipt)
+        receipt_path = (
+            self.paths.estate_usage_receipts
+            / f"{receipt_sha256.removeprefix('sha256:')}.json"
+        )
+        if receipt_path.exists():
+            if read_json(receipt_path, {}) != receipt:
+                raise RuntimeFailure(
+                    "estate-usage-receipt-collision", receipt_sha256
+                )
+        else:
+            atomic_json(receipt_path, receipt, mode=0o600)
+        current = {
+            "schema_version": 1,
+            "receipt_sha256": receipt_sha256,
+            "snapshot_sha256": snapshot_sha256,
+            "census_snapshot_sha256": census["snapshot_sha256"],
+            "usage": usage,
+        }
+        atomic_json(self.paths.estate_usage_current, current, mode=0o600)
+        return {
+            "status": "recorded",
+            "receipt_sha256": receipt_sha256,
+            "snapshot_sha256": snapshot_sha256,
+            "complete": usage.get("coverage", {}).get("complete") is True,
         }
 
     def _mark_queue(self, qualified_session_id: str, revision: str, status: str) -> None:
@@ -2655,10 +2733,21 @@ def collect_estate_census(
             "estate-census-failed", str(result.get("error", process.stderr.strip()))
         )
     census = result.get("census")
+    usage = result.get("usage")
     receiver = result.get("receiver")
     if not isinstance(census, dict):
         raise RuntimeFailure("estate-census-malformed", "census missing")
-    return core.record_estate_census(census, receiver)
+    recorded = core.record_estate_census(census, receiver)
+    if usage is not None:
+        if not isinstance(usage, dict):
+            raise RuntimeFailure("estate-census-malformed", "usage malformed")
+        recorded["usage"] = core.record_estate_usage(usage, receiver, census)
+    else:
+        recorded["usage"] = {
+            "status": "unavailable",
+            "reason": "collector_generation_has_no_usage",
+        }
+    return recorded
 
 
 def selftest(require_config: bool) -> dict[str, Any]:

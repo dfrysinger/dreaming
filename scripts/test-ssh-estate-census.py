@@ -79,6 +79,18 @@ class SshEstateCensusTest(unittest.TestCase):
                         "snapshot_sha256": "sha256:" + "a" * 64,
                         "host_id": config["host_id"],
                     }
+                def collect_bundle(config):
+                    census = collect(config)
+                    return {
+                        "census": census,
+                        "usage": {
+                            "schema_version": 1,
+                            "snapshot_sha256": "sha256:" + "b" * 64,
+                            "census_snapshot_sha256": census["snapshot_sha256"],
+                            "host_id": census["host_id"],
+                            "collected_at": "fixture",
+                        },
+                    }
                 """
             ),
             encoding="utf-8",
@@ -120,6 +132,10 @@ class SshEstateCensusTest(unittest.TestCase):
         result = json.loads(process.stdout)
         self.assertEqual(result["census"]["host_id"], "macbook")
         self.assertEqual(result["receiver"]["receiver_id"], "fixture-client")
+        self.assertEqual(
+            result["usage"]["census_snapshot_sha256"],
+            result["census"]["snapshot_sha256"],
+        )
 
     def test_remote_command_quotes_ipv6_and_paths(self) -> None:
         args = Namespace(
@@ -133,11 +149,14 @@ class SshEstateCensusTest(unittest.TestCase):
             target_host_id="macbook",
             target_home="/Users/fixture user",
             remote_copilot_binary="/fixture/copilot",
+            remote_copilot_session_root=None,
             user_context_cwd=None,
             remote_project_contexts_file=None,
             ssh_bin="/usr/bin/ssh",
             address_family="6",
             host="fixture@fd7a::1",
+            usage_max_sessions=100,
+            usage_max_bytes=1000,
         )
         command = module.remote_command(args)
         self.assertEqual(command[:4], ["/usr/bin/ssh", "-6", "-o", "BatchMode=yes"])

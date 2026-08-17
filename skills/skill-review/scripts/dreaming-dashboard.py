@@ -3052,7 +3052,7 @@ class DashboardData:
 
         authority = {name: 0 for name in sorted(ESTATE_AUTHORITIES)}
         root_classes = {name: 0 for name in sorted(ESTATE_ROOT_CLASSES)}
-        instances: list[dict[str, Any]] = []
+        physical_instances: list[dict[str, Any]] = []
 
         def latest_action(
             target: str | None, prefix: str
@@ -3110,7 +3110,7 @@ class DashboardData:
                 else "unknown"
             )
             decision = latest_action(skill_name, "personal_")
-            instances.append(
+            physical_instances.append(
                 {
                     "skill_name": skill_name,
                     "root_class": root_class,
@@ -3166,7 +3166,7 @@ class DashboardData:
                 and value >= 0
                 for value in declared_authority.values()
             )
-            and sum(declared_authority.values()) == len(instances)
+            and sum(declared_authority.values()) == len(physical_instances)
         ):
             authority = {
                 name: declared_authority[name]
@@ -3182,7 +3182,7 @@ class DashboardData:
                 and value >= 0
                 for value in declared_root_classes.values()
             )
-            and sum(declared_root_classes.values()) == len(instances)
+            and sum(declared_root_classes.values()) == len(physical_instances)
         ):
             root_classes = {
                 name: declared_root_classes[name]
@@ -3265,16 +3265,357 @@ class DashboardData:
                     ),
                 }
             )
+
+        usage = self._estate_usage(census, receiver)
+        usage_by_capability = {
+            item["canonical_capability_id"]: item
+            for item in usage.get("canonical_usage", [])
+            if isinstance(item, dict)
+        }
+        physical_by_instance = {
+            item["instance_id"]: item
+            for item in physical_instances
+            if item["instance_id"]
+        }
+        enabled_by_capability: dict[str, list[dict[str, Any]]] = {}
+        for item in census.get("enabled_instances", []):
+            if not isinstance(item, dict) or item.get("runtime_enabled") is not True:
+                continue
+            capability_id = item.get("canonical_capability_id")
+            if not isinstance(capability_id, str):
+                continue
+            enabled_by_capability.setdefault(capability_id, []).append(item)
+
+        enabled_skills = []
+        for capability_id, mappings in sorted(
+            enabled_by_capability.items(),
+            key=lambda value: safe_text(value[1][0].get("runtime_name"), 200),
+        ):
+            representative = next(
+                (
+                    physical_by_instance.get(safe_text(mapping.get("instance_id"), 80))
+                    for mapping in mappings
+                    if physical_by_instance.get(
+                        safe_text(mapping.get("instance_id"), 80)
+                    )
+                ),
+                None,
+            )
+            if representative is None:
+                continue
+            usage_row = usage_by_capability.get(capability_id)
+            usage_state = (
+                "unavailable"
+                if not usage["available"]
+                else "complete"
+                if usage["complete"]
+                else "incomplete"
+            )
+            skill_name = safe_text(mappings[0].get("runtime_name"), 200)
+            decision_prefix = (
+                "plugin_"
+                if representative["root_class"] == "plugin"
+                else "personal_"
+            )
+            decision_target = (
+                representative["owner"]
+                if decision_prefix == "plugin_"
+                else skill_name
+            )
+            decision = latest_action(decision_target, decision_prefix)
+            enabled_skills.append(
+                {
+                    "skill_name": skill_name,
+                    "canonical_capability_id": capability_id,
+                    "source": representative["source"],
+                    "root_class": representative["root_class"],
+                    "authority": representative["authority"],
+                    "provenance_status": representative["provenance_status"],
+                    "state": "enabled",
+                    "usage_state": usage_state,
+                    "uses_7d": usage_row.get("uses_7d") if usage_row else None,
+                    "uses_30d": usage_row.get("uses_30d") if usage_row else None,
+                    "uses_90d": usage_row.get("uses_90d") if usage_row else None,
+                    "uses_total": usage_row.get("uses_total") if usage_row else None,
+                    "last_successful_invocation": (
+                        usage_row.get("last_successful_invocation")
+                        if usage_row
+                        else None
+                    ),
+                    "latest_decision": (
+                        {
+                            "decision": decision["decision"],
+                            "status": decision["status"],
+                            "receipt_sha256": decision["receipt_sha256"],
+                        }
+                        if decision
+                        else None
+                    ),
+                }
+            )
+        other_physical_copies = [
+            {
+                **item,
+                "reason": "inactive, cached, stale, or duplicate physical copy",
+            }
+            for item in physical_instances
+            if item["physical_only"]
+        ]
         return {
             **base,
+            "usage": {
+                key: value
+                for key, value in usage.items()
+                if key not in {"canonical_usage"}
+            },
             "authority_counts": dict(sorted(authority.items())),
             "root_class_counts": dict(sorted(root_classes.items())),
             "contexts": contexts,
             "unresolved_mappings": unresolved,
             "plugins": plugins,
-            "instances": instances,
+            "enabled_skills": enabled_skills,
+            "other_physical_copies": other_physical_copies,
             "decisions": actions["items"],
         }
+
+    def _estate_usage(
+        self, census: dict[str, Any], census_receiver: dict[str, Any]
+    ) -> dict[str, Any]:
+        unavailable = {
+            "status": "unavailable",
+            "available": False,
+            "complete": None,
+            "source": None,
+            "collected_at": None,
+            "earliest_retained_event": None,
+            "sessions_scanned": None,
+            "bytes_scanned": None,
+            "bound_reached": None,
+            "failure_count": None,
+            "unattributed_count": None,
+            "canonical_usage": [],
+        }
+        current_path = self.paths.state / "estate-usage-current.json"
+        if not current_path.is_file() or current_path.is_symlink():
+            return unavailable
+        try:
+            current = self._json(current_path, None, "current estate usage")
+            required_current = {
+                "schema_version",
+                "receipt_sha256",
+                "snapshot_sha256",
+                "census_snapshot_sha256",
+                "usage",
+            }
+            if (
+                not isinstance(current, dict)
+                or set(current) != required_current
+                or current.get("schema_version") != 1
+                or not CANDIDATE_ID_RE.fullmatch(
+                    str(current.get("receipt_sha256", ""))
+                )
+                or not CANDIDATE_ID_RE.fullmatch(
+                    str(current.get("snapshot_sha256", ""))
+                )
+                or current.get("census_snapshot_sha256")
+                != census.get("snapshot_sha256")
+                or not isinstance(current.get("usage"), dict)
+            ):
+                return unavailable
+            usage = current["usage"]
+            required_usage = {
+                "schema_version",
+                "host_id",
+                "collected_at",
+                "census_snapshot_sha256",
+                "source",
+                "coverage",
+                "canonical_usage",
+                "unattributed",
+                "snapshot_sha256",
+            }
+            usage_snapshot = {
+                key: value for key, value in usage.items() if key != "snapshot_sha256"
+            }
+            if (
+                set(usage) != required_usage
+                or usage.get("schema_version") != 1
+                or usage.get("snapshot_sha256") != current["snapshot_sha256"]
+                or sha(usage_snapshot) != usage.get("snapshot_sha256")
+                or usage.get("host_id") != census.get("host_id")
+                or usage.get("collected_at") != census.get("collected_at")
+                or usage.get("census_snapshot_sha256")
+                != census.get("snapshot_sha256")
+                or usage.get("source") != "copilot_local_session_state"
+            ):
+                return unavailable
+            receipt_path = (
+                self.paths.state
+                / "estate-usage-receipts"
+                / f"{current['receipt_sha256'].removeprefix('sha256:')}.json"
+            )
+            if (
+                not receipt_path.is_file()
+                or receipt_path.is_symlink()
+                or receipt_path.stat().st_size > MAX_JSON_BYTES
+            ):
+                return unavailable
+            receipt = self._json(receipt_path, None, "estate usage receipt")
+            if (
+                not isinstance(receipt, dict)
+                or set(receipt)
+                != {
+                    "schema_version",
+                    "snapshot_sha256",
+                    "census_snapshot_sha256",
+                    "receiver",
+                    "usage",
+                }
+                or receipt.get("schema_version") != 1
+                or receipt.get("snapshot_sha256") != usage["snapshot_sha256"]
+                or receipt.get("census_snapshot_sha256")
+                != census.get("snapshot_sha256")
+                or receipt.get("receiver") != census_receiver
+                or receipt.get("usage") != usage
+                or sha(receipt) != current["receipt_sha256"]
+            ):
+                return unavailable
+            coverage = usage.get("coverage")
+            if (
+                not isinstance(coverage, dict)
+                or set(coverage)
+                != {
+                    "complete",
+                    "earliest_retained_event",
+                    "sessions_scanned",
+                    "bytes_scanned",
+                    "max_sessions",
+                    "max_bytes",
+                    "bound_reached",
+                    "failures",
+                }
+                or not isinstance(coverage.get("complete"), bool)
+                or not all(
+                    isinstance(coverage.get(name), int)
+                    and not isinstance(coverage.get(name), bool)
+                    and coverage[name] >= 0
+                    for name in (
+                        "sessions_scanned",
+                        "bytes_scanned",
+                        "max_sessions",
+                        "max_bytes",
+                    )
+                )
+                or coverage.get("bound_reached")
+                not in {None, "max_sessions", "max_bytes"}
+                or not isinstance(coverage.get("failures"), list)
+            ):
+                return unavailable
+            if coverage["earliest_retained_event"] is not None and parse_time(
+                coverage["earliest_retained_event"]
+            ) is None:
+                return unavailable
+            for failure in coverage["failures"]:
+                if (
+                    not isinstance(failure, dict)
+                    or set(failure) != {"session_id", "reason"}
+                    or not CANDIDATE_ID_RE.fullmatch(
+                        str(failure.get("session_id", ""))
+                    )
+                    or not re.fullmatch(
+                        r"[a-z0-9_]{3,100}", str(failure.get("reason", ""))
+                    )
+                ):
+                    return unavailable
+            enabled_ids = {
+                item.get("canonical_capability_id")
+                for item in census.get("enabled_instances", [])
+                if isinstance(item, dict) and item.get("runtime_enabled") is True
+            }
+            canonical_usage = usage.get("canonical_usage")
+            if not isinstance(canonical_usage, list):
+                return unavailable
+            seen_ids: set[str] = set()
+            for item in canonical_usage:
+                if (
+                    not isinstance(item, dict)
+                    or set(item)
+                    != {
+                        "canonical_capability_id",
+                        "uses_7d",
+                        "uses_30d",
+                        "uses_90d",
+                        "uses_total",
+                        "last_successful_invocation",
+                    }
+                    or item.get("canonical_capability_id") not in enabled_ids
+                    or item.get("canonical_capability_id") in seen_ids
+                    or not all(
+                        isinstance(item.get(name), int)
+                        and not isinstance(item.get(name), bool)
+                        and item[name] >= 0
+                        for name in (
+                            "uses_7d",
+                            "uses_30d",
+                            "uses_90d",
+                            "uses_total",
+                        )
+                    )
+                    or not (
+                        item["uses_7d"]
+                        <= item["uses_30d"]
+                        <= item["uses_90d"]
+                        <= item["uses_total"]
+                    )
+                ):
+                    return unavailable
+                last_used = item.get("last_successful_invocation")
+                if (
+                    last_used is not None
+                    and (
+                        parse_time(last_used) is None
+                        or parse_time(last_used) > parse_time(usage["collected_at"])
+                    )
+                ):
+                    return unavailable
+                seen_ids.add(item["canonical_capability_id"])
+            unattributed = usage.get("unattributed")
+            if not isinstance(unattributed, list):
+                return unavailable
+            for item in unattributed:
+                if (
+                    not isinstance(item, dict)
+                    or set(item)
+                    != {
+                        "name",
+                        "reason",
+                        "uses_7d",
+                        "uses_30d",
+                        "uses_90d",
+                        "uses_total",
+                    }
+                    or not SKILL_RE.fullmatch(str(item.get("name", "")))
+                    or item.get("reason")
+                    not in {"unmapped", "conflicting_mapping"}
+                ):
+                    return unavailable
+            complete = coverage["complete"]
+            return {
+                "status": "complete" if complete else "incomplete",
+                "available": True,
+                "complete": complete,
+                "source": "MacBook Copilot local transcripts",
+                "collected_at": usage["collected_at"],
+                "earliest_retained_event": coverage["earliest_retained_event"],
+                "sessions_scanned": coverage["sessions_scanned"],
+                "bytes_scanned": coverage["bytes_scanned"],
+                "bound_reached": coverage["bound_reached"],
+                "failure_count": len(coverage["failures"]),
+                "unattributed_count": len(unattributed),
+                "canonical_usage": canonical_usage,
+            }
+        except (DashboardError, OSError, TypeError, ValueError):
+            return unavailable
 
     def _backlog_history(self) -> list[dict[str, Any]]:
         queue = [

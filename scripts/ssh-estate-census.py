@@ -70,6 +70,10 @@ def receiver_config(args: argparse.Namespace) -> dict[str, Any]:
         "target_home": args.target_home,
         "user_context_cwd": args.user_context_cwd or args.target_home,
         "copilot_binary": args.copilot_binary,
+        "copilot_session_root": args.copilot_session_root
+        or str(Path(args.target_home) / ".copilot/session-state"),
+        "usage_max_sessions": args.usage_max_sessions,
+        "usage_max_bytes": args.usage_max_bytes,
     }
     if args.project_contexts_file:
         path = Path(args.project_contexts_file).expanduser().resolve()
@@ -93,10 +97,21 @@ def receive(args: argparse.Namespace) -> None:
     identity = receiver_identity(args)
     collector = load_collector(Path(args.estate_script).expanduser().resolve())
     try:
-        census = collector.collect(receiver_config(args))
+        config = receiver_config(args)
+        if hasattr(collector, "collect_bundle"):
+            bundle = collector.collect_bundle(config)
+        else:
+            bundle = {"census": collector.collect(config)}
     except collector.EstateError as error:
         raise CensusError(str(error)) from error
-    emit({"ok": True, "census": census, "receiver": identity})
+    if not isinstance(bundle, dict) or not isinstance(bundle.get("census"), dict):
+        raise CensusError("collector returned an invalid bundle")
+    result = {"ok": True, "census": bundle["census"], "receiver": identity}
+    if "usage" in bundle:
+        if not isinstance(bundle["usage"], dict):
+            raise CensusError("collector returned invalid usage")
+        result["usage"] = bundle["usage"]
+    emit(result)
 
 
 def remote_command(args: argparse.Namespace) -> list[str]:
@@ -120,7 +135,15 @@ def remote_command(args: argparse.Namespace) -> list[str]:
         args.target_home,
         "--copilot-binary",
         args.remote_copilot_binary,
+        "--usage-max-sessions",
+        str(args.usage_max_sessions),
+        "--usage-max-bytes",
+        str(args.usage_max_bytes),
     ]
+    if args.remote_copilot_session_root:
+        receiver.extend(
+            ["--copilot-session-root", args.remote_copilot_session_root]
+        )
     if args.user_context_cwd:
         receiver.extend(["--user-context-cwd", args.user_context_cwd])
     if args.remote_project_contexts_file:
@@ -187,6 +210,8 @@ def common_parser() -> argparse.ArgumentParser:
     parser.add_argument("--target-host-id", required=True)
     parser.add_argument("--target-home", required=True)
     parser.add_argument("--user-context-cwd")
+    parser.add_argument("--usage-max-sessions", type=int, default=10_000)
+    parser.add_argument("--usage-max-bytes", type=int, default=1024 * 1024 * 1024)
     return parser
 
 
@@ -199,6 +224,7 @@ def receiver_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-receiver-sha", required=True)
     parser.add_argument("--expected-collector-sha", required=True)
     parser.add_argument("--copilot-binary", required=True)
+    parser.add_argument("--copilot-session-root")
     parser.add_argument("--project-contexts-file")
     return parser
 
@@ -213,6 +239,7 @@ def local_parser() -> argparse.ArgumentParser:
     parser.add_argument("--remote-estate-script", required=True)
     parser.add_argument("--remote-receiver-id-file", required=True)
     parser.add_argument("--remote-copilot-binary", required=True)
+    parser.add_argument("--remote-copilot-session-root")
     parser.add_argument("--remote-project-contexts-file")
     parser.add_argument("--expected-receiver-id", required=True)
     parser.add_argument("--expected-receiver-sha", required=True)
