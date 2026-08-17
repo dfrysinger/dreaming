@@ -75,22 +75,20 @@ met.
   passed after closing qualification interruption fencing, Copilot-version
   restore drift, verified-code pathname replacement, and repeated descriptor
   execution. Final implementation review for the scheduled whole-estate
-  pipeline remains gated on a passing installed scheduled-live receipt for the
-  exact successor candidate.
+  pipeline passed final two-family static review for exact subject
+  `33f8428..533877b` with no material findings.
 - **Settings decision:** plugin mutation uses same-directory macOS
   `renamex_np(..., RENAME_SWAP)` to retain the exact displaced settings inode;
   unsupported volumes and unqualified plugin source classes remain
   report-only.
-- **Current phase:** bounded-snapshot successor installation before the final
-  whole-estate proof. The authenticated and certified `c4ae5de` generation was
-  enabled, then forced run `20260817T021221Z-93348` again completed the census
-  and 24 transcript reviews before the same 431 KB immutable snapshot produced
-  `malformed-executor-result`. Exact public-adapter replay reproduced the
-  failure, while replay of the newest contiguous 100 KB event suffix passed
-  with a complete structured result. Successor `7cc9b44` makes 100 KB the
-  shared source, generated-config, core, and dashboard boundary. It must be
-  installed behind the halt switch, certified once, enabled through the
-  managed installer, and proven by one complete forced weekly run.
+- **Current phase:** closure. Exact candidate `533877b` is installed, enabled,
+  and healthy on the Mac mini. The final forced weekly run
+  `20260817T091808Z-12484` completed consolidation, roll, and scheduled-live
+  pruning. Its exact estate-review session reached `complete`, released its
+  writer lease, and left no active lifecycle lock, recovery fence, halt, or
+  worker. The authenticated Estate API remains complete, fresh, and current.
+  Installed fail-closed probes reject success without the exact deterministic
+  session and abort an unfinished session before releasing its lease.
 - **Implementation order:** census and identity model; estate dashboard and
   unresolved mappings; evaluation and recommendations; remote personal-skill
   archive/restore; atomic settings transaction and source qualification;
@@ -130,13 +128,19 @@ met.
   estate-action dependency reference and proves dependency enumeration from
   the shipped dashboard LaunchAgent root. Commit `c4ae5de` adds the fail-closed
   Copilot authentication canary and rejects both missing authentication and
-  output that merely echoes the requested sentinel.
+  output that merely echoes the requested sentinel. Commit `33f8428` enforces
+  scheduler-owned exact curator-session reconciliation. Commit `e2f7a89`
+  makes the dashboard read estate-action authority from
+  `SKILLS_REVIEW_STATE_DIR`; commit `533877b` updates every deterministic
+  dashboard contract fixture for that explicit path.
 - **Installed state:** activation generation
-  `20260815T085144Z-install-91788` containing runtime successor `c4ae5de` is
-  enabled and authenticated. Later baton-only commits do not change its
-  executable inputs. The failed proof left every recovery fence absent and no
-  worker running. Executable successor `7cc9b44` is not installed or certified
-  yet. The dashboard remains available.
+  `20260817T082320Z-install-60081` contains exact commit
+  `533877b526e55d93bdea6f3817323f4c5c527c91`. Managed certification passed
+  with zero failures and generation-bound enablement succeeded. The halt is
+  inactive, the dashboard is running, the scheduler and watchdog are enabled,
+  and all installed adapter doctors pass under restricted system-only `PATH`.
+  The dependency bundle remains
+  `c5f046f2ec992222067008bed1a0ff7b6f009c73291234921260c3c317f74128`.
 - **Live-proof status:** CHK-09 passed. The installed Mac mini collected a
   complete fixture-inclusive census, archived the real MacBook fixture through
   the governed receiver, returned the identical result on retry, restored the
@@ -214,7 +218,11 @@ met.
   431,333 bytes. Exact public-adapter replay failed, while its newest
   contiguous 100 KB suffix retained 47 events and returned a complete
   `discard` result. Targeted validation for successor `7cc9b44` passed 25
-  vendor-adapter tests, 36 core tests, and 120 dashboard checks.
+  vendor-adapter tests, 36 core tests, and 120 dashboard checks. Exact
+  generation certification later passed with zero failures. Installed replay
+  of the same session retained 47 events and 99,674 serialized event bytes and
+  returned a complete `factual_memory` result with no mutation or artifact;
+  the differing valid route is model judgment rather than a boundary failure.
 - **CHK-04 closure:** the final MacBook live proof found five plugin packages,
   three enabled packages, complete capability inventories, and zero unresolved
   mappings. The estate suite passed 44 tests; core, receiver transport,
@@ -269,3 +277,28 @@ met.
 - **Completion authority:** only the design's named Definition of Done; do not
   substitute partial unit checks, dashboard rendering, or one successful
   mutation for the complete installed two-host proof.
+- **Final scheduled-live proof:** forced installed run
+  `20260817T091808Z-12484` returned
+  `ok reviewed=64 archived=0 consolidated=0 plugins_disabled=0
+  recommendations=56`. Its deterministic session
+  `20260817T091808Z-12484-estate-review` finished `complete`. The sealed census
+  reports 93 canonical and effective capabilities, 107 physical instances, 14
+  physical-only instances, five plugin packages, three enabled packages, and
+  zero unresolved runtime skills. The authenticated Estate API reports
+  `status=current`, `available=true`, `complete=true`, `fresh=true`, and 61
+  action records: 56 recommendations and five historical reversible
+  operations. Recovery, running, halted, paused, and writer-blocked states are
+  all false.
+- **Final recovery evidence:** installed scheduler probes prove an unfinished
+  estate session is aborted and reconciled, while a success sentinel with an
+  absent exact session fails closed. No worker or active file lock remained
+  after the proof. The historical CHK-09 receipt is preserved outside the
+  operation namespace at
+  `DREAMING_STATE_DIR/evidence/estate-action-reconciliations/chk09-personal-archive.json`
+  with SHA-256
+  `155394fe12429c4c5ae74f88029eadf5d8406bb6aecfb37998373f867a29f730`.
+- **Definition of Done:** every criterion in
+  `Definition of Done: Unified skill estate governance` has installed or
+  deterministic evidence. The Mac mini is the active governance server for
+  the bounded MacBook capability estate. Dreaming remains local-only and must
+  not be pushed.
