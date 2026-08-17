@@ -1498,7 +1498,7 @@ print(json.dumps({"ok": True}))
         self.assertEqual(data["executor_order"], ["codex", "claude"])
         self.assertEqual(data["routes"], ["claude>codex", "codex>codex"])
         self.assertEqual(list(data["publishers"]), ["claude", "codex"])
-        self.assertEqual(data["max_snapshot_bytes"], 1_000_000)
+        self.assertEqual(data["max_snapshot_bytes"], 100_000)
         self.assertEqual(data["max_events"], 2_000)
         self.assertEqual(data["max_field_bytes"], 64_000)
         for entry in data["sources"].values():
@@ -1506,7 +1506,7 @@ print(json.dumps({"ok": True}))
             self.assertEqual(argv[argv.index("--max-events") + 1], "2000")
             self.assertEqual(
                 argv[argv.index("--max-snapshot-bytes") + 1],
-                "1000000",
+                "100000",
             )
             self.assertEqual(argv[argv.index("--max-field-bytes") + 1], "64000")
         expected_roots = {

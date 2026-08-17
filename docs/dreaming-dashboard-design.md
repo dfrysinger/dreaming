@@ -423,8 +423,9 @@ snapshots, evaluations, bundles, learned skills, and logs.
 Per-category bars are prohibited because these categories have no quotas. The
 only capacity bar represents the actual filesystem volume. If configured roots
 occupy different devices, the API returns one capacity row per distinct device.
-Snapshot storage also reports the real 1 MB per-snapshot limit. There is no
-aggregate retention ceiling or automatic cleanup claim.
+Snapshot storage also reports the configured 100 KB event-payload limit for
+each retained snapshot. There is no aggregate retention ceiling or automatic
+cleanup claim.
 
 ## HTTP service
 
@@ -698,8 +699,8 @@ snapshot selected by its digest. Traversal, symlink, malformed, oversized, and
 digest-mismatch fixtures are refused.
 
 **AC12. Honest storage:** System reports measured category sizes, the real
-filesystem capacity for each device, the 1 MB snapshot limit, and no fictional
-category quota or cleanup policy.
+filesystem capacity for each device, the configured 100 KB snapshot event
+limit, and no fictional category quota or cleanup policy.
 
 **AC13. Failure visibility:** Corrupt queue, run, evidence, evaluation,
 publication, and snapshot fixtures produce explicit scoped errors rather than

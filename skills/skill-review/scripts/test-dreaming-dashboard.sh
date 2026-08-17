@@ -432,6 +432,7 @@ for index in range(1750):
     "codex": {"skills": []},
 }), encoding="utf-8")
 (state / "adapters.json").write_text(json.dumps({
+    "max_snapshot_bytes": 100_000,
     "publishers": {
         "copilot": {
             "argv": [
@@ -918,6 +919,12 @@ try:
         route_status, _, route_body = request(route)
         check(route_status == 200, f"{route} returns schema-v1 data")
         private_boundary_bodies.append(route_body)
+        if route == "/api/v1/system":
+            check(
+                json.loads(route_body)["data"]["limits"]["snapshot_bytes"]
+                == 100_000,
+                "system reports the configured snapshot boundary",
+            )
     check(
         all(
             sentinel not in payload.decode()

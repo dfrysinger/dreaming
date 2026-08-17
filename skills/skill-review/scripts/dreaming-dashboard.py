@@ -3417,6 +3417,29 @@ class DashboardData:
         }
 
     def system(self) -> dict[str, Any]:
+        config_path = Path(
+            os.environ.get(
+                "DREAMING_ADAPTER_CONFIG",
+                self.paths.state / "adapters.json",
+            )
+        )
+        config = (
+            self._json(config_path, {}, "adapter config")
+            if config_path.exists()
+            else {}
+        )
+        snapshot_bytes = config.get("max_snapshot_bytes", 100_000)
+        if (
+            not isinstance(snapshot_bytes, int)
+            or isinstance(snapshot_bytes, bool)
+            or snapshot_bytes < 2
+        ):
+            raise DashboardError(
+                503,
+                "adapter_config_invalid",
+                "Adapter snapshot limit is malformed",
+                ["adapter config"],
+            )
         categories = []
         for name, path in (
             ("State", self.paths.state),
@@ -3462,7 +3485,7 @@ class DashboardData:
             "categories": categories,
             "filesystems": list(devices.values()),
             "limits": {
-                "snapshot_bytes": 1_000_000,
+                "snapshot_bytes": snapshot_bytes,
                 "aggregate_retention_bytes": None,
                 "automatic_cleanup": False,
             },

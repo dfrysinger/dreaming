@@ -4459,7 +4459,7 @@ def parser() -> argparse.ArgumentParser:
     result.add_argument("--quiet-seconds", type=int, default=300)
     result.add_argument("--max-field-bytes", type=int, default=64_000)
     result.add_argument("--max-events", type=int, default=2_000)
-    result.add_argument("--max-snapshot-bytes", type=int, default=1_000_000)
+    result.add_argument("--max-snapshot-bytes", type=int, default=100_000)
     result.add_argument("--timeout", type=int, default=600)
     result.add_argument("--token-budget", type=int, default=100_000)
     result.add_argument("--turn-budget", type=int, default=100_000)
