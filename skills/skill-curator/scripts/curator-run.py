@@ -3082,6 +3082,11 @@ def command_estate_session_begin(args: argparse.Namespace) -> int:
     recovery = estate_session_recovery_path()
     if recovery.exists():
         raise RunError("estate action recovery is required")
+    expected_run_id = os.environ.get("DREAMING_ESTATE_SESSION_ID")
+    if expected_run_id and args.run_id != expected_run_id:
+        raise RunError(
+            "estate session run ID does not match DREAMING_ESTATE_SESSION_ID"
+        )
     run_id = args.run_id or (
         f"{datetime.now(timezone.utc):%Y%m%dT%H%M%SZ}-{uuid.uuid4().hex[:8]}"
     )
@@ -3157,6 +3162,73 @@ def command_estate_session_finish(args: argparse.Namespace) -> int:
     manifest["finished_at"] = now_iso()
     atomic_write(path, manifest)
     release_lock(manifest)
+    return 0
+
+
+def install_estate_session_recovery(run_id: str, reason: str) -> None:
+    recovery = estate_session_recovery_path()
+    if recovery.exists():
+        return
+    payload = {
+        "schema_version": 1,
+        "status": "estate_session_recovery_required",
+        "run_id": run_id,
+        "reason": reason,
+        "created_at": now_iso(),
+    }
+    try:
+        immutable_write(recovery, payload)
+    except RunError:
+        if not recovery.exists():
+            raise
+
+
+def command_estate_session_reconcile(args: argparse.Namespace) -> int:
+    path = estate_session_path(args.run)
+    if not path.exists():
+        print(json.dumps({"ok": True, "state": "absent", "run_id": args.run}))
+        return 0
+    try:
+        path, manifest = load_estate_session(args.run)
+    except (RunError, OSError, ValueError, TypeError, KeyError):
+        install_estate_session_recovery(args.run, "estate-session-manifest-invalid")
+        raise
+
+    status = manifest.get("status")
+    if status in {"complete", "aborted"}:
+        result = lock_command("release", manifest["lock_token"], check=False)
+        if result.returncode not in {0, 1}:
+            install_estate_session_recovery(
+                args.run, "estate-session-terminal-release-unverified"
+            )
+            raise RunError("could not verify terminal estate session lease release")
+        print(
+            json.dumps(
+                {"ok": True, "state": "already-terminal", "run_id": args.run}
+            )
+        )
+        return 0
+    if status != "active":
+        install_estate_session_recovery(args.run, "estate-session-status-invalid")
+        raise RunError(f"cannot reconcile estate session in status {status}")
+
+    manifest["status"] = "aborted"
+    manifest["finished_at"] = now_iso()
+    manifest["finish_reason"] = args.reason
+    try:
+        atomic_write(path, manifest)
+    except OSError:
+        install_estate_session_recovery(
+            args.run, "estate-session-abort-persistence-failed"
+        )
+        raise
+    result = lock_command("release", manifest["lock_token"], check=False)
+    if result.returncode != 0:
+        install_estate_session_recovery(
+            args.run, "estate-session-active-release-unverified"
+        )
+        raise RunError("could not release active estate session lease")
+    print(json.dumps({"ok": True, "state": "aborted-active", "run_id": args.run}))
     return 0
 
 
@@ -3250,6 +3322,11 @@ def parser() -> argparse.ArgumentParser:
         "--status", choices=("complete", "aborted"), required=True
     )
     estate_session_finish.set_defaults(func=command_estate_session_finish)
+
+    estate_session_reconcile = sub.add_parser("estate-session-reconcile")
+    estate_session_reconcile.add_argument("--run", required=True)
+    estate_session_reconcile.add_argument("--reason", required=True)
+    estate_session_reconcile.set_defaults(func=command_estate_session_reconcile)
     return root
 
 

@@ -130,7 +130,15 @@ run_curator() {
 
 test_estate_session_lease() {
   local session
+  export DREAMING_ESTATE_SESSION_ID=estate-review-fixture
+  if run_curator estate-session-begin >/dev/null 2>&1; then
+    fail "scheduled estate session began without the required run ID"
+  fi
+  if run_curator estate-session-begin --run-id divergent-estate-review >/dev/null 2>&1; then
+    fail "scheduled estate session began with a divergent run ID"
+  fi
   session="$(run_curator estate-session-begin --run-id estate-review-fixture)"
+  unset DREAMING_ESTATE_SESSION_ID
   [[ "$session" == "estate-review-fixture" ]] ||
     fail "estate session begin returned the wrong ID"
   run_curator estate-session-renew --run "$session"
@@ -146,6 +154,31 @@ test_estate_session_lease() {
 
   run_curator estate-session-begin --run-id next-estate-review >/dev/null
   run_curator estate-session-finish --run next-estate-review --status complete
+  run_curator estate-session-reconcile --run next-estate-review \
+    --reason scheduler-postflight |
+    grep -q '"state": "already-terminal"'
+
+  run_curator estate-session-begin --run-id abandoned-estate-review >/dev/null
+  run_curator estate-session-reconcile --run abandoned-estate-review \
+    --reason bounded-runner-timeout |
+    grep -q '"state": "aborted-active"'
+  run_curator estate-session-begin --run-id post-reconcile-estate-review >/dev/null
+  run_curator estate-session-finish --run post-reconcile-estate-review \
+    --status complete
+
+  run_curator estate-session-reconcile --run never-started-estate-review \
+    --reason bounded-runner-failed |
+    grep -q '"state": "absent"'
+
+  printf '%s\n' '{"schema_version":1,"kind":"wrong"}' \
+    > "$RUNS/estate-sessions/malformed-estate-review.json"
+  if run_curator estate-session-reconcile --run malformed-estate-review \
+      --reason malformed-session >/dev/null 2>&1; then
+    fail "malformed estate session reconciled without a recovery fence"
+  fi
+  [[ -f "$CASE/estate-recovery-required.json" ]] ||
+    fail "malformed estate session did not create a recovery fence"
+  rm -f "$CASE/estate-recovery-required.json"
 
   touch "$CASE/estate-recovery-required.json"
   if run_curator estate-session-begin --run-id fenced-estate-review >/dev/null 2>&1; then

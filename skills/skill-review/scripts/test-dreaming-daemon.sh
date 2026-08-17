@@ -137,7 +137,20 @@ echo "not a sqlite database" > "$SKILLS_LOCK_DIR"
 if "$SCRIPT_DIR/daemon-lock.sh" acquire --mode session --owner contender >/dev/null 2>&1; then
   fail "malformed lock was reclaimed"
 fi
+set +e
+"$SCRIPT_DIR/daemon-lock.sh" release missing-token >/dev/null 2>&1
+release_status=$?
+set -e
+assert_eq "$release_status" "2" "malformed lock release did not fail distinctly"
 pass "malformed lock fails closed"
+
+new_case absent-release
+set +e
+"$SCRIPT_DIR/daemon-lock.sh" release missing-token >/dev/null 2>&1
+release_status=$?
+set -e
+assert_eq "$release_status" "1" "absent lock token did not retain its not-found status"
+pass "release distinguishes absent tokens from lock database failures"
 
 new_case legacy-lock
 mkdir -p "$SKILLS_LOCK_DIR"

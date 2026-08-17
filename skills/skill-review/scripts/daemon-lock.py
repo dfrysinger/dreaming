@@ -215,8 +215,11 @@ def assert_or_renew(args: argparse.Namespace, renew: bool) -> int:
 def release(args: argparse.Namespace) -> int:
     try:
         con = connect()
-    except (BlockingIOError, sqlite3.DatabaseError):
+    except BlockingIOError:
         return 1
+    except sqlite3.DatabaseError as error:
+        print(f"lock database invalid: {error}", file=sys.stderr)
+        return 2
     try:
         con.execute("BEGIN IMMEDIATE")
         cursor = con.execute(
@@ -225,6 +228,9 @@ def release(args: argparse.Namespace) -> int:
         )
         con.commit()
         return 0 if cursor.rowcount == 1 else 1
+    except sqlite3.DatabaseError as error:
+        print(f"lock database invalid: {error}", file=sys.stderr)
+        return 2
     finally:
         con.close()
 

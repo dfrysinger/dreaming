@@ -18,8 +18,10 @@ SEQUENCE:
    paused, an estate recovery fence exists, or the shared writer lease cannot
    be acquired unambiguously, print `DREAM_PASS_RESULT: aborted <reason>` and
    stop without mutation. Acquire the lease with
-   `curator-run.py estate-session-begin`; do not use `begin`, a remote request,
-   or a mutation plan merely to hold the review lease. Renew it with
+   `curator-run.py estate-session-begin --run-id
+   "$DREAMING_ESTATE_SESSION_ID"`; require that environment variable to be
+   present, and do not use `begin`, a remote request, or a mutation plan merely
+   to hold the review lease. Renew it with
    `estate-session-renew` during long review work and always release it with
    `estate-session-finish --status complete|aborted` before printing the final
    sentinel.
