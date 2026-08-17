@@ -94,12 +94,13 @@ check(True, "empty, duplicate, and excessive anchor IDs fail closed")
 
 state = root / "state"
 control = root / "control"
+review = control / "skill-review"
 orchestrator = root / "orchestrator"
 data = root / "data"
 skills = root / "skills"
 assets = repo / "skills/skill-review/assets/dashboard"
 token = state / "dashboard/access-token"
-for path in (state, control, orchestrator, data, skills):
+for path in (state, control, review, orchestrator, data, skills):
     path.mkdir(parents=True, exist_ok=True)
 token.parent.mkdir(parents=True, exist_ok=True)
 token.write_text("A" * 43 + "\n", encoding="ascii")
@@ -112,7 +113,9 @@ skill.mkdir()
 (skill / ".skill-evaluation-cases.json").write_text("{}", encoding="utf-8")
 (skill / ".skill-evaluation-policy.json").write_text("{}", encoding="utf-8")
 (skill / "SKILL.md").write_text("---\nname: fixture-skill\ndescription: Fixture.\n---\n", encoding="utf-8")
-paths = dashboard.DashboardPaths(state, control, orchestrator, data, skills, repo, assets, token)
+paths = dashboard.DashboardPaths(
+    state, control, review, orchestrator, data, skills, repo, assets, token
+)
 service = dashboard.DashboardData(paths)
 dashboard_candidate = service._skill_candidate(skill)
 evaluation_candidate, _ = evaluation.candidate_id(skill)
@@ -333,6 +336,7 @@ subprocess.run(["git", "-C", str(unborn_skills), "init", "-q"], check=True)
 unborn_paths = dashboard.DashboardPaths(
     state,
     control,
+    review,
     orchestrator,
     data,
     unborn_skills,
@@ -520,6 +524,7 @@ absorbed = lifecycle.persist(absorbed)
 candidate_paths = dashboard.DashboardPaths(
     state,
     control,
+    review,
     orchestrator,
     data,
     skills,
@@ -813,6 +818,7 @@ empty_service = dashboard.DashboardData(
     dashboard.DashboardPaths(
         state,
         control,
+        review,
         orchestrator,
         data,
         skills,
@@ -839,6 +845,7 @@ file_service = dashboard.DashboardData(
     dashboard.DashboardPaths(
         state,
         control,
+        review,
         orchestrator,
         data,
         skills,
