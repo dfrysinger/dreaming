@@ -49,23 +49,26 @@ class Fixture:
         self.action.state.mkdir(parents=True, exist_ok=True)
         self.state = root / "dashboard-state"
         self.control = root / "control"
+        self.review = root / "review"
         self.orchestrator = root / "orchestrator"
         self.data = root / "data"
         self.skills = root / "skills"
         for path in (
             self.state,
             self.control,
+            self.review,
             self.orchestrator,
             self.data,
             self.skills,
         ):
             path.mkdir(parents=True, exist_ok=True)
-        config = self.state / "estate-action/config.json"
+        config = self.review / "estate-action/config.json"
         config.parent.mkdir(parents=True)
         config.write_bytes(self.action.config_path.read_bytes())
         paths = dashboard.DashboardPaths(
             self.state,
             self.control,
+            self.review,
             self.orchestrator,
             self.data,
             self.skills,
@@ -241,7 +244,7 @@ with temporary:
 
 temporary, current = fixture("plugin_disable")
 with temporary:
-    config = current.state / "estate-action/config.json"
+    config = current.review / "estate-action/config.json"
     config.write_text("{}", encoding="utf-8")
     actions = current.actions()
     check(

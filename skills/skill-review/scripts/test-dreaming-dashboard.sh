@@ -268,7 +268,8 @@ action_fixture = estate_action_test.Fixture(
     root / "estate-action-fixture", "plugin_disable"
 )
 action_fixture.dispatch()
-action_config_path = state / "estate-action/config.json"
+review_state = control / "skill-review"
+action_config_path = review_state / "estate-action/config.json"
 action_config_path.parent.mkdir(parents=True)
 action_config_path.write_bytes(action_fixture.config_path.read_bytes())
 decision_records = []
@@ -310,7 +311,7 @@ for payload in (
 )
 
 paths = dashboard.DashboardPaths(
-    state, control, orchestrator, data, skills, repo, assets, token_path
+    state, control, review_state, orchestrator, data, skills, repo, assets, token_path
 )
 
 check(dashboard.read_token(token_path) == token, "valid mode-0600 token is accepted")
@@ -348,6 +349,7 @@ result = subprocess.run(
         **os.environ,
         "DREAMING_STATE_DIR": str(state),
         "SKILLS_STATE_DIR": str(control),
+        "SKILLS_REVIEW_STATE_DIR": str(review_state),
         "DREAMING_ORCHESTRATOR_STATE_DIR": str(orchestrator),
         "DREAMING_DATA_DIR": str(data),
         "DREAMING_SKILLS_ROOT": str(skills),
@@ -365,6 +367,7 @@ result = subprocess.run(
         **os.environ,
         "DREAMING_STATE_DIR": str(state),
         "SKILLS_STATE_DIR": str(control),
+        "SKILLS_REVIEW_STATE_DIR": str(review_state),
         "DREAMING_ORCHESTRATOR_STATE_DIR": str(orchestrator),
         "DREAMING_DATA_DIR": str(data),
         "DREAMING_SKILLS_ROOT": str(skills),
@@ -642,6 +645,7 @@ env = {
     "DREAMING_REPO_ROOT": str(repo),
     "DREAMING_STATE_DIR": str(state),
     "SKILLS_STATE_DIR": str(control),
+    "SKILLS_REVIEW_STATE_DIR": str(review_state),
     "DREAMING_ORCHESTRATOR_STATE_DIR": str(orchestrator),
     "DREAMING_DATA_DIR": str(data),
     "DREAMING_SKILLS_ROOT": str(skills),

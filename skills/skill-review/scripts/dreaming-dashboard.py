@@ -302,6 +302,7 @@ def fallback_name(session_id: str) -> str:
 class DashboardPaths:
     state: Path
     control_state: Path
+    review_state: Path
     orchestrator_state: Path
     data: Path
     skills: Path
@@ -333,6 +334,11 @@ class DashboardPaths:
         control_state = Path(
             os.environ.get("SKILLS_STATE_DIR", state)
         ).resolve()
+        review_state = Path(
+            os.environ.get(
+                "SKILLS_REVIEW_STATE_DIR", control_state / "skill-review"
+            )
+        ).resolve()
         orchestrator_state = Path(
             os.environ.get("DREAMING_ORCHESTRATOR_STATE_DIR", state / "orchestrator")
         ).resolve()
@@ -360,6 +366,7 @@ class DashboardPaths:
         return cls(
             state,
             control_state,
+            review_state,
             orchestrator_state,
             data,
             skills,
@@ -2505,7 +2512,7 @@ class DashboardData:
         }
 
     def _estate_actions(self) -> dict[str, Any]:
-        config_path = self.paths.state / "estate-action/config.json"
+        config_path = self.paths.review_state / "estate-action/config.json"
         if not config_path.exists():
             return {
                 "status": "unavailable",
