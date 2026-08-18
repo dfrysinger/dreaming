@@ -391,6 +391,9 @@ def inherit_remote_copilot(existing: dict[str, object]) -> None:
             "DREAMING_COPILOT_ESTATE_SESSION_ROOT": argv_value(
                 estate_entry, "--remote-copilot-session-root"
             ),
+            "DREAMING_COPILOT_ESTATE_USAGE_INDEX": argv_value(
+                estate_entry, "--remote-usage-index-path"
+            ),
             "DREAMING_ESTATE_USAGE_MAX_SESSIONS": argv_value(
                 estate_entry, "--usage-max-sessions"
             ),
@@ -629,6 +632,14 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
             os.environ.get(
                 "DREAMING_COPILOT_ESTATE_BIN",
                 os.environ.get("DREAMING_COPILOT_BIN", "copilot"),
+            ),
+            "--remote-usage-index-path",
+            os.environ.get(
+                "DREAMING_COPILOT_ESTATE_USAGE_INDEX",
+                str(
+                    Path(remote_home)
+                    / ".local/state/dreaming/copilot-usage-index.json"
+                ),
             ),
             "--usage-max-sessions",
             str(positive_integer("DREAMING_ESTATE_USAGE_MAX_SESSIONS", "10000")),

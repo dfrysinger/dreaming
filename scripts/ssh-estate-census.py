@@ -74,6 +74,11 @@ def receiver_config(args: argparse.Namespace) -> dict[str, Any]:
         or str(Path(args.target_home) / ".copilot/session-state"),
         "usage_max_sessions": args.usage_max_sessions,
         "usage_max_bytes": args.usage_max_bytes,
+        "usage_index_path": getattr(args, "usage_index_path", None)
+        or str(
+            Path(args.target_home)
+            / ".local/state/dreaming/copilot-usage-index.json"
+        ),
     }
     if args.project_contexts_file:
         path = Path(args.project_contexts_file).expanduser().resolve()
@@ -144,6 +149,8 @@ def remote_command(args: argparse.Namespace) -> list[str]:
         receiver.extend(
             ["--copilot-session-root", args.remote_copilot_session_root]
         )
+    if getattr(args, "remote_usage_index_path", None):
+        receiver.extend(["--usage-index-path", args.remote_usage_index_path])
     if args.user_context_cwd:
         receiver.extend(["--user-context-cwd", args.user_context_cwd])
     if args.remote_project_contexts_file:
@@ -225,6 +232,7 @@ def receiver_parser() -> argparse.ArgumentParser:
     parser.add_argument("--expected-collector-sha", required=True)
     parser.add_argument("--copilot-binary", required=True)
     parser.add_argument("--copilot-session-root")
+    parser.add_argument("--usage-index-path")
     parser.add_argument("--project-contexts-file")
     return parser
 
@@ -240,6 +248,7 @@ def local_parser() -> argparse.ArgumentParser:
     parser.add_argument("--remote-receiver-id-file", required=True)
     parser.add_argument("--remote-copilot-binary", required=True)
     parser.add_argument("--remote-copilot-session-root")
+    parser.add_argument("--remote-usage-index-path")
     parser.add_argument("--remote-project-contexts-file")
     parser.add_argument("--expected-receiver-id", required=True)
     parser.add_argument("--expected-receiver-sha", required=True)

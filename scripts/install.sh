@@ -200,6 +200,7 @@ DREAMING_REPO_ROOT="${REQUESTED_REPO_ROOT:-${DREAMING_REPO_ROOT:-$DEFAULT_REPO_R
 DREAMING_RECEIPT_FILE="${REQUESTED_RECEIPT_FILE:-${DREAMING_RECEIPT_FILE:-}}"
 DREAMING_DASHBOARD_HOST="${DREAMING_DASHBOARD_HOST:-127.0.0.1}"
 DREAMING_DASHBOARD_PORT="${DREAMING_DASHBOARD_PORT:-47673}"
+DREAMING_DASHBOARD_TAILNET_HOST="${DREAMING_DASHBOARD_TAILNET_HOST:-}"
 [[ "$DREAMING_DASHBOARD_HOST" == "127.0.0.1" ]] || {
   echo "DREAMING_DASHBOARD_HOST must be 127.0.0.1" >&2
   exit 2
@@ -210,6 +211,11 @@ DREAMING_DASHBOARD_PORT="${DREAMING_DASHBOARD_PORT:-47673}"
   echo "DREAMING_DASHBOARD_PORT must be an integer from 1 through 65535" >&2
   exit 2
 }
+if [[ -n "$DREAMING_DASHBOARD_TAILNET_HOST" ]] &&
+   [[ ! "$DREAMING_DASHBOARD_TAILNET_HOST" =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+ts\.net:${DREAMING_DASHBOARD_PORT}$ ]]; then
+  echo "DREAMING_DASHBOARD_TAILNET_HOST must be an exact lowercase .ts.net host with the dashboard port" >&2
+  exit 2
+fi
 if [[ -n "${DREAMING_RECEIPT_FILE:-}" ]]; then
   export DREAMING_RECEIPT_FILE
 else
@@ -246,6 +252,7 @@ export_runtime_env() {
   export DREAMING_SHARED_PROTOCOL DREAMING_SHARED_REVISION
   export DREAMING_ORCHESTRATOR_STATE_DIR
   export DREAMING_DASHBOARD_HOST DREAMING_DASHBOARD_PORT
+  export DREAMING_DASHBOARD_TAILNET_HOST
   export SKILLS_REPO_ROOT="${SKILLS_REPO_ROOT:-}"
 }
 
@@ -457,6 +464,7 @@ render() {
     "$DREAMING_ADAPTER_CONFIG" "$DREAMING_ENABLE_COPILOT_COMPAT" \
     "$DREAMING_ORCHESTRATOR_STATE_DIR" "$DREAMING_RECEIPT_FILE" \
     "$DREAMING_DASHBOARD_HOST" "$DREAMING_DASHBOARD_PORT" \
+    "$DREAMING_DASHBOARD_TAILNET_HOST" \
     "$DASHBOARD_TOKEN_FILE" "$DASHBOARD_ASSETS" <<'PY'
 import html
 import sys
@@ -481,6 +489,7 @@ import sys
     receipt_file,
     dashboard_host,
     dashboard_port,
+    dashboard_tailnet_host,
     dashboard_token_file,
     dashboard_assets,
 ) = sys.argv[1:]
@@ -515,6 +524,14 @@ if public:
         + "</string>\n"
     )
 text = text.replace("__SKILLS_REPO_ROOT_ENV__", public_env)
+tailnet_env = ""
+if dashboard_tailnet_host:
+    tailnet_env = (
+        "    <key>DREAMING_DASHBOARD_TAILNET_HOST</key><string>"
+        + html.escape(dashboard_tailnet_host)
+        + "</string>\n"
+    )
+text = text.replace("__DREAMING_DASHBOARD_TAILNET_HOST_ENV__", tailnet_env)
 adapter_env = ""
 if adapter_config:
     adapter_env = (
@@ -870,6 +887,8 @@ cmd_status() {
   echo "skills_root=$DREAMING_SKILLS_ROOT"
   echo "copilot_compat=$DREAMING_ENABLE_COPILOT_COMPAT"
   echo "dashboard_url=http://$DREAMING_DASHBOARD_HOST:$DREAMING_DASHBOARD_PORT/"
+  [[ -n "$DREAMING_DASHBOARD_TAILNET_HOST" ]] &&
+    echo "dashboard_tailnet_url=https://$DREAMING_DASHBOARD_TAILNET_HOST/"
   echo "dashboard_token=$([[ -f "$DASHBOARD_TOKEN_FILE" ]] && echo ready || echo missing)"
   [[ -n "$DREAMING_ADAPTER_CONFIG" ]] &&
     echo "adapter_config=$DREAMING_ADAPTER_CONFIG"

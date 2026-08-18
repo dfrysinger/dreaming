@@ -266,6 +266,7 @@ dashboard_plist="$DEST/com.fixture.dreaming.dashboard.plist"
 grep -q "$ROOT/skills/skill-review/scripts/dreaming-dashboard.py" "$dashboard_plist"
 grep -q "<key>SKILLS_STATE_DIR</key><string>$STATE</string>" "$dashboard_plist"
 grep -q "<key>DREAMING_DASHBOARD_TOKEN_FILE</key>" "$dashboard_plist"
+! grep -q "<key>DREAMING_DASHBOARD_TAILNET_HOST</key>" "$dashboard_plist"
 dashboard_token="$TMP/dreaming-state/dashboard/access-token"
 [[ -f "$dashboard_token" && "$(stat -f '%Lp' "$dashboard_token")" == "600" ]] ||
   { echo "install did not create a protected dashboard token" >&2; exit 1; }
@@ -290,6 +291,26 @@ if DREAMING_DASHBOARD_HOST=localhost run_install status \
   exit 1
 fi
 grep -q "DREAMING_DASHBOARD_HOST must be 127.0.0.1" "$TMP/non-loopback.err"
+if DREAMING_DASHBOARD_TAILNET_HOST=https://mac-mini.example.ts.net:47673 \
+    run_install status >"$TMP/invalid-tailnet.out" 2>"$TMP/invalid-tailnet.err"; then
+  echo "installer accepted a malformed tailnet dashboard host" >&2
+  exit 1
+fi
+grep -q "DREAMING_DASHBOARD_TAILNET_HOST must be an exact lowercase .ts.net host" \
+  "$TMP/invalid-tailnet.err"
+DREAMING_DASHBOARD_TAILNET_HOST=mac-mini.example.ts.net:47673 \
+  run_install install >/dev/null
+grep -q \
+  "<key>DREAMING_DASHBOARD_TAILNET_HOST</key><string>mac-mini.example.ts.net:47673</string>" \
+  "$dashboard_plist"
+tailnet_status="$(
+  DREAMING_DASHBOARD_TAILNET_HOST=mac-mini.example.ts.net:47673 \
+    run_install status
+)"
+grep -q '^dashboard_tailnet_url=https://mac-mini.example.ts.net:47673/$' \
+  <<<"$tailnet_status"
+run_install install >/dev/null
+! grep -q "<key>DREAMING_DASHBOARD_TAILNET_HOST</key>" "$dashboard_plist"
 [[ "$(<"$dashboard_token")" == "$token_before" ]] ||
   { echo "invalid dashboard host changed the dashboard token" >&2; exit 1; }
 status_output="$(run_install status)"

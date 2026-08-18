@@ -32,6 +32,7 @@
     <key>DREAMING_SKILLS_ROOT</key><string>__DREAMING_SKILLS_ROOT__</string>
     <key>DREAMING_DASHBOARD_ASSETS</key><string>__DREAMING_DASHBOARD_ASSETS__</string>
     <key>DREAMING_DASHBOARD_TOKEN_FILE</key><string>__DREAMING_DASHBOARD_TOKEN_FILE__</string>
+__DREAMING_DASHBOARD_TAILNET_HOST_ENV__
     <key>SKILLS_STATE_DIR</key><string>__SKILLS_STATE_DIR__</string>
     <key>SKILLS_REVIEW_STATE_DIR</key><string>__SKILLS_REVIEW_STATE_DIR__</string>
   </dict>

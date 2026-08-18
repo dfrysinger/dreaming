@@ -89,6 +89,7 @@ class SshEstateCensusTest(unittest.TestCase):
                             "census_snapshot_sha256": census["snapshot_sha256"],
                             "host_id": census["host_id"],
                             "collected_at": "fixture",
+                            "usage_index_path": config["usage_index_path"],
                         },
                     }
                 """
@@ -136,6 +137,10 @@ class SshEstateCensusTest(unittest.TestCase):
             result["usage"]["census_snapshot_sha256"],
             result["census"]["snapshot_sha256"],
         )
+        self.assertEqual(
+            result["usage"]["usage_index_path"],
+            str(self.root / ".local/state/dreaming/copilot-usage-index.json"),
+        )
 
     def test_remote_command_quotes_ipv6_and_paths(self) -> None:
         args = Namespace(
@@ -150,6 +155,7 @@ class SshEstateCensusTest(unittest.TestCase):
             target_home="/Users/fixture user",
             remote_copilot_binary="/fixture/copilot",
             remote_copilot_session_root=None,
+            remote_usage_index_path="/Users/fixture user/.local/state/dreaming/index.json",
             user_context_cwd=None,
             remote_project_contexts_file=None,
             ssh_bin="/usr/bin/ssh",
@@ -161,6 +167,10 @@ class SshEstateCensusTest(unittest.TestCase):
         command = module.remote_command(args)
         self.assertEqual(command[:4], ["/usr/bin/ssh", "-6", "-o", "BatchMode=yes"])
         self.assertIn("'/Users/fixture user'", command[-1])
+        self.assertIn(
+            "'/Users/fixture user/.local/state/dreaming/index.json'",
+            command[-1],
+        )
 
 
 if __name__ == "__main__":

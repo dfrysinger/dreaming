@@ -3397,12 +3397,24 @@ class DashboardData:
             "status": "unavailable",
             "available": False,
             "complete": None,
+            "corpus_complete": None,
+            "attribution_complete": None,
             "source": None,
             "collected_at": None,
             "earliest_retained_event": None,
+            "discovered_sessions": None,
+            "discovered_bytes": None,
+            "indexed_sessions": None,
+            "indexed_bytes": None,
+            "pending_sessions": None,
+            "pending_bytes": None,
             "sessions_scanned": None,
             "bytes_scanned": None,
+            "sessions_parsed_this_run": None,
+            "bytes_parsed_this_run": None,
             "bound_reached": None,
+            "work_budget_stopped_run": None,
+            "index_status": None,
             "failure_count": None,
             "unattributed_count": None,
             "canonical_usage": [],
@@ -3498,28 +3510,63 @@ class DashboardData:
                 or set(coverage)
                 != {
                     "complete",
+                    "corpus_complete",
+                    "attribution_complete",
                     "earliest_retained_event",
+                    "discovered_sessions",
+                    "discovered_bytes",
+                    "indexed_sessions",
+                    "indexed_bytes",
+                    "pending_sessions",
+                    "pending_bytes",
                     "sessions_scanned",
                     "bytes_scanned",
+                    "sessions_parsed_this_run",
+                    "bytes_parsed_this_run",
                     "max_sessions",
                     "max_bytes",
                     "bound_reached",
+                    "work_budget_stopped_run",
+                    "index_status",
+                    "pending",
                     "failures",
                 }
                 or not isinstance(coverage.get("complete"), bool)
+                or not isinstance(coverage.get("corpus_complete"), bool)
+                or not isinstance(coverage.get("attribution_complete"), bool)
+                or not isinstance(coverage.get("work_budget_stopped_run"), bool)
                 or not all(
                     isinstance(coverage.get(name), int)
                     and not isinstance(coverage.get(name), bool)
                     and coverage[name] >= 0
                     for name in (
+                        "discovered_sessions",
+                        "discovered_bytes",
+                        "indexed_sessions",
+                        "indexed_bytes",
+                        "pending_sessions",
+                        "pending_bytes",
                         "sessions_scanned",
                         "bytes_scanned",
+                        "sessions_parsed_this_run",
+                        "bytes_parsed_this_run",
                         "max_sessions",
                         "max_bytes",
                     )
                 )
+                or coverage["indexed_sessions"] + coverage["pending_sessions"]
+                != coverage["discovered_sessions"]
+                or coverage["indexed_bytes"] + coverage["pending_bytes"]
+                != coverage["discovered_bytes"]
+                or coverage["sessions_scanned"]
+                != coverage["sessions_parsed_this_run"]
+                or coverage["bytes_scanned"] != coverage["bytes_parsed_this_run"]
                 or coverage.get("bound_reached")
                 not in {None, "max_sessions", "max_bytes"}
+                or coverage["work_budget_stopped_run"]
+                != (coverage["bound_reached"] is not None)
+                or coverage.get("index_status") not in {"absent", "loaded", "rebuilt"}
+                or not isinstance(coverage.get("pending"), list)
                 or not isinstance(coverage.get("failures"), list)
             ):
                 return unavailable
@@ -3527,6 +3574,28 @@ class DashboardData:
                 coverage["earliest_retained_event"]
             ) is None:
                 return unavailable
+            for pending in coverage["pending"]:
+                if (
+                    not isinstance(pending, dict)
+                    or set(pending) != {"session_id", "reason"}
+                    or not CANDIDATE_ID_RE.fullmatch(
+                        str(pending.get("session_id", ""))
+                    )
+                    or pending.get("reason")
+                    not in {
+                        "events_recently_modified",
+                        "events_changed_or_unreadable",
+                        "usage_session_invalid_utf8",
+                        "usage_session_malformed_json",
+                        "usage_session_event_not_object",
+                        "usage_session_invalid_timestamp",
+                        "usage_session_future_timestamp",
+                        "usage_session_invalid_skill_start",
+                        "usage_session_duplicate_skill_start",
+                        "usage_session_duplicate_completion",
+                    }
+                ):
+                    return unavailable
             for failure in coverage["failures"]:
                 if (
                     not isinstance(failure, dict)
@@ -3608,12 +3677,19 @@ class DashboardData:
                     }
                     or not OBSERVED_SKILL_RE.fullmatch(str(item.get("name", "")))
                     or item.get("reason")
-                    not in {"unmapped", "conflicting_mapping"}
+                    not in {
+                        "unmapped",
+                        "conflicting_mapping",
+                        "alias_target_missing",
+                        "alias_target_conflicting",
+                    }
                 ):
                     return unavailable
             complete = coverage["complete"]
             if complete and (
                 seen_ids != enabled_ids
+                or not coverage["corpus_complete"]
+                or not coverage["attribution_complete"]
                 or coverage["failures"]
                 or coverage["bound_reached"] is not None
                 or unattributed
@@ -3623,12 +3699,24 @@ class DashboardData:
                 "status": "complete" if complete else "incomplete",
                 "available": True,
                 "complete": complete,
+                "corpus_complete": coverage["corpus_complete"],
+                "attribution_complete": coverage["attribution_complete"],
                 "source": "MacBook Copilot local transcripts",
                 "collected_at": usage["collected_at"],
                 "earliest_retained_event": coverage["earliest_retained_event"],
+                "discovered_sessions": coverage["discovered_sessions"],
+                "discovered_bytes": coverage["discovered_bytes"],
+                "indexed_sessions": coverage["indexed_sessions"],
+                "indexed_bytes": coverage["indexed_bytes"],
+                "pending_sessions": coverage["pending_sessions"],
+                "pending_bytes": coverage["pending_bytes"],
                 "sessions_scanned": coverage["sessions_scanned"],
                 "bytes_scanned": coverage["bytes_scanned"],
+                "sessions_parsed_this_run": coverage["sessions_parsed_this_run"],
+                "bytes_parsed_this_run": coverage["bytes_parsed_this_run"],
                 "bound_reached": coverage["bound_reached"],
+                "work_budget_stopped_run": coverage["work_budget_stopped_run"],
+                "index_status": coverage["index_status"],
                 "failure_count": len(coverage["failures"]),
                 "unattributed_count": len(unattributed),
                 "canonical_usage": canonical_usage,
@@ -3949,6 +4037,7 @@ class DashboardHandler(BaseHTTPRequestHandler):
     data: DashboardData
     token: str
     allowed_hosts: set[str]
+    tailnet_host: str | None
 
     def log_message(self, _format: str, *args: Any) -> None:
         return
@@ -4012,12 +4101,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
         if host not in self.allowed_hosts:
             raise DashboardError(403, "host_denied", "Request host is not allowed")
         origin = self.headers.get("Origin")
-        if origin is not None and origin not in {f"http://{item}" for item in self.allowed_hosts}:
+        tailnet_request = self.tailnet_host is not None and host == self.tailnet_host
+        if tailnet_request:
+            if origin is not None and origin != f"https://{self.tailnet_host}":
+                raise DashboardError(403, "origin_denied", "Request origin is not allowed")
+        elif origin is not None and origin not in {
+            f"http://{item}" for item in self.allowed_hosts if item != self.tailnet_host
+        }:
             raise DashboardError(403, "origin_denied", "Request origin is not allowed")
         if not api:
             return
         if self.headers.get("Cookie") or "access_token" in urllib.parse.urlsplit(self.path).query:
             raise DashboardError(401, "authentication_required", "Bearer authentication is required")
+        if tailnet_request:
+            return
         authorization = self.headers.get("Authorization", "")
         prefix = "Bearer "
         supplied = authorization[len(prefix) :] if authorization.startswith(prefix) else ""
@@ -4085,7 +4182,20 @@ class DashboardHandler(BaseHTTPRequestHandler):
         asset = self.data.paths.assets / name
         if asset.is_symlink() or not asset.is_file() or asset.parent.resolve() != self.data.paths.assets:
             raise DashboardError(503, "asset_missing", "Dashboard asset is unavailable")
-        self._send(asset.read_bytes(), content_type)
+        body = asset.read_bytes()
+        if (
+            name == "index.html"
+            and self.tailnet_host is not None
+            and self.headers.get("Host") == self.tailnet_host
+        ):
+            body = body.replace(
+                b'<meta name="dreaming-tailnet-host" content="">',
+                (
+                    f'<meta name="dreaming-tailnet-host" '
+                    f'content="{self.tailnet_host}">'
+                ).encode("ascii"),
+            )
+        self._send(body, content_type)
 
     def do_GET(self) -> None:
         try:
@@ -4115,6 +4225,32 @@ class DashboardHandler(BaseHTTPRequestHandler):
     do_OPTIONS = _method_not_allowed
 
 
+def configured_tailnet_host(port: int) -> str | None:
+    value = os.environ.get("DREAMING_DASHBOARD_TAILNET_HOST")
+    if value is None:
+        return None
+    try:
+        parsed = urllib.parse.urlsplit(f"//{value}")
+        parsed_port = parsed.port
+    except ValueError:
+        return None
+    if (
+        parsed.scheme
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.path
+        or parsed.query
+        or parsed.fragment
+        or parsed.hostname is None
+        or parsed.hostname != parsed.hostname.lower()
+        or not parsed.hostname.endswith(".ts.net")
+        or parsed_port != port
+        or value != f"{parsed.hostname}:{parsed_port}"
+    ):
+        return None
+    return value
+
+
 def run_server(host: str, port: int, paths: DashboardPaths) -> None:
     if host != "127.0.0.1":
         raise DashboardError(
@@ -4127,16 +4263,21 @@ def run_server(host: str, port: int, paths: DashboardPaths) -> None:
     token = read_token(paths.token)
     if not paths.assets.is_dir() or paths.assets.is_symlink():
         raise DashboardError(2, "asset_missing", "Dashboard assets are unavailable")
+    tailnet_host = configured_tailnet_host(port)
+    allowed_hosts = {
+        f"{host}:{port}",
+        f"localhost:{port}",
+    }
+    if tailnet_host is not None:
+        allowed_hosts.add(tailnet_host)
     handler = type(
         "ConfiguredDashboardHandler",
         (DashboardHandler,),
         {
             "data": DashboardData(paths),
             "token": token,
-            "allowed_hosts": {
-                f"{host}:{port}",
-                f"localhost:{port}",
-            },
+            "allowed_hosts": allowed_hosts,
+            "tailnet_host": tailnet_host,
         },
     )
     server = BoundedThreadingHTTPServer((host, port), handler)

@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -1053,6 +1054,7 @@ class EstateCensusTest(unittest.TestCase):
             collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
             max_sessions=10,
             max_bytes=100_000,
+            quiet_seconds=0,
         )
         self.assertTrue(usage["coverage"]["complete"])
         self.assertEqual(usage["coverage"]["sessions_scanned"], 1)
@@ -1126,6 +1128,7 @@ class EstateCensusTest(unittest.TestCase):
             collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
             max_sessions=10,
             max_bytes=100_000,
+            quiet_seconds=0,
         )
         self.assertFalse(usage["coverage"]["complete"])
         self.assertEqual(
@@ -1159,6 +1162,7 @@ class EstateCensusTest(unittest.TestCase):
             collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
             max_sessions=10,
             max_bytes=100_000,
+            quiet_seconds=0,
         )
         self.assertFalse(usage["coverage"]["complete"])
         self.assertEqual(usage["canonical_usage"][0]["uses_total"], 0)
@@ -1197,6 +1201,7 @@ class EstateCensusTest(unittest.TestCase):
             collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
             max_sessions=10,
             max_bytes=100_000,
+            quiet_seconds=0,
         )
         self.assertFalse(usage["coverage"]["complete"])
         self.assertEqual(usage["canonical_usage"][0]["uses_total"], 0)
@@ -1273,6 +1278,7 @@ class EstateCensusTest(unittest.TestCase):
             collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
             max_sessions=10,
             max_bytes=100_000,
+            quiet_seconds=0,
         )
         self.assertFalse(usage["coverage"]["complete"])
         self.assertEqual(
@@ -1319,10 +1325,355 @@ class EstateCensusTest(unittest.TestCase):
             collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
             max_sessions=1,
             max_bytes=100_000,
+            quiet_seconds=0,
         )
         self.assertFalse(usage["coverage"]["complete"])
         self.assertEqual(usage["coverage"]["bound_reached"], "max_sessions")
         self.assertEqual(usage["canonical_usage"][0]["uses_total"], 1)
+
+    def test_usage_index_advances_reuses_and_replaces_changed_sessions(self) -> None:
+        capability_id = "sha256:" + "9" * 64
+        collected_at = datetime(2026, 8, 18, 12, tzinfo=timezone.utc)
+        root = self.case / "sessions"
+        index = self.case / "state" / "usage-index.json"
+        paths = []
+        for offset, session in enumerate(("one", "two", "three"), start=1):
+            path = self.write_usage_events(
+                session,
+                [
+                    self.usage_event(
+                        "tool.execution_start",
+                        "2026-08-17T10:00:00+00:00",
+                        call_id=session,
+                    ),
+                    self.usage_event(
+                        "tool.execution_complete",
+                        "2026-08-17T10:00:01+00:00",
+                        call_id=session,
+                    ),
+                ],
+            )
+            stamp = collected_at.timestamp() - (4000 - offset * 100)
+            os.utime(path, (stamp, stamp))
+            paths.append(path)
+
+        for expected in (1, 2, 3):
+            usage = module.collect_usage(
+                self.usage_census([("fixture-skill", capability_id)]),
+                root,
+                collected_at=collected_at,
+                max_sessions=1,
+                max_bytes=100_000,
+                index_path=index,
+            )
+            self.assertEqual(usage["coverage"]["indexed_sessions"], expected)
+            self.assertEqual(usage["coverage"]["sessions_parsed_this_run"], 1)
+
+        unchanged = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            root,
+            collected_at=collected_at,
+            max_sessions=1,
+            max_bytes=100_000,
+            index_path=index,
+        )
+        self.assertTrue(unchanged["coverage"]["corpus_complete"])
+        self.assertEqual(unchanged["coverage"]["sessions_parsed_this_run"], 0)
+        self.assertEqual(unchanged["canonical_usage"][0]["uses_total"], 3)
+
+        with paths[0].open("a", encoding="utf-8") as handle:
+            handle.write(
+                json.dumps(
+                    self.usage_event(
+                        "tool.execution_start",
+                        "2026-08-17T11:00:00+00:00",
+                        call_id="one-extra",
+                    )
+                )
+                + "\n"
+            )
+            handle.write(
+                json.dumps(
+                    self.usage_event(
+                        "tool.execution_complete",
+                        "2026-08-17T11:00:01+00:00",
+                        call_id="one-extra",
+                    )
+                )
+                + "\n"
+            )
+        changed_stamp = collected_at.timestamp() - 600
+        os.utime(paths[0], (changed_stamp, changed_stamp))
+        changed = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            root,
+            collected_at=collected_at,
+            max_sessions=1,
+            max_bytes=100_000,
+            index_path=index,
+        )
+        self.assertEqual(changed["coverage"]["indexed_sessions"], 3)
+        self.assertEqual(changed["coverage"]["sessions_parsed_this_run"], 1)
+        self.assertEqual(changed["canonical_usage"][0]["uses_total"], 4)
+
+    def test_usage_index_streams_oversized_session_then_moves_beyond_it(self) -> None:
+        capability_id = "sha256:" + "a" * 64
+        collected_at = datetime(2026, 8, 18, 12, tzinfo=timezone.utc)
+        root = self.case / "sessions"
+        index = self.case / "state" / "usage-index.json"
+        oversized = self.write_usage_events(
+            "oversized",
+            [
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T10:00:00+00:00",
+                    call_id="oversized",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T10:00:01+00:00",
+                    call_id="oversized",
+                ),
+                *[
+                    {
+                        "type": "user.message",
+                        "timestamp": "2026-08-17T10:00:02+00:00",
+                        "data": {"padding": "x" * 100},
+                    }
+                    for _ in range(20)
+                ],
+            ],
+        )
+        ordinary = self.write_usage_events(
+            "ordinary",
+            [
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T11:00:00+00:00",
+                    call_id="ordinary",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T11:00:01+00:00",
+                    call_id="ordinary",
+                ),
+            ],
+        )
+        os.utime(
+            oversized,
+            (collected_at.timestamp() - 1000, collected_at.timestamp() - 1000),
+        )
+        os.utime(
+            ordinary,
+            (collected_at.timestamp() - 900, collected_at.timestamp() - 900),
+        )
+        budget = ordinary.stat().st_size + 1
+        self.assertGreater(oversized.stat().st_size, budget)
+        original_read_bytes = Path.read_bytes
+
+        def guarded_read_bytes(path: Path) -> bytes:
+            if path.name == "events.jsonl":
+                raise AssertionError("transcript was read as one byte string")
+            return original_read_bytes(path)
+
+        with mock.patch.object(Path, "read_bytes", guarded_read_bytes):
+            first = module.collect_usage(
+                self.usage_census([("fixture-skill", capability_id)]),
+                root,
+                collected_at=collected_at,
+                max_sessions=10,
+                max_bytes=budget,
+                index_path=index,
+            )
+        self.assertEqual(first["coverage"]["indexed_sessions"], 1)
+        self.assertGreater(first["coverage"]["bytes_parsed_this_run"], budget)
+        self.assertEqual(first["coverage"]["bound_reached"], "max_bytes")
+
+        second = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            root,
+            collected_at=collected_at,
+            max_sessions=10,
+            max_bytes=budget,
+            index_path=index,
+        )
+        self.assertTrue(second["coverage"]["corpus_complete"])
+        self.assertEqual(second["coverage"]["indexed_sessions"], 2)
+        self.assertEqual(second["canonical_usage"][0]["uses_total"], 2)
+
+    def test_usage_index_is_private_rebuildable_and_quiescent(self) -> None:
+        capability_id = "sha256:" + "b" * 64
+        collected_at = datetime(2026, 8, 18, 12, tzinfo=timezone.utc)
+        root = self.case / "sessions"
+        index = self.case / "state" / "usage-index.json"
+        sentinel = "PRIVATE-PROMPT-AND-PATH-SENTINEL"
+        stable = self.write_usage_events(
+            "private-session-name",
+            [
+                {
+                    "type": "user.message",
+                    "timestamp": "2026-08-17T09:00:00+00:00",
+                    "data": {"prompt": sentinel, "path": f"/private/{sentinel}"},
+                },
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T10:00:00+00:00",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T10:00:01+00:00",
+                ),
+            ],
+        )
+        recent = self.write_usage_events(
+            "recent-session",
+            [
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T11:00:00+00:00",
+                    call_id="recent",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T11:00:01+00:00",
+                    call_id="recent",
+                ),
+            ],
+        )
+        os.utime(
+            stable,
+            (collected_at.timestamp() - 600, collected_at.timestamp() - 600),
+        )
+        os.utime(
+            recent,
+            (collected_at.timestamp() - 100, collected_at.timestamp() - 100),
+        )
+        first = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            root,
+            collected_at=collected_at,
+            max_sessions=10,
+            max_bytes=100_000,
+            index_path=index,
+        )
+        self.assertEqual(first["coverage"]["indexed_sessions"], 1)
+        self.assertEqual(first["coverage"]["pending_sessions"], 1)
+        self.assertEqual(
+            first["coverage"]["pending"][0]["reason"],
+            "events_recently_modified",
+        )
+        index_text = index.read_text(encoding="utf-8")
+        self.assertNotIn(sentinel, index_text)
+        self.assertNotIn("private-session-name", index_text)
+        self.assertNotIn("events.jsonl", index_text)
+
+        index.write_text("{malformed", encoding="utf-8")
+        os.utime(
+            recent,
+            (collected_at.timestamp() - 600, collected_at.timestamp() - 600),
+        )
+        rebuilt = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            root,
+            collected_at=collected_at,
+            max_sessions=10,
+            max_bytes=100_000,
+            index_path=index,
+        )
+        self.assertEqual(rebuilt["coverage"]["index_status"], "rebuilt")
+        self.assertTrue(rebuilt["coverage"]["corpus_complete"])
+        self.assertEqual(len(list(index.parent.glob("usage-index.json.rejected-*"))), 1)
+
+    def test_usage_aliases_are_exact_unique_and_never_override_direct_names(self) -> None:
+        development_id = "sha256:" + "c" * 64
+        nexus_id = "sha256:" + "d" * 64
+        absorb_id = "sha256:" + "e" * 64
+        direct_id = "sha256:" + "f" * 64
+        events = []
+        for index, name in enumerate(
+            (
+                "feature-development-loop",
+                "gated-pr-merge",
+                "nexus-dev",
+                "prototype-reference-integration",
+                "caveman",
+            )
+        ):
+            call_id = f"alias-{index}"
+            events.extend(
+                [
+                    self.usage_event(
+                        "tool.execution_start",
+                        f"2026-08-17T1{index}:00:00+00:00",
+                        call_id=call_id,
+                        name=name,
+                    ),
+                    self.usage_event(
+                        "tool.execution_complete",
+                        f"2026-08-17T1{index}:00:01+00:00",
+                        call_id=call_id,
+                        name=name,
+                    ),
+                ]
+            )
+        self.write_usage_events("aliases", events)
+        usage = module.collect_usage(
+            self.usage_census(
+                [
+                    ("development-loop", development_id),
+                    ("nexus-gotchas", nexus_id),
+                    ("absorb-poc", absorb_id),
+                ]
+            ),
+            self.case / "sessions",
+            collected_at=datetime(2026, 8, 18, 12, tzinfo=timezone.utc),
+            max_sessions=10,
+            max_bytes=100_000,
+            quiet_seconds=0,
+        )
+        self.assertEqual(
+            {
+                item["canonical_capability_id"]: item["uses_total"]
+                for item in usage["canonical_usage"]
+            },
+            {development_id: 2, nexus_id: 1, absorb_id: 1},
+        )
+        self.assertEqual(
+            [(item["name"], item["reason"]) for item in usage["unattributed"]],
+            [("caveman", "unmapped")],
+        )
+
+        direct = module.collect_usage(
+            self.usage_census(
+                [
+                    ("feature-development-loop", direct_id),
+                    ("development-loop", development_id),
+                    ("nexus-gotchas", nexus_id),
+                    ("absorb-poc", absorb_id),
+                ]
+            ),
+            self.case / "sessions",
+            collected_at=datetime(2026, 8, 18, 12, tzinfo=timezone.utc),
+            max_sessions=10,
+            max_bytes=100_000,
+            quiet_seconds=0,
+        )
+        self.assertEqual(
+            {
+                item["canonical_capability_id"]: item["uses_total"]
+                for item in direct["canonical_usage"]
+            },
+            {
+                direct_id: 1,
+                development_id: 1,
+                nexus_id: 1,
+                absorb_id: 1,
+            },
+        )
+        invalid = json.loads(json.dumps(module.USAGE_ALIASES))
+        invalid["feature-development-loop"]["evidence"][0]["from"] = "wrong"
+        with self.assertRaisesRegex(module.EstateError, "usage_aliases_invalid"):
+            module.validate_usage_aliases(invalid)
 
     def test_plugin_capabilities_cover_non_skill_surfaces(self) -> None:
         plugin = self.case / "plugin"

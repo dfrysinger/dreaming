@@ -78,6 +78,13 @@ check(
     "candidate views conspicuously show shadow authority, identity, recurrence, freshness, and gates",
 )
 check(
+    'meta[name="dreaming-tailnet-host"]' in javascript
+    and 'location.protocol === "https:" && location.host === tailnetHost' in javascript
+    and "const headers = state.token ?" in javascript
+    and "authNote.hidden = Boolean(state.token) || tailnetMode" in javascript,
+    "browser uses tokenless API requests only on the exact injected HTTPS tailnet origin",
+)
+check(
     "Governance decisions and actions" in javascript
     and "Recovery required:" in javascript
     and "receipts are verification-only" in javascript,
@@ -299,12 +306,25 @@ usage_snapshot = {
     "source": "copilot_local_session_state",
     "coverage": {
         "complete": True,
+        "corpus_complete": True,
+        "attribution_complete": True,
         "earliest_retained_event": "2026-07-01T00:00:00+00:00",
+        "discovered_sessions": 12,
+        "discovered_bytes": 4096,
+        "indexed_sessions": 12,
+        "indexed_bytes": 4096,
+        "pending_sessions": 0,
+        "pending_bytes": 0,
         "sessions_scanned": 12,
         "bytes_scanned": 4096,
+        "sessions_parsed_this_run": 12,
+        "bytes_parsed_this_run": 4096,
         "max_sessions": 100,
         "max_bytes": 100000,
         "bound_reached": None,
+        "work_budget_stopped_run": False,
+        "index_status": "loaded",
+        "pending": [],
         "failures": [],
     },
     "canonical_usage": [{
@@ -740,12 +760,15 @@ env = {
     "DREAMING_DASHBOARD_TOKEN_FILE": str(token_path),
     "DREAMING_DASHBOARD_ASSETS": str(assets),
 }
-server = subprocess.Popen(
-    [sys.executable, str(script), "--host", "127.0.0.1", "--port", str(port)],
-    env=env,
-    stdout=subprocess.DEVNULL,
-    stderr=subprocess.PIPE,
-)
+tailnet_host = f"mac-mini.example.ts.net:{port}"
+
+def start_server(extra_env=None):
+    return subprocess.Popen(
+        [sys.executable, str(script), "--host", "127.0.0.1", "--port", str(port)],
+        env={**env, **(extra_env or {})},
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
 
 def request(path, *, method="GET", host=None, origin=None, auth=True, cookie=None):
     connection = http.client.HTTPConnection("127.0.0.1", port, timeout=10)
@@ -767,21 +790,66 @@ def request(path, *, method="GET", host=None, origin=None, auth=True, cookie=Non
     connection.close()
     return result
 
-try:
+def wait_for_server():
     deadline = time.time() + 120
     while True:
         try:
             status, _, _ = request("/", auth=False)
             if status == 200:
-                break
+                return
         except OSError:
             pass
         if time.time() > deadline:
             raise AssertionError("server did not become ready")
         time.sleep(0.05)
 
+server = start_server()
+try:
+    wait_for_server()
+    check(
+        request(
+            "/api/v1/dreams",
+            host=tailnet_host,
+            origin=f"https://{tailnet_host}",
+            auth=False,
+        )[0]
+        == 403,
+        "unset tailnet Host configuration retains localhost-only behavior",
+    )
+finally:
+    server.terminate()
+    server.wait(timeout=30)
+
+server = start_server(
+    {"DREAMING_DASHBOARD_TAILNET_HOST": f"https://{tailnet_host}"}
+)
+try:
+    wait_for_server()
+    check(
+        request(
+            "/api/v1/dreams",
+            host=tailnet_host,
+            origin=f"https://{tailnet_host}",
+            auth=False,
+        )[0]
+        == 403,
+        "malformed tailnet Host configuration retains localhost-only behavior",
+    )
+finally:
+    server.terminate()
+    server.wait(timeout=30)
+
+server = start_server({"DREAMING_DASHBOARD_TAILNET_HOST": tailnet_host})
+try:
+    wait_for_server()
+
     status, headers, body = request("/", auth=False)
-    check(status == 200 and b"Dreaming Dashboard" in body, "static shell loads without private-state authority")
+    check(
+        status == 200
+        and b"Dreaming Dashboard" in body
+        and b'<meta name="dreaming-tailnet-host" content="">' in body,
+        "localhost static shell loads without remote-origin configuration",
+    )
     check(
         "default-src 'self'" in headers.get("Content-Security-Policy", "")
         and headers.get("Cache-Control") == "no-store"
@@ -794,6 +862,83 @@ try:
     check(request("/api/v1/dreams", auth=False)[0] == 401, "missing bearer is rejected before state reads")
     check(request("/api/v1/dreams", host="evil.example", auth=False)[0] == 403, "foreign Host is rejected before state reads")
     check(request("/api/v1/dreams", origin="http://evil.example", auth=False)[0] == 403, "foreign Origin is rejected before state reads")
+    (state / "queue.json").write_bytes(malformed)
+    check(
+        request("/api/v1/dreams", host=tailnet_host, auth=False)[0] == 200,
+        "exact configured tailnet Host reads without a bearer when Origin is absent",
+    )
+    check(
+        request(
+            "/api/v1/dreams",
+            host=tailnet_host,
+            origin=f"https://{tailnet_host}",
+            auth=False,
+        )[0]
+        == 200,
+        "exact configured tailnet HTTPS origin reads without a bearer",
+    )
+    tailnet_shell = request("/", host=tailnet_host, auth=False)
+    check(
+        tailnet_shell[0] == 200
+        and (
+            f'<meta name="dreaming-tailnet-host" content="{tailnet_host}">'
+        ).encode("ascii")
+        in tailnet_shell[2],
+        "tailnet shell receives only its exact tokenless origin configuration",
+    )
+    (state / "queue.json").write_text("{malformed", encoding="utf-8")
+    check(
+        request(
+            "/api/v1/dreams",
+            host=tailnet_host,
+            origin=f"https://evil.example",
+            auth=False,
+        )[0]
+        == 403,
+        "configured tailnet Host rejects a foreign Origin before state reads",
+    )
+    check(
+        request(
+            "/api/v1/dreams",
+            host=tailnet_host,
+            origin=f"http://{tailnet_host}",
+            auth=False,
+        )[0]
+        == 403,
+        "configured tailnet Host rejects a non-HTTPS Origin before state reads",
+    )
+    check(
+        request(
+            "/api/v1/dreams",
+            host=tailnet_host,
+            origin=f"https://{tailnet_host}",
+            auth=False,
+            cookie="dashboard=secret",
+        )[0]
+        == 401,
+        "configured tailnet path rejects cookie authentication before state reads",
+    )
+    check(
+        request(
+            "/api/v1/dreams?access_token=secret",
+            host=tailnet_host,
+            origin=f"https://{tailnet_host}",
+            auth=False,
+        )[0]
+        == 401,
+        "configured tailnet path rejects query-token authentication before state reads",
+    )
+    check(
+        request(
+            "/api/v1/dreams",
+            method="POST",
+            host=tailnet_host,
+            origin=f"https://{tailnet_host}",
+            auth=False,
+        )[0]
+        == 405,
+        "configured tailnet path rejects write methods",
+    )
     (state / "queue.json").write_bytes(malformed)
     check(request("/api/v1/dreams", cookie="dashboard=secret")[0] == 401, "cookie authentication is rejected")
     check(request("/api/v1/dreams?access_token=secret", auth=False)[0] == 401, "query-token authentication is rejected")

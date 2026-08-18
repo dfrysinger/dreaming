@@ -11,6 +11,8 @@ const state = {
 const view = document.getElementById("view");
 const errorBox = document.getElementById("error");
 const authNote = document.getElementById("auth-note");
+const tailnetHost = document.querySelector('meta[name="dreaming-tailnet-host"]')?.content || "";
+const tailnetMode = location.protocol === "https:" && location.host === tailnetHost;
 
 function readToken() {
   const fragment = new URLSearchParams(location.hash.replace(/^#/, ""));
@@ -125,9 +127,10 @@ function lastUse(item) {
 }
 
 async function api(path) {
-  if (!state.token) throw new Error("Open the dashboard with the dashboard-open installer command.");
+  if (!state.token && !tailnetMode) throw new Error("Open the dashboard with the dashboard-open installer command.");
+  const headers = state.token ? { Authorization: `Bearer ${state.token}` } : {};
   const response = await fetch(path, {
-    headers: { Authorization: `Bearer ${state.token}` },
+    headers,
     cache: "no-store",
   });
   const payload = await response.json();
@@ -257,7 +260,7 @@ async function renderEstate() {
     </div>
     <div class="notice"><strong>Bounded scope:</strong> ${esc(data.scope?.label)} Registered: ${esc((data.scope?.registered_context_ids || []).join(", ") || "none")}. Outside claim: ${esc((data.scope?.outside_context_ids || []).join(", ") || "none")}.</div>
     <div class="notice"><strong>Verified source:</strong> receiver ${esc(data.receiver?.id || "unavailable")} · census receipt ${esc(data.receipt_sha256 ? `${data.receipt_sha256.slice(0,18)}…` : "unavailable")} · settings ${esc(data.settings_sha256 ? `${data.settings_sha256.slice(0,16)}…` : "hash unavailable")}.</div>
-    <div class="notice"><strong>Usage evidence:</strong> ${esc(usage.source || "Unavailable")} · ${badge(usage.status || "unavailable")} · collected ${usage.collected_at ? relative(usage.collected_at) : "not recorded"} · retained history starts ${usage.earliest_retained_event ? fullTime(usage.earliest_retained_event) : "unknown"} · ${number(usage.sessions_scanned)} sessions scanned. Missing or incomplete evidence is never shown as zero.</div>
+    <div class="notice"><strong>Usage evidence:</strong> ${esc(usage.source || "Unavailable")} · ${badge(usage.status || "unavailable")} · corpus ${badge(usage.corpus_complete === true ? "complete" : usage.corpus_complete === false ? "catching up" : "unknown")} · attribution ${badge(usage.attribution_complete === true ? "complete" : usage.attribution_complete === false ? "incomplete" : "unknown")} · ${number(usage.indexed_sessions)} of ${number(usage.discovered_sessions)} sessions indexed (${bytes(usage.indexed_bytes)} of ${bytes(usage.discovered_bytes)}) · ${number(usage.pending_sessions)} pending (${bytes(usage.pending_bytes)}) · this run parsed ${number(usage.sessions_parsed_this_run)} sessions / ${bytes(usage.bytes_parsed_this_run)}${usage.work_budget_stopped_run ? " before reaching its work budget" : ""}. Collected ${usage.collected_at ? relative(usage.collected_at) : "not recorded"}; retained history starts ${usage.earliest_retained_event ? fullTime(usage.earliest_retained_event) : "unknown"}. Missing or incomplete evidence is never shown as zero.</div>
     <div class="notice"><strong>Personal means installation location, not authorship.</strong> Automation authority and origin evidence are shown separately.</div>
     <div class="grid split">
       <article class="panel"><div class="panel-head"><h2>Authority and provenance</h2></div><table><thead><tr><th>Class</th><th>Physical instances</th></tr></thead><tbody>
@@ -523,6 +526,6 @@ async function route() {
 }
 
 state.token = readToken();
-authNote.hidden = Boolean(state.token);
+authNote.hidden = Boolean(state.token) || tailnetMode;
 window.addEventListener("hashchange", route);
 route();
