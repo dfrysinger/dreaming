@@ -1582,6 +1582,11 @@ def collect_usage(
         try:
             before = events.stat()
         except FileNotFoundError:
+            present_sessions.discard(session_id)
+            if session_id in indexed_summaries:
+                del indexed_summaries[session_id]
+                if index_path is not None:
+                    write_usage_index(index_path, index)
             continue
         except OSError:
             fail(session.name, "events_unreadable", corpus=True)

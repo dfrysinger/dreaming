@@ -1584,6 +1584,53 @@ class EstateCensusTest(unittest.TestCase):
         self.assertTrue(rebuilt["coverage"]["corpus_complete"])
         self.assertEqual(len(list(index.parent.glob("usage-index.json.rejected-*"))), 1)
 
+    def test_usage_index_evicts_session_when_events_file_is_removed(self) -> None:
+        capability_id = "sha256:" + "b" * 64
+        collected_at = datetime(2026, 8, 18, 12, tzinfo=timezone.utc)
+        root = self.case / "sessions"
+        index = self.case / "state" / "usage-index.json"
+        events = self.write_usage_events(
+            "removed-events",
+            [
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T10:00:00+00:00",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T10:00:01+00:00",
+                ),
+            ],
+        )
+        first = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            root,
+            collected_at=collected_at,
+            max_sessions=10,
+            max_bytes=100_000,
+            quiet_seconds=0,
+            index_path=index,
+        )
+        self.assertEqual(first["canonical_usage"][0]["uses_total"], 1)
+
+        events.unlink()
+        second = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            root,
+            collected_at=collected_at,
+            max_sessions=10,
+            max_bytes=100_000,
+            quiet_seconds=0,
+            index_path=index,
+        )
+        self.assertTrue(second["coverage"]["corpus_complete"])
+        self.assertEqual(second["coverage"]["discovered_sessions"], 0)
+        self.assertEqual(second["coverage"]["indexed_sessions"], 0)
+        self.assertEqual(second["canonical_usage"][0]["uses_total"], 0)
+        self.assertEqual(
+            json.loads(index.read_text(encoding="utf-8"))["sessions"], {}
+        )
+
     def test_usage_aliases_are_exact_unique_and_never_override_direct_names(self) -> None:
         development_id = "sha256:" + "c" * 64
         nexus_id = "sha256:" + "d" * 64
