@@ -555,23 +555,34 @@ The boundary fails closed when deterministic and live checks show:
 
 ## Definition of Done: Dreaming evidence completeness
 
-- [ ] CHK-E1 through CHK-E5 and CHK-E9 pass on deterministic fixtures.
-- [ ] Exact Git-proven aliases among the current unattributed personal names are
+- [x] CHK-E1 through CHK-E5 and CHK-E9 pass on deterministic fixtures.
+- [x] Exact Git-proven aliases among the current unattributed personal names are
       recorded and CHK-E3 proves uncertain names remain unresolved.
-- [ ] The installed MacBook index makes forward progress across bounded runs,
+- [x] The installed MacBook index makes forward progress across bounded runs,
       streams the oversized session, and reaches the CHK-E7 terminal state.
-- [ ] The dashboard shows corpus and attribution completeness plus pending
+- [x] The dashboard shows corpus and attribution completeness plus pending
       sessions and bytes without turning incomplete absence into zero.
-- [ ] The exact MagicDNS dashboard URL works from a tailnet peer without a
+- [x] The exact MagicDNS dashboard URL works from a tailnet peer without a
       bearer while localhost retains bearer authentication.
-- [ ] CHK-E6 proves existing Tailscale Serve entries survive deployment and
+- [x] CHK-E6 proves existing Tailscale Serve entries survive deployment and
       rollback unchanged.
-- [ ] `docs/dreaming-live-evidence-audit.md` satisfies CHK-E8, including a
+- [x] `docs/dreaming-live-evidence-audit.md` satisfies CHK-E8, including a
       measured review-backlog capacity conclusion and named follow-ups.
-- [ ] Existing estate mutation, receipt, dashboard containment, installer,
+- [x] Existing estate mutation, receipt, dashboard containment, installer,
       self-test, and watchdog checks pass.
-- [ ] A live-proof receipt covers CHK-E6 and CHK-E7 on the reviewed candidate.
-- [ ] Dual implementation review has no unresolved in-scope must-fix finding.
-- [ ] Final installed two-host proof passes on the reviewed tree.
-- [ ] The design, implementation, audit, and proof references are committed
+- [x] A live-proof receipt covers CHK-E6 and CHK-E7 on the reviewed candidate.
+- [x] Dual implementation review has no unresolved in-scope must-fix finding.
+- [x] Final installed two-host proof passes on the reviewed tree.
+- [x] The design, implementation, audit, and proof references are committed
       locally; nothing is pushed.
+
+Completion evidence:
+
+- Deterministic checks, installed self-test, and final activation:
+  `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/evidence-completeness-live-proof/installed-selftest-enable-eb62266.log`
+- CHK-E6, CHK-E7, final two-host identity, and governance ownership:
+  `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/evidence-completeness-live-proof/CHK-E6-E7-live-proof.md`
+- Adversarial real-user behavior validation:
+  `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/behavior-validation-evidence-completeness-206e5bb/REPORT.md`
+- Dashboard producer and backlog-capacity audit:
+  `docs/dreaming-live-evidence-audit.md`
