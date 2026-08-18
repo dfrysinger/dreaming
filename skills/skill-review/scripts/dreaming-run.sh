@@ -155,15 +155,15 @@ for index in 0 1 2; do
 
   if (( index == 1 )) && [[ "${DREAMING_FORCE_DUE:-0}" != "1" ]]; then
     set +e
-    "$STATE_TOOL" due --epoch "$START_EPOCH"
+    "$STATE_TOOL" claim-weekly --epoch "$START_EPOCH"
     due_rc=$?
     set -e
     if (( due_rc == 1 )); then
-      log "weekly bucket already completed; roll and prune are not scheduled"
+      log "weekly bucket already completed or attempted today; roll and prune are not scheduled"
       append_pass "roll" "not_scheduled" "" "" "" "weekly-not-due"
       append_pass "prune" "not_scheduled" "" "" "" "weekly-not-due"
       record_cadence_neutral_success
-      log "daily consolidation completed"
+      log "scheduled consolidation completed"
       exit 0
     elif (( due_rc != 0 )); then
       append_pass "roll" "not_started" "" "" "" "cadence-eval-failed"

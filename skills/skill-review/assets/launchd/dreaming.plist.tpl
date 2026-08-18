@@ -9,11 +9,8 @@
     <string>/bin/bash</string>
     <string>__DREAMING_REPO_ROOT__/skills/skill-review/scripts/dreaming-run.sh</string>
   </array>
-  <key>StartCalendarInterval</key>
-  <dict>
-    <key>Hour</key><integer>9</integer>
-    <key>Minute</key><integer>15</integer>
-  </dict>
+  <key>StartInterval</key>
+  <integer>14400</integer>
   <key>RunAtLoad</key>
   <false/>
   <key>StandardOutPath</key>

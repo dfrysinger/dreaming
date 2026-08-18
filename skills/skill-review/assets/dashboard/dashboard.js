@@ -51,6 +51,22 @@ function percent(value) {
   return value === null || value === undefined ? "Unknown" : `${value}%`;
 }
 
+function duration(value) {
+  if (value === null || value === undefined) return "Unknown";
+  const seconds = Math.max(0, Number(value));
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h`;
+  return `${Math.floor(seconds / 86400)}d`;
+}
+
+function burnDownLabel(dreams) {
+  if (dreams.capacity_status === "burning_down") {
+    return `${number(dreams.estimated_burn_down_days)}d estimated`;
+  }
+  if (dreams.capacity_status === "not_burning_down") return "Not burning down";
+  return "Capacity unavailable";
+}
+
 function relative(value) {
   const timestamp = typeof value === "number" ? value * 1000 : Date.parse(value);
   if (!Number.isFinite(timestamp)) return "Unknown";
@@ -219,6 +235,14 @@ async function renderOverview() {
       <article class="panel"><div class="panel-head"><h2>Dream backlog burn-down</h2></div>
         ${lineChart(data.dreams.history, ["remaining"], ["#a98bff"])}
         <div class="legend"><span>Dreams remaining</span></div>
+        <div class="capacity-grid">
+          <div><span class="label">Observed arrivals · 24h</span><strong>${number(data.dreams.arrivals_24h)}</strong></div>
+          <div><span class="label">Observed completions · 24h</span><strong>${number(data.dreams.completed_24h)}</strong></div>
+          <div><span class="label">Oldest queued age</span><strong>${duration(data.dreams.oldest_queued_age_seconds)}</strong></div>
+          <div><span class="label">Recovery required</span><strong>${number(data.dreams.recovery_required)}</strong></div>
+          <div><span class="label">Observed net · 24h</span><strong>${number(data.dreams.observed_net_24h)}</strong></div>
+          <div><span class="label">Burn-down state</span><strong>${esc(burnDownLabel(data.dreams))}</strong></div>
+        </div>
       </article>
     </div>
     <div class="grid split mt">

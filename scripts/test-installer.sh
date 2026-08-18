@@ -260,6 +260,21 @@ for kind in dreaming selftest watchdog; do
       "$plist"
   fi
 done
+dreaming_plist="$DEST/com.fixture.dreaming.dreaming.plist"
+python3 - "$dreaming_plist" <<'PY'
+import plistlib
+import sys
+
+with open(sys.argv[1], "rb") as handle:
+    plist = plistlib.load(handle)
+if plist.get("StartInterval") != 14400:
+    raise SystemExit(
+        f"dreaming schedule interval is not exactly 14400: "
+        f"{plist.get('StartInterval')!r}"
+    )
+if "StartCalendarInterval" in plist:
+    raise SystemExit("dreaming schedule retained the daily calendar interval")
+PY
 dashboard_plist="$DEST/com.fixture.dreaming.dashboard.plist"
 [[ -f "$dashboard_plist" ]] ||
   { echo "install missed dashboard" >&2; exit 1; }
@@ -512,6 +527,28 @@ if calls != [["remove"]]:
 PY
 NATIVE_ADAPTERS="$NATIVE/dreaming-state/adapters.json"
 grep -q '"copilot"' "$NATIVE_ADAPTERS"
+python3 - "$NATIVE_ADAPTERS" <<'PY'
+import json
+import sys
+
+config = json.load(open(sys.argv[1], encoding="utf-8"))
+def keys(value):
+    if isinstance(value, dict):
+        for key, nested in value.items():
+            yield str(key)
+            yield from keys(nested)
+    elif isinstance(value, list):
+        for nested in value:
+            yield from keys(nested)
+
+leaked = sorted(
+    key
+    for key in keys(config)
+    if "schedule" in key.lower() or "start_interval" in key.lower()
+)
+if leaked:
+    raise SystemExit(f"adapter configuration contains schedule state: {leaked}")
+PY
 python3 - "$NATIVE_ADAPTERS" "$FAKE_COPILOT" <<'PY'
 import json
 import sys

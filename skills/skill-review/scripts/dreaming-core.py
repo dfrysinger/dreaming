@@ -2714,6 +2714,11 @@ def configured_runtime_settings(config: dict[str, Any]) -> dict[str, Any]:
                 "invalid-adapter-config",
                 f"{name} must remain 30 until recurrence admission exists",
             )
+        if name == "max_reviews_per_run" and value > 25:
+            raise RuntimeFailure(
+                "invalid-adapter-config",
+                f"{name} must not exceed 25",
+            )
         settings[name] = value
     return settings
 

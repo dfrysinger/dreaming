@@ -534,6 +534,82 @@ class RuntimeTest(unittest.TestCase):
         )
         self.assertEqual(json.loads(result.stdout)["adapters"], [])
 
+    def test_repeated_runs_remain_bounded_at_twenty_five(self) -> None:
+        sessions = [self.session(f"session-{index:02d}", index + 1) for index in range(52)]
+        source_fixture = self.source_fixture(sessions)
+        executor_fixture = self.write("bounded-executor.json", {"mode": "success"})
+        config = self.write(
+            "bounded-adapters.json",
+            {
+                "contract_version": 1,
+                "max_reviews_per_run": 25,
+                "routes": ["fake>fake-executor"],
+                "executor_order": ["fake-executor"],
+                "sources": {
+                    "fake": {
+                        "argv": [
+                            sys.executable,
+                            str(FAKE),
+                            "--fixture",
+                            str(source_fixture),
+                            "--adapter-id",
+                            "fake",
+                            "--role",
+                            "session-source",
+                        ]
+                    }
+                },
+                "executors": {
+                    "fake-executor": {
+                        "argv": [
+                            sys.executable,
+                            str(FAKE),
+                            "--fixture",
+                            str(executor_fixture),
+                            "--adapter-id",
+                            "fake-executor",
+                            "--role",
+                            "review-executor",
+                        ]
+                    }
+                },
+                "publishers": {},
+            },
+        )
+        environment = {
+            **os.environ,
+            "DREAMING_ADAPTER_CONFIG": str(config),
+            "DREAMING_DATA_DIR": str(self.case / "bounded-data"),
+            "DREAMING_STATE_DIR": str(self.case / "bounded-state"),
+        }
+        observed = []
+        for _ in range(3):
+            result = subprocess.run(
+                [sys.executable, str(RUNTIME_PATH), "run"],
+                env=environment,
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            report = json.loads(result.stdout)
+            observed.append((len(report["reviews"]), report["deferred_reviews"]))
+        self.assertEqual(observed, [(25, 27), (25, 2), (2, 0)])
+        ledger = json.loads(
+            (Path(environment["DREAMING_STATE_DIR"]) / "review-ledger.json").read_text()
+        )
+        self.assertEqual(len(ledger), 52)
+        self.assertEqual(
+            len({(row["session_id"], row["source_revision"]) for row in ledger}),
+            52,
+        )
+
+    def test_review_limit_above_twenty_five_is_rejected(self) -> None:
+        with self.assertRaisesRegex(RuntimeFailure, "max_reviews_per_run"):
+            runtime_module.configured_runtime_settings(
+                {"max_reviews_per_run": 26}
+            )
+
     def test_support_file_paths_are_canonical_nonconflicting_files(self) -> None:
         core = self.core(set())
         result = {
@@ -1169,10 +1245,20 @@ class RuntimeTest(unittest.TestCase):
             self.paths.queue,
             [
                 {
+                    "qualified_session_id": "fake:done",
+                    "source_revision": "done-revision",
+                    "status": "reviewed",
+                },
+                {
                     "qualified_session_id": "fake:missing",
                     "source_revision": "missing-revision",
                     "status": "queued",
-                }
+                },
+                {
+                    "qualified_session_id": "fake:later",
+                    "source_revision": "later-revision",
+                    "status": "queued",
+                },
             ],
         )
         core._write_transaction(
@@ -1194,9 +1280,17 @@ class RuntimeTest(unittest.TestCase):
                 [("exec", executor)],
                 expected_revision="missing-revision",
             )
+        statuses = {
+            row["qualified_session_id"]: row["status"]
+            for row in core._state(self.paths.queue, [])
+        }
         self.assertEqual(
-            core._state(self.paths.queue, [])[0]["status"],
-            "recovery-required",
+            statuses,
+            {
+                "fake:done": "reviewed",
+                "fake:missing": "recovery-required",
+                "fake:later": "queued",
+            },
         )
 
     def test_missing_pre_mutation_result_remains_retryable(self) -> None:

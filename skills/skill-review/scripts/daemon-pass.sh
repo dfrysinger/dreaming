@@ -30,12 +30,16 @@ done
   exit 2
 }
 
+ABS_MAX_SECS="${DREAMING_PASS_MAX_SECS:-1800}"
+GRACE_SECS="${DREAMING_PASS_GRACE_SECS:-20}"
+
 if [[ -n "${DREAMING_ADAPTER_CONFIG:-}" ]]; then
   mkdir -p "$(dirname "$LOG")"
   : > "$LOG"
   if [[ "$SESSION_NAME" == "skills-consolidate" ]]; then
-    if "$SCRIPT_DIR/dreaming-core.py" run | tee -a "$LOG" |
-        grep -q '"ok": true'; then
+    if skills_run_copilot_bounded \
+        "$LOG" '"ok":[[:space:]]*true' "$ABS_MAX_SECS" "$GRACE_SECS" -- \
+        "$SCRIPT_DIR/dreaming-core.py" run; then
       echo "DREAM_PASS_RESULT: ok standalone=$SESSION_NAME" | tee -a "$LOG"
       exit 0
     fi
@@ -84,8 +88,6 @@ except Exception:
 fi
 
 DONE_RE='AI Credits[[:space:]]+[0-9]'
-ABS_MAX_SECS="${DREAMING_PASS_MAX_SECS:-1800}"
-GRACE_SECS="${DREAMING_PASS_GRACE_SECS:-20}"
 ESTATE_SESSION_ID=""
 if [[ "$SESSION_NAME" == "skills-prune" ]]; then
   ESTATE_SESSION_ID="${DREAMING_PARENT_RUN_ID:-manual-$$}-estate-review"

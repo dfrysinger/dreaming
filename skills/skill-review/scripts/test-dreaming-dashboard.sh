@@ -510,6 +510,89 @@ for index in range(1750):
 (state / "queue.json").write_text(json.dumps(queue), encoding="utf-8")
 (state / "unsettled.json").write_text("{}", encoding="utf-8")
 (state / "review-ledger.json").write_text("[]", encoding="utf-8")
+queue_bytes = (state / "queue.json").read_bytes()
+ledger_bytes = (state / "review-ledger.json").read_bytes()
+now = time.time()
+stamp = lambda seconds: time.strftime(
+    "%Y-%m-%dT%H:%M:%SZ", time.gmtime(now - seconds)
+)
+(state / "queue.json").write_text(json.dumps([
+    {
+        "qualified_session_id": "copilot:queued-oldest",
+        "source_revision": "queued-oldest",
+        "status": "queued",
+        "queued_at": stamp(7200),
+    },
+    {
+        "qualified_session_id": "copilot:queued-newest",
+        "source_revision": "queued-newest",
+        "status": "queued",
+        "queued_at": stamp(1800),
+    },
+    {
+        "qualified_session_id": "copilot:superseded",
+        "source_revision": "superseded",
+        "status": "superseded",
+        "queued_at": stamp(1200),
+    },
+    {
+        "qualified_session_id": "copilot:recovery",
+        "source_revision": "recovery",
+        "status": "recovery-required",
+        "queued_at": stamp(900),
+    },
+]), encoding="utf-8")
+(state / "review-ledger.json").write_text(json.dumps([
+    {
+        "session_id": f"copilot:completed-{index}",
+        "source_revision": f"completed-{index}",
+        "reviewed_at": stamp(600 + index),
+    }
+    for index in range(6)
+]), encoding="utf-8")
+capacity = dashboard.DashboardData(paths).overview()["dreams"]
+check(
+    capacity["queued"] == 2
+    and capacity["arrivals_24h"] == 4
+    and capacity["completed_24h"] == 6
+    and capacity["recovery_required"] == 1
+    and capacity["observed_net_24h"] == 2
+    and capacity["estimated_burn_down_days"] == 1
+    and capacity["capacity_status"] == "burning_down"
+    and 7100 <= capacity["oldest_queued_age_seconds"] <= 7300,
+    "capacity projection counts retained arrivals, completions, current queue, and recovery state",
+)
+(state / "review-ledger.json").write_text(json.dumps([
+    {
+        "session_id": "copilot:completed-one",
+        "source_revision": "completed-one",
+        "reviewed_at": stamp(60),
+    }
+]), encoding="utf-8")
+capacity = dashboard.DashboardData(paths).overview()["dreams"]
+check(
+    capacity["observed_net_24h"] == -3
+    and capacity["estimated_burn_down_days"] is None
+    and capacity["capacity_status"] == "not_burning_down",
+    "non-positive observed throughput has no burn-down estimate",
+)
+(state / "review-ledger.json").write_text(json.dumps([
+    {
+        "session_id": "copilot:malformed",
+        "source_revision": "malformed",
+        "reviewed_at": "not-a-time",
+    }
+]), encoding="utf-8")
+capacity = dashboard.DashboardData(paths).overview()["dreams"]
+check(
+    capacity["completed_24h"] is None
+    and capacity["observed_net_24h"] is None
+    and capacity["estimated_burn_down_days"] is None
+    and capacity["capacity_status"] == "unknown",
+    "malformed capacity timestamps remain unknown",
+)
+(state / "queue.json").write_bytes(queue_bytes)
+(state / "review-ledger.json").write_bytes(ledger_bytes)
 (state / "review-attempts.json").write_text(json.dumps([
     {
         "session_id": "copilot:scheduled-session",

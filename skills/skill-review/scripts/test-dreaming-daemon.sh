@@ -259,7 +259,8 @@ assert_eq "$(paste -sd, "$ORDER_FILE")" "compatibility" "single-pass wrapper"
 pass "single-pass compatibility wrapper delegates under its parent lock"
 
 new_case roll-failure
-export DREAMING_FORCE_DUE=1
+"$SCRIPT_DIR/dreaming-state.py" seed \
+  --bucket "$(( NOW / WEEK - 1 ))" --epoch "$((NOW - WEEK))"
 export FAKE_FAIL_PASS=skills-roll
 if "$SCRIPT_DIR/dreaming-run.sh"; then
   fail "roll failure returned success"
@@ -267,7 +268,18 @@ fi
 assert_eq "$(paste -sd, "$ORDER_FILE")" "skills-consolidate,skills-roll" "fail-fast order"
 status="$("$SCRIPT_DIR/dreaming-state.py" latest | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
 assert_eq "$status" "aborted" "failed run status"
-pass "roll failure prevents prune"
+unset FAKE_FAIL_PASS
+: > "$ORDER_FILE"
+"$SCRIPT_DIR/dreaming-run.sh"
+assert_eq "$(paste -sd, "$ORDER_FILE")" "skills-consolidate" \
+  "same-day failed weekly retry order"
+export DREAMING_NOW_EPOCH="$((NOW + 86400))"
+: > "$ORDER_FILE"
+"$SCRIPT_DIR/dreaming-run.sh"
+assert_eq "$(paste -sd, "$ORDER_FILE")" \
+  "skills-consolidate,skills-roll,skills-prune" \
+  "next-day weekly retry order"
+pass "roll failure prevents prune and retries no more than once per local day"
 
 new_case halt-between
 export DREAMING_FORCE_DUE=1

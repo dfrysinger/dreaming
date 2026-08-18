@@ -96,4 +96,41 @@ if "$SCRIPT_DIR/daemon-pass.sh" \
   exit 1
 fi
 
+STANDALONE="$CASE/standalone"
+mkdir -p "$STANDALONE"
+cp "$SCRIPT_DIR/daemon-pass.sh" "$SCRIPT_DIR/lib-daemon.sh" "$STANDALONE/"
+cat > "$STANDALONE/dreaming-core.py" <<'PY'
+#!/usr/bin/env python3
+import json
+import os
+import time
+from pathlib import Path
+
+state = Path(os.environ["FAKE_CORE_STATE"])
+state.mkdir(parents=True, exist_ok=True)
+(state / "pid").write_text(str(os.getpid()))
+time.sleep(10)
+print(json.dumps({"ok": True}))
+PY
+chmod +x "$STANDALONE/dreaming-core.py"
+export FAKE_CORE_STATE="$CASE/core-state"
+export DREAMING_PASS_MAX_SECS=1
+export DREAMING_PASS_GRACE_SECS=0
+started="$(date +%s)"
+if "$STANDALONE/daemon-pass.sh" \
+    --prompt "$PROMPT" \
+    --name skills-consolidate \
+    --log "$LOG" >/dev/null 2>&1; then
+  echo "daemon pass accepted a standalone core that exceeded its bound" >&2
+  exit 1
+fi
+elapsed="$(( $(date +%s) - started ))"
+(( elapsed < 10 )) ||
+  { echo "standalone core outlived the configured pass bound" >&2; exit 1; }
+core_pid="$(<"$FAKE_CORE_STATE/pid")"
+if kill -0 "$core_pid" 2>/dev/null; then
+  echo "standalone core process remained alive after the pass bound" >&2
+  exit 1
+fi
+
 echo "daemon pass tests: PASS"

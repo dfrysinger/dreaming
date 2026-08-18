@@ -2489,6 +2489,7 @@ class DashboardData:
         remaining = [item for item in dreams if item["status"] == "remaining"]
         completed = [item for item in dreams if item["status"] == "completed"]
         activity = self.activity({"limit": ["5"]})["items"]
+        capacity = self._capacity_projection()
         return {
             "runtime": self.health(),
             "dreams": {
@@ -2496,6 +2497,7 @@ class DashboardData:
                 "completed": len(completed),
                 "active": sum(item["status"] == "active" for item in dreams),
                 "history": self._backlog_history(),
+                **capacity,
             },
             "skills": {
                 "count": len([item for item in skills if item.get("status") == "current"]),
@@ -2510,6 +2512,78 @@ class DashboardData:
             "candidates": self.candidate_summary(),
             "estate": self.estate(summary_only=True),
             "activity": activity,
+        }
+
+    def _capacity_projection(self) -> dict[str, Any]:
+        queue = [
+            item for item in self._list("queue.json") if isinstance(item, dict)
+        ]
+        ledger = [
+            item
+            for item in self._list("review-ledger.json")
+            if isinstance(item, dict)
+        ]
+        now = time.time()
+        cutoff = now - 86400
+        current_queued = {
+            item.get("qualified_session_id"): item
+            for item in queue
+            if item.get("status") == "queued"
+            and isinstance(item.get("qualified_session_id"), str)
+        }
+        recovery_required = {
+            item.get("qualified_session_id")
+            for item in queue
+            if item.get("status") == "recovery-required"
+            and isinstance(item.get("qualified_session_id"), str)
+        }
+
+        queued_times = [parse_time(item.get("queued_at")) for item in current_queued.values()]
+        oldest_queued_at = None
+        oldest_queued_age_seconds = None
+        if queued_times and all(value is not None for value in queued_times):
+            oldest = min(value for value in queued_times if value is not None)
+            oldest_queued_at = datetime.fromtimestamp(oldest, timezone.utc).isoformat()
+            oldest_queued_age_seconds = max(0, int(now - oldest))
+
+        arrival_times = [parse_time(item.get("queued_at")) for item in queue]
+        completion_times = [parse_time(item.get("reviewed_at")) for item in ledger]
+        arrivals_24h = (
+            sum(value >= cutoff for value in arrival_times if value is not None)
+            if all(value is not None for value in arrival_times)
+            else None
+        )
+        completed_24h = (
+            sum(value >= cutoff for value in completion_times if value is not None)
+            if all(value is not None for value in completion_times)
+            else None
+        )
+        observed_net_24h = (
+            completed_24h - arrivals_24h
+            if arrivals_24h is not None and completed_24h is not None
+            else None
+        )
+        if observed_net_24h is None:
+            capacity_status = "unknown"
+            estimated_burn_down_days = None
+        elif observed_net_24h > 0:
+            capacity_status = "burning_down"
+            estimated_burn_down_days = math.ceil(
+                len(current_queued) / observed_net_24h
+            )
+        else:
+            capacity_status = "not_burning_down"
+            estimated_burn_down_days = None
+        return {
+            "queued": len(current_queued),
+            "oldest_queued_at": oldest_queued_at,
+            "oldest_queued_age_seconds": oldest_queued_age_seconds,
+            "arrivals_24h": arrivals_24h,
+            "completed_24h": completed_24h,
+            "recovery_required": len(recovery_required),
+            "observed_net_24h": observed_net_24h,
+            "estimated_burn_down_days": estimated_burn_down_days,
+            "capacity_status": capacity_status,
         }
 
     def _estate_actions(self) -> dict[str, Any]:
