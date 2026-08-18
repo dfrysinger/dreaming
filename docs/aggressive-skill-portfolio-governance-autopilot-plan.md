@@ -34,15 +34,16 @@
   six-card desktop panel at 1440x900, and a no-overflow 390px layout. The
   fresh judgment is `SUPPORTED` with `flaky:true`; the first
   `INSUFFICIENT` judgment remains retained.
-- Targeted capacity validation refreshed on the current tree: installer,
-  daemon-pass, 39 core tests, 28 daemon checks, and 137 dashboard checks pass.
+- Capacity validation refreshed on the current tree: 2 process-cleanup tests,
+  39 core tests, daemon-pass, 28 daemon checks, 137 dashboard checks,
+  54 dashboard contract checks, and 12 installer tests pass.
 - Paired capacity review found one must-fix hard-bound defect: the absolute
   1,800-second path allowed a further five-second termination grace. The local
   fix now kills the owned process group immediately at the absolute deadline,
   while retaining graceful cleanup for early successful completion and
   operator signals. Targeted process and daemon checks pass, and both Opus and
   Terra fix-verification reviews report the finding resolved with no new
-  findings.
+  findings. The correction is committed locally as `1a10787`.
 - Capacity work remaining: observe and adjudicate the fresh unchanged natural
   tick for SC-010, run governance-lever proof, execute rollback preservation,
   install the reviewed timeout correction after natural-tick capture, finalize
