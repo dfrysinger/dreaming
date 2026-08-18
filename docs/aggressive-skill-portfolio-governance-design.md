@@ -1,0 +1,904 @@
+# Aggressive skill portfolio governance and decision dashboard
+
+## Objective
+
+Judge every enabled skill primarily by controlled evaluation, verified usage,
+redundancy, and dependencies, then give the user a plain-language decision
+queue while automatically pruning only machine-created skills and reversibly
+disabling eligible plugin packages.
+
+## Lane
+
+**Critical.** This change affects durable personal skill files, Copilot plugin
+enablement, user-authorized dashboard mutations, retained evaluation and usage
+authority, and recoverable archive transactions.
+
+The system must fail closed when inventory, evaluation, usage, dependencies,
+target identity, settings identity, authorization, or restore evidence is
+missing or stale.
+
+## Non-goals
+
+- Do not change transcript discovery, transcript scoring, the 25-review
+  capacity limit, model routing, or candidate recurrence.
+- Do not let one transcript occurrence prove that an active skill should be
+  kept.
+- Do not edit files inside an installed plugin package.
+- Do not claim individual plugin-skill disablement when the installed Copilot
+  version exposes only whole-plugin enablement.
+- Do not uninstall plugins automatically.
+- Do not automatically edit, consolidate, or archive user-created or
+  unknown-origin personal skills.
+- Do not allow dashboard code to edit files or settings directly.
+- Do not treat missing usage, missing evaluation, or an inconclusive
+  evaluation as positive evidence.
+- Do not treat provenance or ownership as evidence that a skill is useful.
+- Do not remove pins, bypass scheduled dependencies, discard Git history, or
+  weaken restore verification.
+- Do not add another inventory collector, evaluator, archive format, settings
+  writer, scheduler, or transaction authority.
+
+## User policy
+
+The portfolio policy is intentionally aggressive about reducing the number of
+enabled skills because catalog size has a cost even when a skill is not used:
+more descriptions compete during routing, more nearby instructions can load,
+and more overlapping capabilities make evaluation and maintenance harder.
+
+The policy separates **judgment** from **automatic authority**:
+
+- every enabled personal skill receives a keep, evaluate, merge, disable, or
+  archive recommendation regardless of who created it;
+- every plugin skill receives an individual recommendation;
+- every plugin package receives a whole-package recommendation;
+- Dreaming may automatically change only Dreaming-managed and verified
+  machine-created personal skills;
+- Dreaming may automatically disable or restore a whole plugin only through
+  the existing qualified plugin settings transaction;
+- user-created and unknown-origin personal skills remain unchanged until the
+  user explicitly acts in the dashboard or foreground CLI;
+- an explicit dashboard action is user authority, not autonomous authority,
+  and still requires identity, dependency, pin, dirty-tree, transaction, and
+  restore checks.
+
+## Plain-language model
+
+The product uses these terms:
+
+| Term | Meaning |
+| --- | --- |
+| Conversation inspection | Read one completed conversation and look for a reusable lesson |
+| Supporting occurrence | One independent task where a reusable procedure appeared useful |
+| Unpublished draft | Proposed instructions that agents cannot load |
+| Evaluation | Controlled tasks run with and without the exact skill |
+| Successful use | A skill-tool invocation whose matching completion proves the skill loaded |
+| Recommendation | The system's suggested portfolio decision |
+| Action | A disable, archive, restore, merge, keep, pin, or evaluation request |
+| Receipt | Durable proof that an action completed or was rolled back |
+
+The dashboard must not use "review" without a qualifying noun. It must not call
+a recommendation evidence. It must not use "observed" when it means the time a
+report was generated.
+
+## Reuse contract
+
+| Concern | Existing owner | Required extension |
+| --- | --- | --- |
+| Complete enabled-skill inventory | `dreaming-estate.py` census | Preserve one row per canonical enabled capability |
+| Verified usage | `dreaming-estate.py` usage collector | Expose 7, 30, and 90-day successful loads and completeness |
+| Candidate and active-skill evaluation | `skill-evaluation.py` and retained receipts | Join current exact-skill results into estate decisions |
+| Complete-catalog routing and portfolio cost | Existing portfolio benchmark | Evaluate proposed removals as well as additions |
+| Dependencies and pins | `scheduled-skill-deps.py` and curator inventory | Show blockers and bind them into actions |
+| Personal withdraw, archive, and restore | `estate-action.py` through `curator-run.py`, `archive-skill.sh`, and `restore-skill.sh` adapters | Add automatic machine and explicit user-intent authority contracts without creating another writer |
+| Plugin package disable and restore | `plugin-settings-transaction.py` | Reuse the existing lossless settings transaction |
+| Estate action authority | `estate-action.py` | Remain the sole mutation authorization and dispatch owner; add user-intent, disposition, and machine-withdraw contracts |
+| Dashboard data | `dreaming-dashboard.py` | Produce portfolio decisions and detail records |
+| Dashboard presentation | `dashboard.js` | Replace governance log terminology and add decision workflows |
+| Halt and recovery | Existing shared halt and recovery fences | Apply to every mutating dashboard action |
+
+New code is justified for four missing boundaries:
+
+1. a decision engine that combines evaluation, usage, redundancy, and
+   dependency facts for every enabled capability;
+2. individual plugin-skill recommendations even when only whole-plugin
+   mutation is supported;
+3. append-only user decisions and action intents from the dashboard;
+4. a dashboard view that presents decision facts rather than transaction
+   internals.
+
+## Supersession of the read-only dashboard invariant
+
+This work order narrows invariant 15 and CHK-08 in
+`docs/unified-skill-estate-governance-design.md`.
+
+The dashboard remains unable to create **autonomous** authority and remains
+unable to write managed roots, settings, receipts, or transaction state. An
+authenticated, nonce-bound user action may create an immutable user-intent
+record. `estate-action.py` is still the sole authority that may validate that
+intent and dispatch an existing transaction.
+
+The unified CHK-08 read-only requirement continues to apply when mutation
+endpoints are disabled. When enabled by this work order, its replacement is
+PORT-CHK-09: dashboard state alone cannot authorize mutation, while an explicit
+current user intent may enter the existing fail-closed authority path.
+
+## Authority and value are separate
+
+Each capability has two independent classifications.
+
+### Value state
+
+Value state answers whether the skill appears worth keeping:
+
+- `proven_useful`
+- `used_evaluation_missing`
+- `evaluate_now`
+- `merge_candidate`
+- `disable_candidate`
+- `archive_candidate`
+- `insufficient_information`
+
+Protection is not a value state. Pins and dependencies are independent
+retention constraints. A protected capability can therefore be both
+`disable_candidate` and `user_decision_required`, with the regression visible
+while automatic removal remains blocked.
+
+### Mutation authority
+
+Mutation authority answers what Dreaming may do:
+
+- `automatic_personal`
+- `user_decision_required`
+- `automatic_plugin_package`
+- `report_only`
+- `immutable_builtin`
+
+A skill can be `archive_candidate` and
+`user_decision_required`. The dashboard must show both facts instead of
+changing the recommendation to `keep`.
+
+## Decision inputs
+
+### Primary evidence
+
+1. **Controlled evaluation**
+   - exact skill inventory and content identity;
+   - intended cases;
+   - close negative and conflict cases;
+   - related-task regressions;
+   - proof that the skill loaded;
+   - exact model, CLI, policy, and environment identity;
+   - result currency.
+
+2. **Verified usage**
+   - successful loads in the last 7, 30, and 90 days;
+   - distinct sessions or tasks when available;
+   - last successful load;
+   - whether the usage corpus and capability attribution are complete.
+
+3. **Portfolio relationship**
+   - overlapping or superseding skills;
+   - complete-catalog routing effect;
+   - marginal task value;
+   - proposed-estate comparison with the skill removed.
+
+4. **Removal safety**
+   - explicit and implicit pins;
+   - scheduled and durable dependencies;
+   - clean target worktree;
+   - exact inventory identity;
+   - tested archive or settings restore path.
+
+### Secondary context
+
+Supporting occurrences may explain why a skill was created or why a rare skill
+still matters. They do not substitute for evaluation or usage when deciding
+whether an active skill should stay enabled.
+
+Provenance controls automatic authority. It does not increase value.
+
+## Decision policy
+
+The policy file is versioned and content-addressed. A policy change does not
+rewrite prior decisions. It produces new recommendations bound to the new
+policy identity.
+
+### Hard precedence
+
+Rules are evaluated in this order:
+
+1. A current critical evaluation regression produces `disable_candidate`.
+2. A complete evaluation that shows another enabled skill covers the same
+   tasks produces `merge_candidate`.
+3. A current passing evaluation plus verified recent use produces
+   `proven_useful`.
+4. A current passing evaluation with no recent use produces `proven_useful`
+   only when the bound evaluation policy declares the retained cases
+   `rare_or_safety_critical` and the portfolio relationship proves the
+   capability is not redundant; otherwise it produces `evaluate_now` with
+   `passing_but_unused` and either `rarity_unproven` or
+   `portfolio_value_unproven`.
+5. Recent verified use without a current evaluation produces
+   `used_evaluation_missing`.
+6. Complete affirmative non-use for 30 days without a current passing
+   evaluation produces `evaluate_now`.
+7. A failed or non-inferior-value evaluation with complete non-use produces
+   `disable_candidate`.
+8. A disabled or withdrawn personal skill with 60 days of complete non-use,
+   no passing unique-value evaluation, and no dependency produces
+   `archive_candidate`.
+9. Missing or conflicting primary evidence produces
+    `insufficient_information`, never `proven_useful`.
+
+After value classification, pins and dependencies are applied as removal
+constraints. They never hide the value state. A pinned or required
+`disable_candidate` remains enabled, appears in the human decision queue as a
+blocking regression, and names every dependent capability. Automatic action is
+refused until the dependency is removed or the user chooses a governed
+replacement plan.
+
+### Evaluation currency
+
+- Passing or failing exact-skill evaluations remain current for 90 days when
+  their bound model, CLI, harness, policy, skill content, and environment have
+  not changed.
+- A content change invalidates the skill's evaluation immediately.
+- A model, CLI, harness, grader, or policy change invalidates dependent
+  evaluation authority.
+- A stale passing evaluation may explain history but cannot produce
+  `proven_useful`.
+
+### Aggressive evaluation queue
+
+The evaluator prioritizes:
+
+1. enabled skills with no successful use in 30 days;
+2. enabled skills with no current evaluation;
+3. overlapping skills;
+4. skills implicated in routing conflicts or regressions;
+5. plugins whose complete package may be disabled;
+6. stale passing evaluations.
+
+The initial migration queue includes every enabled skill. Work is bounded by a
+configured daily case and AI-credit budget. Unfinished evaluation work remains
+visible with its queue position and reason. Budget exhaustion never becomes a
+keep decision.
+
+## Personal skills
+
+### Recommendations
+
+All personal skills receive recommendations, including user-created,
+machine-created, protected, and unknown-origin skills.
+
+### Automatic actions
+
+Only `dreaming_managed` and `legacy_machine` skills may be changed
+automatically.
+
+Automatic withdrawal, archive, or consolidation requires:
+
+- `disable_candidate`, `archive_candidate`, or `merge_candidate`;
+- complete evaluation and usage evidence required by that recommendation;
+- complete dependency and pin inventory;
+- no unrelated dirty work;
+- exact provenance and target identity;
+- a complete Git-backed restore path;
+- open halt and pause controls;
+- an exclusive writer lease;
+- a proposed-estate routing and portfolio pass.
+
+A machine-created `disable_candidate` first enters a reversible withdrawn
+state through an `estate-action.py` `personal_withdraw` action. Withdrawal
+removes the skill from active loading without deleting its Git-backed package,
+writes a retirement record, and proves exact restore. After 60 days of complete
+non-use in the withdrawn state, an `archive_candidate` decision may authorize
+archive. Consolidation uses the same authority owner and may not bypass
+withdrawal or archive proof.
+
+### User actions
+
+The user may explicitly act on any personal skill that lives in a managed Git
+root.
+
+User authority may choose keep, pin, run evaluation, merge, withdraw, archive,
+or restore. It does not bypass:
+
+- path and identity validation;
+- pins unless the explicit action is unpin;
+- dependency disclosure and confirmation;
+- dirty-work protection;
+- transaction journaling;
+- Git-backed restore;
+- post-action inventory verification.
+
+The confirmation surface must show the exact skill, recommendation, reason,
+dependencies, files affected, and restore method.
+
+`estate-action.py` accepts two explicit personal authorization sources:
+
+- `automatic_machine`, limited to current `dreaming_managed` or
+  `legacy_machine` provenance and policy-authorized actions;
+- `explicit_user_intent`, carrying a current immutable user intent for the
+  exact target and permitting a user-authorized action regardless of
+  provenance.
+
+Both sources bind the same census, target, decision, dependency, policy,
+portfolio, proposed-estate, halt, receiver, routing, and restore evidence.
+`explicit_user_intent` additionally binds the intent identity, confirmation
+nonce, user reason, and disposition state. `curator-run.py` and archive/restore
+helpers are adapters beneath `estate-action.py`; they never accept dashboard
+authority directly.
+
+## Plugin skills and packages
+
+### Individual skill recommendations
+
+Every skill inside an enabled plugin receives its own value recommendation
+from evaluation, usage, overlap, and dependencies.
+
+Individual recommendations answer:
+
+- keep this skill;
+- this skill needs evaluation;
+- this skill appears redundant;
+- this skill appears harmful;
+- this skill is unused;
+- this skill is required by a dependency.
+
+### Individual disable capability
+
+Individual plugin-skill disablement is enabled only when an installed-host
+qualification proves that the exact Copilot version exposes a supported,
+reversible, ownership-safe per-skill enablement control.
+
+The qualification must prove:
+
+1. disabling one exact plugin skill removes only that skill;
+2. the rest of the plugin's skills, agents, hooks, MCP servers, and LSP
+   servers remain unchanged;
+3. unrelated plugins remain unchanged;
+4. restoring the prior setting returns the exact capability;
+5. settings conflicts and runtime verification fail closed.
+
+Copilot CLI 1.0.81 exposes plugin management and whole-plugin enablement but
+the current repository has no proven per-skill disable contract. Until such a
+qualification exists, individual plugin-skill decisions are recommendation
+only.
+
+The system must never simulate individual disablement by editing plugin files,
+hiding paths, or copying a modified plugin.
+
+### Whole-plugin recommendation and disable
+
+A plugin receives `disable_candidate` only when:
+
+- every skill capability is `disable_candidate`, `archive_candidate`, or
+  redundant;
+- every non-skill capability is fully inventoried and shown unnecessary,
+  unused with complete telemetry, or superseded;
+- no dependency requires the plugin or one of its capabilities;
+- the proposed estate without the plugin passes routing and portfolio gates;
+- the installed plugin source type has a current settings qualification;
+- disable and restore can be verified through fresh runtime inventories.
+
+One useful, protected, unevaluated, or unknown capability blocks automatic
+whole-plugin disablement. The dashboard still reports which individual skills
+made the package ineligible.
+
+The user may explicitly disable a plugin from the dashboard after seeing its
+complete capability inventory. The existing settings transaction remains the
+only writer.
+
+## Human decision dashboard
+
+### Portfolio page
+
+The default estate page shows one row per enabled canonical skill:
+
+| Column | Meaning |
+| --- | --- |
+| Skill | Runtime skill name |
+| Installed from | Personal root, Dreaming bundle, plugin, or builtin |
+| Recommendation | Plain-language value decision |
+| Why | Short reason based on evaluation, usage, overlap, or dependency |
+| Evaluation | Pass, fail, inconclusive, stale, missing, or queued |
+| Use 30d | Verified successful loads or Unknown |
+| Last used | Last successful load or Never observed |
+| Dependencies | Protected, clear, incomplete, or Unknown |
+| Authority | Automatic, your decision, plugin package only, or immutable |
+| Next action | Open, evaluate, keep, disable, archive, merge, or restore |
+
+The page defaults to decision priority:
+
+1. failing or harmful;
+2. archive or disable candidate;
+3. needs user decision;
+4. needs evaluation;
+5. protected;
+6. proven useful.
+
+### Decision queue
+
+The dashboard provides filters for:
+
+- needs your decision;
+- evaluation failed;
+- evaluation missing or stale;
+- unused 30 days;
+- unused 90 days;
+- duplicate or merge candidate;
+- plugin skill recommendation;
+- whole-plugin disable candidate;
+- protected dependency;
+- insufficient information.
+
+### Detail view
+
+The detail view shows:
+
+- complete current skill instructions;
+- exact source and authority;
+- 7, 30, and 90-day usage;
+- last successful invocation;
+- evaluation cases, outcomes, traces, model, and currency;
+- supporting occurrences in a separate history section;
+- overlapping skills and comparative evidence;
+- dependencies and pins;
+- recommendation reason and policy version;
+- action history and receipts;
+- restore instructions.
+
+### User actions
+
+The dashboard supports:
+
+- Run evaluation
+- Keep for 90 days
+- Keep and pin
+- Merge
+- Withdraw or disable
+- Archive
+- Restore
+- Correct origin classification
+- Disable whole plugin
+- Restore plugin
+
+Unavailable actions remain visible but disabled with a precise reason.
+
+### Terminology changes
+
+Replace:
+
+| Existing label | Replacement |
+| --- | --- |
+| Governance decisions and actions | Portfolio decisions |
+| Authority | Who may change it |
+| Decision | Recommendation |
+| Action `recommendation` | No action taken |
+| State `kept` | Still enabled |
+| Evidence `recommendation` | Remove the column |
+| Observed | Recommendation generated |
+| Current | Latest recommendation |
+| Historical | Older action receipt |
+| Manual review | Needs your decision |
+| Shadow candidate | Unpublished draft |
+| Dream review | Conversation inspection |
+
+Recommendation rows and completed action receipts appear in separate tables.
+
+## Dashboard mutation boundary
+
+The dashboard remains an authenticated local service. Read requests use the
+existing token. Mutating requests require:
+
+- the existing dashboard token in the authorization header;
+- a same-origin request;
+- JSON content type;
+- an exact action kind and target identity;
+- the current estate snapshot and recommendation identities;
+- a one-time confirmation nonce from a prior read;
+- a non-empty user reason for destructive or disabling actions.
+
+The dashboard never edits a skill, Git root, plugin setting, policy file, or
+receipt directly.
+
+It writes an immutable user-intent record and invokes the existing authority:
+
+- evaluation requests enter the bounded evaluator queue;
+- every personal mutation passes through `estate-action.py`, which dispatches
+  `curator-run.py` and the archive/restore helpers as adapters;
+- plugin actions use `estate-action.py` and
+  `plugin-settings-transaction.py`;
+- keep and pin decisions use scoped append-only disposition records;
+- origin corrections create an explicit user-attested provenance record
+  without rewriting historical evidence.
+
+The HTTP response returns an accepted intent ID. Completion is observed from
+the action ledger. A browser disconnect does not cancel or repeat a committed
+transaction.
+
+## Data model
+
+### Portfolio decision
+
+```json
+{
+  "schema_version": 1,
+  "decision_id": "sha256:...",
+  "capability_id": "opaque canonical identity",
+  "target_identity_sha256": "sha256:...",
+  "recommendation": "evaluate_now",
+  "reason_codes": ["evaluation_missing", "unused_30d"],
+  "evaluation": {
+    "status": "missing",
+    "receipt_sha256": null,
+    "current": false
+  },
+  "usage": {
+    "complete": true,
+    "uses_7d": 0,
+    "uses_30d": 0,
+    "uses_90d": 0,
+    "last_successful_invocation": null
+  },
+  "dependencies": {
+    "complete": true,
+    "blocking": []
+  },
+  "mutation_authority": "user_decision_required",
+  "policy_sha256": "sha256:...",
+  "census_sha256": "sha256:...",
+  "generated_at": "timestamp"
+}
+```
+
+### User disposition
+
+```json
+{
+  "schema_version": 1,
+  "intent_id": "opaque random identity",
+  "capability_id": "opaque canonical identity",
+  "action": "keep",
+  "reason": "Still needed for quarterly recovery work",
+  "effective_until": "timestamp",
+  "target_identity_sha256": "sha256:...",
+  "decision_id": "sha256:...",
+  "created_at": "timestamp",
+  "status": "accepted"
+}
+```
+
+Keep dispositions expire after 90 days by default. They do not fabricate
+evaluation or usage evidence. They temporarily suppress automatic mutation and
+remain visible as user authority.
+
+Every automatic personal action binds the current disposition-set identity.
+`estate-action.py` re-reads and verifies that identity immediately before
+dispatch. A Keep or Pin accepted after authorization but before dispatch makes
+the authorization stale and refuses mutation. Expiration recomputes a
+recommendation but never revives or executes a previously authorized action.
+
+## Failure model
+
+| Failure | Required behavior |
+| --- | --- |
+| Evaluation missing | Show Needs evaluation; do not show Proven useful |
+| Evaluation stale | Show Stale evaluation and queue refresh |
+| Usage unavailable | Show Unknown; do not convert to zero |
+| No usage with complete corpus | Show the measured zero and apply policy |
+| Recommendation generated but no action taken | Show recommendation only; no receipt |
+| Completed action authority later changes | Keep the receipt as history, not current evidence |
+| User action targets stale census identity | Reject and require refreshed confirmation |
+| User closes browser during action | Continue transaction and expose status by intent ID |
+| Duplicate POST | Idempotently return the existing intent |
+| Halt, pause, or recovery fence active | Reject mutating intent |
+| Personal skill has unrelated dirty work | Refuse mutation and preserve worktree |
+| Dependency inventory incomplete | Disable archive controls and explain why |
+| Plugin has one unknown capability | Block automatic whole-plugin disable |
+| Individual plugin disable unsupported | Show recommendation; disable control explains platform limit |
+| Settings change concurrently | Preserve all versions and enter recovery-required state |
+| Archive commit fails | Restore working tree and write no success receipt |
+| Dashboard data malformed | Show unavailable and disable actions |
+| User disposition expires | Recompute recommendation; do not execute immediately from stale data |
+| Keep or Pin arrives after automatic authorization | Refuse dispatch as stale; require a new decision and authorization |
+
+## Hard invariants
+
+1. Every enabled skill receives a recommendation or an explicit insufficient
+   information result.
+2. Provenance never counts as value evidence.
+3. A recommendation never counts as an action receipt.
+4. Missing or inconclusive evaluation never becomes a passing evaluation.
+5. Missing usage never becomes zero usage.
+6. Every automatic personal mutation targets only
+   `dreaming_managed` or `legacy_machine`.
+7. User-created and unknown-origin personal skills require explicit user
+   action.
+8. Plugin files are never edited.
+9. Individual plugin-skill disablement requires a version-qualified native
+   control.
+10. Whole-plugin disablement considers every skill and non-skill capability.
+11. Every disable or archive has a verified restore path before mutation.
+12. Pins and dependencies block automatic removal.
+13. Dashboard handlers never mutate managed roots or settings directly.
+14. Every mutating dashboard request binds the current target, decision,
+    census, policy, disposition set, and one-time confirmation nonce.
+15. Halt, pause, recovery-required, stale identity, and incomplete authority
+    fail closed.
+16. All action history remains visible after later recommendations change.
+
+## Migration
+
+1. Add portfolio decision records in report-only mode.
+2. Render the new portfolio table and decision details while retaining the old
+   estate API fields for compatibility.
+3. Backfill one decision for every enabled canonical capability.
+4. Join current evaluation receipts and usage summaries.
+5. Generate individual plugin-skill recommendations.
+6. Add the human decision queue with all controls disabled.
+7. Qualify intent creation, idempotency, authentication, stale-state refusal,
+   and action routing in fixtures.
+8. Enable Run evaluation and Keep actions.
+9. Enable explicit personal archive and restore through existing transactions.
+10. Enable whole-plugin disable and restore through existing qualified
+    settings transactions.
+11. Enable automatic machine-created pruning only after every enabled
+    capability has a report-only decision whose inputs are current or
+    explicitly `insufficient_information`, and two consecutive daily runs
+    produce zero disagreement between recomputed decisions and dry-run action
+    receipts. New or invalidated capabilities return the system to report-only
+    mode until they satisfy the same gate.
+12. Remove the old combined recommendation/action table after compatibility
+    readers no longer require it.
+
+Individual plugin-skill disable remains gated until an installed Copilot
+version passes the native-control qualification.
+
+## Rollback
+
+Rollback is configuration-first:
+
+1. Disable dashboard mutation endpoints.
+2. Disable automatic portfolio actions.
+3. Restore the prior read-only estate presentation.
+4. Continue reading new decision and user-intent records as inert history.
+5. Restore disabled plugins through their ordered settings receipts.
+6. Restore archived skills through their Git-backed retirement records.
+7. Preserve evaluation, usage, recommendation, and action evidence.
+
+Rollback never deletes user dispositions, decisions, receipts, retirement
+history, or recovery state.
+
+Fail-closed rollback proof requires:
+
+- disabled HTTP mutation endpoints return method-not-allowed;
+- no automatic personal or plugin action can be authorized;
+- prior read-only estate routes remain available;
+- plugin restore returns exact effective capabilities;
+- personal restore returns the exact archived package;
+- unrelated settings and Git work remain unchanged.
+
+## Acceptance criteria
+
+- Every enabled skill appears once in the portfolio table.
+- Every personal skill receives a value recommendation regardless of origin.
+- User-created and unknown-origin skills show recommendations but are never
+  changed automatically.
+- Every plugin skill receives an individual recommendation.
+- Every plugin receives a complete-package recommendation.
+- Unsupported individual plugin disablement is visible and unavailable, not
+  silently simulated.
+- Evaluation status, currency, cases, and receipts are visible for every
+  evaluated skill.
+- Verified 7, 30, and 90-day usage and last use are visible or explicitly
+  Unknown.
+- Supporting occurrences are shown separately from evaluation and usage.
+- Recommendation reasons are plain and name the deciding facts.
+- Recommendation history is separate from completed action receipts.
+- The dashboard has a filterable human decision queue.
+- User Keep, Evaluate, Archive, Restore, Disable plugin, and Restore plugin
+  actions use governed transactions.
+- Automatic withdrawal, archive, or consolidation affects only verified
+  machine-created personal skills.
+- A plugin package is automatically disabled only when every capability and
+  dependency gate passes.
+- Every archive and disable is reversible and verified.
+- Halt, pause, stale state, conflicts, incomplete evidence, and recovery state
+  block mutation.
+
+## Deterministic check contract
+
+### PORT-CHK-01: Complete recommendation coverage
+
+- **Protects:** Every enabled skill is judged.
+- **Setup:** Seed personal, Dreaming, plugin, builtin, duplicate physical, and
+  unresolved instances.
+- **Pass:** Exactly one decision exists per enabled canonical capability;
+  unresolved instances remain explicit and do not create false capabilities.
+- **Failure:** An enabled capability is omitted or a physical duplicate is
+  counted twice.
+- **Why:** It proves the portfolio has no hidden origin-based exclusion.
+
+### PORT-CHK-02: Value and authority separation
+
+- **Protects:** Safety limits do not become keep evidence.
+- **Setup:** Give identical failing evaluation and zero-use evidence to one
+  machine-created and one user-created skill.
+- **Pass:** Both receive the same `disable_candidate` value recommendation;
+  only the machine-created skill receives automatic mutation authority.
+- **Failure:** The user-created skill is labeled keep or the automatic action
+  is authorized for it.
+- **Why:** It proves provenance controls action, not judgment.
+
+### PORT-CHK-03: Evaluation and usage precedence
+
+- **Protects:** Decisions follow the declared policy.
+- **Setup:** Cover passing, failing, stale, missing, and inconclusive
+  evaluations with recent use, complete non-use, unknown usage, declared rare
+  cases, redundancy, pins, and required dependencies.
+- **Pass:** Every matrix row produces the specified value state and reason
+  codes; pins and dependencies preserve but do not hide a regression.
+- **Failure:** Missing evidence becomes positive evidence, a critical
+  regression is labeled useful, or protection replaces its value state.
+- **Why:** It proves the primary evidence model.
+
+### PORT-CHK-04: Recommendation is not evidence or receipt
+
+- **Protects:** Dashboard truthfulness.
+- **Setup:** Seed recommendation-only, running, committed, historical, and
+  recovery-required records.
+- **Pass:** Recommendations appear only in the decision table; completed
+  transactions appear only in action history with receipts.
+- **Failure:** A recommendation appears in an Evidence column or shows a
+  receipt.
+- **Why:** It proves the misleading repeated recommendation state is removed.
+
+### PORT-CHK-05: Plain terminology
+
+- **Protects:** User comprehension.
+- **Setup:** Render portfolio, candidate, activity, and evidence pages.
+- **Pass:** The banned ambiguous labels appear only in a glossary or backward
+  compatibility payload, and every visible replacement matches this design.
+- **Failure:** Unqualified review, shadow candidate, Evidence recommendation,
+  or Observed recommendation appears in the UI.
+- **Why:** It prevents the product from recreating the same conceptual
+  confusion.
+
+### PORT-CHK-06: Individual plugin recommendations
+
+- **Protects:** Plugin packages do not hide low-value skills.
+- **Setup:** Seed a plugin with useful, unused, failing, and unknown skills plus
+  a non-skill capability.
+- **Pass:** Each skill receives its own recommendation and the package decision
+  names every blocker.
+- **Failure:** The plugin has only one undifferentiated keep recommendation.
+- **Why:** It proves per-capability judgment.
+
+### PORT-CHK-07: Individual plugin disable gate
+
+- **Protects:** Unsupported per-skill mutation fails closed.
+- **Setup:** Mandatory: run with no qualification and a failed qualification.
+  Conditional register-only: when the installed CLI exposes a candidate native
+  control, run a passing version-bound qualification.
+- **Pass:** Mandatory cases remain recommendation-only. If the conditional
+  qualification is registered, it changes only the exact skill and restores
+  it.
+- **Failure:** Plugin files are edited, sibling capabilities change, or an
+  unqualified version enables the control.
+- **Why:** It proves "if possible" means proven native support, not simulation.
+
+### PORT-CHK-08: Whole-plugin decision
+
+- **Protects:** One useful or unknown capability blocks package disablement.
+- **Setup:** Exercise complete packages with all removable capabilities and
+  packages with one useful, unknown, or dependent capability.
+- **Pass:** Only the all-removable package becomes disable-eligible.
+- **Failure:** A partial judgment disables the plugin.
+- **Why:** It proves complete-package authority.
+
+### PORT-CHK-09: Human decision intent
+
+- **Protects:** Dashboard actions are explicit and bound.
+- **Setup:** Submit valid, duplicate, stale, unauthenticated, cross-origin,
+  malformed, halted, paused, and recovery-blocked intents; authorize an
+  automatic archive, then accept Keep before dispatch.
+- **Pass:** Valid intent is accepted once; duplicate is idempotent; every other
+  case is rejected without mutation; the later Keep invalidates the automatic
+  authorization.
+- **Failure:** A stale or unauthenticated request creates authority.
+- **Why:** It proves the dashboard is a governed user surface.
+
+### PORT-CHK-10: Personal archive and restore
+
+- **Protects:** User-authorized and automatic archives remain recoverable.
+- **Setup:** Withdraw and later archive machine-created automatically, archive
+  user-created by explicit intent, attempt automatic user-created archive, and
+  attempt to invoke the curator adapter without `estate-action.py`.
+- **Pass:** First two commit exact scoped deletion plus retirement records; the
+  third and fourth are refused; both completed archives restore exactly.
+- **Failure:** User content changes automatically or restore loses bytes.
+- **Why:** It proves the requested authority boundary.
+
+### PORT-CHK-11: Plugin disable and restore
+
+- **Protects:** Whole-plugin actions preserve settings and capabilities.
+- **Setup:** Execute disable and restore with unrelated settings, concurrent
+  edits, runtime mismatch, and stacked transactions.
+- **Pass:** Successful paths change only the exact plugin key; conflicts retain
+  all bytes and require recovery.
+- **Failure:** Unrelated settings are lost or capabilities do not match the
+  receipt.
+- **Why:** It proves reversible non-destructive plugin pruning.
+
+### PORT-CHK-12: Automatic aggressive pruning
+
+- **Protects:** Aggressive policy remains evidence-bound.
+- **Setup:** Seed 30-day non-use, failing evaluation, redundancy, missing
+  evidence, pins, and dependencies across authority classes.
+- **Pass:** Eligible machine-created disable candidates withdraw, mature
+  withdrawn candidates archive, and protected, unknown, and user-decision
+  targets do not mutate. Automation remains report-only until every capability
+  has a current or explicit insufficient-information decision and two
+  consecutive daily dry-run comparisons agree.
+- **Failure:** Missing data authorizes removal or eligible machine-created work
+  remains permanently recommendation-only.
+- **Why:** It proves both aggression and safety.
+
+### PORT-CHK-13: Browser decision workflow
+
+- **Protects:** The real dashboard supports understanding and action.
+- **Setup:** Drive desktop and 390-pixel views with a complete mixed portfolio.
+- **Pass:** A user can find a failing skill, understand why, inspect evaluation
+  and usage, submit an action, and observe its final receipt without reading
+  raw JSON.
+- **Failure:** The workflow requires interpreting recommendation/evidence
+  jargon or using the terminal.
+- **Why:** It proves the product outcome rather than API presence.
+
+### PORT-CHK-14: Rollback
+
+- **Protects:** The critical boundary can be disabled safely.
+- **Setup:** Roll back after decisions, user dispositions, a personal archive,
+  and a plugin disable.
+- **Pass:** Mutation endpoints and automation are disabled, read-only
+  presentation works, archived and disabled targets restore, and history
+  remains.
+- **Failure:** Rollback deletes evidence, leaves a target disabled, or permits
+  new mutation.
+- **Why:** It proves fail-closed reversibility.
+
+## Definition of Done: Aggressive skill portfolio governance
+
+- [ ] Every enabled skill receives a plain-language value recommendation
+      independent of mutation authority.
+- [ ] Evaluation and verified usage are the primary keep-or-prune evidence.
+- [ ] Supporting occurrences, recommendations, actions, and receipts are
+      presented as distinct concepts.
+- [ ] Every plugin skill and complete plugin package receives a recommendation.
+- [ ] Individual plugin-skill disablement is either version-qualified and
+      reversible or explicitly unavailable.
+- [ ] Automatic personal mutations remain limited to verified machine-created
+      skills.
+- [ ] User-created and unknown-origin skills can be acted on only through an
+      explicit user intent.
+- [ ] The dashboard provides a filterable decision queue, detail evidence, and
+      governed Keep, Evaluate, Archive, Restore, Disable plugin, and Restore
+      plugin actions.
+- [ ] Aggressive non-use, regression, and redundancy policy is active without
+      converting missing evidence into removal authority.
+- [ ] Every action passes identity, dependency, pin, halt, recovery, and
+      restore checks.
+- [ ] Deterministic checks PORT-CHK-01 through PORT-CHK-14 pass, with the
+      conditional native-control branch of PORT-CHK-07 required only after a
+      candidate installed Copilot version exposes that control.
+- [ ] Desktop and narrow browser proof demonstrates the complete human
+      decision workflow.
+- [ ] Installed plugin disable, restore, personal archive, and restore proof
+      passes on the Mac mini and MacBook.
+- [ ] Paired implementation review has no unresolved in-scope must-fix finding.
+- [ ] Rollback proof disables mutation, restores targets, and preserves
+      retained history.
+- [ ] The reviewed design, implementation, and proof references are committed
+      locally; nothing is pushed.
