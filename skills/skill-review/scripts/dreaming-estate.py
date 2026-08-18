@@ -973,7 +973,11 @@ def normalize_skill_name(value: Any) -> str | None:
     if not isinstance(value, str):
         return None
     normalized = unicodedata.normalize("NFC", value).strip().casefold()
-    return normalized if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", normalized) else None
+    return (
+        normalized
+        if re.fullmatch(r"[a-z0-9](?:[a-z0-9:-]{0,198}[a-z0-9])?", normalized)
+        else None
+    )
 
 
 def parse_usage_time(value: Any) -> datetime | None:
@@ -994,15 +998,16 @@ def opaque_session_id(name: str) -> str:
 
 def parse_usage_session(
     raw: bytes, *, collected_at: datetime
-) -> tuple[list[tuple[str, datetime]], datetime | None]:
-    starts: dict[str, str] = {}
-    completions: dict[str, tuple[bool, datetime]] = {}
+) -> tuple[list[tuple[str, datetime]], datetime | None, list[str]]:
+    starts: dict[str, tuple[str, datetime, int]] = {}
+    completions: dict[str, tuple[bool, datetime, str | None, int]] = {}
     earliest: datetime | None = None
+    issues: list[str] = []
     try:
         text = raw.decode("utf-8")
     except UnicodeDecodeError as error:
         raise EstateError("usage_session_invalid_utf8") from error
-    for line in text.splitlines():
+    for event_index, line in enumerate(text.splitlines()):
         if not line.strip():
             continue
         try:
@@ -1029,37 +1034,81 @@ def parse_usage_session(
                 if isinstance(arguments, dict)
                 else None
             )
-            if not isinstance(call_id, str) or not call_id or name is None:
+            if not isinstance(call_id, str) or not call_id:
                 raise EstateError("usage_session_invalid_skill_start")
+            if name is None:
+                issues.append("usage_session_invalid_skill_name")
+                continue
             if call_id in starts:
                 raise EstateError("usage_session_duplicate_skill_start")
-            starts[call_id] = name
+            starts[call_id] = (name, timestamp, event_index)
         elif event_type == "tool.execution_complete" and isinstance(data, dict):
             call_id = data.get("toolCallId")
             if not isinstance(call_id, str) or not call_id:
                 continue
             if call_id in completions:
                 raise EstateError("usage_session_duplicate_completion")
-            completions[call_id] = (data.get("success") is True, timestamp)
-    successful = [
-        (name, completions[call_id][1])
-        for call_id, name in starts.items()
-        if call_id in completions and completions[call_id][0]
-    ]
-    return successful, earliest
+            result = data.get("result")
+            content = result.get("content") if isinstance(result, dict) else None
+            match = (
+                re.match(r'^Skill "([^"]+)" loaded successfully\.', content)
+                if isinstance(content, str)
+                else None
+            )
+            loaded_name = normalize_skill_name(match.group(1)) if match else None
+            completions[call_id] = (
+                data.get("success") is True,
+                timestamp,
+                loaded_name,
+                event_index,
+            )
+    successful: list[tuple[str, datetime]] = []
+    if any(
+        success and loaded_name is not None and call_id not in starts
+        for call_id, (success, _, loaded_name, _) in completions.items()
+    ):
+        issues.append("usage_session_unmatched_skill_completion")
+    for call_id, (name, started_at, start_index) in starts.items():
+        completion = completions.get(call_id)
+        if completion is None or not completion[0]:
+            continue
+        _, completed_at, loaded_name, completion_index = completion
+        if (
+            completion_index <= start_index
+            or completed_at < started_at
+            or loaded_name != name
+        ):
+            issues.append("usage_session_unverified_skill_completion")
+            continue
+        successful.append((name, completed_at))
+    return successful, earliest, sorted(set(issues))
 
 
-def usage_name_mappings(census: dict[str, Any]) -> dict[str, set[str]]:
+def usage_name_mappings(
+    census: dict[str, Any],
+) -> tuple[dict[str, set[str]], set[str], list[tuple[str, str]]]:
     mappings: dict[str, set[str]] = {}
+    capability_ids: set[str] = set()
+    issues: list[tuple[str, str]] = []
     for item in census.get("enabled_instances", []):
         if not isinstance(item, dict) or item.get("runtime_enabled") is not True:
             continue
         name = normalize_skill_name(item.get("runtime_name"))
         capability_id = item.get("canonical_capability_id")
-        if name is None or not isinstance(capability_id, str):
+        if not isinstance(capability_id, str):
+            continue
+        capability_ids.add(capability_id)
+        if name is None:
+            issues.append((capability_id, "usage_census_invalid_runtime_name"))
             continue
         mappings.setdefault(name, set()).add(capability_id)
-    return mappings
+    for capability_ids_for_name in mappings.values():
+        if len(capability_ids_for_name) > 1:
+            issues.extend(
+                (capability_id, "usage_census_conflicting_mapping")
+                for capability_id in capability_ids_for_name
+            )
+    return mappings, capability_ids, issues
 
 
 def collect_usage(
@@ -1070,7 +1119,7 @@ def collect_usage(
     max_sessions: int,
     max_bytes: int,
 ) -> dict[str, Any]:
-    mappings = usage_name_mappings(census)
+    mappings, canonical_ids, mapping_issues = usage_name_mappings(census)
     counts: dict[str, Counter[str]] = {}
     last_used: dict[str, datetime] = {}
     unattributed: dict[tuple[str, str], Counter[str]] = {}
@@ -1085,6 +1134,11 @@ def collect_usage(
         nonlocal complete
         complete = False
         failures.append({"session_id": opaque_session_id(session), "reason": reason})
+
+    if census.get("scope", {}).get("complete") is not True:
+        fail("census", "usage_census_incomplete")
+    for capability_id, reason in mapping_issues:
+        fail(f"census:{capability_id}", reason)
 
     try:
         if session_root.is_symlink() or not session_root.is_dir():
@@ -1160,12 +1214,14 @@ def collect_usage(
         sessions_scanned += 1
         bytes_scanned += len(raw)
         try:
-            successful, session_earliest = parse_usage_session(
+            successful, session_earliest, session_issues = parse_usage_session(
                 raw, collected_at=collected_at
             )
         except EstateError as error:
             fail(session.name, str(error))
             continue
+        for reason in session_issues:
+            fail(session.name, reason)
         if session_earliest is not None:
             earliest_retained = (
                 session_earliest
@@ -1206,15 +1262,8 @@ def collect_usage(
 
     if unattributed:
         complete = False
-    canonical_ids = sorted(
-        {
-            capability_id
-            for capability_ids in mappings.values()
-            for capability_id in capability_ids
-        }
-    )
     usage_rows = []
-    for capability_id in canonical_ids:
+    for capability_id in sorted(canonical_ids):
         value = counts.get(capability_id, Counter())
         usage_rows.append(
             {

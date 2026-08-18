@@ -231,6 +231,63 @@ class RuntimeTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeFailure, "census binding"):
             core.record_estate_usage(altered, receiver, census)
 
+        invalid_coverage = dict(usage)
+        invalid_coverage["coverage"] = None
+        invalid_coverage_snapshot = {
+            key: value
+            for key, value in invalid_coverage.items()
+            if key != "snapshot_sha256"
+        }
+        invalid_coverage["snapshot_sha256"] = runtime_module.digest(
+            invalid_coverage_snapshot
+        )
+        with self.assertRaisesRegex(RuntimeFailure, "coverage"):
+            core.record_estate_usage(invalid_coverage, receiver, census)
+
+        newer_census_snapshot = {
+            **census_snapshot,
+            "collected_at": "2026-08-17T19:00:00+00:00",
+        }
+        newer_census = {
+            **newer_census_snapshot,
+            "snapshot_sha256": runtime_module.digest(newer_census_snapshot),
+        }
+        newer_usage_snapshot = {
+            **usage_snapshot,
+            "collected_at": newer_census["collected_at"],
+            "census_snapshot_sha256": newer_census["snapshot_sha256"],
+        }
+        newer_usage = {
+            **newer_usage_snapshot,
+            "snapshot_sha256": runtime_module.digest(newer_usage_snapshot),
+        }
+        self.assertEqual(
+            core.record_estate_census(newer_census, receiver)["status"],
+            "recorded",
+        )
+        self.assertEqual(
+            core.record_estate_usage(newer_usage, receiver, newer_census)["status"],
+            "recorded",
+        )
+        self.assertEqual(
+            core.record_estate_census(census, receiver)["status"],
+            "superseded",
+        )
+        self.assertEqual(
+            core.record_estate_usage(usage, receiver, census)["status"],
+            "superseded",
+        )
+        self.assertEqual(
+            json.loads(self.paths.estate_current.read_text())["snapshot_sha256"],
+            newer_census["snapshot_sha256"],
+        )
+        self.assertEqual(
+            json.loads(self.paths.estate_usage_current.read_text())[
+                "snapshot_sha256"
+            ],
+            newer_usage["snapshot_sha256"],
+        )
+
     def initialize_git_repo(self) -> None:
         subprocess.run(
             ["git", "-C", str(self.paths.skills), "init", "-q"],

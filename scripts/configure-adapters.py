@@ -379,6 +379,29 @@ def inherit_remote_copilot(existing: dict[str, object]) -> None:
             if name not in os.environ and value is not None:
                 os.environ[name] = value
 
+    estate_entry = existing.get("estate_census")
+    estate_argv = (
+        estate_entry.get("argv", []) if isinstance(estate_entry, dict) else []
+    )
+    if isinstance(estate_argv, list) and any(
+        isinstance(value, str) and value.endswith("/scripts/ssh-estate-census.py")
+        for value in estate_argv
+    ):
+        estate_values = {
+            "DREAMING_COPILOT_ESTATE_SESSION_ROOT": argv_value(
+                estate_entry, "--remote-copilot-session-root"
+            ),
+            "DREAMING_ESTATE_USAGE_MAX_SESSIONS": argv_value(
+                estate_entry, "--usage-max-sessions"
+            ),
+            "DREAMING_ESTATE_USAGE_MAX_BYTES": argv_value(
+                estate_entry, "--usage-max-bytes"
+            ),
+        }
+        for name, value in estate_values.items():
+            if name not in os.environ and value is not None:
+                os.environ[name] = value
+
 
 def inherit_local_binaries(existing: dict[str, object]) -> None:
     for vendor in VENDORS:

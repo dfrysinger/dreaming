@@ -106,10 +106,13 @@ function originLabel(value) {
 
 function recentUse(item) {
   if (item.usage_state === "unavailable") return badge("Usage unavailable");
-  const counts = `${number(item.uses_7d)} / ${number(item.uses_30d)} / ${number(item.uses_90d)}`;
   if (item.usage_state === "incomplete") {
-    return item.uses_total > 0 ? `${esc(counts)} · ${badge("partial")}` : badge("Usage incomplete");
+    if (item.uses_total <= 0) return badge("Usage incomplete");
+    const lowerBound = value => Number(value) > 0 ? `${Number(value).toLocaleString()}+` : "Unknown";
+    const counts = `${lowerBound(item.uses_7d)} / ${lowerBound(item.uses_30d)} / ${lowerBound(item.uses_90d)}`;
+    return `${esc(counts)} · ${badge("partial")}`;
   }
+  const counts = `${number(item.uses_7d)} / ${number(item.uses_30d)} / ${number(item.uses_90d)}`;
   return esc(counts);
 }
 

@@ -480,9 +480,23 @@ class DreamingRuntime:
             "snapshot_sha256": snapshot_sha256,
             "census": census,
         }
-        atomic_json(self.paths.estate_current, current, mode=0o600)
+        collected_at = parse_time(census.get("collected_at"))
+        existing = read_json(self.paths.estate_current, {})
+        existing_census = existing.get("census") if isinstance(existing, dict) else None
+        existing_collected_at = (
+            parse_time(existing_census.get("collected_at"))
+            if isinstance(existing_census, dict)
+            else None
+        )
+        is_current = (
+            collected_at is None
+            or existing_collected_at is None
+            or collected_at >= existing_collected_at
+        )
+        if is_current:
+            atomic_json(self.paths.estate_current, current, mode=0o600)
         return {
-            "status": "recorded",
+            "status": "recorded" if is_current else "superseded",
             "receipt_sha256": receipt_sha256,
             "snapshot_sha256": snapshot_sha256,
             "complete": census.get("scope", {}).get("complete") is True,
@@ -509,6 +523,17 @@ class DreamingRuntime:
             or usage.get("collected_at") != census.get("collected_at")
         ):
             raise RuntimeFailure("estate-usage-invalid", "census binding")
+        host_id = usage.get("host_id")
+        collected_at = parse_time(usage.get("collected_at"))
+        coverage = usage.get("coverage")
+        if not isinstance(host_id, str) or not host_id:
+            raise RuntimeFailure("estate-usage-invalid", "host binding")
+        if collected_at is None or collected_at.tzinfo is None:
+            raise RuntimeFailure("estate-usage-invalid", "collection time")
+        if not isinstance(coverage, dict) or not isinstance(
+            coverage.get("complete"), bool
+        ):
+            raise RuntimeFailure("estate-usage-invalid", "coverage")
         required_receiver = {
             "receiver_id",
             "receiver_sha256",
@@ -551,12 +576,23 @@ class DreamingRuntime:
             "census_snapshot_sha256": census["snapshot_sha256"],
             "usage": usage,
         }
-        atomic_json(self.paths.estate_usage_current, current, mode=0o600)
+        existing = read_json(self.paths.estate_usage_current, {})
+        existing_usage = existing.get("usage") if isinstance(existing, dict) else None
+        existing_collected_at = (
+            parse_time(existing_usage.get("collected_at"))
+            if isinstance(existing_usage, dict)
+            else None
+        )
+        is_current = (
+            existing_collected_at is None or collected_at >= existing_collected_at
+        )
+        if is_current:
+            atomic_json(self.paths.estate_usage_current, current, mode=0o600)
         return {
-            "status": "recorded",
+            "status": "recorded" if is_current else "superseded",
             "receipt_sha256": receipt_sha256,
             "snapshot_sha256": snapshot_sha256,
-            "complete": usage.get("coverage", {}).get("complete") is True,
+            "complete": coverage.get("complete") is True,
         }
 
     def _mark_queue(self, qualified_session_id: str, revision: str, status: str) -> None:

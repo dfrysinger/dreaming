@@ -1003,6 +1003,10 @@ class EstateCensusTest(unittest.TestCase):
             data.update({"toolName": "skill", "arguments": {"skill": name}})
         elif event_type == "tool.execution_complete":
             data["success"] = success
+            if success:
+                data["result"] = {
+                    "content": f'Skill "{name}" loaded successfully.'
+                }
         return {"type": event_type, "timestamp": timestamp, "data": data}
 
     def test_usage_aggregates_only_successful_correlated_skill_calls(self) -> None:
@@ -1066,6 +1070,102 @@ class EstateCensusTest(unittest.TestCase):
             ],
         )
         self.assertEqual(usage["unattributed"], [])
+
+    def test_usage_accepts_namespaced_names_and_preserves_verified_calls(self) -> None:
+        namespaced_id = "sha256:" + "6" * 64
+        ordinary_id = "sha256:" + "7" * 64
+        self.write_usage_events(
+            "namespaced",
+            [
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T10:00:00+00:00",
+                    call_id="namespaced",
+                    name="code-review--auto",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T10:00:01+00:00",
+                    call_id="namespaced",
+                    name="code-review--auto",
+                ),
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T11:00:00+00:00",
+                    call_id="mismatch",
+                    name="fixture-skill",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T11:00:01+00:00",
+                    call_id="mismatch",
+                    name="different-skill",
+                ),
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T12:00:00+00:00",
+                    call_id="ordinary",
+                    name="fixture-skill",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T12:00:01+00:00",
+                    call_id="ordinary",
+                    name="fixture-skill",
+                ),
+            ],
+        )
+        usage = module.collect_usage(
+            self.usage_census(
+                [
+                    ("code-review--auto", namespaced_id),
+                    ("fixture-skill", ordinary_id),
+                ]
+            ),
+            self.case / "sessions",
+            collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
+            max_sessions=10,
+            max_bytes=100_000,
+        )
+        self.assertFalse(usage["coverage"]["complete"])
+        self.assertEqual(
+            {
+                item["canonical_capability_id"]: item["uses_total"]
+                for item in usage["canonical_usage"]
+            },
+            {namespaced_id: 1, ordinary_id: 1},
+        )
+        self.assertEqual(
+            usage["coverage"]["failures"][0]["reason"],
+            "usage_session_unverified_skill_completion",
+        )
+
+    def test_usage_marks_orphaned_successful_skill_completion_incomplete(self) -> None:
+        capability_id = "sha256:" + "8" * 64
+        self.write_usage_events(
+            "orphaned",
+            [
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T10:00:01+00:00",
+                    call_id="orphaned",
+                    name="fixture-skill",
+                ),
+            ],
+        )
+        usage = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            self.case / "sessions",
+            collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
+            max_sessions=10,
+            max_bytes=100_000,
+        )
+        self.assertFalse(usage["coverage"]["complete"])
+        self.assertEqual(usage["canonical_usage"][0]["uses_total"], 0)
+        self.assertEqual(
+            usage["coverage"]["failures"][0]["reason"],
+            "usage_session_unmatched_skill_completion",
+        )
 
     def test_usage_discards_invalid_sessions_and_never_scans_nested_artifacts(self) -> None:
         capability_id = "sha256:" + "2" * 64
@@ -1149,6 +1249,7 @@ class EstateCensusTest(unittest.TestCase):
                     "tool.execution_complete",
                     "2026-08-17T12:00:01+00:00",
                     call_id="ambiguous",
+                    name="shared",
                 ),
                 self.usage_event(
                     "tool.execution_start",
@@ -1160,6 +1261,7 @@ class EstateCensusTest(unittest.TestCase):
                     "tool.execution_complete",
                     "2026-08-17T13:00:01+00:00",
                     call_id="missing",
+                    name="missing",
                 ),
             ],
         )
@@ -1180,7 +1282,18 @@ class EstateCensusTest(unittest.TestCase):
         self.assertTrue(
             all(item["uses_total"] == 0 for item in usage["canonical_usage"])
         )
-        self.assertEqual(len(usage["coverage"]["failures"]), 2)
+        self.assertEqual(len(usage["coverage"]["failures"]), 4)
+        self.assertEqual(
+            {
+                item["reason"]
+                for item in usage["coverage"]["failures"]
+            },
+            {
+                "usage_census_conflicting_mapping",
+                "usage_session_duplicate_skill_start",
+                "usage_session_future_timestamp",
+            },
+        )
 
     def test_usage_bounds_are_incomplete_not_zero_evidence(self) -> None:
         capability_id = "sha256:" + "5" * 64

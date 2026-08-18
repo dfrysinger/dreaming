@@ -30,6 +30,7 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 SKILL_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+OBSERVED_SKILL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9:-]{0,198}[a-z0-9])?$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_JSON_BYTES = 16 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 1_100_000
@@ -3287,6 +3288,14 @@ class DashboardData:
             enabled_by_capability.setdefault(capability_id, []).append(item)
 
         enabled_skills = []
+        usage_state = (
+            "unavailable"
+            if not usage["available"]
+            else "complete"
+            if usage["complete"]
+            else "incomplete"
+        )
+        represented_instance_ids: set[str] = set()
         for capability_id, mappings in sorted(
             enabled_by_capability.items(),
             key=lambda value: safe_text(value[1][0].get("runtime_name"), 200),
@@ -3303,14 +3312,9 @@ class DashboardData:
             )
             if representative is None:
                 continue
+            represented_instance_ids.add(representative["instance_id"])
             usage_row = usage_by_capability.get(capability_id)
-            usage_state = (
-                "unavailable"
-                if not usage["available"]
-                else "complete"
-                if usage["complete"]
-                else "incomplete"
-            )
+            row_usage_state = usage_state if usage_row else "unavailable"
             skill_name = safe_text(mappings[0].get("runtime_name"), 200)
             decision_prefix = (
                 "plugin_"
@@ -3332,7 +3336,7 @@ class DashboardData:
                     "authority": representative["authority"],
                     "provenance_status": representative["provenance_status"],
                     "state": "enabled",
-                    "usage_state": usage_state,
+                    "usage_state": row_usage_state,
                     "uses_7d": usage_row.get("uses_7d") if usage_row else None,
                     "uses_30d": usage_row.get("uses_30d") if usage_row else None,
                     "uses_90d": usage_row.get("uses_90d") if usage_row else None,
@@ -3353,14 +3357,22 @@ class DashboardData:
                     ),
                 }
             )
-        other_physical_copies = [
-            {
-                **item,
-                "reason": "inactive, cached, stale, or duplicate physical copy",
-            }
-            for item in physical_instances
-            if item["physical_only"]
-        ]
+        disabled_instance_ids = {
+            safe_text(item.get("instance_id"), 80)
+            for item in census.get("enabled_instances", [])
+            if isinstance(item, dict) and item.get("runtime_enabled") is not True
+        }
+        other_physical_copies = []
+        for item in physical_instances:
+            if item["instance_id"] in represented_instance_ids:
+                continue
+            if item["instance_id"] in disabled_instance_ids:
+                reason = "installed but disabled in the current runtime"
+            elif item["physical_only"]:
+                reason = "installed copy not selected by the current runtime"
+            else:
+                reason = "additional installed copy of an enabled capability"
+            other_physical_copies.append({**item, "reason": reason})
         return {
             **base,
             "usage": {
@@ -3594,12 +3606,19 @@ class DashboardData:
                         "uses_90d",
                         "uses_total",
                     }
-                    or not SKILL_RE.fullmatch(str(item.get("name", "")))
+                    or not OBSERVED_SKILL_RE.fullmatch(str(item.get("name", "")))
                     or item.get("reason")
                     not in {"unmapped", "conflicting_mapping"}
                 ):
                     return unavailable
             complete = coverage["complete"]
+            if complete and (
+                seen_ids != enabled_ids
+                or coverage["failures"]
+                or coverage["bound_reached"] is not None
+                or unattributed
+            ):
+                return unavailable
             return {
                 "status": "complete" if complete else "incomplete",
                 "available": True,
