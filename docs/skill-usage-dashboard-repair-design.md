@@ -249,9 +249,9 @@ retained-history start, and whether coverage is complete.
 - **Why it proves the contract:** It exercises the real transcript, receiver,
   persistence, API, and browser path in order.
 - **Status:** PASS on reviewed candidate
-  `9ec046ff47833e69c8c73da4f537f335e0e1cbf2`, live run
-  `20260818T015429Z-46040`. The durable token-free receipt is
-  `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/skill-usage-reviewed-live-proof/CHK-U4-reviewed-receipt.md`.
+  `d95de54430212eb5de9c7da396a503c0962ac8ad`, live run
+  `20260818T031824Z-10537`. The durable token-free receipt is
+  `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/skill-usage-final-live-proof/CHK-U4-final-receipt.md`.
 
 ## Migration and rollback
 
