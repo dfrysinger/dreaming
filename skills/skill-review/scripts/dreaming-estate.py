@@ -45,6 +45,63 @@ USAGE_INDEX_SCHEMA_VERSION = 1
 USAGE_QUIET_SECONDS = 300
 MAX_USAGE_SESSION_ISSUES = 32
 USAGE_ALIASES = {
+    "architecture-guardrails": {
+        "target": "guardrails",
+        "evidence": [
+            {
+                "repository": "dfrysinger/skills",
+                "commit": "ba32528e71dd0065ad9950cc30d413fb81c302d0",
+                "kind": "git_rename",
+                "from": "architecture-guardrails",
+                "to": "guardrails",
+            },
+        ],
+    },
+    "autopilot-brief": {
+        "target": "unattended-run",
+        "evidence": [
+            {
+                "repository": "dfrysinger/skills",
+                "commit": "ba32528e71dd0065ad9950cc30d413fb81c302d0",
+                "kind": "git_rename",
+                "from": "autopilot-brief",
+                "to": "brief",
+            },
+            {
+                "repository": "dfrysinger/skills",
+                "commit": "68f0ce55c35f106b51b05f34e64f0f739fd5911f",
+                "kind": "git_rename",
+                "from": "brief",
+                "to": "autopilot-loop",
+            },
+            {
+                "repository": "dfrysinger/skills",
+                "commit": "f25fabaca4aff4f1c0b85f4d89aaf3f8fdd28b72",
+                "kind": "git_rename",
+                "from": "autopilot-loop",
+                "to": "unattended-run",
+            },
+        ],
+    },
+    "context-hygiene": {
+        "target": "self-compact",
+        "evidence": [
+            {
+                "repository": "dfrysinger/skills",
+                "commit": "ba32528e71dd0065ad9950cc30d413fb81c302d0",
+                "kind": "git_rename",
+                "from": "context-hygiene",
+                "to": "hygiene",
+            },
+            {
+                "repository": "dfrysinger/skills",
+                "commit": "68f0ce55c35f106b51b05f34e64f0f739fd5911f",
+                "kind": "git_rename",
+                "from": "hygiene",
+                "to": "self-compact",
+            },
+        ],
+    },
     "feature-development-loop": {
         "target": "development-loop",
         "evidence": [
@@ -61,6 +118,18 @@ USAGE_ALIASES = {
                 "kind": "git_rename",
                 "from": "develop",
                 "to": "development-loop",
+            },
+        ],
+    },
+    "gaw-development": {
+        "target": "gaw",
+        "evidence": [
+            {
+                "repository": "personal-skills",
+                "commit": "4adf93d6eebd8af101d5c71f985cfe78dbd6b216",
+                "kind": "git_rename",
+                "from": "gaw-development",
+                "to": "gaw",
             },
         ],
     },
@@ -97,6 +166,18 @@ USAGE_ALIASES = {
             },
         ],
     },
+    "loop": {
+        "target": "microsoft-loop",
+        "evidence": [
+            {
+                "repository": "personal-skills",
+                "commit": "4adf93d6eebd8af101d5c71f985cfe78dbd6b216",
+                "kind": "git_rename",
+                "from": "loop",
+                "to": "microsoft-loop",
+            },
+        ],
+    },
     "nexus-dev": {
         "target": "nexus-gotchas",
         "evidence": [
@@ -125,6 +206,18 @@ USAGE_ALIASES = {
                 "kind": "git_rename",
                 "from": "prototype-reference-integration",
                 "to": "absorb-poc",
+            },
+        ],
+    },
+    "upstream-contribution": {
+        "target": "upstream-pitch",
+        "evidence": [
+            {
+                "repository": "personal-skills",
+                "commit": "d3747d163f71339acdd0152046ba900044c22f1d",
+                "kind": "git_rename",
+                "from": "upstream-contribution",
+                "to": "upstream-pitch",
             },
         ],
     },

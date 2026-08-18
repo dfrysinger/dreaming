@@ -1589,13 +1589,25 @@ class EstateCensusTest(unittest.TestCase):
         nexus_id = "sha256:" + "d" * 64
         absorb_id = "sha256:" + "e" * 64
         direct_id = "sha256:" + "f" * 64
+        guardrails_id = "sha256:" + "1" * 64
+        unattended_id = "sha256:" + "2" * 64
+        compact_id = "sha256:" + "3" * 64
+        gaw_id = "sha256:" + "4" * 64
+        loop_id = "sha256:" + "5" * 64
+        upstream_id = "sha256:" + "6" * 64
         events = []
         for index, name in enumerate(
             (
+                "architecture-guardrails",
+                "autopilot-brief",
+                "context-hygiene",
                 "feature-development-loop",
+                "gaw-development",
                 "gated-pr-merge",
+                "loop",
                 "nexus-dev",
                 "prototype-reference-integration",
+                "upstream-contribution",
                 "caveman",
             )
         ):
@@ -1604,13 +1616,13 @@ class EstateCensusTest(unittest.TestCase):
                 [
                     self.usage_event(
                         "tool.execution_start",
-                        f"2026-08-17T1{index}:00:00+00:00",
+                        f"2026-08-17T{index:02d}:00:00+00:00",
                         call_id=call_id,
                         name=name,
                     ),
                     self.usage_event(
                         "tool.execution_complete",
-                        f"2026-08-17T1{index}:00:01+00:00",
+                        f"2026-08-17T{index:02d}:00:01+00:00",
                         call_id=call_id,
                         name=name,
                     ),
@@ -1620,9 +1632,15 @@ class EstateCensusTest(unittest.TestCase):
         usage = module.collect_usage(
             self.usage_census(
                 [
+                    ("guardrails", guardrails_id),
+                    ("unattended-run", unattended_id),
+                    ("self-compact", compact_id),
                     ("development-loop", development_id),
+                    ("gaw", gaw_id),
+                    ("microsoft-loop", loop_id),
                     ("nexus-gotchas", nexus_id),
                     ("absorb-poc", absorb_id),
+                    ("upstream-pitch", upstream_id),
                 ]
             ),
             self.case / "sessions",
@@ -1636,7 +1654,17 @@ class EstateCensusTest(unittest.TestCase):
                 item["canonical_capability_id"]: item["uses_total"]
                 for item in usage["canonical_usage"]
             },
-            {development_id: 2, nexus_id: 1, absorb_id: 1},
+            {
+                guardrails_id: 1,
+                unattended_id: 1,
+                compact_id: 1,
+                development_id: 2,
+                gaw_id: 1,
+                loop_id: 1,
+                nexus_id: 1,
+                absorb_id: 1,
+                upstream_id: 1,
+            },
         )
         self.assertEqual(
             [(item["name"], item["reason"]) for item in usage["unattributed"]],
@@ -1647,9 +1675,15 @@ class EstateCensusTest(unittest.TestCase):
             self.usage_census(
                 [
                     ("feature-development-loop", direct_id),
+                    ("guardrails", guardrails_id),
+                    ("unattended-run", unattended_id),
+                    ("self-compact", compact_id),
                     ("development-loop", development_id),
+                    ("gaw", gaw_id),
+                    ("microsoft-loop", loop_id),
                     ("nexus-gotchas", nexus_id),
                     ("absorb-poc", absorb_id),
+                    ("upstream-pitch", upstream_id),
                 ]
             ),
             self.case / "sessions",
@@ -1666,8 +1700,14 @@ class EstateCensusTest(unittest.TestCase):
             {
                 direct_id: 1,
                 development_id: 1,
+                guardrails_id: 1,
+                unattended_id: 1,
+                compact_id: 1,
+                gaw_id: 1,
+                loop_id: 1,
                 nexus_id: 1,
                 absorb_id: 1,
+                upstream_id: 1,
             },
         )
         invalid = json.loads(json.dumps(module.USAGE_ALIASES))
