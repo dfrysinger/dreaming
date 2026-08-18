@@ -434,6 +434,12 @@ class DreamingRuntime:
     ) -> dict[str, Any]:
         if census.get("schema_version") != 1:
             raise RuntimeFailure("estate-census-invalid", "schema version")
+        host_id = census.get("host_id")
+        collected_at = parse_time(census.get("collected_at"))
+        if not isinstance(host_id, str) or not host_id:
+            raise RuntimeFailure("estate-census-invalid", "host binding")
+        if collected_at is None or collected_at.tzinfo is None:
+            raise RuntimeFailure("estate-census-invalid", "collection time")
         snapshot_sha256 = census.get("snapshot_sha256")
         snapshot = {
             key: value for key, value in census.items() if key != "snapshot_sha256"
@@ -480,7 +486,6 @@ class DreamingRuntime:
             "snapshot_sha256": snapshot_sha256,
             "census": census,
         }
-        collected_at = parse_time(census.get("collected_at"))
         existing = read_json(self.paths.estate_current, {})
         existing_census = existing.get("census") if isinstance(existing, dict) else None
         existing_collected_at = (
@@ -489,8 +494,7 @@ class DreamingRuntime:
             else None
         )
         is_current = (
-            collected_at is None
-            or existing_collected_at is None
+            existing_collected_at is None
             or collected_at >= existing_collected_at
         )
         if is_current:

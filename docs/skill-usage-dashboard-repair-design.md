@@ -136,7 +136,7 @@ retained-history start, and whether coverage is complete.
 | A transcript file is malformed, unreadable, or changes during collection | Record usage as incomplete, identify the failed session without exposing transcript content, and do not report absent skills as zero-use |
 | A skill call starts but does not complete successfully | Do not count it as use |
 | The same tool-call identifier appears twice | Reject that session from complete coverage rather than double-counting |
-| A transcript timestamp is malformed or in the future | Reject that event and mark coverage incomplete |
+| A transcript timestamp is malformed or in the future | Reject that session from complete coverage rather than mix trusted and untrusted event ordering |
 | An invoked name has no enabled runtime mapping or maps to more than one canonical capability | Keep the invocation unattributed, mark coverage incomplete, and do not assign it to any capability |
 | The usage receipt is missing, stale, malformed, or from another receiver or host | Keep the estate inventory visible, label usage unavailable, and do not synthesize zeros |
 | A physical-only copy shares a name with an enabled skill | Do not assign the enabled skill's usage to the inactive copy |
@@ -248,6 +248,10 @@ retained-history start, and whether coverage is complete.
   raw enum labels dominate the table, or Personal reads as authorship.
 - **Why it proves the contract:** It exercises the real transcript, receiver,
   persistence, API, and browser path in order.
+- **Status:** PASS on reviewed candidate
+  `9ec046ff47833e69c8c73da4f537f335e0e1cbf2`, live run
+  `20260818T015429Z-46040`. The durable token-free receipt is
+  `/Users/dfrysinger/.copilot/session-state/c8b94df9-d6e2-5cd7-a707-155405e27d8f/files/skill-usage-reviewed-live-proof/CHK-U4-reviewed-receipt.md`.
 
 ## Migration and rollback
 
@@ -279,5 +283,5 @@ part of this change.
 - [x] Zero use and unavailable usage are visibly different.
 - [x] Personal installation source is not presented as human authorship.
 - [x] CHK-U1, CHK-U2, and CHK-U3 pass on deterministic fixtures.
-- [ ] CHK-U4 passes on the installed two-host system.
+- [x] CHK-U4 passes on the installed two-host system.
 - [x] Existing estate action and dashboard contract checks remain green.

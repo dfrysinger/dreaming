@@ -160,6 +160,7 @@ class RuntimeTest(unittest.TestCase):
         snapshot = {
             "schema_version": 1,
             "host_id": "macbook",
+            "collected_at": "2026-08-17T18:00:00+00:00",
             "scope": {"complete": True},
             "totals": {"physical_instances": 2, "effective_instances": 1},
         }
@@ -230,6 +231,23 @@ class RuntimeTest(unittest.TestCase):
         altered["snapshot_sha256"] = runtime_module.digest(altered_snapshot)
         with self.assertRaisesRegex(RuntimeFailure, "census binding"):
             core.record_estate_usage(altered, receiver, census)
+
+        invalid_census = dict(census)
+        invalid_census["collected_at"] = "not-a-time"
+        invalid_census_snapshot = {
+            key: value
+            for key, value in invalid_census.items()
+            if key != "snapshot_sha256"
+        }
+        invalid_census["snapshot_sha256"] = runtime_module.digest(
+            invalid_census_snapshot
+        )
+        with self.assertRaisesRegex(RuntimeFailure, "collection time"):
+            core.record_estate_census(invalid_census, receiver)
+        self.assertEqual(
+            json.loads(self.paths.estate_current.read_text())["snapshot_sha256"],
+            census["snapshot_sha256"],
+        )
 
         invalid_coverage = dict(usage)
         invalid_coverage["coverage"] = None
