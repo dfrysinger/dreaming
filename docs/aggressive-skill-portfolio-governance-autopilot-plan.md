@@ -19,9 +19,34 @@
 - Capacity implementation commit: `f2b4fcb`
 - Capacity natural-tick watcher evidence:
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/behavior-validation-review-capacity-f2b4fcb/traces/SC-010/04-natural-successor.json`
-- Capacity work remaining: adjudicate SC-010, retry direct-tailnet SC-007,
-  desktop and 390px visual proof, governance-lever proof, rollback SC-025,
-  paired implementation review, final install, report, local proof commit.
+- Capacity natural successor `20260818T220321Z-97940` started without operator
+  intervention at `2026-08-18T22:03:21Z`. It attempted 25 reviews, completed
+  24, retained one `executor-timeout`, and ended honestly as `aborted` after
+  1,784 seconds. SC-010's literal verdict is `NOT_SUPPORTED`; the retained
+  run did not satisfy the completion-without-timeout gate.
+- The exact-host reinstall completed successfully as activation generation
+  `20260818T224231Z-install-18298`. Its unchanged launchd owner has
+  `StartInterval=14400`, `RunAtLoad=false`, zero starts since activation, and
+  is being left untouched for a fresh natural tick.
+- SC-007's permitted retry reached
+  `https://mac-mini.hornbill-dragon.ts.net:47673/` directly. The browser
+  captured an HTTP 200 same-load Overview response, an API-consistent
+  six-card desktop panel at 1440x900, and a no-overflow 390px layout. The
+  fresh judgment is `SUPPORTED` with `flaky:true`; the first
+  `INSUFFICIENT` judgment remains retained.
+- Targeted capacity validation refreshed on the current tree: installer,
+  daemon-pass, 39 core tests, 28 daemon checks, and 137 dashboard checks pass.
+- Paired capacity review found one must-fix hard-bound defect: the absolute
+  1,800-second path allowed a further five-second termination grace. The local
+  fix now kills the owned process group immediately at the absolute deadline,
+  while retaining graceful cleanup for early successful completion and
+  operator signals. Targeted process and daemon checks pass, and both Opus and
+  Terra fix-verification reviews report the finding resolved with no new
+  findings.
+- Capacity work remaining: observe and adjudicate the fresh unchanged natural
+  tick for SC-010, run governance-lever proof, execute rollback preservation,
+  install the reviewed timeout correction after natural-tick capture, finalize
+  the evidence ledger, and make the local proof commit.
 - Governance work remaining: all implementation and PORT-CHK-01 through
   PORT-CHK-14.
 

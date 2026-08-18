@@ -274,6 +274,7 @@ skills_run_copilot_bounded() (
     fi
   }
   terminate_copilot_group() {
+    local grace_secs="${1:-5}"
     if [[ -z "$cpid" ]]; then
       cpid="$(jobs -pr 2>/dev/null | head -1)"
     fi
@@ -286,16 +287,22 @@ skills_run_copilot_bounded() (
     fi
     if (( copilot_group_owned )) &&
         skills_process_group_alive "$cpgid"; then
-      kill -TERM "-$cpgid" 2>/dev/null || true
-      sleep 5
-      if skills_process_group_alive "$cpgid"; then
+      if (( grace_secs > 0 )); then
+        kill -TERM "-$cpgid" 2>/dev/null || true
+        sleep "$grace_secs"
+      fi
+      if (( grace_secs == 0 )) ||
+          skills_process_group_alive "$cpgid"; then
         kill -KILL "-$cpgid" 2>/dev/null || true
       fi
     elif [[ -n "$cpid" ]] && kill -0 "$cpid" 2>/dev/null; then
-      kill -TERM "$cpid" 2>/dev/null || true
-      sleep 5
-      kill -0 "$cpid" 2>/dev/null &&
+      if (( grace_secs > 0 )); then
+        kill -TERM "$cpid" 2>/dev/null || true
+        sleep "$grace_secs"
+      fi
+      if (( grace_secs == 0 )) || kill -0 "$cpid" 2>/dev/null; then
         kill -KILL "$cpid" 2>/dev/null || true
+      fi
     fi
     wait "$cpid" 2>/dev/null || true
   }
@@ -325,7 +332,11 @@ skills_run_copilot_bounded() (
     if (( done_at < 0 )) && grep -qE "$done_re" "$log" 2>/dev/null; then
       done_at=$waited
     fi
-    if (( (done_at >= 0 && waited - done_at >= grace) || waited >= abs_max )); then
+    if (( waited >= abs_max )); then
+      terminate_copilot_group 0
+      break
+    fi
+    if (( done_at >= 0 && waited - done_at >= grace )); then
       terminate_copilot_group
       break
     fi

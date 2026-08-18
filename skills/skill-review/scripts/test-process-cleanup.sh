@@ -114,11 +114,14 @@ echo "PASS  registered nested process group survives leader exit and is fully re
 rm -f "$LEADER_FILE" "$DESCENDANT_FILE" "$DREAMING_CHILD_PGID_FILE"
 : > "$TMP/direct.log"
 status=0
+started_at="$SECONDS"
 skills_run_copilot_bounded \
-  "$TMP/direct.log" "NEVER_MATCH" 1 1 -- "$FAKE" || status=$?
+  "$TMP/direct.log" "NEVER_MATCH" 3 1 -- "$FAKE" || status=$?
+elapsed=$((SECONDS - started_at))
 [[ "$status" != "0" ]]
+(( elapsed < 7 ))
 direct_leader_pid="$(cat "$LEADER_FILE")"
 direct_descendant_pid="$(cat "$DESCENDANT_FILE")"
 ! kill -0 "$direct_leader_pid" 2>/dev/null
 ! kill -0 "$direct_descendant_pid" 2>/dev/null
-echo "PASS  bounded cleanup kills descendants after their leader exits"
+echo "PASS  absolute deadline immediately kills the owned process group"
