@@ -19,17 +19,17 @@
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
-- Capacity natural-tick watcher evidence:
-  `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/behavior-validation-review-capacity-f2b4fcb/traces/SC-010/04-natural-successor.json`
-- Capacity natural successor `20260818T220321Z-97940` started without operator
-  intervention at `2026-08-18T22:03:21Z`. It attempted 25 reviews, completed
+- The first natural successor `20260818T220321Z-97940` remains retained as a
+  literal `SC-010` `NOT_SUPPORTED` result. It attempted 25 reviews, completed
   24, retained one `executor-timeout`, and ended honestly as `aborted` after
-  1,784 seconds. SC-010's literal verdict is `NOT_SUPPORTED`; the retained
-  run did not satisfy the completion-without-timeout gate.
-- The exact-host reinstall completed successfully as activation generation
-  `20260818T224231Z-install-18298`. Its unchanged launchd owner has
-  `StartInterval=14400`, `RunAtLoad=false`, zero starts since activation, and
-  is being left untouched for a fresh natural tick.
+  1,784 seconds. This historical result has not been relabeled or discarded.
+- A fresh zero-start installation at activation generation
+  `20260818T224231Z-install-18298` fired naturally after 14,402 seconds. Run
+  `20260819T024233Z-48016` ended `ok` after 1,313 seconds, considered exactly
+  25 rows, accepted 23, classified two as `stale-before-review`, recorded no
+  errors, left no active-run marker, and required no recovery. The separately
+  scoped `SC-C6-FRESH` judgment is `SUPPORTED` with `flaky:false`:
+  `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/behavior-validation-review-capacity-f2b4fcb/judgments/SC-C6-FRESH.json`.
 - SC-007's permitted retry reached
   `https://mac-mini.hornbill-dragon.ts.net:47673/` directly. The browser
   captured an HTTP 200 same-load Overview response, an API-consistent
@@ -46,22 +46,41 @@
   operator signals. Targeted process and daemon checks pass, and both Opus and
   Terra fix-verification reviews report the finding resolved with no new
   findings. The correction is committed locally as `1a10787`.
-- Capacity work remaining: observe and adjudicate the fresh unchanged natural
-  tick for SC-010, run governance-lever proof, execute rollback preservation,
-  install the reviewed timeout correction after natural-tick capture, finalize
-  the evidence ledger, and make the local proof commit.
-- Governance work remaining: all implementation and PORT-CHK-01 through
-  PORT-CHK-14.
+- Rollback preservation is in progress under `SC-025`. Before rollback, 426
+  retained review-evidence files were hashed. The explicit backup
+  `20260818T165513Z-41055` restored the daily 09:15 schedule behind halt with
+  `RunAtLoad=false` and no `StartInterval`; the adapter digest and all 426
+  evidence hashes remained identical, and enable correctly failed before
+  restored self-test. The restored generation self-test is currently running.
+  Retained traces are under
+  `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/behavior-validation-review-capacity-f2b4fcb/traces/SC-025/`.
+- Capacity work remaining: let the restored self-test finish without
+  disturbance, enable and verify the restored daily generation, reinstall the
+  reviewed candidate containing `1a10787`, run its self-test and enablement,
+  verify final ownership and `StartInterval=14400`, adjudicate `SC-025`,
+  regenerate the evidence ledger, and make the local proof commit.
+- The isolated governance preview is implemented and committed locally as
+  `60fb7ce` on `feature/aggressive-skill-governance-preview`. Its manifested
+  private snapshot contains one decision for each of 93 enabled canonical
+  capabilities, renders positive incomplete usage as honest lower bounds,
+  uses labeled narrow-view cards, exposes no enabled mutation route, and
+  passed desktop and 390-pixel browser proof. Its paired review is closed with
+  no unresolved finding.
+- Governance work remaining: run the final `PORT-CHK-PREVIEW` comparison after
+  capacity closure, merge `60fb7ce` locally only after rollback evidence is
+  retained, then implement and prove the governed mutation phases and
+  `PORT-CHK-01` through `PORT-CHK-14`.
 - Parallel preview boundary: use
   `/Users/dfrysinger/code/dreaming-governance-preview` on
   `feature/aggressive-skill-governance-preview`. Before starting its server,
   record the isolation-contract commit, prove the capture preflight, verify the
   manifested snapshot, and configure separate roots and port. Pass the full
-  PORT-CHK-PREVIEW before accepting browser review or merging. Do not write the
-  installed Mac mini generation or live state, do not change launchd, and do
-  not merge until capacity natural-run and rollback evidence are retained.
-  Before creating the worktree, commit this isolation contract, record that
-  commit here, and require the preview branch to descend from it.
+  PORT-CHK-PREVIEW before merging. The accepted preview snapshot is
+  `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/governance-preview/snapshot-with-estate-v2`
+  and its retained receipt is `live-proof-receipt-v2.md` in the same
+  directory. Do not write the installed Mac mini generation or live state, do
+  not change launchd, and do not merge until capacity natural-run and rollback
+  evidence are retained.
 
 ## Definition of Done: Capacity closure and aggressive portfolio governance
 
