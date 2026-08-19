@@ -523,22 +523,74 @@ author_operation_id="$(
   python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["operation_id"])' \
     "$AUTHORING/author-operation.json"
 )"
+mkdir -p "$AUTHORING/author-bin"
+cat >"$AUTHORING/author-bin/copilot" <<'PY'
+#!/usr/bin/env python3
+import json
+import os
+import sys
+
+for key in os.environ:
+    if (
+        key.startswith("FAKE_")
+        or key == "DREAMING_COPILOT_BIN"
+        or key == "UNTRUSTED_PROVIDER_REDIRECT"
+    ):
+        raise SystemExit(f"forbidden inherited provider variable: {key}")
+args = sys.argv[1:]
+prompt = args[args.index("-p") + 1]
+model = args[args.index("--model") + 1]
+packet = json.loads(prompt.split("authoring_packet:\n", 1)[1])
+if model == "fixture-author-model-mismatch":
+    observed_model = "different-provider-model"
+else:
+    observed_model = model
+if model == "fixture-author-insufficient":
+    payload = {
+        "outcome": "insufficient_information",
+        "summary": "The synthetic fixture cannot establish an objective outcome.",
+        "reason": "objective_grader_unavailable",
+    }
+else:
+    payload = {
+        "outcome": "draft",
+        "summary": "Safe synthetic fixture cases.",
+        "cases": [
+            {
+                "id": case["id"],
+                "task_id": f"authored:{case['class']}-{index:04d}",
+                "prompt": f"Complete the synthetic {case['class']} task {index}.",
+            }
+            for index, case in enumerate(packet["suite_template"]["cases"], 1)
+        ],
+    }
+print(json.dumps({"events": [
+    {"type": "session.start", "data": {"model": observed_model}},
+    {"type": "result", "data": payload},
+    {"type": "session.usage_checkpoint", "usage": {
+        "input_tokens": 100,
+        "output_tokens": 40,
+        "total_tokens": 140,
+    }},
+]}))
+PY
+chmod +x "$AUTHORING/author-bin/copilot"
 registration="$(
-  "$EVAL" v2-input-register "$AUTHORING/skill" \
-    --suite "$AUTHORING/materialized/suite.json" \
-    --policy "$AUTHORING/materialized/policy.json" \
-    --config "$AUTHORING/materialized/compilation.json" \
-    --routing "$AUTHORING/materialized/routing.json" \
+  env \
+    DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/author-bin/copilot" \
+    UNTRUSTED_PROVIDER_REDIRECT="$HOME/should-not-cross" \
+    FAKE_PROVIDER_ROUTE="$HOME/should-not-cross" \
+    "$EVAL" v2-input-author "$AUTHORING/skill" \
+    --suite "$AUTHORING/skill/.skill-evaluation-cases.json" \
+    --policy "$AUTHORING/skill/.skill-evaluation-policy.json" \
+    --config "$AUTHORING/config/compilation.json" \
+    --routing "$AUTHORING/config/routing.json" \
     --harness "$HARNESS" \
-    --authoring-method bounded-safe-author \
-    --authoring-packet "$AUTHORING/packet.json" \
-    --authoring-draft "$AUTHORING/draft.json" \
-    --authoring-receipt "$AUTHORING/materialized/authoring.json" \
-    --authoring-operation "$AUTHORING/author-operation.json" \
-    --source-id "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["packet_id"])' <<<"$materialization")" \
-    --source-id "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["draft_id"])' <<<"$materialization")" \
-    --source-id "$source_catalog_id" \
-    --source-id "$author_operation_id"
+    --catalog "$AUTHORING/config/authoring-catalog.json" \
+    --model fixture-author-model \
+    --timeout 60 --token-budget 140 --output-bytes 100000 \
+    --output-dir "$AUTHORING/trusted-materialized"
 )"
 manifest="$(
   python3 -c 'import json,sys; print(json.load(sys.stdin)["input_manifest_sha256"])' \
@@ -590,8 +642,15 @@ mkdir -p "$AUTHORING/bin"
 cat >"$AUTHORING/bin/copilot" <<'PY'
 #!/usr/bin/env python3
 import json
+import os
 import sys
 
+for key in os.environ:
+    if key.startswith("FAKE_") or key in {
+        "DREAMING_COPILOT_BIN",
+        "UNTRUSTED_PROVIDER_REDIRECT",
+    }:
+        raise SystemExit(f"forbidden inherited provider variable: {key}")
 args = sys.argv[1:]
 prompt = args[args.index("-p") + 1]
 json.loads(prompt.split("review_packet:\n", 1)[1])
@@ -614,7 +673,7 @@ print(json.dumps({"events": [
 ]}))
 PY
 chmod +x "$AUTHORING/bin/copilot"
-python3 - "$EVAL" "$AUTHORING/bin/copilot" "$HOME" <<'PY'
+python3 - "$EVAL" "$AUTHORING/bin/copilot" "$HOME" "$TEST_ROOT" <<'PY'
 import importlib.util
 import os
 import sys
@@ -627,14 +686,16 @@ spec.loader.exec_module(module)
 with mock.patch.dict(
     os.environ,
     {
-        "DREAMING_EXECUTOR_TEST_ALLOW_ROOT": sys.argv[2],
+        "DREAMING_EXECUTOR_TEST_ALLOW_ROOT": sys.argv[4],
         "DREAMING_COPILOT_BIN": sys.argv[2],
         "SKILLS_STATE_DIR": str(Path(sys.argv[3]) / ".copilot/test-state"),
     },
     clear=False,
 ):
     try:
-        module.input_review_test_binary(Path(sys.argv[3]).resolve())
+        module.trusted_input_test_binary(
+            Path(sys.argv[3]).resolve(), Path(sys.argv[3])
+        )
     except module.EvaluationError as error:
         assert "non-authoritative test roots" in str(error)
     else:
@@ -643,8 +704,9 @@ PY
 run_trusted_review() {
   local model="$1"
   env \
-    DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$AUTHORING" \
+    DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
     DREAMING_COPILOT_BIN="$AUTHORING/bin/copilot" \
+    UNTRUSTED_PROVIDER_REDIRECT="$HOME/should-not-cross" \
     "$EVAL" v2-input-review "$AUTHORING/skill" --manifest "$manifest" \
       --validation "$author_validation_id" --model "$model"
 }
@@ -666,7 +728,7 @@ review_two_id="$(
 )"
 expect_refusal "author-reviewer-independence" \
   "input reviewer model must differ from the author model" \
-  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$AUTHORING" \
+  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
     DREAMING_COPILOT_BIN="$AUTHORING/bin/copilot" \
     "$EVAL" v2-input-review "$AUTHORING/skill" --manifest "$manifest" \
       --validation "$author_validation_id" --model "fixture-author-model"
@@ -697,9 +759,93 @@ assert {
 assert sys.argv[2] in manifest["source_identities"]
 assert manifest["authoring_method"] == "bounded-safe-author"
 PY
+expect_refusal "author-model-mismatch" "exact-model-unproved" \
+  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/author-bin/copilot" \
+    "$EVAL" v2-input-author "$AUTHORING/skill" \
+      --suite "$AUTHORING/skill/.skill-evaluation-cases.json" \
+      --policy "$AUTHORING/skill/.skill-evaluation-policy.json" \
+      --config "$AUTHORING/config/compilation.json" \
+      --routing "$AUTHORING/config/routing.json" \
+      --harness "$HARNESS" \
+      --catalog "$AUTHORING/config/authoring-catalog.json" \
+      --model fixture-author-model-mismatch \
+      --timeout 60 --token-budget 140 --output-bytes 100000 \
+      --output-dir "$AUTHORING/model-mismatch-materialized"
+[[ ! -e "$AUTHORING/model-mismatch-materialized" ]] ||
+  fail "author model mismatch left materialized output"
+insufficient="$(
+  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/author-bin/copilot" \
+    "$EVAL" v2-input-author "$AUTHORING/skill" \
+      --suite "$AUTHORING/skill/.skill-evaluation-cases.json" \
+      --policy "$AUTHORING/skill/.skill-evaluation-policy.json" \
+      --config "$AUTHORING/config/compilation.json" \
+      --routing "$AUTHORING/config/routing.json" \
+      --harness "$HARNESS" \
+      --catalog "$AUTHORING/config/authoring-catalog.json" \
+      --model fixture-author-insufficient \
+      --timeout 60 --token-budget 140 --output-bytes 100000 \
+      --output-dir "$AUTHORING/insufficient-materialized"
+)"
+python3 - "$insufficient" <<'PY'
+import json
+import sys
+
+value = json.loads(sys.argv[1])
+assert value["status"] == "insufficient_information"
+assert value["state"] == "insufficient_information"
+assert value["reason"] == "objective_grader_unavailable"
+assert value["input_manifest"] is None
+assert value["input_manifest_sha256"] is None
+PY
+[[ ! -e "$AUTHORING/insufficient-materialized" ]] ||
+  fail "insufficient authoring created materialized output"
 mkdir -p "$AUTHORING/evaluator-alias"
 ln -s "$EVAL" "$AUTHORING/evaluator-alias/skill-evaluation.py"
-alias_registration="$(
+python3 - "$EVAL" "$AUTHORING/evaluator-alias/skill-evaluation.py" \
+  "$AUTHORING/adapter-boundary" "$SCRIPT_DIR/dreaming-vendor-adapter.py" <<'PY'
+import importlib.util
+import sys
+from pathlib import Path
+from unittest import mock
+
+evaluator, alias, boundary_arg, adapter = map(Path, sys.argv[1:])
+spec = importlib.util.spec_from_file_location("skill_evaluation", evaluator)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+with mock.patch.object(module, "__file__", str(alias)):
+    assert module.trusted_authoring_adapter_path() == adapter.resolve()
+boundary_arg.mkdir()
+fake_evaluator = boundary_arg / "skill-evaluation.py"
+fake_evaluator.write_text("# trust-anchor fixture\n")
+fake_adapter = boundary_arg / "dreaming-vendor-adapter.py"
+fake_adapter.symlink_to(adapter)
+with mock.patch.object(module, "__file__", str(fake_evaluator)), mock.patch.object(
+    module.subprocess, "run"
+) as run:
+    try:
+        module.trusted_authoring_adapter_path()
+    except module.EvaluationError as error:
+        assert "adapter is unavailable" in str(error)
+    else:
+        raise AssertionError("symlinked adapter was accepted")
+    assert not run.called
+fake_adapter.unlink()
+fake_adapter.write_text("# byte-substituted adapter\n")
+with mock.patch.object(module, "__file__", str(fake_evaluator)), mock.patch.object(
+    module.subprocess, "run"
+) as run:
+    try:
+        module.trusted_authoring_adapter_path()
+    except module.EvaluationError as error:
+        assert "reviewed identity" in str(error)
+    else:
+        raise AssertionError("byte-substituted adapter was accepted")
+    assert not run.called
+PY
+expect_refusal "caller-forged-authoring-ingress" \
+  "caller-supplied authoring provenance is not accepted" \
   "$AUTHORING/evaluator-alias/skill-evaluation.py" \
     v2-input-register "$AUTHORING/skill" \
     --suite "$AUTHORING/materialized/suite.json" \
@@ -716,16 +862,7 @@ alias_registration="$(
     --source-id "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["draft_id"])' <<<"$materialization")" \
     --source-id "$source_catalog_id" \
     --source-id "$author_operation_id"
-)"
-python3 - "$registration" "$alias_registration" <<'PY'
-import json
-import sys
-
-direct = json.loads(sys.argv[1])
-aliased = json.loads(sys.argv[2])
-assert aliased["input_manifest_sha256"] == direct["input_manifest_sha256"]
-PY
-expect_refusal "authoring-provenance-required" "requires exact authoring provenance" \
+expect_refusal "authoring-provenance-required" "registration is evaluator-owned" \
   "$EVAL" v2-input-register "$AUTHORING/skill" \
     --suite "$AUTHORING/materialized/suite.json" \
     --policy "$AUTHORING/materialized/policy.json" \
@@ -733,6 +870,61 @@ expect_refusal "authoring-provenance-required" "requires exact authoring provena
     --routing "$AUTHORING/materialized/routing.json" \
     --harness "$HARNESS" --authoring-method bounded-safe-author \
     --source-id "$source_catalog_id"
+python3 - "$EVAL" "$AUTHORING/packet.json" "$AUTHORING/draft.json" \
+  "$AUTHORING/author-operation.json" "$SCRIPT_DIR/dreaming-vendor-adapter.py" <<'PY'
+import copy
+import hashlib
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+spec = importlib.util.spec_from_file_location("skill_evaluation", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+packet = json.loads(Path(sys.argv[2]).read_text())
+draft = json.loads(Path(sys.argv[3]).read_text())
+operation = json.loads(Path(sys.argv[4]).read_text())
+adapter_sha = module.sha256_file(Path(sys.argv[5]))
+draft_id = "sha256:" + hashlib.sha256(module.canonical(draft)).hexdigest()
+mutations = {
+    "normalized-token budget": (
+        lambda value: value["usage"].update(
+            normalized_tokens=112001, input_tokens=112000, output_tokens=1
+        ),
+        "normalized-token budget",
+    ),
+    "elapsed-time budget": (
+        lambda value: value.__setitem__("elapsed_ms", 1500001),
+        "elapsed-time budget",
+    ),
+    "billing provenance": (
+        lambda value: value["billing"].update(status="available"),
+        "billing telemetry",
+    ),
+}
+for label, (mutate, expected) in mutations.items():
+    value = copy.deepcopy(operation)
+    value.pop("operation_id")
+    mutate(value)
+    value["operation_id"] = "sha256:" + hashlib.sha256(
+        module.shadow_canonical(value)
+    ).hexdigest()
+    try:
+        module.validate_authoring_operation(value, packet, draft_id, adapter_sha)
+    except module.EvaluationError as error:
+        assert expected in str(error), (label, error)
+    else:
+        raise AssertionError(f"{label} forgery was accepted")
+forged = copy.deepcopy(operation)
+forged["operation_id"] = "sha256:" + "3" * 64
+try:
+    module.validate_authoring_operation(forged, packet, draft_id, adapter_sha)
+except module.EvaluationError as error:
+    assert "content identity" in str(error)
+else:
+    raise AssertionError("operation ID forgery was accepted")
+PY
 python3 - "$AUTHORING/author-operation.json" \
   "$AUTHORING/overspent-author-operation.json" <<'PY'
 import hashlib
@@ -758,7 +950,7 @@ overspent_operation_id="$(
   python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["operation_id"])' \
     "$AUTHORING/overspent-author-operation.json"
 )"
-expect_refusal "authoring-operation-budget" "exceeds the normalized-token budget" \
+expect_refusal "authoring-operation-budget" "caller-supplied authoring provenance is not accepted" \
   "$EVAL" v2-input-register "$AUTHORING/skill" \
     --suite "$AUTHORING/materialized/suite.json" \
     --policy "$AUTHORING/materialized/policy.json" \
@@ -825,7 +1017,7 @@ forged["operation_id"] = "sha256:" + "3" * 64
 PY
 expect_author_operation_refusal() {
   local label="$1"
-  local expected="$2"
+  local expected="caller-supplied authoring provenance is not accepted"
   local operation_path="$3"
   local operation_id
   operation_id="$(
@@ -929,7 +1121,7 @@ PY
 for forged in rubric source-kind; do
   forge_authoring_provenance "$forged"
   forged_prefix="$AUTHORING/forged-$forged"
-  expect_refusal "authoring-forged-$forged" "retained authoring catalog" \
+  expect_refusal "authoring-forged-$forged" "caller-supplied authoring provenance is not accepted" \
     "$EVAL" v2-input-register "$AUTHORING/skill" \
       --suite "$AUTHORING/materialized/suite.json" \
       --policy "$AUTHORING/materialized/policy.json" \
@@ -944,6 +1136,65 @@ for forged in rubric source-kind; do
       --source-id "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["draft_id"])' "$forged_prefix.meta.json")" \
       --source-id "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_catalog_id"])' "$forged_prefix.meta.json")" \
       --source-id "$author_operation_id"
+  python3 - "$EVAL" "$AUTHORING" "$HARNESS" "$forged_prefix" "$forged" <<'PY'
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+evaluator, root_arg, harness_arg, prefix_arg, mode = sys.argv[1:]
+root = Path(root_arg)
+prefix = Path(prefix_arg)
+spec = importlib.util.spec_from_file_location("skill_evaluation", evaluator)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+skill = root / "skill"
+candidate, files = module.candidate_id(skill)
+suite, suite_id = module.load_suite(root / "materialized/suite.json")
+policy, policy_id = module.load_policy(root / "materialized/policy.json")
+harness = Path(harness_arg)
+harness_sha = module.sha256_file(harness)
+config_path = root / "materialized/compilation.json"
+config, _ = module.validate_compilation_config(
+    config_path, suite, policy, harness_sha
+)
+routing = module.validate_routing(
+    root / "materialized/routing.json",
+    config["executors"],
+    config["comparator"],
+)
+try:
+    module.validate_authoring_provenance(
+        skill,
+        candidate,
+        files,
+        suite,
+        suite_id,
+        policy,
+        policy_id,
+        config,
+        routing,
+        harness_sha,
+        json.loads(Path(f"{prefix}.packet.json").read_text()),
+        json.loads(Path(f"{prefix}.draft.json").read_text()),
+        json.loads(Path(f"{prefix}.receipt.json").read_text()),
+        json.loads((root / "author-operation.json").read_text()),
+        module.sha256_file(Path(evaluator).resolve().with_name(
+            "dreaming-vendor-adapter.py"
+        )),
+        module.canonical_file_inventory(config_path.parent / "fixtures"),
+        module.canonical_file_inventory(config_path.parent / "graders"),
+    )
+except module.EvaluationError as error:
+    expected = (
+        "retained authoring catalog rubric"
+        if mode == "rubric"
+        else "not a safe declared fixture"
+    )
+    assert expected in str(error), (mode, error)
+else:
+    raise AssertionError(f"{mode} retained provenance forgery was accepted")
+PY
 done
 for invalid_draft in fixture grader artifact semantic missing sensitive duplicate-task duplicate-prompt; do
   make_authoring_draft "$AUTHORING/packet.json" \

@@ -8,6 +8,7 @@ import fcntl
 import hashlib
 import json
 import os
+import pwd
 import re
 import shutil
 import subprocess
@@ -55,6 +56,10 @@ COMPILATION_SCHEMA_VERSION = 1
 INPUT_REGISTRY_SCHEMA_VERSION = 1
 AUTHORING_CATALOG_SCHEMA_VERSION = 1
 AUTHORING_PACKET_SCHEMA_VERSION = 1
+TRUSTED_MODEL_ENVIRONMENT_VERSION = 1
+TRUSTED_AUTHORING_ADAPTER_SHA256 = (
+    "sha256:e1a995ad1ab30453dc828a4594d1062234bb9e0bdff76c099b9fc6b20b92ec03"
+)
 AUTHORING_FIXTURE_SOURCE_KINDS = {"public", "synthetic"}
 AUTHORING_MAX_SKILL_CONTRACT_BYTES = 131_072
 AUTHORING_MAX_FIXTURE_BYTES = 1_048_576
@@ -347,9 +352,16 @@ def trusted_harness_path() -> Path:
 
 
 def trusted_authoring_adapter_path() -> Path:
-    path = Path(__file__).resolve().with_name("dreaming-vendor-adapter.py")
+    evaluator = Path(__file__).resolve()
+    if not evaluator.is_file() or evaluator.is_symlink():
+        raise EvaluationError("trusted evaluator executable is unavailable")
+    path = evaluator.with_name("dreaming-vendor-adapter.py")
     if not path.is_file() or path.is_symlink():
         raise EvaluationError("trusted authoring adapter is unavailable")
+    if sha256_file(path) != TRUSTED_AUTHORING_ADAPTER_SHA256:
+        raise EvaluationError(
+            "trusted authoring adapter bytes differ from the reviewed identity"
+        )
     return path
 
 
@@ -2247,20 +2259,17 @@ def validate_materialized_authoring_trees(
             )
 
 
-def v2_input_author_materialize(args: argparse.Namespace) -> dict[str, Any]:
-    expected_packet, context = build_input_author_packet(args)
-    supplied_packet = load_json(resolve_path(Path(args.packet), "authoring packet"))
-    if supplied_packet != expected_packet:
-        raise EvaluationError(
-            "authoring packet differs from the current candidate and trusted sources"
-        )
-    draft, draft_id = validate_input_author_draft(
-        resolve_path(Path(args.draft), "authoring draft"),
-        expected_packet,
-        context,
+def materialize_input_author(
+    expected_packet: dict[str, Any],
+    context: dict[str, Any],
+    draft_value: dict[str, Any],
+    output_dir: str,
+) -> dict[str, Any]:
+    draft, draft_id = validate_input_author_draft_value(
+        draft_value, expected_packet, context
     )
     output = authoring_output_path(
-        args.output_dir, context["skill_dir"], "authoring materialization output"
+        output_dir, context["skill_dir"], "authoring materialization output"
     )
     parent = output.parent
     if parent.is_symlink() or not parent.is_dir():
@@ -2343,12 +2352,29 @@ def v2_input_author_materialize(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def v2_input_author_materialize(args: argparse.Namespace) -> dict[str, Any]:
+    expected_packet, context = build_input_author_packet(args)
+    supplied_packet = load_json(resolve_path(Path(args.packet), "authoring packet"))
+    if supplied_packet != expected_packet:
+        raise EvaluationError(
+            "authoring packet differs from the current candidate and trusted sources"
+        )
+    draft = load_json(resolve_path(Path(args.draft), "authoring draft"))
+    return materialize_input_author(
+        expected_packet, context, draft, args.output_dir
+    )
+
+
 def validate_authoring_operation(
     operation: dict[str, Any],
     packet: dict[str, Any],
-    draft_id: str,
+    draft_id: str | None,
     adapter_sha256: str,
+    *,
+    expected_outcome: str = "draft",
 ) -> dict[str, Any]:
+    if expected_outcome not in {"draft", "insufficient_information"}:
+        raise EvaluationError("unsupported authoring operation outcome")
     require_exact_keys(
         operation,
         "authoring operation",
@@ -2374,6 +2400,23 @@ def validate_authoring_operation(
         },
     )
     model = require_text(operation.get("model"), "authoring operation.model")
+    outcome_valid = (
+        operation.get("outcome") == "draft"
+        and expected_outcome == "draft"
+        and operation.get("reason") is None
+        and operation.get("draft_id") == draft_id
+    ) or (
+        operation.get("outcome") == "insufficient_information"
+        and expected_outcome == "insufficient_information"
+        and operation.get("reason")
+        in {
+            "evaluation_case_unavailable",
+            "safe_fixture_unavailable",
+            "objective_grader_unavailable",
+        }
+        and operation.get("draft_id") is None
+        and draft_id is None
+    )
     if (
         operation.get("schema_version") != AUTHORING_PACKET_SCHEMA_VERSION
         or operation.get("kind") != "evaluation_input_model_operation"
@@ -2385,9 +2428,7 @@ def validate_authoring_operation(
         or operation.get("adapter_executable_sha256") != adapter_sha256
         or operation.get("packet_id") != packet["packet_id"]
         or operation.get("candidate_id") != packet["candidate_id"]
-        or operation.get("outcome") != "draft"
-        or operation.get("reason") is not None
-        or operation.get("draft_id") != draft_id
+        or not outcome_valid
     ):
         raise EvaluationError(
             "authoring operation identity, outcome, or draft binding is invalid"
@@ -2765,7 +2806,17 @@ def validate_authoring_provenance(
     return packet, draft, receipt, operation
 
 
-def v2_input_register(args: argparse.Namespace) -> dict[str, Any]:
+def register_input_manifest(
+    args: argparse.Namespace,
+    trusted_authoring: tuple[
+        dict[str, Any],
+        dict[str, Any],
+        dict[str, Any],
+        dict[str, Any],
+        Path,
+    ]
+    | None = None,
+) -> dict[str, Any]:
     skill_dir = resolve_path(Path(args.skill_dir), "skill directory")
     candidate, files = candidate_id(skill_dir)
     suite, suite_id = load_suite(resolve_path(Path(args.suite), "suite"))
@@ -2781,33 +2832,21 @@ def v2_input_register(args: argparse.Namespace) -> dict[str, Any]:
         routing_path, config["executors"], config["comparator"]
     )
     authoring_method = require_text(args.authoring_method, "authoring method")
-    authoring_paths = (
-        args.authoring_packet,
-        args.authoring_draft,
-        args.authoring_receipt,
-        args.authoring_operation,
-    )
-    if any(authoring_paths) != all(authoring_paths):
-        raise EvaluationError(
-            "authoring packet, draft, receipt, and operation must be supplied together"
-        )
-    if (authoring_method == "bounded-safe-author") != all(authoring_paths):
-        raise EvaluationError(
-            "bounded-safe-author registration requires exact authoring provenance"
-        )
     provenance_objects: list[dict[str, Any]] = []
-    if all(authoring_paths):
-        packet = load_json(resolve_path(Path(args.authoring_packet), "authoring packet"))
-        draft_value = load_json(
-            resolve_path(Path(args.authoring_draft), "authoring draft")
+    if trusted_authoring is None:
+        if authoring_method == "bounded-safe-author":
+            raise EvaluationError(
+                "bounded-safe-author registration is evaluator-owned; use v2-input-author"
+            )
+        source_identities = list(args.source_id)
+    else:
+        if authoring_method != "bounded-safe-author":
+            raise EvaluationError(
+                "trusted authoring provenance requires bounded-safe-author"
+            )
+        packet, draft_value, receipt, operation, authoring_adapter = (
+            trusted_authoring
         )
-        receipt = load_json(
-            resolve_path(Path(args.authoring_receipt), "authoring receipt")
-        )
-        operation = load_json(
-            resolve_path(Path(args.authoring_operation), "authoring operation")
-        )
-        authoring_adapter = trusted_authoring_adapter_path()
         authoring_adapter_sha = sha256_file(authoring_adapter)
         packet, draft_value, receipt, operation = validate_authoring_provenance(
             skill_dir,
@@ -2847,6 +2886,12 @@ def v2_input_register(args: argparse.Namespace) -> dict[str, Any]:
                 "text/x-python",
             )
         )
+        source_identities = [
+            packet["packet_id"],
+            f"sha256:{digest(canonical(draft_value))}",
+            packet["source_catalog_id"],
+            operation["operation_id"],
+        ]
     objects = [
         publish_registry_object(
             canonical(suite), "suite", "suite.json", "application/json"
@@ -2898,7 +2943,7 @@ def v2_input_register(args: argparse.Namespace) -> dict[str, Any]:
         "tool_policy_id": config["tool_policy_id"],
         "harness_executable_sha256": harness_sha,
         "authoring_method": authoring_method,
-        "source_identities": args.source_id,
+        "source_identities": source_identities,
         "tool_version": RUNNER_VERSION,
         "objects": objects,
     }
@@ -2911,6 +2956,22 @@ def v2_input_register(args: argparse.Namespace) -> dict[str, Any]:
         "input_manifest": str(path),
         "input_manifest_sha256": manifest_sha256,
     }
+
+
+def v2_input_register(args: argparse.Namespace) -> dict[str, Any]:
+    if any(
+        getattr(args, name, None)
+        for name in (
+            "authoring_packet",
+            "authoring_draft",
+            "authoring_receipt",
+            "authoring_operation",
+        )
+    ):
+        raise EvaluationError(
+            "caller-supplied authoring provenance is not accepted; use v2-input-author"
+        )
+    return register_input_manifest(args)
 
 
 def input_receipt_binding(
@@ -3053,11 +3114,175 @@ def run_trusted_input_review(
     packet: dict[str, Any],
     adapter: Path,
 ) -> dict[str, Any]:
-    test_binary = input_review_test_binary(skill_dir)
-    with tempfile.TemporaryDirectory(prefix="dreaming-input-review-owner-") as work:
+    operation, _ = run_trusted_input_adapter(
+        args,
+        skill_dir,
+        Path(args.skill_dir),
+        packet,
+        adapter,
+        "review",
+        [
+            "--manifest",
+            manifest_sha256,
+            "--validation",
+            packet["validation_contract"]["receipt_sha256"],
+        ],
+    )
+    return operation
+
+
+def path_has_symlink(path: Path) -> bool:
+    current = Path(os.path.abspath(path))
+    while True:
+        if current.is_symlink():
+            return True
+        if current.parent == current:
+            return False
+        current = current.parent
+
+
+def trusted_model_path() -> str:
+    return os.pathsep.join(
+        dict.fromkeys(
+            (
+                str(Path(sys.executable).resolve().parent),
+                "/opt/homebrew/bin",
+                "/usr/local/bin",
+                "/usr/bin",
+                "/bin",
+                "/usr/sbin",
+                "/sbin",
+            )
+        )
+    )
+
+
+def trusted_input_test_binary(
+    skill_dir: Path, supplied_skill_dir: Path
+) -> Path | None:
+    allow_value = os.environ.get("DREAMING_EXECUTOR_TEST_ALLOW_ROOT")
+    if not allow_value:
+        return None
+    test_root = Path(__file__).resolve().parents[3] / ".test-work"
+    allow_path = Path(allow_value)
+    state_value = os.environ.get("SKILLS_STATE_DIR")
+    binary_value = os.environ.get("DREAMING_COPILOT_BIN")
+    if not state_value or not binary_value:
+        raise EvaluationError(
+            "trusted input test override requires isolated state and binary"
+        )
+    state_path = Path(state_value)
+    binary_path = Path(binary_value)
+    allow_root = allow_path.resolve()
+    state = state_path.resolve()
+    binary = binary_path.resolve()
+    if (
+        path_has_symlink(allow_path)
+        or path_has_symlink(state_path)
+        or path_has_symlink(binary_path)
+        or path_has_symlink(supplied_skill_dir)
+        or allow_root != test_root
+        or state_path.is_symlink()
+        or binary_path.is_symlink()
+        or not state.is_relative_to(test_root)
+        or not skill_dir.is_relative_to(test_root)
+        or not binary.is_relative_to(test_root)
+        or not binary.is_file()
+        or not os.access(binary, os.X_OK)
+    ):
+        raise EvaluationError(
+            "trusted input test override is limited to non-authoritative test roots"
+        )
+    return binary
+
+
+def trusted_model_state_root() -> Path:
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    supplied = Path(
+        os.environ.get(
+            "SKILLS_STATE_DIR", str(real_home / ".copilot/skill-state")
+        )
+    )
+    if path_has_symlink(supplied):
+        raise EvaluationError("trusted model registry state must not use symlinks")
+    return supplied.resolve()
+
+
+def trusted_model_launch_environment(
+    work_path: Path, test_binary: Path | None
+) -> dict[str, str]:
+    real_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+    temporary = work_path / "tmp"
+    temporary.mkdir()
+    required, advisory = desired_executor_roles()
+    environment = {
+        "HOME": str(real_home),
+        "PATH": trusted_model_path(),
+        "TMPDIR": str(temporary),
+        "LANG": "C",
+        "LC_ALL": "C",
+        "LC_CTYPE": "C",
+        "SKILLS_STATE_DIR": str(trusted_model_state_root()),
+        "DREAMING_EVALUATION_EXECUTORS": ",".join(required),
+        "DREAMING_ADVISORY_EVALUATION_EXECUTORS": ",".join(advisory),
+        "DREAMING_TRUSTED_MODEL_ENVIRONMENT_VERSION": str(
+            TRUSTED_MODEL_ENVIRONMENT_VERSION
+        ),
+    }
+    if test_binary is not None:
+        environment["DREAMING_EXECUTOR_TEST_ALLOW_ROOT"] = str(
+            Path(__file__).resolve().parents[3] / ".test-work"
+        )
+    return environment
+
+
+def trusted_copilot_binary(test_binary: Path | None) -> Path:
+    if test_binary is not None:
+        return test_binary
+    selected = shutil.which("copilot", path=trusted_model_path())
+    if not selected:
+        raise EvaluationError("trusted Copilot executable is unavailable")
+    binary = Path(selected).resolve()
+    if not binary.is_file():
+        raise EvaluationError("trusted Copilot executable is unavailable")
+    return binary
+
+
+def trusted_model_work_parent() -> Path:
+    state_root = trusted_model_state_root()
+    expected_evaluation_root = (
+        state_root / "skill-review" / "evaluations" / "v2"
+    )
+    if v2_evaluation_dir().resolve() != expected_evaluation_root:
+        raise EvaluationError(
+            "trusted model registry state differs from evaluator state"
+        )
+    parent = expected_evaluation_root / "trusted-model-work"
+    parent.mkdir(parents=True, exist_ok=True)
+    if parent.is_symlink() or not parent.is_dir():
+        raise EvaluationError("trusted model work root must be a real directory")
+    return parent
+
+
+def run_trusted_input_adapter(
+    args: argparse.Namespace,
+    skill_dir: Path,
+    supplied_skill_dir: Path,
+    packet: dict[str, Any],
+    adapter: Path,
+    operation_name: str,
+    source_arguments: list[str],
+) -> tuple[dict[str, Any], dict[str, Any] | None]:
+    test_binary = trusted_input_test_binary(skill_dir, supplied_skill_dir)
+    binary = trusted_copilot_binary(test_binary)
+    with tempfile.TemporaryDirectory(
+        prefix=f"dreaming-input-{operation_name}-owner-",
+        dir=trusted_model_work_parent(),
+    ) as work:
         work_path = Path(work).resolve()
         packet_path = work_path / "packet.json"
         result_path = work_path / "operation.json"
+        draft_path = work_path / "draft.json"
         packet_path.write_bytes(canonical(packet))
         command = [
             sys.executable,
@@ -3067,50 +3292,33 @@ def run_trusted_input_review(
             "--role",
             "evaluation-input-author",
             "--model",
-            require_text(args.model, "input reviewer model"),
+            require_text(args.model, f"input {operation_name} model"),
             "--timeout",
             str(args.timeout),
             "--token-budget",
             str(args.token_budget),
             "--output-bytes",
             str(args.output_bytes),
+            "--binary",
+            str(binary),
+            "run",
+            "--operation",
+            operation_name,
+            "--packet",
+            str(packet_path),
+            "--skill-dir",
+            str(skill_dir),
+            "--result",
+            str(result_path),
         ]
-        if test_binary is not None:
-            command.extend(["--binary", str(test_binary)])
-        command.extend(
-            [
-                "run",
-                "--operation",
-                "review",
-                "--packet",
-                str(packet_path),
-                "--skill-dir",
-                str(skill_dir),
-                "--manifest",
-                manifest_sha256,
-                "--validation",
-                packet["validation_contract"]["receipt_sha256"],
-                "--result",
-                str(result_path),
-            ]
-        )
-        environment = dict(os.environ)
-        for key in list(environment):
-            if (
-                key == "DREAMING_COPILOT_BIN"
-                or key.startswith("DREAMING_EXECUTOR_TEST_")
-                or key.startswith("FAKE_")
-            ):
-                environment.pop(key, None)
-        if test_binary is not None:
-            environment["DREAMING_EXECUTOR_TEST_ALLOW_ROOT"] = str(
-                Path(__file__).resolve().parents[3] / ".test-work"
-            )
+        if operation_name == "author":
+            command.extend(["--draft-output", str(draft_path)])
+        command.extend(source_arguments)
         try:
             completed = subprocess.run(
                 command,
                 cwd=work_path,
-                env=environment,
+                env=trusted_model_launch_environment(work_path, test_binary),
                 stdin=subprocess.DEVNULL,
                 stdout=subprocess.PIPE,
                 stderr=subprocess.PIPE,
@@ -3120,46 +3328,147 @@ def run_trusted_input_review(
             )
         except (OSError, subprocess.TimeoutExpired) as exc:
             raise EvaluationError(
-                f"trusted input reviewer execution failed: {exc}"
+                f"trusted input {operation_name} execution failed: {exc}"
             ) from exc
-        if completed.returncode != 0 or not result_path.is_file():
+        if (
+            completed.returncode != 0
+            or not result_path.is_file()
+            or result_path.is_symlink()
+        ):
             detail = (completed.stderr or completed.stdout).strip()[-1000:]
             raise EvaluationError(
-                "trusted input reviewer refused"
+                f"trusted input {operation_name} refused"
                 + (f": {detail}" if detail else "")
             )
         operation = load_json(result_path)
-        if not isinstance(operation, dict):
-            raise EvaluationError("trusted input reviewer result must be an object")
-        return operation
+        draft = None
+        if draft_path.exists():
+            if draft_path.is_symlink() or not draft_path.is_file():
+                raise EvaluationError(
+                    "trusted input author draft must be a regular file"
+                )
+            draft = load_json(draft_path)
+        return operation, draft
 
 
-def input_review_test_binary(skill_dir: Path) -> Path | None:
-    if not os.environ.get("DREAMING_EXECUTOR_TEST_ALLOW_ROOT"):
-        return None
-    test_root = Path(__file__).resolve().parents[3] / ".test-work"
-    state_value = os.environ.get("SKILLS_STATE_DIR")
-    binary_value = os.environ.get("DREAMING_COPILOT_BIN")
-    if not state_value or not binary_value:
-        raise EvaluationError(
-            "input review test override requires isolated state and binary"
-        )
-    state_path = Path(state_value)
-    binary_path = Path(binary_value)
-    state = state_path.resolve()
-    binary = binary_path.resolve()
+def validate_input_model_budget(args: argparse.Namespace, field: str) -> None:
+    require_positive_int(args.timeout, f"{field} timeout")
+    require_positive_int(args.token_budget, f"{field} token budget")
+    require_positive_int(args.output_bytes, f"{field} output-byte budget")
     if (
-        state_path.is_symlink()
-        or binary_path.is_symlink()
-        or not state.is_relative_to(test_root)
-        or not skill_dir.is_relative_to(test_root)
-        or not binary.is_relative_to(test_root)
-        or not binary.is_file()
+        args.timeout > 25 * 60
+        or args.token_budget > 112_000
+        or args.output_bytes > 1_000_000
+    ):
+        raise EvaluationError(f"{field} process budget exceeds its hard bound")
+
+
+def v2_input_author(args: argparse.Namespace) -> dict[str, Any]:
+    model = require_text(args.model, "input author model")
+    if model == "default":
+        raise EvaluationError("input author requires an explicit non-default model")
+    validate_input_model_budget(args, "input author")
+    packet, context = build_input_author_packet(args)
+    adapter = trusted_authoring_adapter_path()
+    adapter_sha256 = sha256_file(adapter)
+    output = authoring_output_path(
+        args.output_dir,
+        context["skill_dir"],
+        "authoring materialization output",
+    )
+    test_binary = trusted_input_test_binary(
+        context["skill_dir"], Path(args.skill_dir)
+    )
+    if test_binary is not None and (
+        path_has_symlink(Path(args.output_dir))
+        or not output.is_relative_to(
+            Path(__file__).resolve().parents[3] / ".test-work"
+        )
     ):
         raise EvaluationError(
-            "input review test override is limited to non-authoritative test roots"
+            "trusted input test materialization is limited to non-authoritative test roots"
         )
-    return binary
+    source_arguments: list[str] = []
+    for option in (
+        "suite",
+        "policy",
+        "config",
+        "routing",
+        "harness",
+        "catalog",
+    ):
+        source_arguments.extend(
+            [f"--{option}", str(resolve_path(Path(getattr(args, option)), option))]
+        )
+    operation, draft_value = run_trusted_input_adapter(
+        args,
+        context["skill_dir"],
+        Path(args.skill_dir),
+        packet,
+        adapter,
+        "author",
+        source_arguments,
+    )
+    if operation.get("model") != model:
+        raise EvaluationError("trusted input author returned the wrong requested model")
+    if operation.get("outcome") == "insufficient_information":
+        if draft_value is not None:
+            raise EvaluationError(
+                "insufficient-information authoring returned an unexpected draft"
+            )
+        operation = validate_authoring_operation(
+            operation,
+            packet,
+            None,
+            adapter_sha256,
+            expected_outcome="insufficient_information",
+        )
+        return {
+            "status": "insufficient_information",
+            "state": "insufficient_information",
+            "reason": operation["reason"],
+            "summary": operation["summary"],
+            "candidate_id": packet["candidate_id"],
+            "packet_id": packet["packet_id"],
+            "operation_id": operation["operation_id"],
+            "input_manifest": None,
+            "input_manifest_sha256": None,
+        }
+    if draft_value is None:
+        raise EvaluationError("trusted input author returned no draft")
+    draft_value, draft_id = validate_input_author_draft_value(
+        draft_value, packet, context
+    )
+    operation = validate_authoring_operation(
+        operation, packet, draft_id, adapter_sha256
+    )
+    materialization = materialize_input_author(
+        packet, context, draft_value, str(output)
+    )
+    receipt = load_json(Path(materialization["output_dir"]) / "authoring.json")
+    registration_args = argparse.Namespace(
+        skill_dir=str(context["skill_dir"]),
+        suite=materialization["suite"],
+        policy=materialization["policy"],
+        config=materialization["config"],
+        routing=materialization["routing"],
+        harness=str(trusted_harness_path()),
+        authoring_method="bounded-safe-author",
+        source_id=[],
+    )
+    registration = register_input_manifest(
+        registration_args,
+        (packet, draft_value, receipt, operation, adapter),
+    )
+    return {
+        "status": "review_required",
+        "state": "review_required",
+        "outcome": "draft",
+        **materialization,
+        **registration,
+        "author_operation_id": operation["operation_id"],
+        "author_model": operation["observed_model"],
+    }
 
 
 def build_input_review_packet(
@@ -7349,6 +7658,19 @@ def build_parser() -> argparse.ArgumentParser:
     input_author_packet_parser.add_argument("--harness", required=True)
     input_author_packet_parser.add_argument("--catalog", required=True)
     input_author_packet_parser.add_argument("--output", required=True)
+    input_author_parser = commands.add_parser("v2-input-author")
+    input_author_parser.add_argument("skill_dir")
+    input_author_parser.add_argument("--suite", required=True)
+    input_author_parser.add_argument("--policy", required=True)
+    input_author_parser.add_argument("--config", required=True)
+    input_author_parser.add_argument("--routing", required=True)
+    input_author_parser.add_argument("--harness", required=True)
+    input_author_parser.add_argument("--catalog", required=True)
+    input_author_parser.add_argument("--model", required=True)
+    input_author_parser.add_argument("--timeout", type=int, default=600)
+    input_author_parser.add_argument("--token-budget", type=int, default=18_000)
+    input_author_parser.add_argument("--output-bytes", type=int, default=100_000)
+    input_author_parser.add_argument("--output-dir", required=True)
     input_author_materialize_parser = commands.add_parser(
         "v2-input-author-materialize"
     )
@@ -7370,10 +7692,18 @@ def build_parser() -> argparse.ArgumentParser:
     input_register_parser.add_argument("--routing", required=True)
     input_register_parser.add_argument("--harness", required=True)
     input_register_parser.add_argument("--authoring-method", required=True)
-    input_register_parser.add_argument("--authoring-packet")
-    input_register_parser.add_argument("--authoring-draft")
-    input_register_parser.add_argument("--authoring-receipt")
-    input_register_parser.add_argument("--authoring-operation")
+    input_register_parser.add_argument(
+        "--authoring-packet", help=argparse.SUPPRESS
+    )
+    input_register_parser.add_argument(
+        "--authoring-draft", help=argparse.SUPPRESS
+    )
+    input_register_parser.add_argument(
+        "--authoring-receipt", help=argparse.SUPPRESS
+    )
+    input_register_parser.add_argument(
+        "--authoring-operation", help=argparse.SUPPRESS
+    )
     input_register_parser.add_argument(
         "--source-id", action="append", required=True
     )
@@ -7517,6 +7847,7 @@ def main() -> int:
             "v2-suite-validate": v2_suite_validate,
             "v2-policy-validate": v2_policy_validate,
             "v2-input-author-packet": v2_input_author_packet,
+            "v2-input-author": v2_input_author,
             "v2-input-author-materialize": v2_input_author_materialize,
             "v2-input-register": v2_input_register,
             "v2-input-validate": v2_input_validate,

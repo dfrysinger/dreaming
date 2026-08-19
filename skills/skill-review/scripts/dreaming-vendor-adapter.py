@@ -2343,40 +2343,52 @@ def validate_evaluation_input_packet(
 def evaluation_input_author_environment(
     work_path: Path, binary: str
 ) -> dict[str, str]:
-    source = executor_environment("copilot", work_path, binary)
-    allowed = {
-        "HOME",
-        "TMPDIR",
-        "XDG_CACHE_HOME",
-        "XDG_CONFIG_HOME",
-        "XDG_DATA_HOME",
-        "XDG_STATE_HOME",
-        "CLAUDE_CODE_TMPDIR",
-        "PATH",
-        "LANG",
-        "LC_ALL",
-        "LC_CTYPE",
-        "SSL_CERT_FILE",
-        "SSL_CERT_DIR",
-    }
+    real_home = Path.home().resolve()
+    synthetic_home = work_path / "home"
+    temporary = work_path / "tmp"
+    cache = synthetic_home / ".cache"
+    config = synthetic_home / ".config"
+    data = synthetic_home / ".local/share"
+    state = synthetic_home / ".local/state"
+    for directory in (synthetic_home, temporary, cache, config, data, state):
+        directory.mkdir(parents=True, exist_ok=True)
+    copy_auth_file(
+        real_home / ".config/gh/hosts.yml",
+        synthetic_home / ".config/gh/hosts.yml",
+    )
+    copy_auth_file(
+        real_home / ".config/gh/config.yml",
+        synthetic_home / ".config/gh/config.yml",
+    )
+    copy_auth_file(
+        real_home / ".copilot/config.json",
+        synthetic_home / ".copilot/config.json",
+    )
     environment = {
-        key: value
-        for key, value in source.items()
-        if key in allowed and isinstance(value, str)
+        "HOME": str(synthetic_home),
+        "TMPDIR": str(temporary),
+        "XDG_CACHE_HOME": str(cache),
+        "XDG_CONFIG_HOME": str(config),
+        "XDG_DATA_HOME": str(data),
+        "XDG_STATE_HOME": str(state),
+        "CLAUDE_CODE_TMPDIR": str(temporary),
+        "PATH": os.pathsep.join(
+            dict.fromkeys(
+                (
+                    str(Path(sys.executable).resolve().parent),
+                    "/opt/homebrew/bin",
+                    "/usr/local/bin",
+                    "/usr/bin",
+                    "/bin",
+                    "/usr/sbin",
+                    "/sbin",
+                )
+            )
+        ),
+        "LANG": "C",
+        "LC_ALL": "C",
+        "LC_CTYPE": "C",
     }
-    if os.environ.get("DREAMING_EXECUTOR_TEST_ALLOW_ROOT"):
-        environment.update(
-            {
-                key: value
-                for key, value in os.environ.items()
-                if key.startswith("FAKE_")
-                or key in {
-                    "CODEX_HOME",
-                    "DREAMING_EXECUTOR_TEST_ALLOW_ROOT",
-                    "DREAMING_EXECUTOR_TEST_ALLOW_ROOTS",
-                }
-            }
-        )
     return environment
 
 

@@ -280,9 +280,16 @@ import json, os, sys
 from pathlib import Path
 vendor = Path(sys.argv[0]).name
 args = sys.argv[1:]
-with Path(os.environ["FAKE_CLI_LOG"]).open("a") as log:
+log_path = Path(
+    os.environ.get(
+        "FAKE_CLI_LOG",
+        str(Path(sys.argv[0]).resolve().parent / "isolated-cli-invocations.jsonl"),
+    )
+)
+with log_path.open("a") as log:
     log.write(json.dumps({"vendor": vendor, "args": args}) + "\\n")
-state_path = Path(os.environ["FAKE_CLI_STATE"])
+state_value = os.environ.get("FAKE_CLI_STATE")
+state_path = Path(state_value) if state_value else Path(sys.argv[0]).resolve().parent / "isolated-state.json"
 state = json.loads(state_path.read_text()) if state_path.exists() else {}
 def write_codex_marketplace_config():
     if vendor != "codex":
@@ -802,10 +809,15 @@ print(json.dumps({"ok": True}))
             )
             self.assertEqual(response["completion_sentinel"], "DREAMING_REVIEW_COMPLETE")
             self.assertEqual(json.loads(result_path.read_text())["terminal_route"], "discard")
-        invocations = [
-            json.loads(line)
-            for line in Path(self.env["FAKE_CLI_LOG"]).read_text().splitlines()
-        ]
+        invocations = []
+        for log_path in (
+            Path(self.env["FAKE_CLI_LOG"]),
+            self.case / "bin/isolated-cli-invocations.jsonl",
+        ):
+            if log_path.is_file():
+                invocations.extend(
+                    json.loads(line) for line in log_path.read_text().splitlines()
+                )
         claude_run = next(
             row["args"]
             for row in invocations
@@ -1030,24 +1042,30 @@ print(json.dumps({"ok": True}))
         self.assertEqual(refusal.exception.code, "token-limit-exceeded")
         self.assertFalse((self.case / "over-budget-result.json").exists())
         self.assertFalse((self.case / "over-budget-draft.json").exists())
-        invocations = [
-            json.loads(line)
-            for line in Path(self.env["FAKE_CLI_LOG"]).read_text().splitlines()
-        ]
-        for invocation in (
+        invocations = []
+        for log_path in (
+            Path(self.env["FAKE_CLI_LOG"]),
+            self.case / "bin/isolated-cli-invocations.jsonl",
+        ):
+            if log_path.is_file():
+                invocations.extend(
+                    json.loads(line) for line in log_path.read_text().splitlines()
+                )
+        author_invocations = [
             row["args"]
             for row in invocations
             if any(
                 "EVALUATION_INPUT_AUTHOR_OPERATION" in arg
                 for arg in row["args"]
             )
-        ):
-            if "--available-tools=__dreaming_no_tools__" in invocation:
-                self.assertNotIn("--available-tools=", invocation)
-            if "--allowedTools" in invocation:
-                self.assertEqual(
-                    invocation[invocation.index("--allowedTools") + 1], ""
-                )
+        ]
+        self.assertTrue(author_invocations)
+        for invocation in author_invocations:
+            self.assertIn(
+                "--available-tools=__dreaming_no_tools__", invocation
+            )
+            self.assertNotIn("--available-tools=", invocation)
+            self.assertNotIn("--allowedTools", invocation)
 
         review_packet = self.case / "review-packet.json"
         review_packet.write_text(
