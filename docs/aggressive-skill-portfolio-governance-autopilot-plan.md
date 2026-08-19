@@ -121,8 +121,25 @@
   installed-content explanations, no horizontal overflow, no browser error,
   and no enabled action. Authenticated writes return HTTP 405. Paired,
   finding-scoped closure reports no unresolved material finding.
-- Governance work remaining: implement the current evaluation inventory and
-  aggressive evaluation queue, then prove governed user intents, reversible
+- The evaluation inventory and aggressive queue are committed locally as
+  `7b9127c` on `feature/aggressive-skill-governance-preview`. The authoritative
+  evaluator validates exact candidate content, transition ordering, aggregate
+  and portfolio receipts, passing authority, and the 90-day currency window.
+  The collector requires exact bounded protocol output and attaches one
+  explicit evaluation state to every physical skill instance.
+  `governance-settled-usage/receiver-result-11.json` covers 109 physical
+  instances and 95 enabled capabilities. All 109 physical instances and all 95
+  enabled capabilities are explicitly `missing`, with no invalid evaluation
+  record.
+- The reviewed evaluation preview snapshot is
+  `governance-preview-snapshot-evaluations-r5`. Desktop and 390-pixel proof in
+  `governance-preview-evaluation-proof-r5.json` shows 95 queued evaluations,
+  with 19 settled 30-day zero-use capabilities first, deterministic queue
+  positions and reasons, no horizontal overflow or browser error, and no
+  enabled action. Authenticated writes return HTTP 405. Paired fix verification
+  reports no unresolved material finding.
+- Governance work remaining: execute the evaluation queue under explicit daily
+  case and AI-credit budgets, then prove governed user intents, reversible
   personal withdrawal/archive/restore, and qualified whole-plugin
   disable/restore under `PORT-CHK-01` through `PORT-CHK-14`. Individual plugin
   skill disablement remains recommendation-only unless native CLI support is
