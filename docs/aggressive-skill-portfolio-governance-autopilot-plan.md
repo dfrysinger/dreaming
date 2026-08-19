@@ -456,6 +456,26 @@
   unresolved material finding. Open-claim liveness recovery, the lane-scoped
   recovery-required state, sealed content validation, the derived in-memory
   queue, and one-claim authoring orchestration remain.
+- Automatic open-claim liveness recovery is implemented and committed locally
+  on the isolated preview branch as `f3d742a`. Scheduled claims are inspected
+  under the inherited writer lease using exact boot, PID/start-time, and
+  process-group leader identities. Proven dead or reused owners close through
+  the existing terminal-publication transaction; any dispatching slot remains
+  permanently failed with unknown spend. Only an exact still-provable process
+  group may be terminated, while a leaderless live group, unreadable
+  same-boot identity, live prior owner, or unavailable host boot identity
+  leaves the claim open and creates a durable lane-scoped,
+  content-addressed recovery marker. The dashboard validates and exposes that
+  marker without falsely claiming an authoring pause that is not yet wired.
+  Validation passes 39 focused claim/liveness checks, 41 certification checks,
+  23 evaluator checks, 41 core checks, 157 dashboard checks, Python
+  compilation, and the diff check. Finding-scoped Opus and Terra closure
+  resolved timezone-sensitive boot identity, unsafe leaderless-group
+  signaling, transient recovery visibility, unavailable boot-probe
+  visibility, and inaccurate dashboard copy with no unresolved finding.
+  The halt- and lease-gated operator recovery command, model process-group
+  monitor, sealed content/root-index validation, derived in-memory queue, and
+  one-claim authoring orchestration remain the next prerequisites.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
