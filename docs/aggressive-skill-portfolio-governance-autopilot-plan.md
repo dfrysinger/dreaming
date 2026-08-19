@@ -310,8 +310,26 @@
   adapters, and authoritative fake providers. Bounded Opus/Terra design review
   found the environment and adapter-authorization omissions; both families
   verified those findings closed in round two with no material regression.
-  Implementation of this reviewed handoff is the next prerequisite before the
-  aggregate six-operation ledger.
+  The implementation is committed locally on the isolated preview branch as
+  `608f674`. New `v2-input-author` trusted code builds the exact packet,
+  pre-authorizes the fixed adapter path and reviewed byte identity, launches
+  the explicit Copilot model with an allowlist-built environment, privately
+  consumes and validates its operation and draft, materializes the trusted
+  fields, and registers in memory without operation-file ingress. Legacy
+  `v2-input-register` refuses caller-supplied bounded-safe-author provenance;
+  deterministic/manual registration remains separate. The same launch
+  boundary owns input reviews. Unknown caller variables and model/provider
+  overrides are absent; the disposable fake-provider seam is physically
+  confined beneath `.test-work`; provider children do not receive test-root
+  controls; insufficient information remains explicit and non-ready.
+  Launch-time adapter pinning does not invalidate replay of historical
+  manifests, which continue to bind their exact retained adapter and operation.
+  Validation passes 37 certification checks, 26 vendor-adapter tests, and 23
+  evaluator regressions. Split Opus/Terra implementation review closed
+  historical-replay coupling, retained-provenance test coverage, child
+  test-control forwarding, and vacuous no-tools assertions with no unresolved
+  material finding. The aggregate six-operation ledger is now the next
+  prerequisite.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
