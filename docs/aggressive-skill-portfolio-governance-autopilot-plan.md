@@ -83,8 +83,9 @@
   supported selected scenarios, one retained flaky browser pass, and the
   historical `SC-010` failure; `SC-C6-FRESH` separately proves the corrected
   natural four-hour run without relabeling that history.
-- Capacity work remaining: commit these final proof references locally. The
-  capacity Definition of Done is otherwise closed.
+- Capacity closure and its final proof references are committed locally as
+  `e7e3a95`. Every item under the capacity Definition of Done is supported by
+  retained evidence.
 - The isolated governance preview is implemented and committed locally as
   `60fb7ce` on `feature/aggressive-skill-governance-preview`. Its manifested
   private snapshot contains one decision for each of 93 enabled canonical
@@ -92,17 +93,32 @@
   uses labeled narrow-view cards, exposes no enabled mutation route, and
   passed desktop and 390-pixel browser proof. Its paired review is closed with
   no unresolved finding.
-- Governance work remaining: run the final `PORT-CHK-PREVIEW` comparison after
-  capacity closure, merge `60fb7ce` locally only after rollback evidence is
-  retained, then implement and prove the governed mutation phases and
-  `PORT-CHK-01` through `PORT-CHK-14`.
+- The settled-use report-only slice is committed locally as `d4c6e3a` on
+  `feature/aggressive-skill-governance-preview`. Its real private receipt
+  indexes 2,274 stable sessions and excludes eight actively changing tails
+  under the five-minute quiet rule. It has no stable backlog, parser failure,
+  or identity failure. The manifested preview contains one decision for each
+  of 94 enabled capabilities: 76 positive-use decisions are explicitly shown
+  as lower bounds and 18 settled-zero decisions are available for evaluation.
+  Desktop and 390-pixel live proof pass without overflow or browser errors,
+  every action remains disabled, and authenticated writes return HTTP 405.
+  The candidate-bound receipt is
+  `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/governance-preview-live-proof-receipt.md`.
+  Paired implementation review closed after one fix-verification round with no
+  unresolved material finding.
+- Governance work remaining: complete authoritative dependency and pin
+  inventory before granting any removal authority, then implement and prove
+  governed user intents, reversible personal withdrawal/archive/restore, and
+  qualified whole-plugin disable/restore under `PORT-CHK-01` through
+  `PORT-CHK-14`. Run the final `PORT-CHK-PREVIEW` comparison before merging
+  preview commits locally into `feature/multi-cli-dreaming`.
 - The reviewed settled-use amendment is committed in the isolated preview as
   `1dcf2a9`. It permits per-capability 30-day settled zero only after relevant
   stable transcript work drains, excludes recent active tails explicitly,
   scopes historical identity ambiguity to plausible targets, preserves
   dependency overrides, and requires a fresh decision before any future
-  automatic removal. Its first report-only collector/dashboard slice is in
-  progress; mutation routes remain disabled.
+  automatic removal. Its first report-only collector/dashboard slice is
+  complete at `d4c6e3a`; mutation routes remain disabled.
 - Parallel preview boundary: use
   `/Users/dfrysinger/code/dreaming-governance-preview` on
   `feature/aggressive-skill-governance-preview`. Before starting its server,
