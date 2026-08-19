@@ -31,6 +31,7 @@ from evaluation_input_claims import (  # noqa: E402
     complete_slot as complete_claim_slot,
     fail_dispatched_slot,
     inspect_claim,
+    pending_terminal_publications,
     prepare_dispatch as prepare_claim_dispatch,
     reserve_claim,
     review_set_identity,
@@ -164,7 +165,12 @@ INPUT_READINESS_TRANSITIONS = {
         "invalid",
         "insufficient_information",
     },
-    "review_required": {"review_required", "invalid", "ready"},
+    "review_required": {
+        "review_required",
+        "invalid",
+        "insufficient_information",
+        "ready",
+    },
     "invalid": {"drafting", "review_required", "invalid", "ready"},
     "insufficient_information": set(),
     "ready": {"ready"},
@@ -5102,6 +5108,7 @@ def load_input_transition(
     }
     if set(transition) not in (
         transition_keys,
+        transition_keys | {"claim_id"},
         transition_keys | {"claim_id", "review_set_id"},
     ):
         raise EvaluationError(
@@ -5109,6 +5116,13 @@ def load_input_transition(
         )
     state = transition.get("state")
     reason = transition.get("reason")
+    claim_id = transition.get("claim_id")
+    claim_terminal_reason = (
+        isinstance(claim_id, str)
+        and state in {"invalid", "insufficient_information"}
+        and isinstance(reason, str)
+        and re.fullmatch(r"[a-z][a-z0-9_]{0,127}", reason) is not None
+    )
     if (
         transition.get("schema_version") != INPUT_REGISTRY_SCHEMA_VERSION
         or transition.get("kind") != "evaluation_input_readiness_transition"
@@ -5116,7 +5130,10 @@ def load_input_transition(
         or transition.get("skill_key") != latest_key(str(skill_dir))
         or transition.get("candidate_id") != current_candidate_id
         or state not in INPUT_READINESS_STATES
-        or reason not in INPUT_READINESS_REASONS.get(state, set())
+        or (
+            reason not in INPUT_READINESS_REASONS.get(state, set())
+            and not claim_terminal_reason
+        )
         or transition.get("transition_id")
         != identity_with("transition_id", transition)
         or transition.get("transition_id") != transition_id
@@ -5131,14 +5148,14 @@ def load_input_transition(
     manifest_sha256 = transition.get("input_manifest_sha256")
     validation_sha256 = transition.get("validation_receipt_sha256")
     reviews = transition.get("review_receipt_sha256s")
-    claim_id = transition.get("claim_id")
     review_set_id = transition.get("review_set_id")
-    if (claim_id is None) != (review_set_id is None):
+    if review_set_id is not None and claim_id is None:
         raise EvaluationError(
-            "input readiness claim and review set identities must appear together"
+            "input readiness review set identity requires a claim"
         )
     if claim_id is not None:
         require_sha256(claim_id, "input readiness claim ID")
+    if review_set_id is not None:
         require_sha256(review_set_id, "input readiness review set ID")
     if not isinstance(reviews, list):
         raise EvaluationError("input readiness reviews must be a list")
@@ -5146,7 +5163,9 @@ def load_input_transition(
         require_sha256(
             receipt_sha256, f"input readiness review receipt {index}"
         )
-    if state in {"input_missing", "drafting", "insufficient_information"}:
+    if state in {"input_missing", "drafting"} or (
+        state == "insufficient_information" and claim_id is None
+    ):
         if (
             manifest_sha256 is not None
             or validation_sha256 is not None
@@ -5155,6 +5174,23 @@ def load_input_transition(
         ):
             raise EvaluationError(
                 f"{state} readiness cannot retain manifest or review authority"
+            )
+        return transition
+    if state == "insufficient_information":
+        if (
+            manifest_sha256 is not None
+            or validation_sha256 is not None
+            or reviews
+            or review_set_id is not None
+        ):
+            raise EvaluationError(
+                "claim-bound insufficient information cannot retain input authority"
+            )
+        return transition
+    if state == "invalid" and manifest_sha256 is None:
+        if validation_sha256 is not None or reviews or claim_id is None:
+            raise EvaluationError(
+                "manifest-free invalid readiness requires a claim without receipts"
             )
         return transition
     require_sha256(manifest_sha256, "input readiness manifest digest")
@@ -5190,6 +5226,10 @@ def load_input_transition(
         validate_input_receipts(resolved, validation_sha256, reviews)
         bounded = is_bounded_input_manifest(resolved["manifest"])
         if bounded and claim_id is not None:
+            if review_set_id is None:
+                raise EvaluationError(
+                    "bounded ready input requires a review set identity"
+                )
             expected_review_set = bounded_review_set_id(
                 resolved, claim_id, reviews
             )
@@ -5248,6 +5288,7 @@ def _write_input_transition_locked(
     created_at: str,
     claim_id: str | None = None,
     review_set_id: str | None = None,
+    before_persist: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     candidate, _ = candidate_id(skill_dir)
     current = load_input_current_pointer(skill_dir)
@@ -5278,16 +5319,21 @@ def _write_input_transition_locked(
         "validation_receipt_sha256": validation_receipt_sha256,
         "review_receipt_sha256s": sorted(review_receipt_sha256s),
     }
-    if claim_id is not None or review_set_id is not None:
+    if claim_id is not None:
         transition["claim_id"] = require_sha256(
             claim_id, "input readiness claim ID"
         )
+    if review_set_id is not None:
         transition["review_set_id"] = require_sha256(
             review_set_id, "input readiness review set ID"
         )
     transition["transition_id"] = identity_with("transition_id", transition)
     path = input_transition_path(skill_dir, candidate, transition["transition_id"])
+    if before_persist is not None:
+        before_persist()
     create_only_bytes(path, canonical(transition), "input readiness transition")
+    if before_persist is not None:
+        before_persist()
     write_input_current_pointer(
         skill_dir, candidate, transition["transition_id"]
     )
@@ -5420,6 +5466,291 @@ def ready_result(
             }
         )
     return result
+
+
+def pending_terminal_matches(
+    transition: dict[str, Any], publication: dict[str, Any]
+) -> bool:
+    return (
+        transition.get("claim_id") == publication["claim_id"]
+        and transition.get("state") == publication["readiness_state"]
+        and transition.get("reason") == publication["readiness_reason"]
+        and transition.get("input_manifest_sha256")
+        == publication["manifest_sha256"]
+        and transition.get("validation_receipt_sha256")
+        == publication["validation_receipt_sha256"]
+        and transition.get("review_receipt_sha256s")
+        == publication["review_receipt_sha256s"]
+        and transition.get("review_set_id") == publication["review_set_id"]
+    )
+
+
+def validate_pending_terminal_facts(
+    skill_dir: Path, publication: dict[str, Any]
+) -> None:
+    require_sha256(publication.get("claim_id"), "pending terminal claim")
+    state = publication.get("readiness_state")
+    reason = publication.get("readiness_reason")
+    if state not in {"ready", "invalid", "insufficient_information"} or (
+        not isinstance(reason, str)
+        or re.fullmatch(r"[a-z][a-z0-9_]{0,127}", reason) is None
+    ):
+        raise EvaluationError("pending terminal state or reason is invalid")
+    manifest = publication.get("manifest_sha256")
+    validation = publication.get("validation_receipt_sha256")
+    reviews = publication.get("review_receipt_sha256s")
+    if not isinstance(reviews, list):
+        raise EvaluationError("pending terminal reviews must be a list")
+    if state == "insufficient_information":
+        if (
+            manifest is not None
+            or validation is not None
+            or reviews
+            or publication.get("review_set_id") is not None
+        ):
+            raise EvaluationError(
+                "pending insufficient information cannot retain input authority"
+            )
+        return
+    if manifest is None:
+        if state != "invalid" or validation is not None or reviews:
+            raise EvaluationError("pending terminal manifest facts are invalid")
+        return
+    resolved = validate_input_manifest(
+        skill_dir, require_sha256(manifest, "pending terminal manifest")
+    )
+    validated_reviews = sorted(
+        require_sha256(value, "pending terminal review") for value in reviews
+    )
+    if validation is not None:
+        validate_input_validation_receipt(
+            resolved,
+            require_sha256(validation, "pending terminal validation receipt"),
+        )
+    decisions = validate_input_review_receipts(resolved, validated_reviews)
+    if state == "invalid":
+        if reason in {
+            "independent_review_rejected",
+            "independent_rereview_rejected",
+        } and "reject" not in decisions:
+            raise EvaluationError(
+                "pending rejected input lacks a rejecting review"
+            )
+        if reason == "deterministic_validation_failed" and (
+            validation is not None or validated_reviews
+        ):
+            raise EvaluationError(
+                "pending validation failure retains passing receipts"
+            )
+    if state == "ready":
+        if validation is None or publication.get("review_set_id") is None:
+            raise EvaluationError(
+                "pending ready transition lacks validation or review set"
+            )
+        validate_input_receipts(resolved, validation, validated_reviews)
+        expected_review_set = bounded_review_set_id(
+            resolved, publication["claim_id"], validated_reviews
+        )
+        if publication["review_set_id"] != expected_review_set:
+            raise EvaluationError("pending ready review set identity is invalid")
+
+
+def publish_pending_terminal(
+    publication: dict[str, Any],
+    *,
+    authority_check: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    skill_dir = resolve_path(
+        Path(publication["skill_path"]), "pending terminal skill directory"
+    )
+    candidate, _ = candidate_id(skill_dir)
+    if (
+        candidate != publication["candidate_id"]
+        or latest_key(str(skill_dir)) != publication["skill_key"]
+    ):
+        raise EvaluationError(
+            "pending terminal candidate identity differs from the current skill"
+        )
+    validate_pending_terminal_facts(skill_dir, publication)
+    with input_readiness_state_lock():
+        readiness_root = input_readiness_dir(skill_dir, candidate)
+        if readiness_root.exists() or readiness_root.is_symlink():
+            transitions, tips = load_input_transition_history(
+                skill_dir, candidate
+            )
+        else:
+            transitions = {}
+            tips = set()
+        pointer = load_input_current_pointer(skill_dir)
+        matching = [
+            transition
+            for transition in transitions.values()
+            if pending_terminal_matches(transition, publication)
+        ]
+        if len(matching) > 1:
+            raise EvaluationError(
+                "pending terminal publication has multiple exact transitions"
+            )
+        if matching:
+            transition = matching[0]
+            if tips != {transition["transition_id"]}:
+                raise EvaluationError(
+                    "pending terminal transition is not the unique history tip"
+                )
+            validate_input_transition_chain(
+                transitions, transition["transition_id"]
+            )
+            if pointer is None:
+                if transition["prior_transition_id"] is not None:
+                    raise EvaluationError(
+                        "pending terminal history lacks its prior pointer"
+                    )
+            elif (
+                pointer["transition_id"] != transition["transition_id"]
+                and transition["prior_transition_id"]
+                != pointer["transition_id"]
+            ):
+                raise EvaluationError(
+                    "pending terminal transition is not the current child"
+                )
+            if (
+                pointer is None
+                or pointer["transition_id"] != transition["transition_id"]
+            ):
+                if authority_check is not None:
+                    authority_check()
+                write_input_current_pointer(
+                    skill_dir, candidate, transition["transition_id"]
+                )
+            resolve_input_readiness(skill_dir)
+        else:
+            if transitions:
+                if pointer is None or tips != {pointer["transition_id"]}:
+                    raise EvaluationError(
+                        "pending terminal history lacks one current tip"
+                    )
+                validate_input_transition_chain(
+                    transitions, pointer["transition_id"]
+                )
+            elif pointer is not None:
+                raise EvaluationError(
+                    "pending terminal pointer has no transition history"
+                )
+            terminal_epoch = publication.get("terminal_epoch")
+            if (
+                not isinstance(terminal_epoch, int)
+                or isinstance(terminal_epoch, bool)
+                or terminal_epoch < 0
+            ):
+                raise EvaluationError(
+                    "pending terminal publication lacks terminal time"
+                )
+            result = _write_input_transition_locked(
+                skill_dir,
+                state=publication["readiness_state"],
+                reason=publication["readiness_reason"],
+                input_manifest_sha256=publication["manifest_sha256"],
+                validation_receipt_sha256=publication[
+                    "validation_receipt_sha256"
+                ],
+                review_receipt_sha256s=publication[
+                    "review_receipt_sha256s"
+                ],
+                created_at=datetime.fromtimestamp(
+                    terminal_epoch, tz=timezone.utc
+                ).isoformat(),
+                claim_id=publication["claim_id"],
+                review_set_id=publication["review_set_id"],
+                before_persist=authority_check,
+            )
+            transition = load_input_transition(
+                skill_dir, candidate, result["transition_id"]
+            )
+        if authority_check is not None:
+            authority_check()
+        acknowledge_terminal_publication(
+            publication["claim_id"], transition
+        )
+        return {
+            **input_transition_result(skill_dir, transition),
+            "claim_id": publication["claim_id"],
+            "publication": "replayed" if matching else "published",
+        }
+
+
+def assert_input_owner_authority() -> None:
+    if (
+        os.environ.get("DREAMING_ORCHESTRATED") != "1"
+        or os.environ.get("SKILLS_LOCK_HELD_BY_PARENT") != "1"
+        or not os.environ.get("DREAMING_PARENT_RUN_ID")
+        or not os.environ.get("SKILLS_LOCK_TOKEN")
+        or not os.environ.get("SKILLS_LOCK_OWNER_PID")
+        or not os.environ.get("SKILLS_LOCK_OWNER_IDENTITY")
+    ):
+        raise EvaluationError(
+            "evaluation-input owner recovery requires inherited orchestration"
+        )
+    halt_file = Path(
+        os.environ.get(
+            "DREAMING_HALT_FILE",
+            Path(
+                os.environ.get(
+                    "SKILLS_STATE_DIR", Path.home() / ".copilot/skill-state"
+                )
+            )
+            / "skill-review"
+            / "disable-daemon",
+        )
+    )
+    if halt_file.exists():
+        raise EvaluationError("evaluation-input owner recovery is halted")
+    lock_assert = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).with_name("daemon-lock.py")),
+            "assert",
+            os.environ["SKILLS_LOCK_TOKEN"],
+            "--pid",
+            os.environ["SKILLS_LOCK_OWNER_PID"],
+            "--process-identity",
+            os.environ["SKILLS_LOCK_OWNER_IDENTITY"],
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if lock_assert.returncode != 0:
+        raise EvaluationError("evaluation-input owner writer lease is invalid")
+
+
+def v2_input_owner_reconcile(_args: argparse.Namespace) -> dict[str, Any]:
+    assert_input_owner_authority()
+    publications = []
+    failures = []
+    for publication in pending_terminal_publications():
+        try:
+            assert_input_owner_authority()
+            publications.append(
+                publish_pending_terminal(
+                    publication, authority_check=assert_input_owner_authority
+                )
+            )
+        except (ClaimLedgerError, EvaluationError, OSError) as error:
+            failures.append(
+                {
+                    "claim_id": publication["claim_id"],
+                    "error": str(error),
+                }
+            )
+    if failures:
+        raise EvaluationError(
+            "terminal publication recovery incomplete: "
+            + json.dumps(failures, sort_keys=True, separators=(",", ":"))
+        )
+    return {
+        "status": "reconciled",
+        "terminal_publications": publications,
+    }
 
 
 def v2_input_ready(args: argparse.Namespace) -> dict[str, Any]:
@@ -9290,6 +9621,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--review", action="append", required=True
     )
     input_ready_parser.add_argument("--created-at")
+    commands.add_parser("v2-input-owner-reconcile")
     input_claim_assert_parser = commands.add_parser(
         "v2-input-claim-assert-ready"
     )
@@ -9410,6 +9742,7 @@ def main() -> int:
             "v2-input-review-packet": v2_input_review_packet,
             "v2-input-state": v2_input_state,
             "v2-input-ready": v2_input_ready,
+            "v2-input-owner-reconcile": v2_input_owner_reconcile,
             "v2-input-claim-assert-ready": v2_input_claim_assert_ready,
             "v2-prepare": v2_prepare,
             "v2-run-compile": v2_run_compile,

@@ -771,6 +771,16 @@ def _record_retained_terminal(
     readiness_reason: str,
 ) -> dict[str, Any]:
     retained = _claim(connection, claim_id)
+    if readiness_state == "insufficient_information":
+        return _record_pending_terminal(
+            connection,
+            claim_id,
+            readiness_state=readiness_state,
+            readiness_reason=readiness_reason,
+            manifest_sha256=None,
+            validation_receipt_sha256=None,
+            review_receipt_sha256s=[],
+        )
     manifest_sha256 = (
         retained["repaired_manifest_sha256"]
         or retained["initial_manifest_sha256"]
@@ -890,6 +900,8 @@ def pending_terminal_publications() -> list[dict[str, Any]]:
         rows = connection.execute(
             """
             SELECT p.*, c.owner_run_id, c.owner_mode
+                 , c.skill_path, c.skill_key, c.candidate_id
+                 , c.review_set_id, c.terminal_epoch
             FROM claim_terminal_publications p
             JOIN claims c ON c.claim_id=p.claim_id
             WHERE p.acknowledged_epoch IS NULL
@@ -901,6 +913,11 @@ def pending_terminal_publications() -> list[dict[str, Any]]:
                 "claim_id": row["claim_id"],
                 "owner_run_id": row["owner_run_id"],
                 "owner_mode": row["owner_mode"],
+                "skill_path": row["skill_path"],
+                "skill_key": row["skill_key"],
+                "candidate_id": row["candidate_id"],
+                "review_set_id": row["review_set_id"],
+                "terminal_epoch": row["terminal_epoch"],
                 "readiness_state": row["readiness_state"],
                 "readiness_reason": row["readiness_reason"],
                 "manifest_sha256": row["manifest_sha256"],

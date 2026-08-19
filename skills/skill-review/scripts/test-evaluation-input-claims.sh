@@ -919,6 +919,9 @@ assert ii_state["status"] == "completed"
 assert ii_state["terminal_reason"] == "repair_insufficient_information"
 assert ii_state["slots"][3]["status"] == "completed"
 assert ii_state["slots"][3]["normalized_tokens"] == 25
+assert ii_state["terminal_publication"]["manifest_sha256"] is None
+assert ii_state["terminal_publication"]["validation_receipt_sha256"] is None
+assert ii_state["terminal_publication"]["review_receipt_sha256s"] == []
 passed("repair insufficient information is terminal with actual usage")
 
 for label, slot, failure in (
@@ -1256,7 +1259,71 @@ unknown = subprocess.run(
 )
 assert unknown.returncode != 0
 assert "invalid choice" in unknown.stderr
-passed("historical inspection ignores live adapter bytes and no completion CLI exists")
+unauthorized_reconcile = subprocess.run(
+    [sys.executable, str(evaluator_path), "v2-input-owner-reconcile"],
+    text=True,
+    capture_output=True,
+    check=False,
+)
+assert unauthorized_reconcile.returncode != 0
+assert "requires inherited orchestration" in unauthorized_reconcile.stderr
+use_state("authorized-reconcile")
+reserve("authorized-reconcile-open-claim")
+token = "00000000-0000-4000-8000-000000000002"
+owner_pid = os.getpid()
+owner_identity = " ".join(
+    subprocess.run(
+        ["/bin/ps", "-o", "lstart=", "-p", str(owner_pid)],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split()
+)
+lock = subprocess.run(
+    [
+        sys.executable,
+        str(evaluator_path.with_name("daemon-lock.py")),
+        "acquire",
+        "--mode",
+        "process",
+        "--owner",
+        "evaluation-input-test",
+        "--pid",
+        str(owner_pid),
+        "--process-identity",
+        owner_identity,
+        "--token",
+        token,
+    ],
+    text=True,
+    capture_output=True,
+    check=False,
+)
+assert lock.returncode == 0, lock.stderr
+authorized_environment = dict(os.environ)
+authorized_environment.update(
+    {
+        "DREAMING_ORCHESTRATED": "1",
+        "SKILLS_LOCK_HELD_BY_PARENT": "1",
+        "DREAMING_PARENT_RUN_ID": "authorized-reconcile-run",
+        "SKILLS_LOCK_TOKEN": token,
+        "SKILLS_LOCK_OWNER_PID": str(owner_pid),
+        "SKILLS_LOCK_OWNER_IDENTITY": owner_identity,
+    }
+)
+authorized_reconcile = subprocess.run(
+    [sys.executable, str(evaluator_path), "v2-input-owner-reconcile"],
+    env=authorized_environment,
+    text=True,
+    capture_output=True,
+    check=False,
+)
+assert authorized_reconcile.returncode == 0, authorized_reconcile.stderr
+assert json.loads(authorized_reconcile.stdout) == {
+    "status": "reconciled",
+    "terminal_publications": [],
+}
+passed("historical inspection is stable and owner reconciliation requires authority")
 
 assert passes == 28
 print(f"PASS  {passes} deterministic evaluation-input claim ledger checks")

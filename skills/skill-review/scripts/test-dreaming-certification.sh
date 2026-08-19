@@ -806,6 +806,227 @@ claims.complete_claim_ready(
     review_receipt_sha256s=reviews,
 )
 PY
+python3 - "$EVAL" <<'PY'
+import importlib.util
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+path = sys.argv[1]
+spec = importlib.util.spec_from_file_location("skill_evaluation", path)
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+pending = module.pending_terminal_publications()
+assert len(pending) == 1
+first = module.publish_pending_terminal(pending[0])
+second = module.publish_pending_terminal(pending[0])
+assert first["transition_id"] == second["transition_id"]
+assert first["publication"] == "published"
+assert second["publication"] == "replayed"
+assert module.pending_terminal_publications() == []
+original_state = Path(module.os.environ["SKILLS_STATE_DIR"])
+module.os.environ["SKILLS_STATE_DIR"] = str(
+    original_state.parent / "terminal-recovery-state"
+)
+
+def sha(label):
+    payload = json.dumps(
+        {"fixture": label}, sort_keys=True, separators=(",", ":")
+    ).encode()
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+def make_skill(label):
+    skill = Path(module.os.environ["SKILLS_STATE_DIR"]).parent / label
+    skill.mkdir(parents=True)
+    skill.joinpath("SKILL.md").write_text(
+        f"---\nname: {label}\ndescription: Fixture.\n---\n\nFixture.\n"
+    )
+    return skill
+
+invalid_skill = make_skill("terminal-invalid")
+invalid_candidate, _ = module.candidate_id(invalid_skill)
+invalid_claim = module.reserve_claim(
+    skill_path=str(invalid_skill),
+    skill_key=module.latest_key(str(invalid_skill)),
+    candidate_id=invalid_candidate,
+    owner_run_id="terminal-invalid-run",
+    author_model="terminal-invalid-author",
+    reviewer_a_model="terminal-invalid-review-a",
+    reviewer_b_model="terminal-invalid-review-b",
+)
+try:
+    module.prepare_claim_dispatch(
+        claim_id=invalid_claim["claim_id"],
+        skill_path=str(invalid_skill),
+        skill_key=invalid_claim["skill_key"],
+        candidate_id=invalid_candidate,
+        slot_name="author",
+        model="wrong-author",
+        packet_id=sha("invalid-packet"),
+        manifest_sha256=None,
+        validation_receipt_sha256=None,
+        requested_token_budget=100,
+        requested_timeout_seconds=60,
+    )
+except module.ClaimLedgerError:
+    pass
+else:
+    raise AssertionError("invalid terminal fixture did not close")
+
+insufficient_skill = make_skill("terminal-insufficient")
+insufficient_candidate, _ = module.candidate_id(insufficient_skill)
+insufficient_claim = module.reserve_claim(
+    skill_path=str(insufficient_skill),
+    skill_key=module.latest_key(str(insufficient_skill)),
+    candidate_id=insufficient_candidate,
+    owner_run_id="terminal-insufficient-run",
+    author_model="terminal-insufficient-author",
+    reviewer_a_model="terminal-insufficient-review-a",
+    reviewer_b_model="terminal-insufficient-review-b",
+)
+packet_id = sha("insufficient-packet")
+module.prepare_claim_dispatch(
+    claim_id=insufficient_claim["claim_id"],
+    skill_path=str(insufficient_skill),
+    skill_key=insufficient_claim["skill_key"],
+    candidate_id=insufficient_candidate,
+    slot_name="author",
+    model="terminal-insufficient-author",
+    packet_id=packet_id,
+    manifest_sha256=None,
+    validation_receipt_sha256=None,
+    requested_token_budget=100,
+    requested_timeout_seconds=60,
+)
+module.complete_claim_slot(
+    claim_id=insufficient_claim["claim_id"],
+    slot_name="author",
+    operation={
+        "operation": "author",
+        "model": "terminal-insufficient-author",
+        "observed_model": "terminal-insufficient-author",
+        "packet_id": packet_id,
+        "operation_id": sha("insufficient-operation"),
+        "usage": {
+            "normalized_tokens": 10,
+            "input_tokens": 9,
+            "output_tokens": 1,
+        },
+        "billing": {
+            "status": "unavailable",
+            "cost_usd": None,
+            "provider": "copilot",
+            "unavailable_reason": "provider_telemetry_unavailable",
+            "native_line_item_id": None,
+            "native_event_sha256": None,
+            "native_event_size": None,
+        },
+        "elapsed_ms": 100,
+    },
+    manifest_sha256=None,
+    terminal_reason="insufficient_information",
+)
+pending_values = module.pending_terminal_publications()
+terminal_results = {
+    item["state"]: item
+    for item in (
+        module.publish_pending_terminal(publication)
+        for publication in pending_values
+    )
+}
+assert set(terminal_results) == {"invalid", "insufficient_information"}
+assert module.pending_terminal_publications() == []
+invalid_publication = next(
+    item for item in pending_values if item["readiness_state"] == "invalid"
+)
+module.write_input_transition(
+    invalid_skill,
+    state="invalid",
+    reason="owner_interrupted",
+    input_manifest_sha256=None,
+    validation_receipt_sha256=None,
+    review_receipt_sha256s=[],
+    created_at="2026-08-18T00:00:01+00:00",
+    claim_id=invalid_publication["claim_id"],
+)
+pointer_before = module.load_input_current_pointer(invalid_skill)
+try:
+    module.publish_pending_terminal(invalid_publication)
+except module.EvaluationError as error:
+    assert "not the unique history tip" in str(error)
+else:
+    raise AssertionError("recovery repointed a non-tip terminal transition")
+assert module.load_input_current_pointer(invalid_skill) == pointer_before
+
+fenced_skill = make_skill("terminal-fenced")
+fenced_candidate, _ = module.candidate_id(fenced_skill)
+fenced_claim = module.reserve_claim(
+    skill_path=str(fenced_skill),
+    skill_key=module.latest_key(str(fenced_skill)),
+    candidate_id=fenced_candidate,
+    owner_run_id="terminal-fenced-run",
+    author_model="terminal-fenced-author",
+    reviewer_a_model="terminal-fenced-review-a",
+    reviewer_b_model="terminal-fenced-review-b",
+)
+try:
+    module.prepare_claim_dispatch(
+        claim_id=fenced_claim["claim_id"],
+        skill_path=str(fenced_skill),
+        skill_key=fenced_claim["skill_key"],
+        candidate_id=fenced_candidate,
+        slot_name="author",
+        model="wrong-fenced-author",
+        packet_id=sha("fenced-packet"),
+        manifest_sha256=None,
+        validation_receipt_sha256=None,
+        requested_token_budget=100,
+        requested_timeout_seconds=60,
+    )
+except module.ClaimLedgerError:
+    pass
+else:
+    raise AssertionError("fenced terminal fixture did not close")
+fenced_publication = module.pending_terminal_publications()[0]
+
+checks = 0
+def lose_before_pointer():
+    global checks
+    checks += 1
+    if checks == 2:
+        raise module.EvaluationError("fixture lease lost")
+
+try:
+    module.publish_pending_terminal(
+        fenced_publication, authority_check=lose_before_pointer
+    )
+except module.EvaluationError as error:
+    assert "fixture lease lost" in str(error)
+else:
+    raise AssertionError("publication ignored lease loss before pointer write")
+assert module.load_input_current_pointer(fenced_skill) is None
+
+checks = 0
+def lose_before_ack():
+    global checks
+    checks += 1
+    if checks == 2:
+        raise module.EvaluationError("fixture halt asserted")
+
+try:
+    module.publish_pending_terminal(
+        fenced_publication, authority_check=lose_before_ack
+    )
+except module.EvaluationError as error:
+    assert "fixture halt asserted" in str(error)
+else:
+    raise AssertionError("publication ignored halt before acknowledgement")
+assert module.load_input_current_pointer(fenced_skill) is not None
+assert len(module.pending_terminal_publications()) == 1
+assert module.publish_pending_terminal(fenced_publication)["publication"] == "replayed"
+assert module.pending_terminal_publications() == []
+PY
 ready="$(
   python3 - "$EVAL" "$author_claim_id" "$AUTHORING/skill" \
     "$manifest" "$author_validation_id" "$review_one_id" "$review_two_id" <<'PY'
@@ -869,7 +1090,7 @@ assert len(list(transition_path.parent.glob("*.json"))) == len(transitions)
 print(json.dumps(results[0], sort_keys=True, separators=(",", ":")))
 PY
 )"
-pass "concurrent claim readiness publishes one tip and recovers an interrupted pointer"
+pass "pending recovery and concurrent readiness publish one tip and recover an interrupted pointer"
 python3 - "$registration" "$source_catalog_id" <<'PY'
 import json
 import sys
