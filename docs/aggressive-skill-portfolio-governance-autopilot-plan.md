@@ -357,6 +357,29 @@
   unresolved material defect. The ledger truthfully records scheduled-owner
   lease integration as `pending`; repair/re-review lineage and existing-owner
   orchestration remain the next prerequisites.
+- Repaired evaluation-input lineage is implemented and committed locally on the
+  isolated preview branch as `80efcb2`. Schema version 2 enables the fixed
+  `repair`, `rereview_a`, and `rereview_b` slots only after both initial
+  reviews complete with at least one rejection. Repair reuses the exact
+  retained author model; re-reviews reuse the two exact original reviewer
+  identities. A repaired manifest recursively binds the initial manifest,
+  validation, canonical review set, original review receipts, repair packet,
+  draft, operation, adapter, and retained policy, compilation, routing,
+  harness, fixture, grader, and authoring objects. Original review receipts
+  remain immutable history but cannot authorize repaired readiness. One
+  successful repaired lifecycle consumes exactly six model operations; a
+  repair or re-review timeout, malformed result, unknown usage, refusal, or
+  budget breach remains permanently spent, and insufficient repair information
+  is terminal and non-ready. Immutable repaired-manifest replay no longer
+  depends on mutable claim status, so a later rejecting re-review cannot make a
+  published manifest unverifiable. A mismatched repair-author model refuses
+  before dispatch without consuming or invalidating the claim. Validation
+  passes 25 focused claim-ledger checks, 41 certification checks, 26
+  vendor-adapter tests, 23 evaluator regressions, Python compilation, and the
+  diff check. Five paired implementation-review slices closed the mutable
+  claim-status coupling and pre-dispatch model-binding findings with no
+  unresolved material defect. Existing-owner lease integration remains the
+  next prerequisite.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
