@@ -13,7 +13,7 @@ TMP="$(mktemp -d "$TEST_ROOT/dreaming-certification.XXXXXX")"
 cleanup() {
   local rc=$?
   trap - EXIT
-  finish_test_work "$rc" "$TMP" "certification"
+  finish_test_work "$rc" "$TMP" "certification" 1
   exit "$rc"
 }
 trap cleanup EXIT

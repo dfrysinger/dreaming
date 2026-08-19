@@ -472,6 +472,14 @@ A different object at an existing address, a missing object, a digest or size
 mismatch, an unexpected role, an absolute or escaping logical path, or an
 unknown schema refuses the input set.
 
+Bootstrap reads each mutable source pack through descriptor-relative,
+no-follow traversal and retains the opened file identity through the bounded
+read. It semantically validates the staged pack before publication, removes
+owner-write permission from every content file and nested directory before
+publication, atomically renames the complete root, and immediately removes
+owner-write permission from the published root. The inherited writer lease
+excludes another Dreaming writer throughout that boundary.
+
 The six primary roles are suite, policy, compilation, routing, authoring
 catalog, and harness. A manifest may also contain repeated fixture entries
 beneath `fixtures/` and grader entries beneath `graders/`. These support trees

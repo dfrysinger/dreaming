@@ -18,6 +18,7 @@ import importlib.util
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -566,6 +567,33 @@ class RuntimeTest(unittest.TestCase):
                 installed_skill_roots=[self.paths.skills],
             )
         extra.unlink()
+        malformed = json.loads(original_manifest)
+        malformed["files"].append(
+            {
+                "role": "fixture",
+                "path": ".",
+                "size": 0,
+                "media_type": "application/octet-stream",
+                "sha256": "sha256:" + "0" * 64,
+            }
+        )
+        malformed["files"].sort(
+            key=lambda item: (item["role"], item["path"])
+        )
+        malformed_bytes = runtime_module.canonical(malformed)
+        manifest_path.write_bytes(malformed_bytes)
+        malformed_entry = {
+            **entry,
+            "manifest_sha256": "sha256:"
+            + hashlib.sha256(malformed_bytes).hexdigest(),
+        }
+        with self.assertRaisesRegex(RuntimeFailure, "is malformed"):
+            runtime_module.validate_evaluation_input_capability(
+                owner,
+                malformed_entry,
+                installed_skill_roots=[self.paths.skills],
+            )
+        manifest_path.write_bytes(original_manifest)
         fake_runtime = self.case / "installed" / "dreaming-core.py"
         fake_runtime.parent.mkdir()
         fake_runtime.write_text("")
@@ -618,6 +646,10 @@ class RuntimeTest(unittest.TestCase):
         (source / "fixtures" / "synthetic.json").write_bytes(
             runtime_module.canonical({"fixture": "synthetic"})
         )
+        (source / "fixtures" / "nested").mkdir()
+        (source / "fixtures" / "nested" / "second.json").write_bytes(
+            runtime_module.canonical({"fixture": "nested"})
+        )
         (source / "graders" / "contracts.json").write_bytes(
             runtime_module.canonical({"grader": "contracts"})
         )
@@ -643,16 +675,20 @@ class RuntimeTest(unittest.TestCase):
             )
         )
         output = self.case / "sealed-inputs"
-        with mock.patch.object(
-            runtime_module,
-            "validate_sealed_evaluation_input_packet",
-        ) as semantic:
-            result = runtime_module.seal_evaluation_input_root(
-                source_root,
-                plan,
-                output,
-                installed_skill_roots=[skill],
-            )
+        prior_umask = os.umask(0o002)
+        try:
+            with mock.patch.object(
+                runtime_module,
+                "validate_sealed_evaluation_input_packet",
+            ) as semantic:
+                result = runtime_module.seal_evaluation_input_root(
+                    source_root,
+                    plan,
+                    output,
+                    installed_skill_roots=[skill],
+                )
+        finally:
+            os.umask(prior_umask)
         self.assertEqual(result["status"], "sealed")
         self.assertEqual(result["capability_ids"], [capability_id])
         semantic.assert_called_once()
@@ -677,7 +713,25 @@ class RuntimeTest(unittest.TestCase):
                 for item in manifest["files"]
                 if item["role"] in {"fixture", "grader"}
             ),
-            ["fixture", "grader"],
+            ["fixture", "fixture", "grader"],
+        )
+        self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o500)
+        self.assertEqual(
+            stat.S_IMODE(
+                (output / entry["directory"] / "fixtures").stat().st_mode
+            ),
+            0o500,
+        )
+        self.assertEqual(
+            stat.S_IMODE(
+                (
+                    output
+                    / entry["directory"]
+                    / "fixtures"
+                    / "nested"
+                ).stat().st_mode
+            ),
+            0o500,
         )
         with self.assertRaisesRegex(
             RuntimeFailure, "roots are unsafe or overlapping"
@@ -689,10 +743,48 @@ class RuntimeTest(unittest.TestCase):
                 installed_skill_roots=[skill],
             )
         fixture = output / entry["directory"] / "fixtures" / "synthetic.json"
+        os.chmod(fixture, 0o600)
         fixture.write_bytes(b"x" * fixture.stat().st_size)
         with self.assertRaisesRegex(RuntimeFailure, "fixture identity is stale"):
             runtime_module.validate_evaluation_input_capability(
                 owner, entry, installed_skill_roots=[skill]
+            )
+
+        reserved_plan = self.case / "reserved-plan.json"
+        reserved = json.loads(plan.read_text())
+        reserved["capabilities"][0]["directory"] = (
+            runtime_module.EVALUATION_INPUT_INDEX_NAME
+        )
+        reserved_plan.write_bytes(runtime_module.canonical(reserved))
+        with self.assertRaisesRegex(RuntimeFailure, "capability 0 is malformed"):
+            runtime_module.validate_evaluation_input_seal_plan(
+                source_root, reserved_plan
+            )
+
+        external = self.case / "external-pack"
+        shutil.copytree(source, external)
+        shutil.rmtree(source)
+        source.symlink_to(external, target_is_directory=True)
+        replacement_output = self.case / "replacement-output"
+        with mock.patch.object(
+            runtime_module,
+            "validate_evaluation_input_seal_plan",
+            return_value=[
+                {
+                    "capability_id": capability_id,
+                    "directory": "capability-000",
+                    "skill_path": str(skill.resolve()),
+                    "source_directory": "pack",
+                }
+            ],
+        ), self.assertRaisesRegex(
+            RuntimeFailure, "source is unavailable"
+        ):
+            runtime_module.seal_evaluation_input_root(
+                source_root,
+                plan,
+                replacement_output,
+                installed_skill_roots=[skill],
             )
 
     def test_evaluation_input_queue_is_same_run_ordered_and_nonpersistent(self) -> None:

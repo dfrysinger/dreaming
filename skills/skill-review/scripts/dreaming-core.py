@@ -2779,6 +2779,7 @@ def validate_evaluation_input_capability(
             or not isinstance(item.get("path"), str)
             or Path(item["path"]).is_absolute()
             or Path(item["path"]).as_posix() != item["path"]
+            or not Path(item["path"]).parts
             or ".." in Path(item["path"]).parts
             or not isinstance(item.get("size"), int)
             or isinstance(item["size"], bool)
@@ -2801,11 +2802,17 @@ def validate_evaluation_input_capability(
             or item["path"] in declared_paths
             or (
                 role == "fixture"
-                and logical_path.parts[0] != "fixtures"
+                and (
+                    len(logical_path.parts) < 2
+                    or logical_path.parts[0] != "fixtures"
+                )
             )
             or (
                 role == "grader"
-                and logical_path.parts[0] != "graders"
+                and (
+                    len(logical_path.parts) < 2
+                    or logical_path.parts[0] != "graders"
+                )
             )
         ):
             raise RuntimeFailure(
@@ -2991,6 +2998,7 @@ def validate_evaluation_input_seal_plan(
                 r"[a-z0-9][a-z0-9._-]{0,127}", str(item.get("directory"))
             )
             is None
+            or item.get("directory") == EVALUATION_INPUT_INDEX_NAME
             or not isinstance(item.get("source_directory"), str)
             or Path(item["source_directory"]).is_absolute()
             or Path(item["source_directory"]).as_posix()
@@ -3035,7 +3043,7 @@ def validate_evaluation_input_seal_plan(
                 "capability_id": capability_id,
                 "directory": directory,
                 "skill_path": str(skill_path.resolve()),
-                "source_directory": str(source_directory.resolve()),
+                "source_directory": item["source_directory"],
             }
         )
     if normalized != sorted(
@@ -3048,37 +3056,216 @@ def validate_evaluation_input_seal_plan(
     return normalized
 
 
-def copy_evaluation_input_seal_file(
-    source: Path,
-    destination: Path,
-    *,
-    executable: bool = False,
-) -> dict[str, Any]:
-    if source.is_symlink() or not source.is_file():
-        raise RuntimeFailure(
-            "evaluation-input-seal-invalid",
-            "evaluation-input seal source is not a regular file",
+def read_evaluation_input_seal_source_tree(
+    source_root: Path,
+    source_directory: str,
+) -> tuple[dict[str, bytes], set[str]]:
+    directory_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+    file_flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        file_flags |= os.O_NOFOLLOW
+
+    def safe_metadata(metadata: os.stat_result, *, directory: bool) -> bool:
+        expected = stat.S_ISDIR if directory else stat.S_ISREG
+        return (
+            expected(metadata.st_mode)
+            and metadata.st_uid == os.getuid()
+            and metadata.st_mode & stat.S_IRUSR
+            and (not directory or metadata.st_mode & stat.S_IXUSR)
+            and not metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
         )
-    try:
-        metadata = source.stat()
-        if metadata.st_size > EVALUATION_INPUT_MAX_FILE_BYTES:
+
+    def read_file(
+        parent_descriptor: int,
+        name: str,
+        listed: os.stat_result,
+        logical_path: str,
+    ) -> bytes:
+        descriptor = os.open(
+            name, file_flags, dir_fd=parent_descriptor
+        )
+        try:
+            before = os.fstat(descriptor)
+            if (
+                not safe_metadata(before, directory=False)
+                or (before.st_dev, before.st_ino)
+                != (listed.st_dev, listed.st_ino)
+                or before.st_size > EVALUATION_INPUT_MAX_FILE_BYTES
+            ):
+                raise RuntimeFailure(
+                    "evaluation-input-seal-invalid",
+                    f"evaluation-input seal source file is unsafe: {logical_path}",
+                )
+            chunks = []
+            remaining = EVALUATION_INPUT_MAX_FILE_BYTES + 1
+            while remaining:
+                chunk = os.read(descriptor, min(65_536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            content = b"".join(chunks)
+            after = os.fstat(descriptor)
+            stable = (
+                before.st_dev,
+                before.st_ino,
+                before.st_size,
+                before.st_mtime_ns,
+                before.st_ctime_ns,
+            ) == (
+                after.st_dev,
+                after.st_ino,
+                after.st_size,
+                after.st_mtime_ns,
+                after.st_ctime_ns,
+            )
+            if (
+                not stable
+                or len(content) != before.st_size
+                or len(content) > EVALUATION_INPUT_MAX_FILE_BYTES
+            ):
+                raise RuntimeFailure(
+                    "evaluation-input-seal-invalid",
+                    f"evaluation-input seal source changed while being read: {logical_path}",
+                )
+            return content
+        finally:
+            os.close(descriptor)
+
+    def scan(
+        descriptor: int,
+        prefix: Path,
+        files: dict[str, bytes],
+        directories: set[str],
+    ) -> None:
+        try:
+            names = sorted(os.listdir(descriptor))
+        except OSError as error:
             raise RuntimeFailure(
                 "evaluation-input-seal-invalid",
-                "evaluation-input seal source exceeds its size bound",
+                f"evaluation-input seal source is unreadable: {error}",
+            ) from error
+        for name in names:
+            if name in {"", ".", ".."} or "/" in name:
+                raise RuntimeFailure(
+                    "evaluation-input-seal-invalid",
+                    "evaluation-input seal source has an invalid entry",
+                )
+            logical = prefix / name
+            logical_text = logical.as_posix()
+            try:
+                metadata = os.stat(
+                    name, dir_fd=descriptor, follow_symlinks=False
+                )
+            except OSError as error:
+                raise RuntimeFailure(
+                    "evaluation-input-seal-invalid",
+                    f"evaluation-input seal source is unreadable: {error}",
+                ) from error
+            if stat.S_ISREG(metadata.st_mode):
+                files[logical_text] = read_file(
+                    descriptor, name, metadata, logical_text
+                )
+            elif stat.S_ISDIR(metadata.st_mode):
+                child = os.open(name, directory_flags, dir_fd=descriptor)
+                try:
+                    opened = os.fstat(child)
+                    if (
+                        not safe_metadata(opened, directory=True)
+                        or (opened.st_dev, opened.st_ino)
+                        != (metadata.st_dev, metadata.st_ino)
+                    ):
+                        raise RuntimeFailure(
+                            "evaluation-input-seal-invalid",
+                            f"evaluation-input seal source directory is unsafe: {logical_text}",
+                        )
+                    directories.add(logical_text)
+                    scan(child, logical, files, directories)
+                finally:
+                    os.close(child)
+            else:
+                raise RuntimeFailure(
+                    "evaluation-input-seal-invalid",
+                    f"evaluation-input seal source entry is unsafe: {logical_text}",
+                )
+
+    descriptor = os.open(source_root, directory_flags)
+    try:
+        if not safe_metadata(os.fstat(descriptor), directory=True):
+            raise RuntimeFailure(
+                "evaluation-input-seal-invalid",
+                "evaluation-input seal source root is unsafe",
             )
-        content = source.read_bytes()
+        current = descriptor
+        owned: list[int] = []
+        try:
+            for part in Path(source_directory).parts:
+                child = os.open(part, directory_flags, dir_fd=current)
+                metadata = os.fstat(child)
+                if not safe_metadata(metadata, directory=True):
+                    os.close(child)
+                    raise RuntimeFailure(
+                        "evaluation-input-seal-invalid",
+                        "evaluation-input seal source directory is unsafe",
+                    )
+                owned.append(child)
+                current = child
+            files: dict[str, bytes] = {}
+            directories: set[str] = set()
+            scan(current, Path(), files, directories)
+            return files, directories
+        finally:
+            for child in reversed(owned):
+                os.close(child)
     except OSError as error:
         raise RuntimeFailure(
             "evaluation-input-seal-invalid",
-            f"evaluation-input seal source is unreadable: {error}",
+            f"evaluation-input seal source is unavailable: {error}",
         ) from error
-    if len(content) != metadata.st_size:
+    finally:
+        os.close(descriptor)
+
+
+def make_evaluation_input_seal_directory(path: Path, root: Path) -> None:
+    missing = []
+    current = path
+    while current != root and not current.exists():
+        missing.append(current)
+        current = current.parent
+    if (
+        current.is_symlink()
+        or not current.is_dir()
+        or not current.resolve().is_relative_to(root.resolve())
+    ):
         raise RuntimeFailure(
             "evaluation-input-seal-invalid",
-            "evaluation-input seal source changed while being read",
+            "evaluation-input seal destination escapes its staging root",
         )
-    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    os.chmod(destination.parent, 0o700)
+    os.chmod(current, 0o700)
+    for directory in reversed(missing):
+        directory.mkdir(mode=0o700)
+        os.chmod(directory, 0o700)
+
+
+def copy_evaluation_input_seal_file(
+    content: bytes,
+    destination: Path,
+    staging_root: Path,
+    *,
+    executable: bool = False,
+) -> dict[str, Any]:
+    if len(content) > EVALUATION_INPUT_MAX_FILE_BYTES:
+        raise RuntimeFailure(
+            "evaluation-input-seal-invalid",
+            "evaluation-input seal source exceeds its size bound",
+        )
+    make_evaluation_input_seal_directory(
+        destination.parent, staging_root
+    )
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -3094,6 +3281,79 @@ def copy_evaluation_input_seal_file(
         "size": len(content),
         "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
     }
+
+
+def make_evaluation_input_seal_read_only(root: Path) -> None:
+    inventory = sorted(
+        root.rglob("*"), key=lambda path: len(path.parts), reverse=True
+    )
+    for path in inventory:
+        if path.is_symlink():
+            raise RuntimeFailure(
+                "evaluation-input-seal-invalid",
+                "evaluation-input seal staging content became a symlink",
+            )
+        executable = bool(path.stat().st_mode & stat.S_IXUSR)
+        os.chmod(
+            path,
+            0o500 if path.is_dir() or executable else 0o400,
+        )
+    os.chmod(root, 0o700)
+
+
+def read_evaluation_input_seal_trusted_file(path: Path) -> bytes:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    try:
+        descriptor = os.open(path, flags)
+        try:
+            before = os.fstat(descriptor)
+            if (
+                not stat.S_ISREG(before.st_mode)
+                or before.st_size > EVALUATION_INPUT_MAX_FILE_BYTES
+            ):
+                raise RuntimeFailure(
+                    "evaluation-input-seal-invalid",
+                    "evaluation-input trusted source is unsafe",
+                )
+            content = b""
+            while len(content) <= EVALUATION_INPUT_MAX_FILE_BYTES:
+                chunk = os.read(descriptor, 65_536)
+                if not chunk:
+                    break
+                content += chunk
+            after = os.fstat(descriptor)
+            if (
+                len(content) != before.st_size
+                or len(content) > EVALUATION_INPUT_MAX_FILE_BYTES
+                or (
+                    before.st_dev,
+                    before.st_ino,
+                    before.st_size,
+                    before.st_mtime_ns,
+                    before.st_ctime_ns,
+                )
+                != (
+                    after.st_dev,
+                    after.st_ino,
+                    after.st_size,
+                    after.st_mtime_ns,
+                    after.st_ctime_ns,
+                )
+            ):
+                raise RuntimeFailure(
+                    "evaluation-input-seal-invalid",
+                    "evaluation-input trusted source changed while being read",
+                )
+            return content
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        raise RuntimeFailure(
+            "evaluation-input-seal-invalid",
+            f"evaluation-input trusted source is unavailable: {error}",
+        ) from error
 
 
 def validate_sealed_evaluation_input_packet(
@@ -3187,6 +3447,7 @@ def seal_evaluation_input_root(
             "evaluation-input-seal-invalid",
             "evaluation-input evaluator is unavailable",
         )
+    harness_content = read_evaluation_input_seal_trusted_file(harness)
     entries = []
     with tempfile.TemporaryDirectory(
         prefix=".evaluation-input-seal.", dir=output_parent
@@ -3194,28 +3455,72 @@ def seal_evaluation_input_root(
         staging = Path(temporary) / "root"
         staging.mkdir(mode=0o700)
         for capability in capabilities:
-            source_directory = Path(capability["source_directory"])
+            source_files, source_directories = (
+                read_evaluation_input_seal_source_tree(
+                    source_root, capability["source_directory"]
+                )
+            )
+            primary_names = {
+                "suite": "suite.json",
+                "policy": "policy.json",
+                "compilation": "compilation.json",
+                "routing": "routing.json",
+                "catalog": "authoring-catalog.json",
+            }
+            required_primary = set(primary_names.values())
+            support_files = {
+                role: sorted(
+                    path
+                    for path in source_files
+                    if path.startswith(f"{directory_name}/")
+                )
+                for role, directory_name in (
+                    ("fixture", "fixtures"),
+                    ("grader", "graders"),
+                )
+            }
+            allowed_directories = {
+                path
+                for path in source_directories
+                if path == "fixtures"
+                or path.startswith("fixtures/")
+                or path == "graders"
+                or path.startswith("graders/")
+            }
+            if (
+                not required_primary <= set(source_files)
+                or any(not paths for paths in support_files.values())
+                or set(source_directories) != allowed_directories
+                or set(source_files)
+                != required_primary
+                | set(support_files["fixture"])
+                | set(support_files["grader"])
+            ):
+                raise RuntimeFailure(
+                    "evaluation-input-seal-invalid",
+                    "evaluation-input seal source pack inventory is malformed",
+                )
             destination = staging / capability["directory"]
             destination.mkdir(mode=0o700)
             primary_sources = {
-                "suite": source_directory / "suite.json",
-                "policy": source_directory / "policy.json",
-                "compilation": source_directory / "compilation.json",
-                "routing": source_directory / "routing.json",
-                "catalog": source_directory / "authoring-catalog.json",
-                "harness": harness,
+                role: source_files[name]
+                for role, name in primary_names.items()
             }
+            primary_sources["harness"] = harness_content
             primary_files: dict[str, Path] = {}
             records = []
-            for role, source in primary_sources.items():
+            for role, content in primary_sources.items():
                 relative = (
                     "skill-evaluation-harness.py"
                     if role == "harness"
-                    else source.name
+                    else primary_names[role]
                 )
                 target = destination / relative
                 facts = copy_evaluation_input_seal_file(
-                    source, target, executable=role == "harness"
+                    content,
+                    target,
+                    staging,
+                    executable=role == "harness",
                 )
                 primary_files[role] = harness if role == "harness" else target
                 records.append(
@@ -3231,33 +3536,11 @@ def seal_evaluation_input_root(
                 ("fixture", "fixtures"),
                 ("grader", "graders"),
             ):
-                source_tree = source_directory / directory_name
-                if source_tree.is_symlink() or not source_tree.is_dir():
-                    raise RuntimeFailure(
-                        "evaluation-input-seal-invalid",
-                        f"evaluation-input {role} tree is unavailable",
-                    )
-                inventory = sorted(
-                    source_tree.rglob("*"),
-                    key=lambda path: path.relative_to(source_tree).as_posix(),
-                )
-                files = [path for path in inventory if path.is_file()]
-                if (
-                    not files
-                    or any(path.is_symlink() for path in inventory)
-                    or any(not path.is_file() and not path.is_dir() for path in inventory)
-                ):
-                    raise RuntimeFailure(
-                        "evaluation-input-seal-invalid",
-                        f"evaluation-input {role} tree is malformed",
-                    )
-                for source in files:
-                    relative = (
-                        Path(directory_name)
-                        / source.relative_to(source_tree)
-                    ).as_posix()
+                for relative in support_files[role]:
                     facts = copy_evaluation_input_seal_file(
-                        source, destination / relative
+                        source_files[relative],
+                        destination / relative,
+                        staging,
                     )
                     records.append(
                         {
@@ -3306,7 +3589,9 @@ def seal_evaluation_input_root(
                 indexed[capability["capability_id"]],
                 installed_skill_roots=installed_roots,
             )
+        make_evaluation_input_seal_read_only(staging)
         os.replace(staging, output_root)
+        os.chmod(output_root, 0o500)
     return {
         "status": "sealed",
         "output_root": str(output_root.resolve()),
