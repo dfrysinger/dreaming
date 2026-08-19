@@ -17,6 +17,7 @@
 
 - Branch: `feature/multi-cli-dreaming`
 - Reviewed governance design commit: `6f82ab2`
+- Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
 - Capacity natural-tick watcher evidence:
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/behavior-validation-review-capacity-f2b4fcb/traces/SC-010/04-natural-successor.json`
