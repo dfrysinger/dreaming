@@ -63,13 +63,21 @@
   `20260819T043509Z-rollback-27327` again restored daily 09:15 behind halt,
   verified the managed instruction, preserved the adapter and all 426 evidence
   hashes, and rejected enable before self-test. Its full restored-generation
+  self-test ended with zero failures; only then was the daily generation
+  enabled. The adapter and all 426 evidence hashes remained identical after
+  enable.
+- Final activation generation `20260819T053804Z-install-81411` was installed
+  from reviewed Mac mini commit `6d27fff` behind halt. The commit descends from
+  hard-timeout fix `1a10787`, its sole Dreaming plist has
+  `StartInterval=14400` and `RunAtLoad=false` with no daily trigger, managed
+  instructions verify, the adapter and all 426 evidence hashes remain
+  identical, and enable rejects before self-test. Its full final-candidate
   self-test is currently running. Retained traces are under
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/behavior-validation-review-capacity-f2b4fcb/traces/SC-025/`.
-- Capacity work remaining: let the restored self-test finish without
-  disturbance, enable and verify the restored daily generation, reinstall the
-  reviewed candidate containing `1a10787`, run its self-test and enablement,
-  verify final ownership and `StartInterval=14400`, adjudicate `SC-025`,
-  regenerate the evidence ledger, and make the local proof commit.
+- Capacity work remaining: let the final self-test finish without disturbance,
+  enable only on zero failures, verify final ownership, cadence, dashboard and
+  preserved evidence, adjudicate `SC-025`, regenerate the evidence ledger, and
+  make the local proof commit.
 - The isolated governance preview is implemented and committed locally as
   `60fb7ce` on `feature/aggressive-skill-governance-preview`. Its manifested
   private snapshot contains one decision for each of 93 enabled canonical
