@@ -19,6 +19,7 @@
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
+- Isolated governance preview tip: `a7880cb`
 - The first natural successor `20260818T220321Z-97940` remains retained as a
   literal `SC-010` `NOT_SUPPORTED` result. It attempted 25 reviews, completed
   24, retained one `executor-timeout`, and ended honestly as `aborted` after
@@ -524,12 +525,32 @@
   and shell syntax checks, and the diff check. Paired implementation review
   closed unbound receipt provenance, malformed nested evidence, and malformed
   plugin-package identity with no unresolved material defect. Model
-  process-group monitoring and one-claim authoring orchestration remain and
-  must be implemented together.
-- Governance work remaining: implement safe case authoring and progress the
-  real zero-use cohort through reviewed readiness, then execute the evaluation
-  queue under explicit daily
-  operation, normalized-token, and elapsed-time budgets. After that, prove
+  process-group monitoring and one-claim authoring orchestration are provided
+  by the next committed unit.
+- Bounded evaluation-input authoring orchestration is implemented and committed
+  locally on the isolated preview branch as `a7880cb`. The core selects at most
+  the first authorable row from the same-run in-memory queue, revalidates its
+  sealed six-file input set, and launches one long-lived evaluator lifecycle in
+  a separate process group. The evaluator reserves one scheduled claim, records
+  the exact writer, run, process, process-group, boot, and configuration fence,
+  then performs authoring, deterministic validation, two independent reviews,
+  at most one same-author repair, and two independent rereviews before
+  publishing one retained terminal result. Claim transactions recheck the
+  inherited authority inside the transaction immediately before commit.
+  Halt, lease loss, and the 25-minute bound terminate the identity-matched
+  process group; lease loss permits no terminal write, while halt or elapsed
+  exhaustion with a retained lease closes the exact owner-run claim even if
+  interruption occurred before the private claim handoff appeared. Reviewer
+  slot dispatch uses the ledger's canonical model order. Validation passes 48
+  focused claim and owner checks, 41 certification checks, 46 core checks,
+  Python and shell syntax checks, and the diff check. Finding-scoped Opus and
+  Terra closure resolved model-order mismatch, commit-time authority loss,
+  claim-handoff interruption, reused process-group identity, and unbounded
+  descendant-held pipe waits with no unresolved material defect.
+- Governance work remaining: bootstrap the sealed inputs for the real zero-use
+  cohort, progress that cohort through reviewed readiness, then execute the
+  evaluation queue under explicit daily operation, normalized-token, and
+  elapsed-time budgets. After that, prove
   governed user intents, reversible personal withdrawal/archive/restore, and qualified whole-plugin
   disable/restore under `PORT-CHK-01` through `PORT-CHK-14`. Individual plugin
   skill disablement remains recommendation-only unless native CLI support is
