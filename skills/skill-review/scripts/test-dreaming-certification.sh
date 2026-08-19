@@ -193,10 +193,28 @@ config={"schema_version":1,"kind":"dreaming_evaluation_compilation",
  "case_runtime":runtime,"rubric":rubric,"executors":compiled_executors,
  "comparator":comparator}
 config_root.joinpath("compilation.json").write_bytes(canonical(config)+b"\n")
-config_root.joinpath("fixtures/default.json").write_bytes(
- canonical({"schema_version":1,"kind":"synthetic_fixture","fixture":fixture})+b"\n")
+fixture_entries=[]
+for fixture_id in sorted({item["fixture"] for item in runtime}):
+    fixture_path=config_root/f"fixtures/{fixture_id}.json"
+    fixture_content=canonical(
+        {"schema_version":1,"kind":"synthetic_fixture","fixture":fixture_id}
+    )+b"\n"
+    fixture_path.write_bytes(fixture_content)
+    fixture_entries.append(
+        {"id":fixture_id,"path":fixture_path.relative_to(config_root/"fixtures").as_posix(),
+         "sha256":"sha256:"+hashlib.sha256(fixture_content).hexdigest(),
+         "size":len(fixture_content),"source_kind":"synthetic",
+         "description":f"Synthetic deterministic {fixture_id} trial fixture."}
+    )
 config_root.joinpath("graders/contracts.json").write_bytes(
  canonical({"schema_version":1,"kind":"deterministic_grader_contracts","graders":graders})+b"\n")
+catalog={"schema_version":1,"kind":"safe_evaluation_source_catalog",
+ "fixtures":fixture_entries,
+ "graders":[{"id":item["id"],"objective":True,
+             "description":f"Deterministic {item['type']} outcome check."} for item in graders],
+ "rubric":{"identity":sha(rubric),
+           "description":"Allowlisted paired quality comparison rubric."}}
+config_root.joinpath("authoring-catalog.json").write_bytes(canonical(catalog))
 PY
 }
 
@@ -293,6 +311,99 @@ for path in sorted(root.rglob("*")):
 print(digest.hexdigest())
 PY
 }
+
+author_packet() {
+  local root="$1" output="$2"
+  "$EVAL" v2-input-author-packet "$root/skill" \
+    --suite "$root/skill/.skill-evaluation-cases.json" \
+    --policy "$root/skill/.skill-evaluation-policy.json" \
+    --config "$root/config/compilation.json" \
+    --routing "$root/config/routing.json" \
+    --harness "$HARNESS" \
+    --catalog "$root/config/authoring-catalog.json" \
+    --output "$output"
+}
+
+AUTHORING="$TMP/authoring"
+make_fixture "$AUTHORING"
+authoring_skill_before="$(skill_tree_digest "$AUTHORING/skill")"
+author_packet "$AUTHORING" "$AUTHORING/packet.json" >/dev/null
+[[ "$(skill_tree_digest "$AUTHORING/skill")" == "$authoring_skill_before" ]] ||
+  fail "authoring packet changed the candidate root"
+python3 - "$AUTHORING/packet.json" <<'PY'
+import hashlib
+import json
+import sys
+
+packet = json.load(open(sys.argv[1]))
+packet_id = packet.pop("packet_id")
+canonical = json.dumps(packet, sort_keys=True, separators=(",", ":")).encode()
+assert packet_id == "sha256:" + hashlib.sha256(canonical).hexdigest()
+assert packet["kind"] == "safe_evaluation_input_authoring_packet"
+assert packet["skill_contract"]["logical_path"] == "SKILL.md"
+assert packet["candidate_inventory"]
+assert {item["class"] for item in packet["suite_template"]["cases"]} == {
+    "intended", "related", "activation_positive", "activation_negative"
+}
+serialized = json.dumps(packet, sort_keys=True)
+assert "/Users/" not in serialized
+assert '"argv"' not in serialized
+assert "fixture-session" not in serialized
+PY
+
+make_unsafe_authoring_fixture() {
+  local root="$1" mode="$2"
+  make_fixture "$root"
+  python3 - "$root" "$mode" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+mode = sys.argv[2]
+catalog_path = root / "config/authoring-catalog.json"
+catalog = json.loads(catalog_path.read_text())
+if mode == "subjective":
+    catalog["graders"][0]["objective"] = False
+elif mode == "missing":
+    catalog["fixtures"].pop()
+elif mode == "description-token":
+    catalog["fixtures"][0]["description"] = "Copied sk-proj-9fA2bQ7xLm4TzR8vNc1D"
+elif mode == "compilation":
+    config_path = root / "config/compilation.json"
+    config = json.loads(config_path.read_text())
+    config["identity_markers"].append("raw transcript from session")
+    config_path.write_text(json.dumps(config, sort_keys=True, separators=(",", ":")) + "\n")
+elif mode == "grader-tree":
+    (root / "config/graders/contracts.json").write_text(
+        "api_key=grader-tree-secret\n"
+    )
+else:
+    fixture = catalog["fixtures"][0]
+    path = root / "config/fixtures" / fixture["path"]
+    content = {
+        "transcript": b"raw transcript copied from a private session\n",
+        "home": b"/Users/alice/private-state.json\n",
+        "credential": b"api_key=super-secret-value\n",
+        "bare-token": b"sk-proj-9fA2bQ7xLm4TzR8vNc1D\n",
+    }[mode]
+    path.write_bytes(content)
+    fixture["sha256"] = "sha256:" + hashlib.sha256(content).hexdigest()
+    fixture["size"] = len(content)
+catalog_path.write_text(json.dumps(catalog, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+for unsafe in transcript home credential bare-token description-token compilation grader-tree subjective missing; do
+  root="$TMP/authoring-$unsafe"
+  make_unsafe_authoring_fixture "$root" "$unsafe"
+  expect_refusal "authoring-$unsafe" "REFUSED:" \
+    author_packet "$root" "$root/packet.json"
+done
+expect_refusal "authoring-inside-skill" "cannot be written inside the skill root" \
+  author_packet "$AUTHORING" "$AUTHORING/skill/packet.json"
+pass "model-facing authoring packets are candidate-bound, transcript-blind, path-sanitized, and limited to declared safe objective sources"
 
 LOCAL_DEV="$TMP/local-development"
 make_fixture "$LOCAL_DEV"

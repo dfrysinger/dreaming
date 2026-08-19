@@ -51,6 +51,35 @@ CERTIFICATE_STATUSES = {"pass", "regression", "inconclusive", "unavailable"}
 HARNESS_CONTRACT_VERSION = 1
 COMPILATION_SCHEMA_VERSION = 1
 INPUT_REGISTRY_SCHEMA_VERSION = 1
+AUTHORING_CATALOG_SCHEMA_VERSION = 1
+AUTHORING_PACKET_SCHEMA_VERSION = 1
+AUTHORING_FIXTURE_SOURCE_KINDS = {"public", "synthetic"}
+AUTHORING_MAX_SKILL_CONTRACT_BYTES = 131_072
+AUTHORING_MAX_FIXTURE_BYTES = 1_048_576
+AUTHORING_MAX_DESCRIPTION_BYTES = 4_096
+AUTHORING_DENIED_TEXT_PATTERNS = (
+    (re.compile(r"(?i)(?:^|[/\\])(?:users|home)[/\\][^/\\\s]+"), "home path"),
+    (re.compile(r"(?i)(?:^|[/\\])\.copilot[/\\]session-state(?:[/\\]|$)"), "session state"),
+    (re.compile(r"(?i)\b(?:raw[-_ ]?)?transcript(?:s)?\b"), "transcript"),
+    (re.compile(r"(?i)\bdashboard (?:snapshot|export)\b"), "dashboard snapshot"),
+    (re.compile(r"(?i)\buser disposition(?:s)?\b"), "user disposition"),
+    (
+        re.compile(
+            r"(?i)\b(?:password|passwd|api[-_ ]?key|access[-_ ]?token|"
+            r"refresh[-_ ]?token|client[-_ ]?secret|private[-_ ]?key)"
+            r"\s*[:=]\s*[^\s,;]{4,}"
+        ),
+        "credential value",
+    ),
+    (
+        re.compile(
+            r"\b(?:(?:ghp|github_pat)_[A-Za-z0-9_-]{12,}|"
+            r"sk-[A-Za-z0-9][A-Za-z0-9_-]{15,})\b"
+        ),
+        "token",
+    ),
+    (re.compile(r"(?i)\bauthorization:\s*bearer\s+\S+"), "bearer credential"),
+)
 INPUT_REGISTRY_REQUIRED_ROLES = {
     "suite",
     "policy",
@@ -346,6 +375,57 @@ def require_exact_keys(value: dict[str, Any], field: str, keys: set[str]) -> Non
         if missing:
             details.append(f"missing keys {missing}")
         raise EvaluationError(f"{field} has {'; '.join(details)}")
+
+
+def require_authoring_safe_text(value: Any, field: str, *, maximum: int) -> str:
+    text = require_text(value, field)
+    encoded = text.encode("utf-8")
+    if len(encoded) > maximum:
+        raise EvaluationError(f"{field} exceeds the authoring size limit")
+    if any(ord(character) < 32 and character not in "\n\r\t" for character in text):
+        raise EvaluationError(f"{field} contains unsupported control characters")
+    for pattern, label in AUTHORING_DENIED_TEXT_PATTERNS:
+        if pattern.search(text):
+            raise EvaluationError(f"{field} contains forbidden {label} content")
+    return text
+
+
+def reject_authoring_sensitive_bytes(
+    content: bytes, field: str, *, allow_contract_paths: bool = False
+) -> None:
+    sample = content.decode("utf-8", errors="ignore")
+    for pattern, label in AUTHORING_DENIED_TEXT_PATTERNS:
+        if allow_contract_paths and label in {"home path", "session state"}:
+            continue
+        if pattern.search(sample):
+            raise EvaluationError(f"{field} contains forbidden {label} content")
+
+
+def reject_authoring_sensitive_value(value: Any, field: str) -> None:
+    encoded = canonical(value)
+    if len(encoded) > AUTHORING_MAX_FIXTURE_BYTES:
+        raise EvaluationError(f"{field} exceeds the authoring contract size limit")
+
+    def visit(item: Any, item_field: str) -> None:
+        if isinstance(item, dict):
+            for key, child in item.items():
+                visit(child, f"{item_field}.{key}")
+        elif isinstance(item, list):
+            for index, child in enumerate(item):
+                visit(child, f"{item_field}[{index}]")
+        elif isinstance(item, str):
+            if len(item.encode("utf-8")) > AUTHORING_MAX_SKILL_CONTRACT_BYTES:
+                raise EvaluationError(f"{item_field} exceeds the authoring text size limit")
+            if any(
+                ord(character) < 32 and character not in "\n\r\t"
+                for character in item
+            ):
+                raise EvaluationError(
+                    f"{item_field} contains unsupported control characters"
+                )
+            reject_authoring_sensitive_bytes(item.encode("utf-8"), item_field)
+
+    visit(value, field)
 
 
 def validate_suite_grader(value: Any, field: str) -> dict[str, Any]:
@@ -1592,6 +1672,282 @@ def write_input_registry_json(
     )
     create_only_bytes(path, content, field)
     return path, value_sha256
+
+
+def validate_authoring_catalog(
+    path: Path,
+    config_path: Path,
+    config: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    raw = path.read_bytes()
+    catalog = load_json(path)
+    if raw != canonical(catalog):
+        raise EvaluationError("authoring catalog must be canonical JSON")
+    require_exact_keys(
+        catalog,
+        "authoring catalog",
+        {"schema_version", "kind", "fixtures", "graders", "rubric"},
+    )
+    if (
+        catalog.get("schema_version") != AUTHORING_CATALOG_SCHEMA_VERSION
+        or catalog.get("kind") != "safe_evaluation_source_catalog"
+    ):
+        raise EvaluationError("unsupported evaluation-input authoring catalog")
+
+    fixture_values = catalog.get("fixtures")
+    if not isinstance(fixture_values, list) or not fixture_values:
+        raise EvaluationError("authoring catalog.fixtures must be a non-empty list")
+    fixture_root = config_path.parent / "fixtures"
+    actual_fixture_inventory = canonical_file_inventory(fixture_root)
+    fixtures: list[dict[str, Any]] = []
+    fixture_ids: set[str] = set()
+    fixture_inventory: list[dict[str, Any]] = []
+    for index, value in enumerate(fixture_values):
+        field = f"authoring catalog.fixtures[{index}]"
+        if not isinstance(value, dict):
+            raise EvaluationError(f"{field} must be an object")
+        require_exact_keys(
+            value,
+            field,
+            {"id", "path", "sha256", "size", "source_kind", "description"},
+        )
+        fixture_id = require_text(value.get("id"), f"{field}.id")
+        if (
+            fixture_id in fixture_ids
+            or not GRADER_ID_RE.fullmatch(fixture_id)
+        ):
+            raise EvaluationError(f"{field}.id is invalid or duplicated")
+        fixture_ids.add(fixture_id)
+        logical_path = safe_registry_logical_path(value.get("path"), f"{field}.path")
+        source_kind = value.get("source_kind")
+        if source_kind not in AUTHORING_FIXTURE_SOURCE_KINDS:
+            raise EvaluationError(
+                f"{field}.source_kind must be public or synthetic"
+            )
+        item = {
+            "id": fixture_id,
+            "path": logical_path,
+            "sha256": require_sha256(value.get("sha256"), f"{field}.sha256"),
+            "size": require_nonnegative_int(value.get("size"), f"{field}.size"),
+            "source_kind": source_kind,
+            "description": require_authoring_safe_text(
+                value.get("description"),
+                f"{field}.description",
+                maximum=AUTHORING_MAX_DESCRIPTION_BYTES,
+            ),
+        }
+        if item["size"] > AUTHORING_MAX_FIXTURE_BYTES:
+            raise EvaluationError(f"{field} exceeds the authoring fixture size limit")
+        fixture_path = fixture_root / logical_path
+        if fixture_path.is_symlink() or not fixture_path.is_file():
+            raise EvaluationError(f"{field}.path does not name a regular fixture")
+        content = fixture_path.read_bytes()
+        reject_authoring_sensitive_bytes(content, field)
+        if (
+            len(content) != item["size"]
+            or f"sha256:{digest(content)}" != item["sha256"]
+        ):
+            raise EvaluationError(f"{field} digest or size does not match its fixture")
+        fixture_inventory.append(
+            {"path": logical_path, "sha256": item["sha256"], "size": item["size"]}
+        )
+        fixtures.append(item)
+    if fixtures != sorted(fixtures, key=lambda item: item["id"]):
+        raise EvaluationError("authoring catalog.fixtures must use canonical id order")
+    if sorted(fixture_inventory, key=lambda item: item["path"]) != actual_fixture_inventory:
+        raise EvaluationError(
+            "authoring catalog must declare the complete fixture tree exactly"
+        )
+    runtime_fixture_ids = {item["fixture"] for item in config["case_runtime"]}
+    if not runtime_fixture_ids <= fixture_ids:
+        raise EvaluationError(
+            "compilation case runtime uses a fixture absent from the safe catalog"
+        )
+
+    grader_values = catalog.get("graders")
+    if not isinstance(grader_values, list) or not grader_values:
+        raise EvaluationError("authoring catalog.graders must be a non-empty list")
+    graders: list[dict[str, Any]] = []
+    for index, value in enumerate(grader_values):
+        field = f"authoring catalog.graders[{index}]"
+        if not isinstance(value, dict):
+            raise EvaluationError(f"{field} must be an object")
+        require_exact_keys(value, field, {"id", "objective", "description"})
+        if value.get("objective") is not True:
+            raise EvaluationError(f"{field} must declare an objective grader")
+        graders.append(
+            {
+                "id": require_text(value.get("id"), f"{field}.id"),
+                "objective": True,
+                "description": require_authoring_safe_text(
+                    value.get("description"),
+                    f"{field}.description",
+                    maximum=AUTHORING_MAX_DESCRIPTION_BYTES,
+                ),
+            }
+        )
+    expected_grader_ids = [item["id"] for item in config["graders"]]
+    if [item["id"] for item in graders] != expected_grader_ids:
+        raise EvaluationError(
+            "authoring catalog graders differ from the compilation grader order"
+        )
+    if len(set(expected_grader_ids)) != len(expected_grader_ids):
+        raise EvaluationError("compilation graders contain duplicate ids")
+
+    rubric = catalog.get("rubric")
+    if not isinstance(rubric, dict):
+        raise EvaluationError("authoring catalog.rubric must be an object")
+    require_exact_keys(rubric, "authoring catalog.rubric", {"identity", "description"})
+    normalized_rubric = {
+        "identity": require_sha256(
+            rubric.get("identity"), "authoring catalog.rubric.identity"
+        ),
+        "description": require_authoring_safe_text(
+            rubric.get("description"),
+            "authoring catalog.rubric.description",
+            maximum=AUTHORING_MAX_DESCRIPTION_BYTES,
+        ),
+    }
+    expected_rubric = f"sha256:{digest(canonical(config['rubric']))}"
+    if normalized_rubric["identity"] != expected_rubric:
+        raise EvaluationError(
+            "authoring catalog rubric differs from the compilation rubric"
+        )
+    grader_root = config_path.parent / "graders"
+    for entry in canonical_file_inventory(grader_root):
+        grader_path = grader_root / entry["path"]
+        if entry["size"] > AUTHORING_MAX_FIXTURE_BYTES:
+            raise EvaluationError(
+                f"grader template {entry['path']} exceeds the authoring size limit"
+            )
+        reject_authoring_sensitive_bytes(
+            grader_path.read_bytes(), f"grader template {entry['path']}"
+        )
+    normalized = {
+        "schema_version": AUTHORING_CATALOG_SCHEMA_VERSION,
+        "kind": "safe_evaluation_source_catalog",
+        "fixtures": fixtures,
+        "graders": graders,
+        "rubric": normalized_rubric,
+    }
+    reject_authoring_sensitive_value(normalized, "authoring catalog")
+    return normalized, f"sha256:{digest(canonical(normalized))}"
+
+
+def v2_input_author_packet(args: argparse.Namespace) -> dict[str, Any]:
+    skill_dir = resolve_path(Path(args.skill_dir), "skill directory")
+    candidate, files = candidate_id(skill_dir)
+    contract_path = skill_dir / "SKILL.md"
+    if contract_path.is_symlink() or not contract_path.is_file():
+        raise EvaluationError("skill contract must be a regular non-symlink file")
+    contract = contract_path.read_bytes()
+    if len(contract) > AUTHORING_MAX_SKILL_CONTRACT_BYTES:
+        raise EvaluationError("skill contract exceeds the authoring size limit")
+    try:
+        contract_text = contract.decode("utf-8")
+    except UnicodeDecodeError as exc:
+        raise EvaluationError("skill contract must be UTF-8 text") from exc
+    reject_authoring_sensitive_bytes(
+        contract, "skill contract", allow_contract_paths=True
+    )
+
+    suite, suite_id = load_suite(resolve_path(Path(args.suite), "suite template"))
+    for index, case in enumerate(suite["cases"]):
+        require_authoring_safe_text(
+            case["prompt"],
+            f"suite template.cases[{index}].prompt",
+            maximum=AUTHORING_MAX_DESCRIPTION_BYTES,
+        )
+    policy, policy_id = load_policy(resolve_path(Path(args.policy), "policy"))
+    harness = require_trusted_harness(Path(args.harness))
+    harness_sha = sha256_file(harness)
+    config_path = resolve_path(Path(args.config), "compilation config")
+    config, _ = validate_compilation_config(config_path, suite, policy, harness_sha)
+    routing = validate_routing(
+        resolve_path(Path(args.routing), "routing config"),
+        config["executors"],
+        config["comparator"],
+    )
+    catalog, catalog_id = validate_authoring_catalog(
+        resolve_path(Path(args.catalog), "authoring catalog"),
+        config_path,
+        config,
+    )
+    reject_authoring_sensitive_value(suite, "suite template")
+    reject_authoring_sensitive_value(policy, "policy contract")
+    reject_authoring_sensitive_value(config, "compilation source contract")
+    routing_contract = {
+        "executors": [
+            {
+                key: route[key]
+                for key in ("name", "adapter_id", "adapter_executable_sha256")
+            }
+            for route in routing["executors"]
+        ],
+        "comparator": {
+            key: routing["comparator"][key]
+            for key in ("route", "adapter_id", "adapter_executable_sha256")
+        },
+    }
+    compilation_contract = {
+        "tool_policy_id": config["tool_policy_id"],
+        "retention_policy_id": config["retention_policy_id"],
+        "limits": config["limits"],
+        "graders": [
+            {
+                "id": source["id"],
+                "type": source["type"],
+                "safety": source["safety"],
+                "identity": source["identity"],
+            }
+            for source in suite["graders"]
+        ],
+        "case_runtime": config["case_runtime"],
+        "rubric": catalog["rubric"],
+        "executors": config["executors"],
+        "comparator": config["comparator"],
+    }
+    reject_authoring_sensitive_value(
+        compilation_contract, "model-facing compilation contract"
+    )
+    reject_authoring_sensitive_value(routing_contract, "routing contract")
+    packet = {
+        "schema_version": AUTHORING_PACKET_SCHEMA_VERSION,
+        "kind": "safe_evaluation_input_authoring_packet",
+        "candidate_id": candidate,
+        "candidate_inventory": files,
+        "skill_contract": {
+            "logical_path": "SKILL.md",
+            "sha256": f"sha256:{digest(contract)}",
+            "content": contract_text,
+        },
+        "suite_template": suite,
+        "suite_template_id": suite_id,
+        "source_catalog": catalog,
+        "source_catalog_id": catalog_id,
+        "policy_contract": policy,
+        "policy_id": policy_id,
+        "compilation_contract": compilation_contract,
+        "routing_contract": routing_contract,
+        "harness_executable_sha256": harness_sha,
+    }
+    packet["packet_id"] = f"sha256:{digest(canonical(packet))}"
+    output = resolve_path(Path(args.output).parent, "authoring packet output parent") / Path(args.output).name
+    if output.is_symlink() or output.exists():
+        raise EvaluationError("authoring packet output must not already exist")
+    try:
+        output.relative_to(skill_dir)
+    except ValueError:
+        pass
+    else:
+        raise EvaluationError("authoring packet cannot be written inside the skill root")
+    atomic_write(output, packet)
+    return {
+        "candidate_id": candidate,
+        "packet": str(output),
+        "packet_id": packet["packet_id"],
+        "source_catalog_id": catalog_id,
+    }
 
 
 def v2_input_register(args: argparse.Namespace) -> dict[str, Any]:
@@ -5631,6 +5987,15 @@ def build_parser() -> argparse.ArgumentParser:
     suite_validate_parser.add_argument("suite")
     policy_validate_parser = commands.add_parser("v2-policy-validate")
     policy_validate_parser.add_argument("policy")
+    input_author_packet_parser = commands.add_parser("v2-input-author-packet")
+    input_author_packet_parser.add_argument("skill_dir")
+    input_author_packet_parser.add_argument("--suite", required=True)
+    input_author_packet_parser.add_argument("--policy", required=True)
+    input_author_packet_parser.add_argument("--config", required=True)
+    input_author_packet_parser.add_argument("--routing", required=True)
+    input_author_packet_parser.add_argument("--harness", required=True)
+    input_author_packet_parser.add_argument("--catalog", required=True)
+    input_author_packet_parser.add_argument("--output", required=True)
     input_register_parser = commands.add_parser("v2-input-register")
     input_register_parser.add_argument("skill_dir")
     input_register_parser.add_argument("--suite", required=True)
@@ -5769,6 +6134,7 @@ def main() -> int:
             "waive": waive,
             "v2-suite-validate": v2_suite_validate,
             "v2-policy-validate": v2_policy_validate,
+            "v2-input-author-packet": v2_input_author_packet,
             "v2-input-register": v2_input_register,
             "v2-input-validate": v2_input_validate,
             "v2-input-review": v2_input_review,
