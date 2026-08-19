@@ -75,7 +75,7 @@ AUTHORING_CATALOG_SCHEMA_VERSION = 1
 AUTHORING_PACKET_SCHEMA_VERSION = 1
 TRUSTED_MODEL_ENVIRONMENT_VERSION = 1
 TRUSTED_AUTHORING_ADAPTER_SHA256 = (
-    "sha256:e1a995ad1ab30453dc828a4594d1062234bb9e0bdff76c099b9fc6b20b92ec03"
+    "sha256:8679d5fb613194abe57164d2fdfdb19d23057d2d92289c8f6d6515ac41857648"
 )
 AUTHORING_FIXTURE_SOURCE_KINDS = {"public", "synthetic"}
 AUTHORING_MAX_SKILL_CONTRACT_BYTES = 131_072
@@ -111,13 +111,22 @@ INPUT_REGISTRY_REQUIRED_ROLES = {
     "routing",
     "harness",
 }
-INPUT_REGISTRY_OPTIONAL_ROLES = {
+INPUT_AUTHORING_OBJECT_ROLES = {
     "authoring_packet",
     "authoring_draft",
     "authoring_receipt",
     "authoring_operation",
     "authoring_adapter",
 }
+INPUT_REPAIR_OBJECT_ROLES = {
+    "repair_packet",
+    "repair_draft",
+    "repair_operation",
+    "repair_adapter",
+}
+INPUT_REGISTRY_OPTIONAL_ROLES = (
+    INPUT_AUTHORING_OBJECT_ROLES | INPUT_REPAIR_OBJECT_ROLES
+)
 INPUT_REVIEW_OBJECT_ROLES = {
     "input_review_packet",
     "input_review_adapter",
@@ -137,6 +146,7 @@ INPUT_READINESS_REASONS = {
     "invalid": {
         "deterministic_validation_failed",
         "independent_review_rejected",
+        "independent_rereview_rejected",
         "authoring_budget_exhausted",
     },
     "insufficient_information": {
@@ -154,7 +164,7 @@ INPUT_READINESS_TRANSITIONS = {
         "insufficient_information",
     },
     "review_required": {"review_required", "invalid", "ready"},
-    "invalid": {"drafting", "invalid"},
+    "invalid": {"drafting", "review_required", "invalid", "ready"},
     "insufficient_information": set(),
     "ready": {"ready"},
 }
@@ -1585,6 +1595,13 @@ def manifest_role(
     return matching[0]
 
 
+def is_bounded_input_manifest(manifest: dict[str, Any]) -> bool:
+    return manifest.get("authoring_method") in {
+        "bounded-safe-author",
+        "bounded-safe-repair",
+    }
+
+
 def validate_input_manifest(
     skill_dir: Path, manifest_sha256: str
 ) -> dict[str, Any]:
@@ -1602,10 +1619,7 @@ def validate_input_manifest(
         != f"{manifest_sha256.removeprefix('sha256:')}.json"
     ):
         raise EvaluationError("input manifest content-addressed path does not match")
-    require_exact_keys(
-        manifest,
-        "input manifest",
-        {
+    manifest_keys = {
             "schema_version",
             "kind",
             "skill_path",
@@ -1627,8 +1641,9 @@ def validate_input_manifest(
             "source_identities",
             "tool_version",
             "objects",
-        },
-    )
+    }
+    if set(manifest) not in (manifest_keys, manifest_keys | {"repair_lineage"}):
+        raise EvaluationError("input manifest has unexpected or missing fields")
     if (
         manifest.get("schema_version") != INPUT_REGISTRY_SCHEMA_VERSION
         or manifest.get("kind") != "evaluation_input_manifest"
@@ -1711,9 +1726,14 @@ def validate_input_manifest(
         or manifest.get("harness_executable_sha256") != harness_sha
     ):
         raise EvaluationError("input manifest normalized input identities do not match")
-    authoring_roles = roles & INPUT_REGISTRY_OPTIONAL_ROLES
+    authoring_roles = roles & INPUT_AUTHORING_OBJECT_ROLES
+    repair_roles = roles & INPUT_REPAIR_OBJECT_ROLES
     if manifest["authoring_method"] == "bounded-safe-author":
-        if authoring_roles != INPUT_REGISTRY_OPTIONAL_ROLES:
+        if (
+            "repair_lineage" in manifest
+            or authoring_roles != INPUT_AUTHORING_OBJECT_ROLES
+            or repair_roles
+        ):
             raise EvaluationError(
                 "bounded-safe-author manifest is missing exact authoring provenance"
             )
@@ -1782,7 +1802,21 @@ def validate_input_manifest(
             raise EvaluationError(
                 "bounded-safe-author manifest source identities are incomplete"
             )
-    elif authoring_roles:
+    elif manifest["authoring_method"] == "bounded-safe-repair":
+        validate_repaired_input_manifest(
+            skill_dir,
+            manifest_sha256,
+            manifest,
+            objects,
+            resolved_suite=suite,
+            resolved_suite_id=suite_id,
+            resolved_policy=policy,
+            resolved_policy_id=policy_id,
+            resolved_config=config,
+            resolved_routing=routing,
+            harness_sha=harness_sha,
+        )
+    elif authoring_roles or repair_roles or "repair_lineage" in manifest:
         raise EvaluationError(
             "authoring provenance is valid only for bounded-safe-author manifests"
         )
@@ -2138,9 +2172,15 @@ def validate_input_author_draft_value(
         "authoring draft",
         {"schema_version", "kind", "packet_id", "candidate_id", "cases"},
     )
+    repair = packet.get("kind") == "safe_evaluation_input_repair_packet"
+    expected_kind = (
+        "safe_evaluation_input_repair_draft"
+        if repair
+        else "safe_evaluation_input_draft"
+    )
     if (
         draft.get("schema_version") != AUTHORING_PACKET_SCHEMA_VERSION
-        or draft.get("kind") != "safe_evaluation_input_draft"
+        or draft.get("kind") != expected_kind
         or draft.get("packet_id") != packet["packet_id"]
         or draft.get("candidate_id") != packet["candidate_id"]
     ):
@@ -2159,6 +2199,7 @@ def validate_input_author_draft_value(
     cases: list[dict[str, Any]] = []
     task_ids: set[str] = set()
     prompts: set[str] = set()
+    changed = False
     for index, (value, template) in enumerate(zip(values, template_cases)):
         field = f"authoring draft.cases[{index}]"
         if not isinstance(value, dict):
@@ -2202,10 +2243,14 @@ def validate_input_author_draft_value(
             raise EvaluationError(f"{field}.prompt duplicates another case prompt")
         task_ids.add(task_id)
         prompts.add(prompt)
+        if task_id != template["task_id"] or prompt != template["prompt"]:
+            changed = True
         cases.append({**fixed, "task_id": task_id, "prompt": prompt})
+    if repair and not changed:
+        raise EvaluationError("repair draft must change at least one task or prompt")
     normalized = {
         "schema_version": AUTHORING_PACKET_SCHEMA_VERSION,
-        "kind": "safe_evaluation_input_draft",
+        "kind": expected_kind,
         "packet_id": packet["packet_id"],
         "candidate_id": packet["candidate_id"],
         "cases": cases,
@@ -3047,11 +3092,16 @@ def v2_input_review(args: argparse.Namespace) -> dict[str, Any]:
     resolved = validate_input_manifest(
         skill_dir, require_sha256(args.manifest, "input manifest digest")
     )
-    bounded = resolved["manifest"]["authoring_method"] == "bounded-safe-author"
+    bounded = is_bounded_input_manifest(resolved["manifest"])
     if bounded:
-        if args.slot not in {"review_a", "review_b"}:
+        expected_slots = (
+            {"rereview_a", "rereview_b"}
+            if resolved["manifest"]["authoring_method"] == "bounded-safe-repair"
+            else {"review_a", "review_b"}
+        )
+        if args.slot not in expected_slots:
             raise EvaluationError(
-                f"input review slot {args.slot} is reserved for a later slice"
+                f"input review slot {args.slot} does not match this manifest generation"
             )
         if (
             not args.claim_id
@@ -3400,7 +3450,7 @@ def run_trusted_input_adapter(
             "--result",
             str(result_path),
         ]
-        if operation_name == "author":
+        if operation_name in {"author", "repair"}:
             command.extend(["--draft-output", str(draft_path)])
         command.extend(source_arguments)
         try:
@@ -3648,6 +3698,699 @@ def v2_input_author(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def initial_authoring_contract(
+    resolved: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
+    objects = resolved["manifest"]["objects"]
+    return (
+        load_registry_json_object(
+            manifest_role(objects, "authoring_packet"), "authoring packet"
+        ),
+        load_registry_json_object(
+            manifest_role(objects, "authoring_draft"), "authoring draft"
+        ),
+        load_registry_json_object(
+            manifest_role(objects, "authoring_receipt"), "authoring receipt"
+        ),
+        load_registry_json_object(
+            manifest_role(objects, "authoring_operation"), "authoring operation"
+        ),
+    )
+
+
+def build_input_repair_packet(
+    skill_dir: Path,
+    claim_id: str,
+    initial_manifest_sha256: str,
+    validation_sha256: str,
+    review_sha256s: list[str],
+    original_author_model: str,
+    *,
+    require_active_claim: bool = True,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    resolved = validate_input_manifest(skill_dir, initial_manifest_sha256)
+    if resolved["manifest"]["authoring_method"] != "bounded-safe-author":
+        raise EvaluationError("repair requires an initial bounded-safe-author manifest")
+    validate_input_validation_receipt(resolved, validation_sha256)
+    validation = load_input_registry_receipt(validation_sha256)
+    review_sha256s = sorted(
+        require_sha256(value, "initial review receipt")
+        for value in review_sha256s
+    )
+    decisions = validate_input_review_receipts(resolved, review_sha256s)
+    if len(decisions) != 2 or "reject" not in decisions:
+        raise EvaluationError(
+            "repair requires exactly two initial reviews with at least one rejection"
+        )
+    authoring_packet, authoring_draft, materialization, author_operation = (
+        initial_authoring_contract(resolved)
+    )
+    retained_author_model = require_text(
+        author_operation.get("observed_model"), "original author model"
+    )
+    if original_author_model != retained_author_model:
+        raise EvaluationError(
+            "repair original author model differs from retained author provenance"
+        )
+    review_history: list[dict[str, Any]] = []
+    reviewer_models: list[str] = []
+    for receipt_sha256 in review_sha256s:
+        receipt = load_input_registry_receipt(receipt_sha256)
+        operation = receipt["review_operation"]
+        model = require_text(
+            operation.get("observed_model"), "original reviewer model"
+        )
+        reviewer_models.append(model)
+        review_history.append(
+            {
+                "receipt_sha256": receipt_sha256,
+                "reviewer_model": model,
+                "decision": operation["decision"],
+                "reason": operation["reason"],
+                "summary": require_authoring_safe_text(
+                    operation["summary"],
+                    "original review summary",
+                    maximum=AUTHORING_MAX_DESCRIPTION_BYTES,
+                ),
+            }
+        )
+    reviewer_models.sort()
+    try:
+        review_set_id = review_set_identity(
+            require_sha256(claim_id, "claim ID"),
+            resolved["candidate_id"],
+            resolved["input_manifest_sha256"],
+            retained_author_model,
+            reviewer_models,
+        )
+    except ClaimLedgerError as error:
+        raise EvaluationError(str(error)) from error
+    if require_active_claim:
+        try:
+            claim = inspect_claim(require_sha256(claim_id, "claim ID"))
+        except ClaimLedgerError as error:
+            raise EvaluationError(str(error)) from error
+        initial_slots = claim["slots"][:3]
+        claim_review_slots = claim["slots"][1:3]
+        if (
+            claim["status"] not in {"open", "completed"}
+            or (
+                claim["status"] == "completed"
+                and claim["terminal_reason"] != "ready"
+            )
+            or claim["skill_path"] != resolved["manifest"]["skill_path"]
+            or claim["skill_key"] != resolved["manifest"]["skill_key"]
+            or claim["candidate_id"] != resolved["candidate_id"]
+            or claim["initial_manifest_sha256"]
+            != resolved["input_manifest_sha256"]
+            or claim["review_set_id"] != review_set_id
+            or claim["models"]["author"] != retained_author_model
+            or sorted(
+                [claim["models"]["reviewer_a"], claim["models"]["reviewer_b"]]
+            )
+            != reviewer_models
+            or len(initial_slots) != 3
+            or any(
+                slot["status"] != "completed"
+                or slot["usage_status"] != "available"
+                for slot in initial_slots
+            )
+            or sorted(
+                slot["review_receipt_sha256"] for slot in claim_review_slots
+            )
+            != review_sha256s
+            or {
+                slot["validation_receipt_sha256"] for slot in claim_review_slots
+            }
+            != {validation_sha256}
+            or "reject"
+            not in {slot["decision"] for slot in claim_review_slots}
+        ):
+            raise EvaluationError(
+                "repair claim, manifest, review set, validation, or receipt lineage is invalid"
+            )
+    packet = {
+        "schema_version": AUTHORING_PACKET_SCHEMA_VERSION,
+        "kind": "safe_evaluation_input_repair_packet",
+        "claim_id": require_sha256(claim_id, "claim ID"),
+        "candidate_id": resolved["candidate_id"],
+        "candidate_inventory": resolved["candidate_inventory"],
+        "initial_manifest_sha256": resolved["input_manifest_sha256"],
+        "initial_validation_contract": {
+            "receipt_sha256": validation_sha256,
+            "status": validation["status"],
+            "validator": validation["validator"],
+        },
+        "initial_review_receipt_sha256s": review_sha256s,
+        "review_set_id": review_set_id,
+        "original_author_model": retained_author_model,
+        "original_reviewer_models": reviewer_models,
+        "skill_contract": authoring_packet["skill_contract"],
+        "initial_suite": resolved["suite"],
+        "source_catalog": authoring_packet["source_catalog"],
+        "policy_contract": authoring_packet["policy_contract"],
+        "compilation_contract": authoring_packet["compilation_contract"],
+        "routing_contract": authoring_packet["routing_contract"],
+        "authoring_contract": {
+            "packet_id": authoring_packet["packet_id"],
+            "draft_id": f"sha256:{digest(canonical(authoring_draft))}",
+            "materialization_id": f"sha256:{digest(canonical(materialization))}",
+            "operation_id": author_operation["operation_id"],
+            "observed_model": retained_author_model,
+        },
+        "review_history": review_history,
+        "repair_contract": {
+            "allowed_case_changes": ["prompt", "task_id"],
+            "fixed_fields": [
+                "id",
+                "class",
+                "deterministic_graders",
+                "fixture",
+                "artifacts",
+                "semantic",
+            ],
+            "insufficient_information_allowed": True,
+        },
+    }
+    reject_authoring_sensitive_value(packet, "model-facing repair packet")
+    packet["packet_id"] = f"sha256:{digest(canonical(packet))}"
+    return packet, {
+        "skill_dir": resolve_path(skill_dir, "skill directory"),
+        "suite": resolved["suite"],
+        "policy": resolved["policy"],
+        "config": resolved["config"],
+        "routing": resolved["routing"],
+        "harness_sha": resolved["manifest"]["harness_executable_sha256"],
+        "initial": resolved,
+    }
+
+
+def v2_input_repair_packet(args: argparse.Namespace) -> dict[str, Any]:
+    skill_dir = resolve_path(Path(args.skill_dir), "skill directory")
+    packet, _ = build_input_repair_packet(
+        skill_dir,
+        require_sha256(args.claim_id, "claim ID"),
+        require_sha256(args.manifest, "initial manifest"),
+        require_sha256(args.validation, "initial validation receipt"),
+        list(args.review),
+        require_text(args.original_author_model, "original author model"),
+    )
+    output = authoring_output_path(
+        args.output, skill_dir, "input repair packet output"
+    )
+    atomic_write(output, packet)
+    return {
+        "candidate_id": packet["candidate_id"],
+        "initial_manifest_sha256": packet["initial_manifest_sha256"],
+        "review_set_id": packet["review_set_id"],
+        "packet_id": packet["packet_id"],
+        "output": str(output),
+    }
+
+
+def validate_repair_operation(
+    operation: dict[str, Any],
+    packet: dict[str, Any],
+    draft_id: str | None,
+    adapter_sha256: str,
+    *,
+    expected_outcome: str = "draft",
+) -> dict[str, Any]:
+    require_exact_keys(
+        operation,
+        "repair operation",
+        {
+            "schema_version",
+            "kind",
+            "operation",
+            "status",
+            "vendor",
+            "model",
+            "observed_model",
+            "adapter_executable_sha256",
+            "packet_id",
+            "candidate_id",
+            "initial_manifest_sha256",
+            "validation_receipt_sha256",
+            "review_set_id",
+            "original_review_receipt_sha256s",
+            "outcome",
+            "summary",
+            "reason",
+            "draft_id",
+            "usage",
+            "billing",
+            "elapsed_ms",
+            "operation_id",
+        },
+    )
+    model = require_text(operation.get("model"), "repair operation.model")
+    outcome_valid = (
+        expected_outcome == "draft"
+        and operation.get("outcome") == "draft"
+        and operation.get("reason") is None
+        and operation.get("draft_id") == draft_id
+    ) or (
+        expected_outcome == "insufficient_information"
+        and operation.get("outcome") == "insufficient_information"
+        and operation.get("reason")
+        in {
+            "evaluation_case_unavailable",
+            "safe_fixture_unavailable",
+            "objective_grader_unavailable",
+        }
+        and operation.get("draft_id") is None
+        and draft_id is None
+    )
+    if (
+        operation.get("schema_version") != AUTHORING_PACKET_SCHEMA_VERSION
+        or operation.get("kind") != "evaluation_input_model_operation"
+        or operation.get("operation") != "repair"
+        or operation.get("status") != "completed"
+        or operation.get("vendor") != "copilot"
+        or model != packet["original_author_model"]
+        or operation.get("observed_model") != model
+        or operation.get("adapter_executable_sha256") != adapter_sha256
+        or operation.get("packet_id") != packet["packet_id"]
+        or operation.get("candidate_id") != packet["candidate_id"]
+        or operation.get("initial_manifest_sha256")
+        != packet["initial_manifest_sha256"]
+        or operation.get("validation_receipt_sha256")
+        != packet["initial_validation_contract"]["receipt_sha256"]
+        or operation.get("review_set_id") != packet["review_set_id"]
+        or operation.get("original_review_receipt_sha256s")
+        != packet["initial_review_receipt_sha256s"]
+        or not outcome_valid
+    ):
+        raise EvaluationError(
+            "repair operation identity, lineage, outcome, or draft binding is invalid"
+        )
+    require_authoring_safe_text(
+        operation.get("summary"),
+        "repair operation.summary",
+        maximum=AUTHORING_MAX_DESCRIPTION_BYTES,
+    )
+    usage = operation.get("usage")
+    if not isinstance(usage, dict):
+        raise EvaluationError("repair operation.usage must be an object")
+    require_exact_keys(
+        usage,
+        "repair operation.usage",
+        {"normalized_tokens", "input_tokens", "output_tokens"},
+    )
+    normalized_tokens = require_positive_int(
+        usage.get("normalized_tokens"),
+        "repair operation.usage.normalized_tokens",
+    )
+    if normalized_tokens > 112_000:
+        raise EvaluationError("repair operation exceeds the normalized-token budget")
+    detailed = [
+        require_nonnegative_int(
+            usage.get(field), f"repair operation.usage.{field}"
+        )
+        for field in ("input_tokens", "output_tokens")
+        if usage.get(field) is not None
+    ]
+    if detailed and (len(detailed) != 2 or sum(detailed) != normalized_tokens):
+        raise EvaluationError(
+            "repair operation detailed usage does not match normalized tokens"
+        )
+    expected_billing = {
+        "status": "unavailable",
+        "cost_usd": None,
+        "provider": "copilot",
+        "unavailable_reason": "provider_telemetry_unavailable",
+        "native_line_item_id": None,
+        "native_event_sha256": None,
+        "native_event_size": None,
+    }
+    if operation.get("billing") != expected_billing:
+        raise EvaluationError("repair operation billing telemetry is invalid")
+    elapsed_ms = require_nonnegative_int(
+        operation.get("elapsed_ms"), "repair operation.elapsed_ms"
+    )
+    if elapsed_ms > 25 * 60 * 1000:
+        raise EvaluationError("repair operation exceeds the elapsed-time budget")
+    operation_without_id = {
+        key: value for key, value in operation.items() if key != "operation_id"
+    }
+    if operation.get("operation_id") != (
+        f"sha256:{digest(shadow_canonical(operation_without_id))}"
+    ):
+        raise EvaluationError("repair operation content identity is invalid")
+    return operation
+
+
+def materialize_input_repair(
+    packet: dict[str, Any],
+    context: dict[str, Any],
+    draft_value: dict[str, Any],
+    output_dir: str,
+) -> dict[str, Any]:
+    draft, draft_id = validate_input_author_draft_value(
+        draft_value, packet, context
+    )
+    output = authoring_output_path(
+        output_dir, context["skill_dir"], "repair materialization output"
+    )
+    parent = output.parent
+    if parent.is_symlink() or not parent.is_dir():
+        raise EvaluationError("repair materialization parent must be a real directory")
+    suite = materialized_authoring_suite(draft, context["suite"])
+    suite_id = f"sha256:{digest(canonical(suite))}"
+    initial_objects = context["initial"]["manifest"]["objects"]
+    staging = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=parent))
+    try:
+        atomic_write(staging / "suite.json", suite)
+        for role, name in (
+            ("policy", "policy.json"),
+            ("compilation", "compilation.json"),
+            ("routing", "routing.json"),
+        ):
+            entry = manifest_role(initial_objects, role)
+            (staging / name).write_bytes(
+                require_registry_file(
+                    registry_object_path(entry["sha256"]),
+                    input_registry_component("objects"),
+                    f"retained {role}",
+                )
+            )
+        for entry in initial_objects:
+            if entry["role"] not in {"fixture", "grader"}:
+                continue
+            prefix = f"{entry['role']}s/"
+            if not entry["logical_path"].startswith(prefix):
+                raise EvaluationError("retained repair tree path is malformed")
+            relative = safe_registry_logical_path(
+                entry["logical_path"].removeprefix(prefix),
+                f"retained {entry['role']} path",
+            )
+            destination = staging / f"{entry['role']}s" / relative
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            destination.write_bytes(
+                require_registry_file(
+                    registry_object_path(entry["sha256"]),
+                    input_registry_component("objects"),
+                    f"retained {entry['role']} object",
+                )
+            )
+        atomic_write(
+            staging / "repair.json",
+            {
+                "schema_version": AUTHORING_PACKET_SCHEMA_VERSION,
+                "kind": "safe_evaluation_input_repair_materialization",
+                "candidate_id": packet["candidate_id"],
+                "initial_manifest_sha256": packet["initial_manifest_sha256"],
+                "claim_id": packet["claim_id"],
+                "review_set_id": packet["review_set_id"],
+                "original_review_receipt_sha256s": packet[
+                    "initial_review_receipt_sha256s"
+                ],
+                "packet_id": packet["packet_id"],
+                "draft_id": draft_id,
+                "suite_id": suite_id,
+            },
+        )
+        staged_suite, staged_suite_id = load_suite(staging / "suite.json")
+        if staged_suite != suite or staged_suite_id != suite_id:
+            raise EvaluationError("repaired suite differs from its trusted form")
+        validate_compilation_config(
+            staging / "compilation.json",
+            staged_suite,
+            context["policy"],
+            context["harness_sha"],
+        )
+        validate_routing(
+            staging / "routing.json",
+            context["config"]["executors"],
+            context["config"]["comparator"],
+        )
+        os.replace(staging, output)
+    except BaseException:
+        if staging.exists():
+            shutil.rmtree(staging)
+        raise
+    return {
+        "candidate_id": packet["candidate_id"],
+        "packet_id": packet["packet_id"],
+        "draft_id": draft_id,
+        "suite_id": suite_id,
+        "output_dir": str(output),
+        "suite": str(output / "suite.json"),
+        "policy": str(output / "policy.json"),
+        "config": str(output / "compilation.json"),
+        "routing": str(output / "routing.json"),
+    }
+
+
+def register_repaired_input_manifest(
+    context: dict[str, Any],
+    packet: dict[str, Any],
+    draft: dict[str, Any],
+    operation: dict[str, Any],
+    adapter: Path,
+) -> dict[str, Any]:
+    initial = context["initial"]
+    repaired_suite = materialized_authoring_suite(draft, context["suite"])
+    objects = [
+        item for item in initial["manifest"]["objects"] if item["role"] != "suite"
+    ]
+    objects.append(
+        publish_registry_object(
+            canonical(repaired_suite), "suite", "suite.json", "application/json"
+        )
+    )
+    for value, role, name in (
+        (packet, "repair_packet", "packet"),
+        (draft, "repair_draft", "draft"),
+        (operation, "repair_operation", "operation"),
+    ):
+        objects.append(
+            publish_registry_object(
+                canonical(value), role, f"repair/{name}.json", "application/json"
+            )
+        )
+    objects.append(
+        publish_registry_object(
+            adapter.read_bytes(),
+            "repair_adapter",
+            "repair/dreaming-vendor-adapter.py",
+            "text/x-python",
+        )
+    )
+    objects.sort(key=lambda item: (item["role"], item["logical_path"]))
+    by_role = {item["role"]: item for item in objects}
+    manifest = {
+        **{
+            key: value
+            for key, value in initial["manifest"].items()
+            if key
+            not in {
+                "suite_id",
+                "authoring_method",
+                "source_identities",
+                "objects",
+            }
+        },
+        "suite_id": f"sha256:{digest(canonical(repaired_suite))}",
+        "authoring_method": "bounded-safe-repair",
+        "source_identities": [
+            packet["claim_id"],
+            packet["initial_manifest_sha256"],
+            packet["review_set_id"],
+            *packet["initial_review_receipt_sha256s"],
+            packet["packet_id"],
+            f"sha256:{digest(canonical(draft))}",
+            operation["operation_id"],
+        ],
+        "repair_lineage": {
+            "initial_manifest_sha256": packet["initial_manifest_sha256"],
+            "claim_id": packet["claim_id"],
+            "initial_review_set_id": packet["review_set_id"],
+            "original_review_receipt_sha256s": packet[
+                "initial_review_receipt_sha256s"
+            ],
+            "repair_packet_sha256": by_role["repair_packet"]["sha256"],
+            "repair_draft_sha256": by_role["repair_draft"]["sha256"],
+            "repair_operation_sha256": by_role["repair_operation"]["sha256"],
+            "repair_adapter_sha256": by_role["repair_adapter"]["sha256"],
+        },
+        "objects": objects,
+    }
+    path, manifest_sha256 = write_input_registry_json(
+        "manifests", manifest, "repaired input manifest"
+    )
+    validate_input_manifest(context["skill_dir"], manifest_sha256)
+    return {
+        "candidate_id": initial["candidate_id"],
+        "input_manifest": str(path),
+        "input_manifest_sha256": manifest_sha256,
+    }
+
+
+def v2_input_repair(args: argparse.Namespace) -> dict[str, Any]:
+    model = require_text(args.original_author_model, "original author model")
+    if model == "default":
+        raise EvaluationError("input repair requires an explicit original model")
+    validate_input_model_budget(args, "input repair")
+    skill_dir = resolve_path(Path(args.skill_dir), "skill directory")
+    initial = validate_input_manifest(
+        skill_dir, require_sha256(args.manifest, "initial manifest")
+    )
+    _, _, _, author_operation = initial_authoring_contract(initial)
+    retained_model = require_text(
+        author_operation["observed_model"], "retained author model"
+    )
+    if model != retained_model:
+        raise EvaluationError(
+            "repair original author model differs from retained author provenance"
+        )
+    packet, context = build_input_repair_packet(
+        skill_dir,
+        require_sha256(args.claim_id, "claim ID"),
+        initial["input_manifest_sha256"],
+        require_sha256(args.validation, "initial validation receipt"),
+        list(args.review),
+        retained_model,
+    )
+    adapter = trusted_authoring_adapter_path()
+    adapter_sha256 = sha256_file(adapter)
+    output = authoring_output_path(
+        args.output_dir, skill_dir, "repair materialization output"
+    )
+    test_binary = trusted_input_test_binary(skill_dir, Path(args.skill_dir))
+    if test_binary is not None and (
+        path_has_symlink(Path(args.output_dir))
+        or not output.is_relative_to(
+            Path(__file__).resolve().parents[3] / ".test-work"
+        )
+    ):
+        raise EvaluationError(
+            "trusted input test materialization is limited to non-authoritative test roots"
+        )
+    dispatch = prepare_claim_dispatch(
+        claim_id=args.claim_id,
+        skill_path=str(skill_dir),
+        skill_key=latest_key(str(skill_dir)),
+        candidate_id=initial["candidate_id"],
+        slot_name="repair",
+        model=model,
+        packet_id=packet["packet_id"],
+        manifest_sha256=initial["input_manifest_sha256"],
+        validation_receipt_sha256=packet["initial_validation_contract"][
+            "receipt_sha256"
+        ],
+        requested_token_budget=args.token_budget,
+        requested_timeout_seconds=args.timeout,
+        lineage_receipt_sha256s=packet["initial_review_receipt_sha256s"],
+    )
+    trusted_args = argparse.Namespace(**vars(args))
+    trusted_args.model = model
+    trusted_args.token_budget = dispatch["token_budget"]
+    trusted_args.timeout = dispatch["timeout_seconds"]
+    source_arguments = [
+        "--claim-id",
+        packet["claim_id"],
+        "--manifest",
+        packet["initial_manifest_sha256"],
+        "--validation",
+        packet["initial_validation_contract"]["receipt_sha256"],
+        "--original-author-model",
+        retained_model,
+    ]
+    for receipt_sha256 in packet["initial_review_receipt_sha256s"]:
+        source_arguments.extend(["--review", receipt_sha256])
+    phase = "model_execution"
+    try:
+        operation, draft_value = run_trusted_input_adapter(
+            trusted_args,
+            skill_dir,
+            Path(args.skill_dir),
+            packet,
+            adapter,
+            "repair",
+            source_arguments,
+        )
+        phase = "result_validation"
+        if operation.get("outcome") == "insufficient_information":
+            if draft_value is not None:
+                raise EvaluationError(
+                    "insufficient-information repair returned an unexpected draft"
+                )
+            operation = validate_repair_operation(
+                operation,
+                packet,
+                None,
+                adapter_sha256,
+                expected_outcome="insufficient_information",
+            )
+            complete_claim_slot(
+                claim_id=args.claim_id,
+                slot_name="repair",
+                operation=operation,
+                manifest_sha256=None,
+                terminal_reason="repair_insufficient_information",
+            )
+            return {
+                "status": "insufficient_information",
+                "state": "insufficient_information",
+                "reason": operation["reason"],
+                "summary": operation["summary"],
+                "candidate_id": packet["candidate_id"],
+                "packet_id": packet["packet_id"],
+                "operation_id": operation["operation_id"],
+                "claim_id": args.claim_id,
+                "input_manifest": None,
+                "input_manifest_sha256": None,
+            }
+        if draft_value is None:
+            raise EvaluationError("trusted input repair returned no draft")
+        draft_value, draft_id = validate_input_author_draft_value(
+            draft_value, packet, context
+        )
+        operation = validate_repair_operation(
+            operation, packet, draft_id, adapter_sha256
+        )
+        phase = "materialization"
+        materialization = materialize_input_repair(
+            packet, context, draft_value, str(output)
+        )
+        registration = register_repaired_input_manifest(
+            context, packet, draft_value, operation, adapter
+        )
+        complete_claim_slot(
+            claim_id=args.claim_id,
+            slot_name="repair",
+            operation=operation,
+            manifest_sha256=registration["input_manifest_sha256"],
+        )
+    except (
+        EvaluationError,
+        OSError,
+        subprocess.SubprocessError,
+        json.JSONDecodeError,
+    ) as error:
+        fail_dispatched_slot(
+            args.claim_id, "repair", claim_failure_reason(phase, error)
+        )
+        raise
+    return {
+        "status": "review_required",
+        "state": "review_required",
+        "outcome": "draft",
+        "claim_id": args.claim_id,
+        "initial_manifest_sha256": packet["initial_manifest_sha256"],
+        "review_set_id": packet["review_set_id"],
+        "original_review_receipt_sha256s": packet[
+            "initial_review_receipt_sha256s"
+        ],
+        **materialization,
+        **registration,
+        "repair_operation_id": operation["operation_id"],
+        "repair_model": operation["observed_model"],
+    }
+
+
 def build_input_review_packet(
     skill_dir: Path,
     manifest_sha256: str,
@@ -3655,7 +4398,7 @@ def build_input_review_packet(
 ) -> dict[str, Any]:
     resolved = validate_input_manifest(skill_dir, manifest_sha256)
     manifest = resolved["manifest"]
-    if manifest["authoring_method"] != "bounded-safe-author":
+    if not is_bounded_input_manifest(manifest):
         raise EvaluationError(
             "model review packets require bounded-safe-author provenance"
         )
@@ -3718,6 +4461,24 @@ def build_input_review_packet(
             ],
         },
     }
+    if manifest["authoring_method"] == "bounded-safe-repair":
+        lineage = manifest["repair_lineage"]
+        repair_packet = load_registry_json_object(
+            manifest_role(objects, "repair_packet"), "repair packet"
+        )
+        repair_draft = load_registry_json_object(
+            manifest_role(objects, "repair_draft"), "repair draft"
+        )
+        repair_operation = load_registry_json_object(
+            manifest_role(objects, "repair_operation"), "repair operation"
+        )
+        packet["repair_lineage_contract"] = {
+            **lineage,
+            "repair_packet_id": repair_packet["packet_id"],
+            "repair_draft_id": f"sha256:{digest(canonical(repair_draft))}",
+            "repair_operation": repair_operation,
+            "original_review_history": repair_packet["review_history"],
+        }
     reject_authoring_sensitive_value(packet, "model-facing review packet")
     packet["packet_id"] = f"sha256:{digest(canonical(packet))}"
     return packet
@@ -3924,6 +4685,33 @@ def bounded_review_set_id(
                 "bounded input review observed model",
             )
         )
+    if resolved["manifest"]["authoring_method"] == "bounded-safe-repair":
+        lineage = resolved["manifest"]["repair_lineage"]
+        initial = validate_input_manifest(
+            Path(resolved["manifest"]["skill_path"]),
+            lineage["initial_manifest_sha256"],
+        )
+        original_receipts = lineage["original_review_receipt_sha256s"]
+        validate_input_review_receipts(initial, original_receipts)
+        original_models = []
+        for receipt_sha256 in original_receipts:
+            receipt = load_input_registry_receipt(receipt_sha256)
+            original_models.append(
+                require_text(
+                    receipt["review_operation"].get("observed_model"),
+                    "original input reviewer model",
+                )
+            )
+        if sorted(reviewer_models) != sorted(original_models):
+            raise EvaluationError(
+                "repaired input reviews must use the original reviewer identities"
+            )
+        expected = bounded_review_set_id(
+            initial, claim_id, original_receipts
+        )
+        if lineage["initial_review_set_id"] != expected:
+            raise EvaluationError("repaired input review-set lineage is invalid")
+        return expected
     try:
         return review_set_identity(
             require_sha256(claim_id, "claim ID"),
@@ -3973,9 +4761,7 @@ def validate_input_review_receipts(
     review_expected = input_receipt_binding(
         resolved, "evaluation_input_review"
     )
-    bounded = (
-        resolved["manifest"]["authoring_method"] == "bounded-safe-author"
-    )
+    bounded = is_bounded_input_manifest(resolved["manifest"])
     author_model = None
     if bounded:
         author_operation = load_registry_json_object(
@@ -4016,6 +4802,7 @@ def validate_input_review_receipts(
                 or adapter_entry["logical_path"]
                 != "reviews/dreaming-vendor-adapter.py"
                 or adapter_entry["media_type"] != "text/x-python"
+                or adapter_entry["sha256"] != TRUSTED_AUTHORING_ADAPTER_SHA256
             ):
                 raise EvaluationError(
                     "input review receipt retained object roles are invalid"
@@ -4056,6 +4843,184 @@ def validate_input_review_receipts(
         reviewers.add(reviewer)
         decisions.append(decision)
     return decisions
+
+
+def validate_repaired_input_manifest(
+    skill_dir: Path,
+    manifest_sha256: str,
+    manifest: dict[str, Any],
+    objects: list[dict[str, Any]],
+    *,
+    resolved_suite: dict[str, Any],
+    resolved_suite_id: str,
+    resolved_policy: dict[str, Any],
+    resolved_policy_id: str,
+    resolved_config: dict[str, Any],
+    resolved_routing: dict[str, Any],
+    harness_sha: str,
+) -> None:
+    lineage = manifest.get("repair_lineage")
+    if not isinstance(lineage, dict):
+        raise EvaluationError("repaired manifest lineage must be an object")
+    require_exact_keys(
+        lineage,
+        "repaired manifest lineage",
+        {
+            "initial_manifest_sha256",
+            "claim_id",
+            "initial_review_set_id",
+            "original_review_receipt_sha256s",
+            "repair_packet_sha256",
+            "repair_draft_sha256",
+            "repair_operation_sha256",
+            "repair_adapter_sha256",
+        },
+    )
+    initial_sha256 = require_sha256(
+        lineage.get("initial_manifest_sha256"),
+        "repair lineage initial manifest",
+    )
+    if initial_sha256 == manifest_sha256:
+        raise EvaluationError("repaired manifest cannot name itself as its initial input")
+    claim_id = require_sha256(lineage.get("claim_id"), "repair lineage claim ID")
+    review_set_id = require_sha256(
+        lineage.get("initial_review_set_id"),
+        "repair lineage review set ID",
+    )
+    review_sha256s = lineage.get("original_review_receipt_sha256s")
+    if not isinstance(review_sha256s, list):
+        raise EvaluationError("repair lineage reviews must be a list")
+    review_sha256s = [
+        require_sha256(value, "repair lineage review receipt")
+        for value in review_sha256s
+    ]
+    if review_sha256s != sorted(review_sha256s) or len(review_sha256s) != 2:
+        raise EvaluationError(
+            "repair lineage requires two sorted original review receipts"
+        )
+    roles = {item["role"] for item in objects}
+    if (
+        roles & INPUT_AUTHORING_OBJECT_ROLES != INPUT_AUTHORING_OBJECT_ROLES
+        or roles & INPUT_REPAIR_OBJECT_ROLES != INPUT_REPAIR_OBJECT_ROLES
+    ):
+        raise EvaluationError(
+            "repaired manifest is missing exact authoring or repair provenance"
+        )
+    initial = validate_input_manifest(skill_dir, initial_sha256)
+    if initial["manifest"]["authoring_method"] != "bounded-safe-author":
+        raise EvaluationError("repair lineage must name an initial author manifest")
+    if (
+        initial["candidate_id"] != manifest["candidate_id"]
+        or initial["candidate_inventory"] != manifest["candidate_inventory"]
+    ):
+        raise EvaluationError("repaired manifest candidate differs from its initial input")
+    initial_retained = sorted(
+        [
+            item
+            for item in initial["manifest"]["objects"]
+            if item["role"] != "suite"
+        ],
+        key=lambda item: (item["role"], item["logical_path"]),
+    )
+    repaired_retained = sorted(
+        [
+            item
+            for item in objects
+            if item["role"] != "suite"
+            and item["role"] not in INPUT_REPAIR_OBJECT_ROLES
+        ],
+        key=lambda item: (item["role"], item["logical_path"]),
+    )
+    if repaired_retained != initial_retained:
+        raise EvaluationError(
+            "repaired manifest changes a retained policy, config, routing, harness, fixture, grader, or authoring object"
+        )
+    repair_entries = {
+        role: manifest_role(objects, role) for role in INPUT_REPAIR_OBJECT_ROLES
+    }
+    expected_repair_entries = {
+        "repair_packet": ("repair/packet.json", "application/json"),
+        "repair_draft": ("repair/draft.json", "application/json"),
+        "repair_operation": ("repair/operation.json", "application/json"),
+        "repair_adapter": (
+            "repair/dreaming-vendor-adapter.py",
+            "text/x-python",
+        ),
+    }
+    if any(
+        (
+            repair_entries[role]["logical_path"],
+            repair_entries[role]["media_type"],
+        )
+        != expected
+        for role, expected in expected_repair_entries.items()
+    ):
+        raise EvaluationError("repair provenance object roles or paths are invalid")
+    for role, lineage_key in (
+        ("repair_packet", "repair_packet_sha256"),
+        ("repair_draft", "repair_draft_sha256"),
+        ("repair_operation", "repair_operation_sha256"),
+        ("repair_adapter", "repair_adapter_sha256"),
+    ):
+        if repair_entries[role]["sha256"] != require_sha256(
+            lineage.get(lineage_key), f"repair lineage {lineage_key}"
+        ):
+            raise EvaluationError("repair lineage object identity is invalid")
+    if repair_entries["repair_adapter"]["sha256"] != TRUSTED_AUTHORING_ADAPTER_SHA256:
+        raise EvaluationError("repair adapter differs from the trusted adapter")
+    packet = load_registry_json_object(
+        repair_entries["repair_packet"], "repair packet"
+    )
+    draft = load_registry_json_object(
+        repair_entries["repair_draft"], "repair draft"
+    )
+    operation = load_registry_json_object(
+        repair_entries["repair_operation"], "repair operation"
+    )
+    expected_packet, context = build_input_repair_packet(
+        skill_dir,
+        claim_id,
+        initial_sha256,
+        packet.get("initial_validation_contract", {}).get("receipt_sha256"),
+        review_sha256s,
+        packet.get("original_author_model"),
+        require_active_claim=False,
+    )
+    if packet != expected_packet or packet["review_set_id"] != review_set_id:
+        raise EvaluationError("repair packet or review-set lineage is not reproducible")
+    draft, draft_id = validate_input_author_draft_value(
+        draft, packet, context
+    )
+    operation = validate_repair_operation(
+        operation,
+        packet,
+        draft_id,
+        repair_entries["repair_adapter"]["sha256"],
+    )
+    expected_suite = materialized_authoring_suite(draft, initial["suite"])
+    if (
+        resolved_suite != expected_suite
+        or resolved_suite_id != f"sha256:{digest(canonical(expected_suite))}"
+        or resolved_policy != initial["policy"]
+        or resolved_policy_id != initial["policy_id"]
+        or resolved_config != initial["config"]
+        or resolved_routing != initial["routing"]
+        or harness_sha != initial["manifest"]["harness_executable_sha256"]
+    ):
+        raise EvaluationError(
+            "repaired manifest changes more than the allowed task and prompt fields"
+        )
+    expected_sources = {
+        claim_id,
+        initial_sha256,
+        review_set_id,
+        *review_sha256s,
+        packet["packet_id"],
+        draft_id,
+        operation["operation_id"],
+    }
+    if set(manifest["source_identities"]) != expected_sources:
+        raise EvaluationError("repaired manifest source identities are incomplete")
 
 
 def parse_registry_timestamp(value: str) -> str:
@@ -4207,7 +5172,10 @@ def load_input_transition(
                 "review-required input needs validation and fewer than two accepting reviews"
             )
     elif state == "invalid":
-        if reason == "independent_review_rejected" and "reject" not in decisions:
+        if reason in {
+            "independent_review_rejected",
+            "independent_rereview_rejected",
+        } and "reject" not in decisions:
             raise EvaluationError("rejected input must bind a rejecting review")
         if reason == "deterministic_validation_failed" and (
             validation_sha256 is not None or reviews
@@ -4219,9 +5187,7 @@ def load_input_transition(
         if validation_sha256 is None:
             raise EvaluationError("ready input requires validation")
         validate_input_receipts(resolved, validation_sha256, reviews)
-        bounded = (
-            resolved["manifest"]["authoring_method"] == "bounded-safe-author"
-        )
+        bounded = is_bounded_input_manifest(resolved["manifest"])
         if bounded and claim_id is not None:
             expected_review_set = bounded_review_set_id(
                 resolved, claim_id, reviews
@@ -4394,7 +5360,11 @@ def v2_input_state(args: argparse.Namespace) -> dict[str, Any]:
             )
         if state == "invalid":
             if (
-                reason == "independent_review_rejected"
+                reason
+                in {
+                    "independent_review_rejected",
+                    "independent_rereview_rejected",
+                }
                 and "reject" not in decisions
             ):
                 raise EvaluationError("rejected input must bind a rejecting review")
@@ -4465,7 +5435,7 @@ def v2_input_ready(args: argparse.Namespace) -> dict[str, Any]:
     validate_input_receipts(
         resolved, validation_sha256, review_sha256s
     )
-    bounded = resolved["manifest"]["authoring_method"] == "bounded-safe-author"
+    bounded = is_bounded_input_manifest(resolved["manifest"])
     claim_id = None
     expected_review_set = None
     if bounded:
@@ -4606,7 +5576,7 @@ def v2_input_claim_assert_ready(args: argparse.Namespace) -> dict[str, Any]:
     resolved = validate_input_manifest(
         skill_dir, require_sha256(args.manifest, "input manifest digest")
     )
-    if resolved["manifest"]["authoring_method"] != "bounded-safe-author":
+    if not is_bounded_input_manifest(resolved["manifest"]):
         raise EvaluationError(
             "claim readiness assertion requires bounded-safe-author input"
         )
@@ -8193,6 +9163,33 @@ def build_parser() -> argparse.ArgumentParser:
     input_author_parser.add_argument("--token-budget", type=int, default=18_000)
     input_author_parser.add_argument("--output-bytes", type=int, default=100_000)
     input_author_parser.add_argument("--output-dir", required=True)
+    input_repair_packet_parser = commands.add_parser("v2-input-repair-packet")
+    input_repair_packet_parser.add_argument("skill_dir")
+    input_repair_packet_parser.add_argument("--claim-id", required=True)
+    input_repair_packet_parser.add_argument("--manifest", required=True)
+    input_repair_packet_parser.add_argument("--validation", required=True)
+    input_repair_packet_parser.add_argument(
+        "--review", action="append", required=True
+    )
+    input_repair_packet_parser.add_argument(
+        "--original-author-model", required=True
+    )
+    input_repair_packet_parser.add_argument("--output", required=True)
+    input_repair_parser = commands.add_parser("v2-input-repair")
+    input_repair_parser.add_argument("skill_dir")
+    input_repair_parser.add_argument("--claim-id", required=True)
+    input_repair_parser.add_argument("--manifest", required=True)
+    input_repair_parser.add_argument("--validation", required=True)
+    input_repair_parser.add_argument(
+        "--review", action="append", required=True
+    )
+    input_repair_parser.add_argument(
+        "--original-author-model", required=True
+    )
+    input_repair_parser.add_argument("--timeout", type=int, default=600)
+    input_repair_parser.add_argument("--token-budget", type=int, default=18_000)
+    input_repair_parser.add_argument("--output-bytes", type=int, default=100_000)
+    input_repair_parser.add_argument("--output-dir", required=True)
     input_author_materialize_parser = commands.add_parser(
         "v2-input-author-materialize"
     )
@@ -8388,6 +9385,8 @@ def main() -> int:
             "v2-input-claim": v2_input_claim,
             "v2-input-claim-inspect": v2_input_claim_inspect,
             "v2-input-author": v2_input_author,
+            "v2-input-repair-packet": v2_input_repair_packet,
+            "v2-input-repair": v2_input_repair,
             "v2-input-author-materialize": v2_input_author_materialize,
             "v2-input-register": v2_input_register,
             "v2-input-validate": v2_input_validate,

@@ -543,28 +543,42 @@ for key in os.environ:
 args = sys.argv[1:]
 prompt = args[args.index("-p") + 1]
 model = args[args.index("--model") + 1]
-packet = json.loads(prompt.split("authoring_packet:\n", 1)[1])
+repair = "EVALUATION_INPUT_REPAIR_OPERATION" in prompt
+packet = json.loads(
+    prompt.split("repair_packet:\n" if repair else "authoring_packet:\n", 1)[1]
+)
 if model == "fixture-author-model-mismatch":
     observed_model = "different-provider-model"
 else:
     observed_model = model
-if model == "fixture-author-insufficient":
+if model == "fixture-author-insufficient" or (
+    repair and model == "fixture-repair-insufficient"
+):
     payload = {
         "outcome": "insufficient_information",
         "summary": "The synthetic fixture cannot establish an objective outcome.",
         "reason": "objective_grader_unavailable",
     }
 else:
+    cases = packet["initial_suite"]["cases"] if repair else packet["suite_template"]["cases"]
     payload = {
         "outcome": "draft",
         "summary": "Safe synthetic fixture cases.",
         "cases": [
             {
                 "id": case["id"],
-                "task_id": f"authored:{case['class']}-{index:04d}",
-                "prompt": f"Complete the synthetic {case['class']} task {index}.",
+                "task_id": (
+                    f"repaired:{case['class']}-{index:04d}"
+                    if repair
+                    else f"authored:{case['class']}-{index:04d}"
+                ),
+                "prompt": (
+                    f"Complete the repaired synthetic {case['class']} task {index}."
+                    if repair
+                    else f"Complete the synthetic {case['class']} task {index}."
+                ),
             }
-            for index, case in enumerate(packet["suite_template"]["cases"], 1)
+            for index, case in enumerate(cases, 1)
         ],
     }
 print(json.dumps({"events": [
@@ -668,14 +682,33 @@ for key in os.environ:
         raise SystemExit(f"forbidden inherited provider variable: {key}")
 args = sys.argv[1:]
 prompt = args[args.index("-p") + 1]
-json.loads(prompt.split("review_packet:\n", 1)[1])
+packet = json.loads(prompt.split("review_packet:\n", 1)[1])
 model = args[args.index("--model") + 1]
+force_reject = os.path.basename(
+    os.path.dirname(os.path.realpath(sys.argv[0]))
+) == "reject-bin"
 input_tokens = 90
 output_tokens = 30
 payload = {
-    "decision": "accept",
-    "summary": f"Exact safe manifest accepted by {model}.",
-    "reason": None,
+    "decision": (
+        "reject"
+        if force_reject
+        or (
+            model == "fixture-repair-review-one"
+            and "repair_lineage_contract" not in packet
+        )
+        else "accept"
+    ),
+    "summary": f"Exact safe manifest reviewed by {model}.",
+    "reason": (
+        "prompt_contract_mismatch"
+        if force_reject
+        or (
+            model == "fixture-repair-review-one"
+            and "repair_lineage_contract" not in packet
+        )
+        else None
+    ),
 }
 print(json.dumps({"events": [
     {"type": "session.start", "data": {"model": model}},
@@ -851,6 +884,350 @@ assert {
 assert sys.argv[2] in manifest["source_identities"]
 assert manifest["authoring_method"] == "bounded-safe-author"
 PY
+repair_claim="$(
+  "$EVAL" v2-input-claim "$AUTHORING/skill" \
+    --owner-run-id certification-repair-run \
+    --author-model fixture-repair-author \
+    --reviewer-a-model fixture-repair-review-one \
+    --reviewer-b-model fixture-repair-review-two
+)"
+repair_claim_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["claim_id"])' \
+    <<<"$repair_claim"
+)"
+repair_initial="$(
+  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/author-bin/copilot" \
+    "$EVAL" v2-input-author "$AUTHORING/skill" \
+      --claim-id "$repair_claim_id" \
+      --suite "$AUTHORING/skill/.skill-evaluation-cases.json" \
+      --policy "$AUTHORING/skill/.skill-evaluation-policy.json" \
+      --config "$AUTHORING/config/compilation.json" \
+      --routing "$AUTHORING/config/routing.json" \
+      --harness "$HARNESS" \
+      --catalog "$AUTHORING/config/authoring-catalog.json" \
+      --model fixture-repair-author \
+      --timeout 60 --token-budget 140 --output-bytes 100000 \
+      --output-dir "$AUTHORING/repair-initial-materialized"
+)"
+repair_initial_manifest="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["input_manifest_sha256"])' \
+    <<<"$repair_initial"
+)"
+repair_initial_validation="$(
+  "$EVAL" v2-input-validate "$AUTHORING/skill" \
+    --manifest "$repair_initial_manifest"
+)"
+repair_initial_validation_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' \
+    <<<"$repair_initial_validation"
+)"
+repair_review_a="$(
+  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/bin/copilot" \
+    "$EVAL" v2-input-review "$AUTHORING/skill" \
+      --claim-id "$repair_claim_id" --slot review_a \
+      --manifest "$repair_initial_manifest" \
+      --validation "$repair_initial_validation_id" \
+      --model fixture-repair-review-one
+)"
+repair_review_a_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' \
+    <<<"$repair_review_a"
+)"
+python3 -c 'import json,sys; assert json.load(sys.stdin)["decision"] == "reject"' \
+  <<<"$repair_review_a"
+repair_review_b="$(
+  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/bin/copilot" \
+    "$EVAL" v2-input-review "$AUTHORING/skill" \
+      --claim-id "$repair_claim_id" --slot review_b \
+      --manifest "$repair_initial_manifest" \
+      --validation "$repair_initial_validation_id" \
+      --model fixture-repair-review-two
+)"
+repair_review_b_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' \
+    <<<"$repair_review_b"
+)"
+"$EVAL" v2-input-repair-packet "$AUTHORING/skill" \
+  --claim-id "$repair_claim_id" \
+  --manifest "$repair_initial_manifest" \
+  --validation "$repair_initial_validation_id" \
+  --review "$repair_review_a_id" --review "$repair_review_b_id" \
+  --original-author-model fixture-repair-author \
+  --output "$AUTHORING/repair-packet.json" >/dev/null
+python3 - "$AUTHORING/repair-packet.json" "$HOME" \
+  "$repair_claim_id" "$repair_initial_manifest" \
+  "$repair_initial_validation_id" "$repair_review_a_id" \
+  "$repair_review_b_id" <<'PY'
+import hashlib
+import json
+import sys
+
+path, home, claim, manifest, validation, review_a, review_b = sys.argv[1:]
+packet = json.load(open(path))
+packet_id = packet.pop("packet_id")
+canonical = json.dumps(
+    packet, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+).encode()
+assert packet_id == "sha256:" + hashlib.sha256(canonical).hexdigest()
+assert packet["kind"] == "safe_evaluation_input_repair_packet"
+assert packet["claim_id"] == claim
+assert packet["initial_manifest_sha256"] == manifest
+assert packet["initial_validation_contract"]["receipt_sha256"] == validation
+assert packet["initial_review_receipt_sha256s"] == sorted([review_a, review_b])
+assert {item["decision"] for item in packet["review_history"]} == {
+    "accept", "reject"
+}
+encoded = json.dumps(packet, sort_keys=True).lower()
+for forbidden in (
+    home.lower(),
+    ".copilot/session-state",
+    "transcript",
+    "private_ambient_secret",
+    "dashboard snapshot",
+    "user disposition",
+):
+    assert forbidden not in encoded
+assert '"content"' in encoded
+assert '"fixture"' in encoded
+assert "synthetic_fixture" not in encoded
+assert "deterministic_grader_contracts" not in encoded
+PY
+expect_refusal "wrong-repair-claim" "claim does not exist" \
+  "$EVAL" v2-input-repair-packet "$AUTHORING/skill" \
+    --claim-id "sha256:0000000000000000000000000000000000000000000000000000000000000000" \
+    --manifest "$repair_initial_manifest" \
+    --validation "$repair_initial_validation_id" \
+    --review "$repair_review_a_id" --review "$repair_review_b_id" \
+    --original-author-model fixture-repair-author \
+    --output "$AUTHORING/wrong-claim-repair-packet.json"
+expect_refusal "wrong-repair-author-model" \
+  "repair original author model differs from retained author provenance" \
+  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/author-bin/copilot" \
+    "$EVAL" v2-input-repair "$AUTHORING/skill" \
+      --claim-id "$repair_claim_id" \
+      --manifest "$repair_initial_manifest" \
+      --validation "$repair_initial_validation_id" \
+      --review "$repair_review_a_id" --review "$repair_review_b_id" \
+      --original-author-model wrong-repair-author \
+      --timeout 60 --token-budget 140 --output-bytes 100000 \
+      --output-dir "$AUTHORING/wrong-model-repair"
+wrong_model_repair_claim="$(
+  "$EVAL" v2-input-claim-inspect --claim-id "$repair_claim_id"
+)"
+python3 - "$wrong_model_repair_claim" <<'PY'
+import json
+import sys
+
+claim = json.loads(sys.argv[1])
+assert claim["status"] == "open"
+assert claim["slots"][3]["status"] == "unstarted"
+assert claim["aggregate_actual"]["started_operations"] == 3
+PY
+repair_result="$(
+  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/author-bin/copilot" \
+    "$EVAL" v2-input-repair "$AUTHORING/skill" \
+      --claim-id "$repair_claim_id" \
+      --manifest "$repair_initial_manifest" \
+      --validation "$repair_initial_validation_id" \
+      --review "$repair_review_a_id" --review "$repair_review_b_id" \
+      --original-author-model fixture-repair-author \
+      --timeout 60 --token-budget 140 --output-bytes 100000 \
+      --output-dir "$AUTHORING/repaired-materialized"
+)"
+repaired_manifest="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["input_manifest_sha256"])' \
+    <<<"$repair_result"
+)"
+[[ "$repaired_manifest" != "$repair_initial_manifest" ]] ||
+  fail "repair reused the initial manifest"
+repaired_validation="$(
+  "$EVAL" v2-input-validate "$AUTHORING/skill" --manifest "$repaired_manifest"
+)"
+repaired_validation_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' \
+    <<<"$repaired_validation"
+)"
+cp -R "$SKILLS_STATE_DIR" "$AUTHORING/reject-state"
+mkdir -p "$AUTHORING/reject-bin"
+cp "$AUTHORING/bin/copilot" "$AUTHORING/reject-bin/copilot"
+reject_rereview_a="$(
+  env SKILLS_STATE_DIR="$AUTHORING/reject-state" \
+    DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/bin/copilot" \
+    "$EVAL" v2-input-review "$AUTHORING/skill" \
+      --claim-id "$repair_claim_id" --slot rereview_a \
+      --manifest "$repaired_manifest" \
+      --validation "$repaired_validation_id" \
+      --model fixture-repair-review-one
+)"
+reject_rereview_b="$(
+  env SKILLS_STATE_DIR="$AUTHORING/reject-state" \
+    DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/reject-bin/copilot" \
+    "$EVAL" v2-input-review "$AUTHORING/skill" \
+      --claim-id "$repair_claim_id" --slot rereview_b \
+      --manifest "$repaired_manifest" \
+      --validation "$repaired_validation_id" \
+      --model fixture-repair-review-two
+)"
+python3 -c 'import json,sys; assert json.load(sys.stdin)["decision"] == "reject"' \
+  <<<"$reject_rereview_b"
+env SKILLS_STATE_DIR="$AUTHORING/reject-state" \
+  "$EVAL" v2-input-validate "$AUTHORING/skill" \
+    --manifest "$repaired_manifest" >/dev/null
+reject_claim_state="$(
+  env SKILLS_STATE_DIR="$AUTHORING/reject-state" \
+    "$EVAL" v2-input-claim-inspect --claim-id "$repair_claim_id"
+)"
+python3 - "$reject_claim_state" <<'PY'
+import json
+import sys
+
+claim = json.loads(sys.argv[1])
+assert claim["status"] == "invalid"
+assert claim["terminal_reason"] == "independent_rereview_rejected"
+PY
+rereview_a="$(
+  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/bin/copilot" \
+    "$EVAL" v2-input-review "$AUTHORING/skill" \
+      --claim-id "$repair_claim_id" --slot rereview_a \
+      --manifest "$repaired_manifest" \
+      --validation "$repaired_validation_id" \
+      --model fixture-repair-review-one
+)"
+rereview_a_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' \
+    <<<"$rereview_a"
+)"
+rereview_b="$(
+  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/bin/copilot" \
+    "$EVAL" v2-input-review "$AUTHORING/skill" \
+      --claim-id "$repair_claim_id" --slot rereview_b \
+      --manifest "$repaired_manifest" \
+      --validation "$repaired_validation_id" \
+      --model fixture-repair-review-two
+)"
+rereview_b_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' \
+    <<<"$rereview_b"
+)"
+expect_refusal "stale-initial-reviews-for-repair" \
+  "does not bind the exact manifest" \
+  "$EVAL" v2-input-ready "$AUTHORING/skill" \
+    --claim-id "$repair_claim_id" --manifest "$repaired_manifest" \
+    --validation "$repaired_validation_id" \
+    --review "$repair_review_a_id" --review "$repair_review_b_id"
+expect_refusal "repaired-reviews-for-initial" \
+  "exact manifest" \
+  "$EVAL" v2-input-ready "$AUTHORING/skill" \
+    --claim-id "$repair_claim_id" --manifest "$repair_initial_manifest" \
+    --validation "$repair_initial_validation_id" \
+    --review "$rereview_a_id" --review "$rereview_b_id"
+repair_ready="$(
+  "$EVAL" v2-input-ready "$AUTHORING/skill" \
+    --claim-id "$repair_claim_id" --manifest "$repaired_manifest" \
+    --validation "$repaired_validation_id" \
+    --review "$rereview_a_id" --review "$rereview_b_id"
+)"
+python3 - "$repair_ready" "$repair_claim_id" "$repair_review_a_id" \
+  "$repair_review_b_id" "$rereview_a_id" "$rereview_b_id" <<'PY'
+import json
+import sys
+
+ready = json.loads(sys.argv[1])
+assert ready["claim_id"] == sys.argv[2]
+transition = json.load(open(ready["transition"]))
+assert transition["review_receipt_sha256s"] == sorted(sys.argv[5:7])
+assert not set(sys.argv[3:5]) & set(transition["review_receipt_sha256s"])
+PY
+rm -f "$AUTHORING/repair-packet.json"
+rm -rf "$AUTHORING/repaired-materialized"
+"$EVAL" v2-input-validate "$AUTHORING/skill" \
+  --manifest "$repaired_manifest" >/dev/null
+python3 - "$EVAL" "$AUTHORING/skill" "$repair_result" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+evaluator, skill, result_json = sys.argv[1:]
+result = json.loads(result_json)
+manifest_path = Path(result["input_manifest"])
+manifest = json.loads(manifest_path.read_text())
+registry = manifest_path.parent.parent
+operation_entry = next(
+    item for item in manifest["objects"] if item["role"] == "repair_operation"
+)
+operation_path = registry / "objects" / operation_entry["sha256"].removeprefix("sha256:")
+
+def assert_tamper_refused(path, mutate):
+    original = path.read_bytes()
+    try:
+        value = json.loads(original)
+        mutate(value)
+        path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")))
+        completed = subprocess.run(
+            [
+                evaluator,
+                "v2-input-validate",
+                skill,
+                "--manifest",
+                result["input_manifest_sha256"],
+            ],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        assert completed.returncode != 0
+    finally:
+        path.write_bytes(original)
+
+assert_tamper_refused(
+    operation_path,
+    lambda value: value.update(summary="tampered repair operation"),
+)
+assert_tamper_refused(
+    manifest_path,
+    lambda value: value["repair_lineage"].update(
+        initial_review_set_id="sha256:" + "0" * 64
+    ),
+)
+PY
+expect_refusal "repair-twice" "completed and cannot dispatch" \
+  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/author-bin/copilot" \
+    "$EVAL" v2-input-repair "$AUTHORING/skill" \
+      --claim-id "$repair_claim_id" \
+      --manifest "$repair_initial_manifest" \
+      --validation "$repair_initial_validation_id" \
+      --review "$repair_review_a_id" --review "$repair_review_b_id" \
+      --original-author-model fixture-repair-author \
+      --timeout 60 --token-budget 140 --output-bytes 100000 \
+      --output-dir "$AUTHORING/repaired-materialized-again"
+repair_claim_state="$(
+  "$EVAL" v2-input-claim-inspect --claim-id "$repair_claim_id"
+)"
+python3 - "$repair_claim_state" "$repair_initial_manifest" "$repaired_manifest" <<'PY'
+import json
+import sys
+
+claim = json.loads(sys.argv[1])
+assert claim["status"] == "completed"
+assert claim["terminal_reason"] == "ready"
+assert claim["initial_manifest_sha256"] == sys.argv[2]
+assert claim["repaired_manifest_sha256"] == sys.argv[3]
+assert claim["aggregate_actual"]["started_operations"] == 6
+assert claim["aggregate_actual"]["normalized_tokens"] == 760
+assert [item["status"] for item in claim["slots"]] == ["completed"] * 6
+PY
+pass "one rejected input is repaired once, re-reviewed by the same identities, replayable, and ready in six slots"
 model_mismatch_claim="$(
   "$EVAL" v2-input-claim "$AUTHORING/skill" \
     --owner-run-id certification-model-mismatch-run \
@@ -917,6 +1294,111 @@ assert value["input_manifest_sha256"] is None
 PY
 [[ ! -e "$AUTHORING/insufficient-materialized" ]] ||
   fail "insufficient authoring created materialized output"
+export DREAMING_NOW_EPOCH=1787234400
+repair_insufficient_claim="$(
+  "$EVAL" v2-input-claim "$AUTHORING/skill" \
+    --owner-run-id certification-repair-insufficient-run \
+    --author-model fixture-repair-insufficient \
+    --reviewer-a-model fixture-repair-review-one \
+    --reviewer-b-model fixture-repair-review-two
+)"
+repair_insufficient_claim_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["claim_id"])' \
+    <<<"$repair_insufficient_claim"
+)"
+repair_insufficient_initial="$(
+  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/author-bin/copilot" \
+    "$EVAL" v2-input-author "$AUTHORING/skill" \
+      --claim-id "$repair_insufficient_claim_id" \
+      --suite "$AUTHORING/skill/.skill-evaluation-cases.json" \
+      --policy "$AUTHORING/skill/.skill-evaluation-policy.json" \
+      --config "$AUTHORING/config/compilation.json" \
+      --routing "$AUTHORING/config/routing.json" \
+      --harness "$HARNESS" \
+      --catalog "$AUTHORING/config/authoring-catalog.json" \
+      --model fixture-repair-insufficient \
+      --timeout 60 --token-budget 140 --output-bytes 100000 \
+      --output-dir "$AUTHORING/repair-insufficient-initial"
+)"
+repair_insufficient_manifest="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["input_manifest_sha256"])' \
+    <<<"$repair_insufficient_initial"
+)"
+repair_insufficient_validation="$(
+  "$EVAL" v2-input-validate "$AUTHORING/skill" \
+    --manifest "$repair_insufficient_manifest"
+)"
+repair_insufficient_validation_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' \
+    <<<"$repair_insufficient_validation"
+)"
+repair_insufficient_review_a="$(
+  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/bin/copilot" \
+    "$EVAL" v2-input-review "$AUTHORING/skill" \
+      --claim-id "$repair_insufficient_claim_id" --slot review_a \
+      --manifest "$repair_insufficient_manifest" \
+      --validation "$repair_insufficient_validation_id" \
+      --model fixture-repair-review-one
+)"
+repair_insufficient_review_a_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' \
+    <<<"$repair_insufficient_review_a"
+)"
+repair_insufficient_review_b="$(
+  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/bin/copilot" \
+    "$EVAL" v2-input-review "$AUTHORING/skill" \
+      --claim-id "$repair_insufficient_claim_id" --slot review_b \
+      --manifest "$repair_insufficient_manifest" \
+      --validation "$repair_insufficient_validation_id" \
+      --model fixture-repair-review-two
+)"
+repair_insufficient_review_b_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' \
+    <<<"$repair_insufficient_review_b"
+)"
+repair_insufficient="$(
+  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
+    DREAMING_COPILOT_BIN="$AUTHORING/author-bin/copilot" \
+    "$EVAL" v2-input-repair "$AUTHORING/skill" \
+      --claim-id "$repair_insufficient_claim_id" \
+      --manifest "$repair_insufficient_manifest" \
+      --validation "$repair_insufficient_validation_id" \
+      --review "$repair_insufficient_review_a_id" \
+      --review "$repair_insufficient_review_b_id" \
+      --original-author-model fixture-repair-insufficient \
+      --timeout 60 --token-budget 140 --output-bytes 100000 \
+      --output-dir "$AUTHORING/repair-insufficient-output"
+)"
+python3 - "$repair_insufficient" "$EVAL" \
+  "$repair_insufficient_claim_id" <<'PY'
+import json
+import subprocess
+import sys
+
+result = json.loads(sys.argv[1])
+assert result["status"] == "insufficient_information"
+assert result["input_manifest_sha256"] is None
+claim = json.loads(
+    subprocess.run(
+        [sys.argv[2], "v2-input-claim-inspect", "--claim-id", sys.argv[3]],
+        check=True,
+        text=True,
+        capture_output=True,
+    ).stdout
+)
+assert claim["status"] == "completed"
+assert claim["terminal_reason"] == "repair_insufficient_information"
+assert claim["slots"][3]["status"] == "completed"
+assert claim["slots"][3]["usage_status"] == "available"
+assert claim["aggregate_actual"]["started_operations"] == 4
+PY
+[[ ! -e "$AUTHORING/repair-insufficient-output" ]] ||
+  fail "insufficient repair created materialized output"
+unset DREAMING_NOW_EPOCH
+pass "repair insufficient information is terminal, non-ready, and retains actual usage"
 mkdir -p "$AUTHORING/evaluator-alias"
 ln -s "$EVAL" "$AUTHORING/evaluator-alias/skill-evaluation.py"
 python3 - "$EVAL" "$AUTHORING/evaluator-alias/skill-evaluation.py" \

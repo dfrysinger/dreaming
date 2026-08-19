@@ -306,17 +306,21 @@ def write_codex_marketplace_config():
         ])
     (codex_home / "config.toml").write_text("\\n".join(lines))
 def input_author_payload(prompt):
-    packet = json.loads(prompt.split("authoring_packet:\\n", 1)[1])
+    repair = "EVALUATION_INPUT_REPAIR_OPERATION" in prompt
+    packet = json.loads(
+      prompt.split("repair_packet:\\n" if repair else "authoring_packet:\\n", 1)[1]
+    )
+    cases = packet["initial_suite"]["cases"] if repair else packet["suite_template"]["cases"]
     return {
       "outcome": "draft",
       "summary": "safe synthetic fixture cases",
       "cases": [
         {
           "id": case["id"],
-          "task_id": f"authored:{case['class']}-{index:04d}",
-          "prompt": f"Complete the standalone {case['class']} task {index} — safely.",
+          "task_id": f"{'repaired' if repair else 'authored'}:{case['class']}-{index:04d}",
+          "prompt": f"Complete the {'repaired ' if repair else ''}standalone {case['class']} task {index} — safely.",
         }
-        for index, case in enumerate(packet["suite_template"]["cases"], 1)
+        for index, case in enumerate(cases, 1)
       ],
     }
 def input_review_payload(prompt):
@@ -351,7 +355,8 @@ if vendor == "codex" and args[:2] == ["login", "status"]:
 if vendor == "codex" and "--output-last-message" in args:
     target = Path(args[args.index("--output-last-message") + 1])
     author_prompt = next(
-      (arg for arg in args if "EVALUATION_INPUT_AUTHOR_OPERATION" in arg), None
+      (arg for arg in args if "EVALUATION_INPUT_AUTHOR_OPERATION" in arg
+       or "EVALUATION_INPUT_REPAIR_OPERATION" in arg), None
     )
     if author_prompt is not None:
         requested_model = args[args.index("--model") + 1]
@@ -384,7 +389,8 @@ if vendor == "codex" and "--output-last-message" in args:
     raise SystemExit()
 if ("-p" in args or "--print" in args) and "plugin" not in args:
     author_prompt = next(
-      (arg for arg in args if "EVALUATION_INPUT_AUTHOR_OPERATION" in arg), None
+      (arg for arg in args if "EVALUATION_INPUT_AUTHOR_OPERATION" in arg
+       or "EVALUATION_INPUT_REPAIR_OPERATION" in arg), None
     )
     if author_prompt is not None:
         requested_model = args[args.index("--model") + 1]
@@ -1066,6 +1072,87 @@ print(json.dumps({"ok": True}))
             )
             self.assertNotIn("--available-tools=", invocation)
             self.assertNotIn("--allowedTools", invocation)
+
+        repair_packet = self.case / "repair-packet.json"
+        repair_packet.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "kind": "safe_evaluation_input_repair_packet",
+                    "packet_id": "sha256:" + "6" * 64,
+                    "claim_id": "sha256:" + "7" * 64,
+                    "candidate_id": "sha256:" + "2" * 64,
+                    "initial_manifest_sha256": "sha256:" + "4" * 64,
+                    "initial_validation_contract": {
+                        "receipt_sha256": "sha256:" + "5" * 64,
+                    },
+                    "initial_review_receipt_sha256s": [
+                        "sha256:" + "8" * 64,
+                        "sha256:" + "9" * 64,
+                    ],
+                    "review_set_id": "sha256:" + "a" * 64,
+                    "original_author_model": "fixture-author-model",
+                    "initial_suite": {"cases": cases},
+                    "compilation_contract": {
+                        "case_runtime": [
+                            {
+                                "id": case["id"],
+                                "fixture": "synthetic",
+                                "artifacts": [],
+                                "semantic": case["class"]
+                                in {"intended", "related"},
+                            }
+                            for case in cases
+                        ]
+                    },
+                }
+            )
+        )
+        repair_result = self.case / "copilot-repair-result.json"
+        repair_draft = self.case / "copilot-repair-draft.json"
+        repair_args = argparse.Namespace(
+            vendor="copilot",
+            operation="repair",
+            packet=str(repair_packet),
+            result=str(repair_result),
+            draft_output=str(repair_draft),
+            model="fixture-author-model",
+            binary=self.env["DREAMING_COPILOT_BIN"],
+            timeout=60,
+            output_bytes=100_000,
+            token_budget=140,
+            deny_root=[],
+            skill_dir="validated-by-test-double",
+            claim_id="sha256:" + "7" * 64,
+            manifest="sha256:" + "4" * 64,
+            validation="sha256:" + "5" * 64,
+            review=["sha256:" + "8" * 64, "sha256:" + "9" * 64],
+            original_author_model="fixture-author-model",
+            suite=None,
+            policy=None,
+            config=None,
+            routing=None,
+            harness=None,
+            catalog=None,
+        )
+        with mock.patch.dict(os.environ, self.env, clear=False), mock.patch.object(
+            vendor_module, "validate_evaluation_input_packet"
+        ), self.assertRaises(SystemExit):
+            vendor_module.evaluation_input_author_run(repair_args)
+        repair = json.loads(repair_result.read_text())
+        self.assertEqual(repair["operation"], "repair")
+        self.assertEqual(repair["model"], "fixture-author-model")
+        self.assertEqual(
+            repair["initial_manifest_sha256"], "sha256:" + "4" * 64
+        )
+        self.assertEqual(
+            repair["original_review_receipt_sha256s"],
+            ["sha256:" + "8" * 64, "sha256:" + "9" * 64],
+        )
+        self.assertEqual(
+            json.loads(repair_draft.read_text())["kind"],
+            "safe_evaluation_input_repair_draft",
+        )
 
         review_packet = self.case / "review-packet.json"
         review_packet.write_text(

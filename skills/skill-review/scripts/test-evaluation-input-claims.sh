@@ -92,7 +92,7 @@ def operation(kind, model, packet_id, tokens, elapsed=100):
 
 
 def dispatch(claim_id, slot, model, packet, *, manifest=None, validation=None,
-             tokens=18_000, timeout=600):
+             tokens=18_000, timeout=600, lineage=None):
     return claims.prepare_dispatch(
         claim_id=claim_id,
         skill_path=str(root / "skill"),
@@ -105,7 +105,79 @@ def dispatch(claim_id, slot, model, packet, *, manifest=None, validation=None,
         validation_receipt_sha256=validation,
         requested_token_budget=tokens,
         requested_timeout_seconds=timeout,
+        lineage_receipt_sha256s=lineage,
     )
+
+
+def rejected_initial(run_id):
+    claim = reserve(run_id)
+    claim_id = claim["claim_id"]
+    manifest = sha(f"{run_id}-initial-manifest")
+    validation = sha(f"{run_id}-initial-validation")
+    packet = sha(f"{run_id}-author-packet")
+    dispatch(claim_id, "author", "model-author", packet)
+    claims.complete_slot(
+        claim_id=claim_id,
+        slot_name="author",
+        operation=operation("author", "model-author", packet, 10),
+        manifest_sha256=manifest,
+    )
+    receipts = []
+    for slot, model, decision in (
+        ("review_a", "model-review-a", "reject"),
+        ("review_b", "model-review-b", "accept"),
+    ):
+        packet = sha(f"{run_id}-{slot}-packet")
+        dispatch(
+            claim_id,
+            slot,
+            model,
+            packet,
+            manifest=manifest,
+            validation=validation,
+        )
+        receipt = sha(f"{run_id}-{slot}-receipt")
+        claims.complete_slot(
+            claim_id=claim_id,
+            slot_name=slot,
+            operation=operation("review", model, packet, 10),
+            manifest_sha256=manifest,
+            review_receipt_sha256=receipt,
+            decision=decision,
+        )
+        receipts.append(receipt)
+    return claim_id, manifest, validation, sorted(receipts)
+
+
+def complete_repair(run_id):
+    claim_id, manifest, validation, receipts = rejected_initial(run_id)
+    packet = sha(f"{run_id}-repair-packet")
+    dispatch(
+        claim_id,
+        "repair",
+        "model-author",
+        packet,
+        manifest=manifest,
+        validation=validation,
+        lineage=receipts,
+    )
+    repaired = sha(f"{run_id}-repaired-manifest")
+    repair_operation = operation("repair", "model-author", packet, 10)
+    repair_operation.update(
+        {
+            "initial_manifest_sha256": manifest,
+            "validation_receipt_sha256": validation,
+            "review_set_id": claims.inspect_claim(claim_id)["review_set_id"],
+            "original_review_receipt_sha256s": receipts,
+        }
+    )
+    claims.complete_slot(
+        claim_id=claim_id,
+        slot_name="repair",
+        operation=repair_operation,
+        manifest_sha256=repaired,
+    )
+    return claim_id, repaired
 
 
 if hasattr(time, "tzset"):
@@ -119,7 +191,7 @@ empty_ledger.chmod(0o644)
 connection = claims.connect()
 connection.close()
 connection = claims.connect()
-assert connection.execute("PRAGMA user_version").fetchone()[0] == 1
+assert connection.execute("PRAGMA user_version").fetchone()[0] == claims.SCHEMA_VERSION
 connection.close()
 assert empty_ledger.stat().st_size > 0
 assert empty_ledger.stat().st_mode & 0o777 == 0o600
@@ -194,7 +266,27 @@ except claims.ClaimLedgerError as error:
     assert "owner status" in str(error)
 else:
     raise AssertionError("an unsupported owner integration status was accepted")
-passed("empty, header-only, repeated, and concurrent bootstrap is fail closed")
+use_state("legacy-schema")
+legacy = claims.ledger_path()
+legacy.parent.mkdir(parents=True)
+with sqlite3.connect(legacy) as connection:
+    connection.execute(
+        "CREATE TABLE schema_metadata "
+        "(singleton INTEGER PRIMARY KEY, schema_version INTEGER NOT NULL, "
+        "owner_integration_status TEXT NOT NULL)"
+    )
+    connection.execute(
+        "INSERT INTO schema_metadata VALUES (1, 1, ?)",
+        (claims.OWNER_INTEGRATION_STATUS,),
+    )
+    connection.execute("PRAGMA user_version=1")
+try:
+    claims.connect()
+except claims.ClaimLedgerError as error:
+    assert "schema version" in str(error)
+else:
+    raise AssertionError("legacy claim schema was silently migrated")
+passed("schema bootstrap is fail closed and version one is explicitly refused")
 
 use_state("capacity")
 first = reserve("run-capacity-1", a="model-z", b="model-a")
@@ -483,48 +575,358 @@ assert completion_mismatch_state["events"][-1]["details"] == {
 }
 passed("review manifest failure survives malformed trailing completion fields")
 
-use_state("unsupported-completion")
-unsupported_completion = reserve("run-unsupported-completion")
-unsupported_packet = sha("unsupported-completion-packet")
-with sqlite3.connect(claims.ledger_path()) as connection:
-    connection.execute(
-        """
-        UPDATE claim_slots
-        SET status='dispatching', started_epoch=?,
-            effective_token_budget=100, effective_timeout_seconds=10,
-            packet_id=?
-        WHERE claim_id=? AND slot_name='repair'
-        """,
-        (
-            int(os.environ["DREAMING_NOW_EPOCH"]),
-            unsupported_packet,
-            unsupported_completion["claim_id"],
-        ),
+use_state("repair-ready")
+repair_claim = reserve("run-repair-ready")
+repair_claim_id = repair_claim["claim_id"]
+initial_manifest = sha("repair-initial-manifest")
+initial_validation = sha("repair-initial-validation")
+author_packet = sha("repair-author-packet")
+dispatch(repair_claim_id, "author", "model-author", author_packet)
+claims.complete_slot(
+    claim_id=repair_claim_id,
+    slot_name="author",
+    operation=operation("author", "model-author", author_packet, 100),
+    manifest_sha256=initial_manifest,
+)
+initial_receipts = []
+for slot, model, decision in (
+    ("review_a", "model-review-a", "reject"),
+    ("review_b", "model-review-b", "accept"),
+):
+    packet = sha(f"repair-{slot}-packet")
+    dispatch(
+        repair_claim_id,
+        slot,
+        model,
+        packet,
+        manifest=initial_manifest,
+        validation=initial_validation,
     )
-try:
+    receipt = sha(f"repair-{slot}-receipt")
     claims.complete_slot(
-        claim_id=unsupported_completion["claim_id"],
-        slot_name="repair",
-        operation=operation(
-            "review", "model-author", unsupported_packet, 1
-        ),
-        manifest_sha256=sha("unsupported-completion-manifest"),
-        review_receipt_sha256=sha("unsupported-completion-receipt"),
+        claim_id=repair_claim_id,
+        slot_name=slot,
+        operation=operation("review", model, packet, 100),
+        manifest_sha256=initial_manifest,
+        review_receipt_sha256=receipt,
+        decision=decision,
+    )
+    initial_receipts.append(receipt)
+assert claims.inspect_claim(repair_claim_id)["status"] == "open"
+repair_packet = sha("repair-packet")
+dispatch(
+    repair_claim_id,
+    "repair",
+    "model-author",
+    repair_packet,
+    manifest=initial_manifest,
+    validation=initial_validation,
+    lineage=initial_receipts,
+)
+repaired_manifest = sha("repaired-manifest")
+repair_operation = operation(
+    "repair", "model-author", repair_packet, 100
+)
+repair_operation.update(
+    {
+        "initial_manifest_sha256": initial_manifest,
+        "validation_receipt_sha256": initial_validation,
+        "review_set_id": claims.inspect_claim(repair_claim_id)["review_set_id"],
+        "original_review_receipt_sha256s": sorted(initial_receipts),
+    }
+)
+claims.complete_slot(
+    claim_id=repair_claim_id,
+    slot_name="repair",
+    operation=repair_operation,
+    manifest_sha256=repaired_manifest,
+)
+rereview_receipts = []
+repaired_validation = sha("repaired-validation")
+for slot, model in (
+    ("rereview_a", "model-review-a"),
+    ("rereview_b", "model-review-b"),
+):
+    packet = sha(f"repair-{slot}-packet")
+    dispatch(
+        repair_claim_id,
+        slot,
+        model,
+        packet,
+        manifest=repaired_manifest,
+        validation=repaired_validation,
+    )
+    receipt = sha(f"repair-{slot}-receipt")
+    claims.complete_slot(
+        claim_id=repair_claim_id,
+        slot_name=slot,
+        operation=operation("review", model, packet, 100),
+        manifest_sha256=repaired_manifest,
+        review_receipt_sha256=receipt,
         decision="accept",
     )
+    rereview_receipts.append(receipt)
+repair_facts = claims.assert_ready(
+    repair_claim_id,
+    skill_path=str(root / "skill"),
+    skill_key="fixture-skill-key",
+    candidate_id=sha("candidate"),
+    manifest_sha256=repaired_manifest,
+    validation_receipt_sha256=repaired_validation,
+    review_receipt_sha256s=rereview_receipts,
+)
+assert repair_facts["review_set_id"] == claims.inspect_claim(
+    repair_claim_id
+)["review_set_id"]
+try:
+    claims.assert_ready(
+        repair_claim_id,
+        skill_path=str(root / "skill"),
+        skill_key="fixture-skill-key",
+        candidate_id=sha("candidate"),
+        manifest_sha256=repaired_manifest,
+        validation_receipt_sha256=repaired_validation,
+        review_receipt_sha256s=initial_receipts,
+    )
 except claims.ClaimLedgerError as error:
-    assert "reserved for a later slice" in str(error)
+    assert "differ from the claim ledger" in str(error)
 else:
-    raise AssertionError("repair completion was mapped to a review")
-unsupported_completion_state = claims.inspect_claim(
-    unsupported_completion["claim_id"]
+    raise AssertionError("initial review receipts authorized repaired readiness")
+repair_state = claims.inspect_claim(repair_claim_id)
+assert repair_state["aggregate_actual"]["started_operations"] == 6
+assert repair_state["aggregate_actual"]["normalized_tokens"] == 600
+passed("one repair and two re-reviews consume exactly six lineage-bound slots")
+
+use_state("repair-substitution")
+sub_claim, sub_manifest, sub_validation, sub_receipts = rejected_initial(
+    "run-repair-substitution"
 )
-assert unsupported_completion_state["slots"][3]["status"] == "failed"
-assert (
-    unsupported_completion_state["slots"][3]["failure_reason"]
-    == "unsupported_operation_kind"
+try:
+    dispatch(
+        sub_claim,
+        "repair",
+        "substituted-author",
+        sha("substituted-repair-packet"),
+        manifest=sub_manifest,
+        validation=sub_validation,
+        lineage=sub_receipts,
+    )
+except claims.ClaimLedgerError as error:
+    assert "author identity unavailable" in str(error)
+else:
+    raise AssertionError("substituted repair author dispatched")
+sub_state = claims.inspect_claim(sub_claim)
+assert sub_state["status"] == "invalid"
+assert sub_state["terminal_reason"] == "author_identity_unavailable"
+assert sub_state["slots"][3]["status"] == "unstarted"
+assert sub_state["aggregate_actual"]["started_operations"] == 3
+passed("repair author substitution invalidates before spending the repair slot")
+
+use_state("repair-lineage-mismatch")
+lineage_claim, lineage_manifest, lineage_validation, lineage_receipts = (
+    rejected_initial("run-repair-lineage-mismatch")
 )
-passed("defensive completion never maps a future repair slot to review")
+try:
+    dispatch(
+        lineage_claim,
+        "repair",
+        "model-author",
+        sha("lineage-mismatch-packet"),
+        manifest=lineage_manifest,
+        validation=lineage_validation,
+        lineage=[lineage_receipts[0], sha("foreign-review-receipt")],
+    )
+except claims.ClaimLedgerError as error:
+    assert "lineage differs from the claim" in str(error)
+else:
+    raise AssertionError("foreign repair receipt lineage dispatched")
+lineage_state = claims.inspect_claim(lineage_claim)
+assert lineage_state["status"] == "invalid"
+assert lineage_state["slots"][3]["status"] == "unstarted"
+use_state("repair-manifest-mismatch")
+wrong_manifest_claim, wrong_manifest, wrong_validation, wrong_receipts = (
+    rejected_initial("run-repair-manifest-mismatch")
+)
+try:
+    dispatch(
+        wrong_manifest_claim,
+        "repair",
+        "model-author",
+        sha("repair-manifest-mismatch-packet"),
+        manifest=sha("foreign-initial-manifest"),
+        validation=wrong_validation,
+        lineage=wrong_receipts,
+    )
+except claims.ClaimLedgerError as error:
+    assert "differs from the claim" in str(error)
+else:
+    raise AssertionError("foreign initial manifest dispatched for repair")
+assert claims.inspect_claim(wrong_manifest_claim)["slots"][3]["status"] == "unstarted"
+use_state("repair-review-set-mismatch")
+wrong_set_claim, wrong_set_manifest, wrong_set_validation, wrong_set_receipts = (
+    rejected_initial("run-repair-review-set-mismatch")
+)
+with sqlite3.connect(claims.ledger_path()) as connection:
+    connection.execute(
+        "UPDATE claims SET review_set_id=? WHERE claim_id=?",
+        (sha("foreign-review-set"), wrong_set_claim),
+    )
+try:
+    dispatch(
+        wrong_set_claim,
+        "repair",
+        "model-author",
+        sha("repair-review-set-mismatch-packet"),
+        manifest=wrong_set_manifest,
+        validation=wrong_set_validation,
+        lineage=wrong_set_receipts,
+    )
+except claims.ClaimLedgerError as error:
+    assert "review set identity is invalid" in str(error)
+else:
+    raise AssertionError("foreign review set dispatched for repair")
+passed("wrong repair manifest, review set, or receipt lineage refuses before dispatch")
+
+use_state("rereview-substitution")
+rereview_sub_claim, rereview_sub_manifest = complete_repair(
+    "run-rereview-substitution"
+)
+try:
+    dispatch(
+        rereview_sub_claim,
+        "rereview_a",
+        "substituted-reviewer",
+        sha("substituted-rereview-packet"),
+        manifest=rereview_sub_manifest,
+        validation=sha("substituted-rereview-validation"),
+    )
+except claims.ClaimLedgerError as error:
+    assert "reviewer identity unavailable" in str(error)
+else:
+    raise AssertionError("substituted re-reviewer dispatched")
+rereview_sub_state = claims.inspect_claim(rereview_sub_claim)
+assert rereview_sub_state["status"] == "invalid"
+assert rereview_sub_state["terminal_reason"] == "reviewer_identity_unavailable"
+assert rereview_sub_state["slots"][4]["status"] == "unstarted"
+assert rereview_sub_state["aggregate_actual"]["started_operations"] == 4
+passed("re-reviewer substitution invalidates before spending the re-review slot")
+
+use_state("repair-insufficient")
+ii_claim, ii_manifest, ii_validation, ii_receipts = rejected_initial(
+    "run-repair-insufficient"
+)
+ii_packet = sha("repair-insufficient-packet")
+dispatch(
+    ii_claim,
+    "repair",
+    "model-author",
+    ii_packet,
+    manifest=ii_manifest,
+    validation=ii_validation,
+    lineage=ii_receipts,
+)
+ii_operation = operation("repair", "model-author", ii_packet, 25)
+ii_operation.update(
+    {
+        "initial_manifest_sha256": ii_manifest,
+        "validation_receipt_sha256": ii_validation,
+        "review_set_id": claims.inspect_claim(ii_claim)["review_set_id"],
+        "original_review_receipt_sha256s": ii_receipts,
+    }
+)
+claims.complete_slot(
+    claim_id=ii_claim,
+    slot_name="repair",
+    operation=ii_operation,
+    manifest_sha256=None,
+    terminal_reason="repair_insufficient_information",
+)
+ii_state = claims.inspect_claim(ii_claim)
+assert ii_state["status"] == "completed"
+assert ii_state["terminal_reason"] == "repair_insufficient_information"
+assert ii_state["slots"][3]["status"] == "completed"
+assert ii_state["slots"][3]["normalized_tokens"] == 25
+passed("repair insufficient information is terminal with actual usage")
+
+for label, slot, failure in (
+    ("repair-timeout", "repair", "trusted_operation_timeout"),
+    ("repair-malformed", "repair", "trusted_operation_malformed"),
+):
+    use_state(label)
+    claim_id, initial, validation, receipts = rejected_initial(f"run-{label}")
+    packet = sha(f"{label}-packet")
+    dispatch(
+        claim_id,
+        "repair",
+        "model-author",
+        packet,
+        manifest=initial,
+        validation=validation,
+        lineage=receipts,
+    )
+    claims.fail_dispatched_slot(claim_id, "repair", failure)
+    state = claims.inspect_claim(claim_id)
+    assert state["slots"][3]["status"] == "failed"
+    assert state["slots"][3]["failure_reason"] == failure
+    assert state["aggregate_actual"]["normalized_tokens"] is None
+
+use_state("repair-token-failure")
+token_claim, token_initial, token_validation, token_receipts = rejected_initial(
+    "run-repair-token-failure"
+)
+token_packet = sha("repair-token-failure-packet")
+dispatch(
+    token_claim,
+    "repair",
+    "model-author",
+    token_packet,
+    manifest=token_initial,
+    validation=token_validation,
+    lineage=token_receipts,
+    tokens=1,
+)
+token_operation = operation("repair", "model-author", token_packet, 2)
+token_operation.update(
+    {
+        "initial_manifest_sha256": token_initial,
+        "validation_receipt_sha256": token_validation,
+        "review_set_id": claims.inspect_claim(token_claim)["review_set_id"],
+        "original_review_receipt_sha256s": token_receipts,
+    }
+)
+try:
+    claims.complete_slot(
+        claim_id=token_claim,
+        slot_name="repair",
+        operation=token_operation,
+        manifest_sha256=sha("repair-token-failure-manifest"),
+    )
+except claims.ClaimLedgerError as error:
+    assert "effective token budget" in str(error)
+else:
+    raise AssertionError("repair token overspend completed")
+assert claims.inspect_claim(token_claim)["slots"][3]["status"] == "failed"
+
+for label, failure in (
+    ("rereview-timeout", "trusted_operation_timeout"),
+    ("rereview-malformed", "trusted_operation_malformed"),
+):
+    use_state(label)
+    claim_id, repaired = complete_repair(f"run-{label}")
+    packet = sha(f"{label}-packet")
+    dispatch(
+        claim_id,
+        "rereview_a",
+        "model-review-a",
+        packet,
+        manifest=repaired,
+        validation=sha(f"{label}-validation"),
+    )
+    claims.fail_dispatched_slot(claim_id, "rereview_a", failure)
+    state = claims.inspect_claim(claim_id)
+    assert state["slots"][4]["status"] == "failed"
+    assert state["slots"][4]["failure_reason"] == failure
+passed("repair and re-review token, timeout, and malformed failures spend their slots")
 
 use_state("insufficient")
 insufficient = reserve("run-insufficient")
@@ -575,24 +977,20 @@ for slot, model in (("review_a", "model-review-a"), ("review_b", "model-review-b
         decision="accept",
     )
     review_receipts.append(receipt)
-for slot, model in (
-    ("repair", "model-author"),
-    ("rereview_a", "model-review-a"),
-    ("rereview_b", "model-review-b"),
-):
-    try:
-        dispatch(
-            ready_claim,
-            slot,
-            model,
-            sha(f"future-{slot}-packet"),
-            manifest=ready_manifest,
-            validation=ready_validation,
-        )
-    except claims.ClaimLedgerError as error:
-        assert "reserved for a later slice" in str(error)
-    else:
-        raise AssertionError(f"future slot {slot} dispatched")
+try:
+    dispatch(
+        ready_claim,
+        "repair",
+        "model-author",
+        sha("unneeded-repair-packet"),
+        manifest=ready_manifest,
+        validation=ready_validation,
+        lineage=review_receipts,
+    )
+except claims.ClaimLedgerError as error:
+    assert "at least one rejected" in str(error)
+else:
+    raise AssertionError("repair dispatched after two accepting reviews")
 future_state = claims.inspect_claim(ready_claim)
 assert future_state["status"] == "open"
 assert all(
@@ -604,13 +1002,7 @@ assert not any(
     and event["slot_name"] in {"repair", "rereview_a", "rereview_b"}
     for event in future_state["events"]
 )
-assert [
-    event["details"]["reason"]
-    for event in future_state["events"]
-    if event["event_type"] == "pre_call_refused"
-    and event["slot_name"] in {"repair", "rereview_a", "rereview_b"}
-] == ["unsupported_future_slot"] * 3
-passed("future repair and rereview slots refuse without spending or invalidating")
+passed("two accepting reviews preserve initial readiness and refuse repair")
 facts = claims.assert_ready(
     ready_claim,
     skill_path=str(root / "skill"),
@@ -671,6 +1063,6 @@ assert unknown.returncode != 0
 assert "invalid choice" in unknown.stderr
 passed("historical inspection ignores live adapter bytes and no completion CLI exists")
 
-assert passes == 20
+assert passes == 25
 print(f"PASS  {passes} deterministic evaluation-input claim ledger checks")
 PY

@@ -13,7 +13,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 OWNER_INTEGRATION_STATUS = "scheduled_owner_integration_pending"
 MAX_CLAIMS_PER_LOCAL_DAY = 4
 MAX_SLOTS = 6
@@ -148,6 +148,7 @@ CREATE TABLE claims (
   status TEXT NOT NULL CHECK (status IN ('open', 'completed', 'invalid')),
   terminal_reason TEXT,
   initial_manifest_sha256 TEXT,
+  repaired_manifest_sha256 TEXT,
   review_set_id TEXT,
   max_slots INTEGER NOT NULL CHECK (max_slots = 6),
   max_normalized_tokens INTEGER NOT NULL,
@@ -189,6 +190,7 @@ CREATE TABLE claim_slots (
   manifest_sha256 TEXT,
   validation_receipt_sha256 TEXT,
   review_receipt_sha256 TEXT,
+  lineage_receipt_sha256s_json TEXT,
   review_set_id TEXT,
   decision TEXT,
   failure_reason TEXT,
@@ -484,11 +486,12 @@ def reserve_claim(
               timezone_name, timezone_offset_minutes, candidate_id,
               skill_key, skill_path, owner_run_id, lock_fence_token_sha256,
               author_model, reviewer_a_model, reviewer_b_model,
-              status, terminal_reason, initial_manifest_sha256, review_set_id,
+              status, terminal_reason, initial_manifest_sha256,
+              repaired_manifest_sha256, review_set_id,
               max_slots, max_normalized_tokens, max_elapsed_ms
             ) VALUES (
               ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-              'open', NULL, NULL, NULL, ?, ?, ?
+              'open', NULL, NULL, NULL, NULL, ?, ?, ?
             )
             """,
             (
@@ -682,6 +685,7 @@ def prepare_dispatch(
     validation_receipt_sha256: str | None,
     requested_token_budget: int,
     requested_timeout_seconds: int,
+    lineage_receipt_sha256s: list[str] | None = None,
 ) -> dict[str, int | str]:
     skill_path = str(Path(require_text(skill_path, "skill path")).resolve())
     skill_key = require_text(skill_key, "skill key")
@@ -695,26 +699,19 @@ def prepare_dispatch(
         requested_timeout_seconds, "requested timeout"
     )
     slot_name = require_text(slot_name, "claim slot")
+    lineage_receipts = sorted(
+        require_sha256(value, "lineage review receipt")
+        for value in (lineage_receipt_sha256s or [])
+    )
+    if len(lineage_receipts) != len(set(lineage_receipts)):
+        raise ClaimLedgerError("lineage review receipts must be distinct")
     error: str | None = None
     result: dict[str, int | str] | None = None
     recovered: list[str] = []
     with transaction() as connection:
         claim = _claim(connection, claim_id)
         slot = _slot(connection, claim["claim_id"], slot_name)
-        if slot["operation_kind"] not in {"author", "review"}:
-            append_event(
-                connection,
-                claim["claim_id"],
-                "pre_call_refused",
-                {
-                    "reason": "unsupported_future_slot",
-                    "requested_slot": slot_name,
-                },
-                slot_name=slot_name,
-            )
-            error = f"claim slot {slot_name} is reserved for a later slice"
-        else:
-            recovered = _reconcile_dispatching(connection, claim)
+        recovered = _reconcile_dispatching(connection, claim)
         if error is None and recovered:
             error = (
                 "recovered dispatching slot as failed unknown-spent before new dispatch"
@@ -739,7 +736,12 @@ def prepare_dispatch(
             elif claim["candidate_id"] != candidate_id:
                 mismatch = "candidate_identity_mismatch"
             if mismatch is None and slot["expected_model"] != model:
-                mismatch = "model_identity_mismatch"
+                if slot_name == "repair":
+                    mismatch = "author_identity_unavailable"
+                elif slot_name in {"rereview_a", "rereview_b"}:
+                    mismatch = "reviewer_identity_unavailable"
+                else:
+                    mismatch = "model_identity_mismatch"
             if mismatch is None and slot["status"] != "unstarted":
                 mismatch = "slot_already_spent"
             if mismatch is not None:
@@ -799,7 +801,7 @@ def prepare_dispatch(
                                 slot_name=slot_name,
                             )
                             error = "author dispatch cannot bind a manifest"
-                    else:
+                    elif slot_name in {"review_a", "review_b"}:
                         if manifest_sha256 is None:
                             error = "review dispatch requires the initial manifest"
                         else:
@@ -865,9 +867,123 @@ def prepare_dispatch(
                                             claim["claim_id"],
                                         ),
                                     )
+                        if lineage_receipts:
+                            error = "initial review dispatch cannot bind repair lineage"
+                    elif slot_name == "repair":
+                        expected_review_set = review_set_identity(
+                            claim["claim_id"],
+                            claim["candidate_id"],
+                            claim["initial_manifest_sha256"],
+                            claim["author_model"],
+                            [
+                                claim["reviewer_a_model"],
+                                claim["reviewer_b_model"],
+                            ],
+                        )
+                        initial_slots = connection.execute(
+                            """
+                            SELECT * FROM claim_slots
+                            WHERE claim_id=? AND slot_index BETWEEN 1 AND 2
+                            ORDER BY slot_index
+                            """,
+                            (claim["claim_id"],),
+                        ).fetchall()
+                        expected_receipts = sorted(
+                            row["review_receipt_sha256"] for row in initial_slots
+                        )
+                        expected_validation = {
+                            row["validation_receipt_sha256"] for row in initial_slots
+                        }
+                        if (
+                            manifest_sha256 is None
+                            or require_sha256(
+                                manifest_sha256, "repair initial manifest"
+                            )
+                            != claim["initial_manifest_sha256"]
+                        ):
+                            error = "repair initial manifest differs from the claim"
+                        elif (
+                            len(initial_slots) != 2
+                            or any(
+                                row["status"] != "completed"
+                                or row["usage_status"] != "available"
+                                for row in initial_slots
+                            )
+                        ):
+                            error = "repair requires both completed initial reviews"
+                        elif not any(
+                            row["decision"] == "reject" for row in initial_slots
+                        ):
+                            error = "repair requires at least one rejected initial review"
+                        elif (
+                            validation_receipt_sha256 is None
+                            or require_sha256(
+                                validation_receipt_sha256,
+                                "repair initial validation receipt",
+                            )
+                            not in expected_validation
+                            or len(expected_validation) != 1
+                        ):
+                            error = "repair validation differs from the initial reviews"
+                        elif lineage_receipts != expected_receipts:
+                            error = "repair review receipt lineage differs from the claim"
+                        elif review_set_id != expected_review_set:
+                            error = "repair review set identity is invalid"
+                        elif claim["repaired_manifest_sha256"] is not None:
+                            error = "claim already has a repaired manifest"
+                    else:
+                        expected_review_set = review_set_identity(
+                            claim["claim_id"],
+                            claim["candidate_id"],
+                            claim["initial_manifest_sha256"],
+                            claim["author_model"],
+                            [
+                                claim["reviewer_a_model"],
+                                claim["reviewer_b_model"],
+                            ],
+                        )
+                        if (
+                            manifest_sha256 is None
+                            or require_sha256(
+                                manifest_sha256, "re-review manifest"
+                            )
+                            != claim["repaired_manifest_sha256"]
+                        ):
+                            error = "re-review manifest differs from the repaired claim"
+                        elif validation_receipt_sha256 is None:
+                            error = "re-review requires repaired validation receipt"
+                        elif review_set_id != expected_review_set:
+                            error = "re-review review set identity is invalid"
+                        else:
+                            validation_receipt_sha256 = require_sha256(
+                                validation_receipt_sha256,
+                                "re-review validation receipt",
+                            )
+                        repair_slot = _slot(
+                            connection, claim["claim_id"], "repair"
+                        )
+                        if (
+                            error is None
+                            and (
+                                repair_slot["status"] != "completed"
+                                or repair_slot["usage_status"] != "available"
+                                or repair_slot["manifest_sha256"]
+                                != claim["repaired_manifest_sha256"]
+                            )
+                        ):
+                            error = "re-review requires one completed repair"
+                        if lineage_receipts:
+                            error = "re-review dispatch derives lineage from the repaired manifest"
                     if error is not None and claim["status"] == "open":
                         refreshed = _claim(connection, claim["claim_id"])
-                        if refreshed["status"] == "open":
+                        nonterminal_refusals = {
+                            "repair requires at least one rejected initial review",
+                            "claim already has a repaired manifest",
+                        }
+                        if (
+                            refreshed["status"] == "open"
+                            and error not in nonterminal_refusals
+                        ):
                             _invalidate(
                                 connection,
                                 refreshed,
@@ -930,6 +1046,7 @@ def prepare_dispatch(
                                     usage_status='pending', packet_id=?,
                                     manifest_sha256=?,
                                     validation_receipt_sha256=?,
+                                    lineage_receipt_sha256s_json=?,
                                     review_set_id=?
                                 WHERE claim_id=? AND slot_name=?
                                   AND status='unstarted'
@@ -943,6 +1060,11 @@ def prepare_dispatch(
                                     packet_id,
                                     manifest_sha256,
                                     validation_receipt_sha256,
+                                    (
+                                        canonical(lineage_receipts).decode()
+                                        if lineage_receipts
+                                        else None
+                                    ),
                                     review_set_id,
                                     claim["claim_id"],
                                     slot_name,
@@ -961,6 +1083,7 @@ def prepare_dispatch(
                                     "effective_token_budget": effective_tokens,
                                     "manifest_sha256": manifest_sha256,
                                     "packet_id": packet_id,
+                                    "lineage_receipt_sha256s": lineage_receipts,
                                     "review_set_id": review_set_id,
                                 },
                                 slot_name=slot_name,
@@ -1073,14 +1196,11 @@ def complete_slot(
             raise ClaimLedgerError(
                 "only a dispatching slot can complete; spent slots cannot retry"
             )
-        if slot["operation_kind"] not in {"author", "review"}:
-            _fail_slot(
-                connection, claim, slot, "unsupported_operation_kind"
-            )
-            error = (
-                f"claim slot {slot_name} is reserved for a later slice"
-            )
-        expected_operation = slot["operation_kind"]
+        expected_operation = (
+            "review"
+            if slot["operation_kind"] == "rereview"
+            else slot["operation_kind"]
+        )
         if error is None and (
             operation.get("operation") != expected_operation
             or operation.get("model") != slot["expected_model"]
@@ -1131,6 +1251,41 @@ def complete_slot(
                     raise ClaimLedgerError(
                         "terminal author operation cannot bind a manifest"
                     )
+            elif slot_name == "repair":
+                if terminal_reason == "repair_insufficient_information":
+                    if manifest_sha256 is not None:
+                        raise ClaimLedgerError(
+                            "terminal repair operation cannot bind a manifest"
+                        )
+                elif terminal_reason is not None:
+                    raise ClaimLedgerError(
+                        "repair terminal reason is unsupported"
+                    )
+                else:
+                    manifest_sha256 = require_sha256(
+                        manifest_sha256, "repaired manifest"
+                    )
+                    if manifest_sha256 == claim["initial_manifest_sha256"]:
+                        _fail_slot(
+                            connection, claim, slot, "repair_manifest_reused"
+                        )
+                        error = "repair must create a new manifest"
+                expected_lineage = json.loads(
+                    slot["lineage_receipt_sha256s_json"] or "[]"
+                )
+                if error is None and (
+                    operation.get("initial_manifest_sha256")
+                    != claim["initial_manifest_sha256"]
+                    or operation.get("validation_receipt_sha256")
+                    != slot["validation_receipt_sha256"]
+                    or operation.get("review_set_id") != claim["review_set_id"]
+                    or operation.get("original_review_receipt_sha256s")
+                    != expected_lineage
+                ):
+                    _fail_slot(
+                        connection, claim, slot, "repair_lineage_invalid"
+                    )
+                    error = "repair operation lineage differs from the claim"
             else:
                 manifest_sha256 = require_sha256(
                     manifest_sha256, "review manifest"
@@ -1192,6 +1347,15 @@ def complete_slot(
                         """,
                         (manifest_sha256, claim["claim_id"]),
                     )
+                elif slot_name == "repair" and terminal_reason is None:
+                    connection.execute(
+                        """
+                        UPDATE claims SET repaired_manifest_sha256=?
+                        WHERE claim_id=? AND status='open'
+                          AND repaired_manifest_sha256 IS NULL
+                        """,
+                        (manifest_sha256, claim["claim_id"]),
+                    )
                 append_event(
                     connection,
                     claim["claim_id"],
@@ -1227,27 +1391,36 @@ def complete_slot(
                         {"reason": terminal_reason, "status": "completed"},
                         created_epoch=current,
                     )
-                elif decision == "reject":
-                    connection.execute(
+                elif slot_name == "rereview_b":
+                    rereviews = connection.execute(
                         """
-                        UPDATE claims
-                        SET status='invalid',
-                            terminal_reason='independent_review_rejected',
-                            terminal_epoch=?
-                        WHERE claim_id=? AND status='open'
+                        SELECT decision FROM claim_slots
+                        WHERE claim_id=? AND slot_name IN ('rereview_a', 'rereview_b')
+                        ORDER BY slot_index
                         """,
-                        (current, claim["claim_id"]),
-                    )
-                    append_event(
-                        connection,
-                        claim["claim_id"],
-                        "claim_terminal",
-                        {
-                            "reason": "independent_review_rejected",
-                            "status": "invalid",
-                        },
-                        created_epoch=current,
-                    )
+                        (claim["claim_id"],),
+                    ).fetchall()
+                    if any(row["decision"] == "reject" for row in rereviews):
+                        connection.execute(
+                            """
+                            UPDATE claims
+                            SET status='invalid',
+                                terminal_reason='independent_rereview_rejected',
+                                terminal_epoch=?
+                            WHERE claim_id=? AND status='open'
+                            """,
+                            (current, claim["claim_id"]),
+                        )
+                        append_event(
+                            connection,
+                            claim["claim_id"],
+                            "claim_terminal",
+                            {
+                                "reason": "independent_rereview_rejected",
+                                "status": "invalid",
+                            },
+                            created_epoch=current,
+                        )
     if error is not None:
         raise ClaimLedgerError(error)
 
@@ -1272,27 +1445,31 @@ def _ready_facts(
         claim["skill_path"] != str(Path(skill_path).resolve())
         or claim["skill_key"] != skill_key
         or claim["candidate_id"] != candidate_id
-        or claim["initial_manifest_sha256"] != manifest_sha256
     ):
         raise ClaimLedgerError("readiness identity differs from the claim")
+    repaired = manifest_sha256 == claim["repaired_manifest_sha256"]
+    if not repaired and manifest_sha256 != claim["initial_manifest_sha256"]:
+        raise ClaimLedgerError("readiness manifest differs from the claim")
+    first_slot, last_slot = ((3, 5) if repaired else (0, 2))
     rows = connection.execute(
         """
         SELECT * FROM claim_slots
-        WHERE claim_id=? AND slot_index BETWEEN 0 AND 2
+        WHERE claim_id=? AND slot_index BETWEEN ? AND ?
         ORDER BY slot_index
         """,
-        (claim["claim_id"],),
+        (claim["claim_id"], first_slot, last_slot),
     ).fetchall()
-    if [row["slot_name"] for row in rows] != [
-        "author",
-        "review_a",
-        "review_b",
-    ] or any(
+    expected_slots = (
+        ["repair", "rereview_a", "rereview_b"]
+        if repaired
+        else ["author", "review_a", "review_b"]
+    )
+    if [row["slot_name"] for row in rows] != expected_slots or any(
         row["status"] != "completed" or row["usage_status"] != "available"
         for row in rows
     ):
         raise ClaimLedgerError(
-            "readiness requires completed author and two review slots"
+            "readiness requires its completed generation and two review slots"
         )
     reviews = rows[1:]
     if any(
@@ -1314,7 +1491,7 @@ def _ready_facts(
     expected_review_set = review_set_identity(
         claim["claim_id"],
         claim["candidate_id"],
-        manifest_sha256,
+        claim["initial_manifest_sha256"],
         claim["author_model"],
         [claim["reviewer_a_model"], claim["reviewer_b_model"]],
     )
@@ -1486,6 +1663,7 @@ def inspect_claim(claim_id: str) -> dict[str, Any]:
             "status": claim["status"],
             "terminal_reason": claim["terminal_reason"],
             "initial_manifest_sha256": claim["initial_manifest_sha256"],
+            "repaired_manifest_sha256": claim["repaired_manifest_sha256"],
             "review_set_id": claim["review_set_id"],
             "limits": {
                 "slots": claim["max_slots"],
@@ -1523,41 +1701,46 @@ def inspect_claim(claim_id: str) -> dict[str, Any]:
             },
             "slots": [
                 {
-                    key: slot[key]
-                    for key in (
-                        "slot_index",
-                        "slot_name",
-                        "operation_kind",
-                        "expected_model",
-                        "status",
-                        "started_epoch",
-                        "terminal_epoch",
-                        "requested_token_budget",
-                        "effective_token_budget",
-                        "requested_timeout_seconds",
-                        "effective_timeout_seconds",
-                        "usage_status",
-                        "normalized_tokens",
-                        "input_tokens",
-                        "output_tokens",
-                        "elapsed_ms",
-                        "billing_status",
-                        "billing_cost_usd",
-                        "billing_provider",
-                        "billing_unavailable_reason",
-                        "billing_native_line_item_id",
-                        "billing_native_event_sha256",
-                        "billing_native_event_size",
-                        "operation_id",
-                        "observed_model",
-                        "packet_id",
-                        "manifest_sha256",
-                        "validation_receipt_sha256",
-                        "review_receipt_sha256",
-                        "review_set_id",
-                        "decision",
-                        "failure_reason",
-                    )
+                    **{
+                        key: slot[key]
+                        for key in (
+                            "slot_index",
+                            "slot_name",
+                            "operation_kind",
+                            "expected_model",
+                            "status",
+                            "started_epoch",
+                            "terminal_epoch",
+                            "requested_token_budget",
+                            "effective_token_budget",
+                            "requested_timeout_seconds",
+                            "effective_timeout_seconds",
+                            "usage_status",
+                            "normalized_tokens",
+                            "input_tokens",
+                            "output_tokens",
+                            "elapsed_ms",
+                            "billing_status",
+                            "billing_cost_usd",
+                            "billing_provider",
+                            "billing_unavailable_reason",
+                            "billing_native_line_item_id",
+                            "billing_native_event_sha256",
+                            "billing_native_event_size",
+                            "operation_id",
+                            "observed_model",
+                            "packet_id",
+                            "manifest_sha256",
+                            "validation_receipt_sha256",
+                            "review_receipt_sha256",
+                            "review_set_id",
+                            "decision",
+                            "failure_reason",
+                        )
+                    },
+                    "lineage_receipt_sha256s": json.loads(
+                        slot["lineage_receipt_sha256s_json"] or "[]"
+                    ),
                 }
                 for slot in slots
             ],
