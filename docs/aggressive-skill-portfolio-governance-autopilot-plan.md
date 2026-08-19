@@ -106,12 +106,31 @@
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/governance-preview-live-proof-receipt.md`.
   Paired implementation review closed after one fix-verification round with no
   unresolved material finding.
-- Governance work remaining: complete authoritative dependency and pin
-  inventory before granting any removal authority, then implement and prove
-  governed user intents, reversible personal withdrawal/archive/restore, and
-  qualified whole-plugin disable/restore under `PORT-CHK-01` through
-  `PORT-CHK-14`. Run the final `PORT-CHK-PREVIEW` comparison before merging
-  preview commits locally into `feature/multi-cli-dreaming`.
+- The dependency and pin inventory is committed locally as `f4bc283` on
+  `feature/aggressive-skill-governance-preview`. The real receiver receipt
+  `governance-settled-usage/receiver-result-9.json` covers all 94 enabled
+  canonical capabilities, resolves every runtime mapping, scans every
+  non-binary source file, and reports no unscanned source, malformed durable
+  owner, stale durable target, or usage parser failure. Thirty-seven
+  capabilities are protected by runtime dependencies or explicit durable
+  ownership; 57 are dependency-clear. Installed-content use remains visible
+  without incorrectly requiring skill enablement.
+- The dependency-aware preview snapshot is
+  `governance-preview-snapshot-dependencies-r3`. Desktop and 390-pixel browser
+  proof in `governance-preview-dependency-proof-r3.json` shows the runtime and
+  installed-content explanations, no horizontal overflow, no browser error,
+  and no enabled action. Authenticated writes return HTTP 405. Paired,
+  finding-scoped closure reports no unresolved material finding.
+- Governance work remaining: implement the current evaluation inventory and
+  aggressive evaluation queue, then prove governed user intents, reversible
+  personal withdrawal/archive/restore, and qualified whole-plugin
+  disable/restore under `PORT-CHK-01` through `PORT-CHK-14`. Individual plugin
+  skill disablement remains recommendation-only unless native CLI support is
+  qualified. Report-only behavior remains mandatory until every capability
+  has a current decision or an explicit insufficient-information decision and
+  two daily dry-run comparisons agree. Run the final `PORT-CHK-PREVIEW`
+  comparison before merging preview commits locally into
+  `feature/multi-cli-dreaming`.
 - The reviewed settled-use amendment is committed in the isolated preview as
   `1dcf2a9`. It permits per-capability 30-day settled zero only after relevant
   stable transcript work drains, excludes recent active tails explicitly,
@@ -133,7 +152,7 @@
 
 ## Definition of Done: Capacity closure and aggressive portfolio governance
 
-- [ ] Every item under
+- [x] Every item under
       `## Definition of Done: Dreaming review backlog capacity` in
       `docs/dreaming-review-backlog-capacity-design.md` is supported by
       retained evidence.
@@ -141,7 +160,7 @@
       `## Definition of Done: Aggressive skill portfolio governance` in
       `docs/aggressive-skill-portfolio-governance-design.md` is supported by
       retained evidence.
-- [ ] The Mac mini remains the sole scheduled Dreaming owner.
+- [x] The Mac mini remains the sole scheduled Dreaming owner.
 - [ ] Final installed generations pass their required self-tests and live
       acceptance flows.
 - [ ] Both implementation slices pass paired review with no unresolved
