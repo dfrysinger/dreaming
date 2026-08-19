@@ -193,8 +193,24 @@
   even when only a smaller identity projection enters the packet. Validation
   passes 36 certification checks. Paired Opus/Terra review closed unrestricted
   compilation projection and bare-token detection findings with no unresolved
-  material finding. Trusted draft materialization, bounded author/reviewer
-  operations, and real zero-use cohort progression remain outstanding.
+  material finding.
+- Trusted draft materialization is committed locally on the isolated preview
+  branch as `c817d1d`. A draft is accepted only when its packet is rebuilt from
+  the current candidate and exact trusted suite, policy, compilation, routing,
+  fixture, grader, catalog, and harness sources. Model output may change only
+  unique task identities and safe prompt text; trusted case classes, grader
+  references, fixture IDs, artifact paths, semantic flags, activation
+  contracts, and runtime identities cannot change. Materialization uses a
+  same-filesystem staging directory, re-reads the staged suite, validates
+  compilation and routing, re-hashes and re-scans packet-bound fixture and
+  grader trees, and publishes atomically outside the skill root. Legacy suites,
+  candidate or source drift, altered runtime fields, unsafe content, and
+  partial output refuse. The resulting files register and validate as an exact
+  external manifest without changing the candidate root. Validation passes 37
+  certification checks. Paired Opus/Terra review closed a source-tree race and
+  a non-registerable legacy-suite path with no unresolved material finding.
+  Bounded author/reviewer operations and real zero-use cohort progression
+  remain outstanding.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
