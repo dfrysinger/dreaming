@@ -88,6 +88,11 @@ INPUT_REGISTRY_REQUIRED_ROLES = {
     "routing",
     "harness",
 }
+INPUT_REGISTRY_OPTIONAL_ROLES = {
+    "authoring_packet",
+    "authoring_draft",
+    "authoring_receipt",
+}
 INPUT_READINESS_STATES = {
     "input_missing",
     "drafting",
@@ -1476,7 +1481,11 @@ def registry_object_bytes(entry: Any, index: int) -> tuple[dict[str, Any], bytes
         {"role", "logical_path", "media_type", "sha256", "size"},
     )
     role = require_text(entry.get("role"), f"{field}.role")
-    if role not in INPUT_REGISTRY_REQUIRED_ROLES | {"fixture", "grader"}:
+    if role not in (
+        INPUT_REGISTRY_REQUIRED_ROLES
+        | INPUT_REGISTRY_OPTIONAL_ROLES
+        | {"fixture", "grader"}
+    ):
         raise EvaluationError(f"{field}.role is unsupported")
     normalized = {
         "role": role,
@@ -1647,6 +1656,74 @@ def validate_input_manifest(
         or manifest.get("harness_executable_sha256") != harness_sha
     ):
         raise EvaluationError("input manifest normalized input identities do not match")
+    authoring_roles = roles & INPUT_REGISTRY_OPTIONAL_ROLES
+    if manifest["authoring_method"] == "bounded-safe-author":
+        if authoring_roles != INPUT_REGISTRY_OPTIONAL_ROLES:
+            raise EvaluationError(
+                "bounded-safe-author manifest is missing exact authoring provenance"
+            )
+        packet = load_registry_json_object(
+            manifest_role(objects, "authoring_packet"), "authoring packet"
+        )
+        draft_value = load_registry_json_object(
+            manifest_role(objects, "authoring_draft"), "authoring draft"
+        )
+        receipt = load_registry_json_object(
+            manifest_role(objects, "authoring_receipt"), "authoring receipt"
+        )
+        fixture_inventory = sorted(
+            [
+                {
+                    "path": item["logical_path"].removeprefix("fixtures/"),
+                    "sha256": item["sha256"],
+                    "size": item["size"],
+                }
+                for item in objects
+                if item["role"] == "fixture"
+            ],
+            key=lambda item: item["path"],
+        )
+        grader_inventory = sorted(
+            [
+                {
+                    "path": item["logical_path"].removeprefix("graders/"),
+                    "sha256": item["sha256"],
+                    "size": item["size"],
+                }
+                for item in objects
+                if item["role"] == "grader"
+            ],
+            key=lambda item: item["path"],
+        )
+        packet, draft_value, _ = validate_authoring_provenance(
+            skill_dir,
+            candidate,
+            files,
+            suite,
+            suite_id,
+            policy,
+            policy_id,
+            config,
+            routing,
+            harness_sha,
+            packet,
+            draft_value,
+            receipt,
+            fixture_inventory,
+            grader_inventory,
+        )
+        if set(manifest["source_identities"]) != {
+            packet["packet_id"],
+            f"sha256:{digest(canonical(draft_value))}",
+            packet["source_catalog_id"],
+        }:
+            raise EvaluationError(
+                "bounded-safe-author manifest source identities are incomplete"
+            )
+    elif authoring_roles:
+        raise EvaluationError(
+            "authoring provenance is valid only for bounded-safe-author manifests"
+        )
     return {
         "input_manifest_sha256": manifest_sha256,
         "manifest": {**manifest, "objects": objects},
@@ -1987,15 +2064,13 @@ def v2_input_author_packet(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
-def validate_input_author_draft(
-    path: Path,
+def validate_input_author_draft_value(
+    draft: dict[str, Any],
     packet: dict[str, Any],
     context: dict[str, Any],
 ) -> tuple[dict[str, Any], str]:
-    raw = path.read_bytes()
-    if len(raw) > AUTHORING_MAX_SKILL_CONTRACT_BYTES:
+    if len(canonical(draft)) > AUTHORING_MAX_SKILL_CONTRACT_BYTES:
         raise EvaluationError("authoring draft exceeds the authoring size limit")
-    draft = load_json(path)
     require_exact_keys(
         draft,
         "authoring draft",
@@ -2077,6 +2152,38 @@ def validate_input_author_draft(
     return normalized, f"sha256:{digest(canonical(normalized))}"
 
 
+def validate_input_author_draft(
+    path: Path,
+    packet: dict[str, Any],
+    context: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    if path.stat().st_size > AUTHORING_MAX_SKILL_CONTRACT_BYTES:
+        raise EvaluationError("authoring draft exceeds the authoring size limit")
+    return validate_input_author_draft_value(load_json(path), packet, context)
+
+
+def materialized_authoring_suite(
+    draft: dict[str, Any],
+    template_suite: dict[str, Any],
+) -> dict[str, Any]:
+    materialized_cases: list[dict[str, Any]] = []
+    for draft_case, template in zip(draft["cases"], template_suite["cases"]):
+        case = {
+            "id": template["id"],
+            "class": template["class"],
+            "task_id": draft_case["task_id"],
+            "prompt": draft_case["prompt"],
+            "deterministic_graders": template["deterministic_graders"],
+        }
+        if "activation" in template:
+            case["activation"] = template["activation"]
+        materialized_cases.append(case)
+    return {
+        **template_suite,
+        "cases": materialized_cases,
+    }
+
+
 def validate_materialized_authoring_trees(
     staging: Path,
     packet: dict[str, Any],
@@ -2140,22 +2247,8 @@ def v2_input_author_materialize(args: argparse.Namespace) -> dict[str, Any]:
     runtime = {
         item["id"]: item for item in context["config"]["case_runtime"]
     }
-    materialized_cases: list[dict[str, Any]] = []
-    for draft_case, template in zip(draft["cases"], context["suite"]["cases"]):
-        case = {
-            "id": template["id"],
-            "class": template["class"],
-            "task_id": draft_case["task_id"],
-            "prompt": draft_case["prompt"],
-            "deterministic_graders": template["deterministic_graders"],
-        }
-        if "activation" in template:
-            case["activation"] = template["activation"]
-        materialized_cases.append(case)
-    suite = {
-        **context["suite"],
-        "cases": materialized_cases,
-    }
+    suite = materialized_authoring_suite(draft, context["suite"])
+    materialized_cases = suite["cases"]
     suite_id = f"sha256:{digest(canonical(suite))}"
     config = {
         **context["config"],
@@ -2228,6 +2321,300 @@ def v2_input_author_materialize(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def validate_authoring_provenance(
+    skill_dir: Path,
+    candidate: str,
+    files: list[dict[str, Any]],
+    suite: dict[str, Any],
+    suite_id: str,
+    policy: dict[str, Any],
+    policy_id: str,
+    config: dict[str, Any],
+    routing: dict[str, Any],
+    harness_sha: str,
+    packet: dict[str, Any],
+    draft_value: dict[str, Any],
+    receipt: dict[str, Any],
+    fixture_inventory: list[dict[str, Any]],
+    grader_inventory: list[dict[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    require_exact_keys(
+        packet,
+        "retained authoring packet",
+        {
+            "schema_version",
+            "kind",
+            "candidate_id",
+            "candidate_inventory",
+            "skill_contract",
+            "suite_template",
+            "suite_template_id",
+            "source_catalog",
+            "source_catalog_id",
+            "policy_contract",
+            "policy_id",
+            "compilation_source_id",
+            "compilation_contract",
+            "routing_source_id",
+            "routing_contract",
+            "harness_executable_sha256",
+            "packet_id",
+        },
+    )
+    packet_without_id = {key: value for key, value in packet.items() if key != "packet_id"}
+    packet_id = f"sha256:{digest(canonical(packet_without_id))}"
+    if (
+        packet.get("schema_version") != AUTHORING_PACKET_SCHEMA_VERSION
+        or packet.get("kind") != "safe_evaluation_input_authoring_packet"
+        or packet.get("packet_id") != packet_id
+        or packet.get("candidate_id") != candidate
+        or packet.get("candidate_inventory") != files
+        or packet.get("harness_executable_sha256") != harness_sha
+    ):
+        raise EvaluationError(
+            "retained authoring packet schema or current candidate binding is invalid"
+        )
+    contract = packet.get("skill_contract")
+    contract_content = (skill_dir / "SKILL.md").read_bytes()
+    if contract != {
+        "logical_path": "SKILL.md",
+        "sha256": f"sha256:{digest(contract_content)}",
+        "content": contract_content.decode("utf-8"),
+    }:
+        raise EvaluationError(
+            "retained authoring packet skill contract is not current"
+        )
+    template_suite = packet.get("suite_template")
+    if (
+        not isinstance(template_suite, dict)
+        or packet.get("suite_template_id")
+        != f"sha256:{digest(canonical(template_suite))}"
+        or template_suite.get("compiled_from_schema_version") is not None
+        or template_suite.get("cross_executor_authority") is not True
+        or packet.get("policy_contract") != policy
+        or packet.get("policy_id") != policy_id
+        or packet.get("compilation_source_id")
+        != f"sha256:{digest(canonical(config))}"
+        or packet.get("routing_source_id")
+        != f"sha256:{digest(canonical(routing))}"
+    ):
+        raise EvaluationError(
+            "retained authoring packet trusted source identities are invalid"
+        )
+    catalog = packet.get("source_catalog")
+    if not isinstance(catalog, dict):
+        raise EvaluationError("retained authoring packet source catalog is invalid")
+    require_exact_keys(
+        catalog,
+        "retained authoring catalog",
+        {
+            "schema_version",
+            "kind",
+            "fixtures",
+            "graders",
+            "rubric",
+            "grader_tree_inventory",
+            "grader_tree_id",
+        },
+    )
+    if (
+        catalog.get("schema_version") != AUTHORING_CATALOG_SCHEMA_VERSION
+        or catalog.get("kind") != "safe_evaluation_source_catalog"
+    ):
+        raise EvaluationError("retained authoring catalog schema is invalid")
+    if (
+        packet.get("source_catalog_id")
+        != f"sha256:{digest(canonical(catalog))}"
+        or catalog.get("grader_tree_inventory") != grader_inventory
+        or catalog.get("grader_tree_id")
+        != f"sha256:{digest(canonical(grader_inventory))}"
+    ):
+        raise EvaluationError(
+            "retained authoring packet grader provenance is invalid"
+        )
+    expected_compilation_contract = {
+        "tool_policy_id": config["tool_policy_id"],
+        "retention_policy_id": config["retention_policy_id"],
+        "limits": config["limits"],
+        "graders": template_suite["graders"],
+        "case_runtime": config["case_runtime"],
+        "rubric": catalog.get("rubric"),
+        "executors": config["executors"],
+        "comparator": config["comparator"],
+    }
+    expected_routing_contract = {
+        "executors": [
+            {
+                key: route[key]
+                for key in ("name", "adapter_id", "adapter_executable_sha256")
+            }
+            for route in routing["executors"]
+        ],
+        "comparator": {
+            key: routing["comparator"][key]
+            for key in ("route", "adapter_id", "adapter_executable_sha256")
+        },
+    }
+    if (
+        packet.get("compilation_contract") != expected_compilation_contract
+        or packet.get("routing_contract") != expected_routing_contract
+    ):
+        raise EvaluationError(
+            "retained authoring packet projected contracts are invalid"
+        )
+    fixture_values = catalog.get("fixtures")
+    if not isinstance(fixture_values, list):
+        raise EvaluationError(
+            "retained authoring packet fixture provenance is invalid"
+        )
+    expected_fixtures = sorted(
+        [
+            {
+                "path": item["path"],
+                "sha256": item["sha256"],
+                "size": item["size"],
+            }
+            for item in fixture_values
+            if isinstance(item, dict)
+            and {"path", "sha256", "size"} <= set(item)
+        ],
+        key=lambda item: item["path"],
+    )
+    if len(expected_fixtures) != len(fixture_values) or expected_fixtures != fixture_inventory:
+        raise EvaluationError(
+            "retained authoring packet fixture provenance is invalid"
+        )
+    fixture_ids: set[str] = set()
+    for index, item in enumerate(fixture_values):
+        field = f"retained authoring catalog.fixtures[{index}]"
+        if not isinstance(item, dict):
+            raise EvaluationError(f"{field} must be an object")
+        require_exact_keys(
+            item,
+            field,
+            {"id", "path", "sha256", "size", "source_kind", "description"},
+        )
+        fixture_id = require_text(item.get("id"), f"{field}.id")
+        if (
+            not GRADER_ID_RE.fullmatch(fixture_id)
+            or fixture_id in fixture_ids
+            or item.get("source_kind") not in AUTHORING_FIXTURE_SOURCE_KINDS
+            or safe_registry_logical_path(item.get("path"), f"{field}.path")
+            != item["path"]
+            or require_sha256(item.get("sha256"), f"{field}.sha256")
+            != item["sha256"]
+            or require_nonnegative_int(item.get("size"), f"{field}.size")
+            != item["size"]
+            or item["size"] > AUTHORING_MAX_FIXTURE_BYTES
+        ):
+            raise EvaluationError(f"{field} is not a safe declared fixture")
+        require_authoring_safe_text(
+            item.get("description"),
+            f"{field}.description",
+            maximum=AUTHORING_MAX_DESCRIPTION_BYTES,
+        )
+        fixture_ids.add(fixture_id)
+    if fixture_values != sorted(fixture_values, key=lambda item: item["id"]):
+        raise EvaluationError(
+            "retained authoring catalog fixtures are not in canonical order"
+        )
+    if not {
+        item["fixture"] for item in config["case_runtime"]
+    } <= fixture_ids:
+        raise EvaluationError(
+            "retained authoring catalog omits a runtime fixture"
+        )
+    grader_values = catalog.get("graders")
+    if not isinstance(grader_values, list) or not grader_values:
+        raise EvaluationError("retained authoring catalog graders are invalid")
+    for index, item in enumerate(grader_values):
+        field = f"retained authoring catalog.graders[{index}]"
+        if not isinstance(item, dict):
+            raise EvaluationError(f"{field} must be an object")
+        require_exact_keys(item, field, {"id", "objective", "description"})
+        if item.get("objective") is not True:
+            raise EvaluationError(f"{field} must declare an objective grader")
+        require_authoring_safe_text(
+            item.get("description"),
+            f"{field}.description",
+            maximum=AUTHORING_MAX_DESCRIPTION_BYTES,
+        )
+    if [item.get("id") for item in grader_values] != [
+        item["id"] for item in config["graders"]
+    ]:
+        raise EvaluationError(
+            "retained authoring catalog graders differ from compilation"
+        )
+    rubric = catalog.get("rubric")
+    if not isinstance(rubric, dict):
+        raise EvaluationError("retained authoring catalog rubric is invalid")
+    require_exact_keys(
+        rubric, "retained authoring catalog.rubric", {"identity", "description"}
+    )
+    if rubric.get("identity") != f"sha256:{digest(canonical(config['rubric']))}":
+        raise EvaluationError(
+            "retained authoring catalog rubric differs from compilation"
+        )
+    require_authoring_safe_text(
+        rubric.get("description"),
+        "retained authoring catalog.rubric.description",
+        maximum=AUTHORING_MAX_DESCRIPTION_BYTES,
+    )
+    reject_authoring_sensitive_value(catalog, "retained authoring catalog")
+    reject_authoring_sensitive_value(template_suite, "retained suite template")
+    reject_authoring_sensitive_value(policy, "retained policy contract")
+    reject_authoring_sensitive_value(config, "retained compilation source")
+    reject_authoring_sensitive_value(
+        packet.get("compilation_contract"),
+        "retained projected compilation contract",
+    )
+    reject_authoring_sensitive_value(
+        packet.get("routing_contract"), "retained routing contract"
+    )
+    draft, draft_id = validate_input_author_draft_value(
+        draft_value,
+        packet,
+        {
+            "suite": template_suite,
+            "config": {
+                "case_runtime": packet["compilation_contract"]["case_runtime"]
+            },
+        },
+    )
+    expected_suite = materialized_authoring_suite(draft, template_suite)
+    if suite != expected_suite or suite_id != f"sha256:{digest(canonical(expected_suite))}":
+        raise EvaluationError(
+            "retained authoring draft does not produce the registered suite"
+        )
+    require_exact_keys(
+        receipt,
+        "authoring materialization receipt",
+        {
+            "schema_version",
+            "kind",
+            "candidate_id",
+            "packet_id",
+            "draft_id",
+            "suite_id",
+            "source_catalog_id",
+        },
+    )
+    expected_receipt = {
+        "schema_version": AUTHORING_PACKET_SCHEMA_VERSION,
+        "kind": "safe_evaluation_input_materialization",
+        "candidate_id": candidate,
+        "packet_id": packet_id,
+        "draft_id": draft_id,
+        "suite_id": suite_id,
+        "source_catalog_id": packet["source_catalog_id"],
+    }
+    if receipt != expected_receipt:
+        raise EvaluationError(
+            "authoring materialization receipt does not bind the registered inputs"
+        )
+    return packet, draft, receipt
+
+
 def v2_input_register(args: argparse.Namespace) -> dict[str, Any]:
     skill_dir = resolve_path(Path(args.skill_dir), "skill directory")
     candidate, files = candidate_id(skill_dir)
@@ -2243,6 +2630,56 @@ def v2_input_register(args: argparse.Namespace) -> dict[str, Any]:
     routing = validate_routing(
         routing_path, config["executors"], config["comparator"]
     )
+    authoring_method = require_text(args.authoring_method, "authoring method")
+    authoring_paths = (
+        args.authoring_packet,
+        args.authoring_draft,
+        args.authoring_receipt,
+    )
+    if any(authoring_paths) != all(authoring_paths):
+        raise EvaluationError(
+            "authoring packet, draft, and receipt must be supplied together"
+        )
+    if (authoring_method == "bounded-safe-author") != all(authoring_paths):
+        raise EvaluationError(
+            "bounded-safe-author registration requires exact authoring provenance"
+        )
+    provenance_objects: list[dict[str, Any]] = []
+    if all(authoring_paths):
+        packet = load_json(resolve_path(Path(args.authoring_packet), "authoring packet"))
+        draft_value = load_json(
+            resolve_path(Path(args.authoring_draft), "authoring draft")
+        )
+        receipt = load_json(
+            resolve_path(Path(args.authoring_receipt), "authoring receipt")
+        )
+        packet, draft_value, receipt = validate_authoring_provenance(
+            skill_dir,
+            candidate,
+            files,
+            suite,
+            suite_id,
+            policy,
+            policy_id,
+            config,
+            routing,
+            harness_sha,
+            packet,
+            draft_value,
+            receipt,
+            canonical_file_inventory(config_path.parent / "fixtures"),
+            canonical_file_inventory(config_path.parent / "graders"),
+        )
+        provenance_objects = [
+            publish_registry_object(
+                canonical(value), role, f"authoring/{name}.json", "application/json"
+            )
+            for value, role, name in (
+                (packet, "authoring_packet", "packet"),
+                (draft_value, "authoring_draft", "draft"),
+                (receipt, "authoring_receipt", "materialization"),
+            )
+        ]
     objects = [
         publish_registry_object(
             canonical(suite), "suite", "suite.json", "application/json"
@@ -2265,6 +2702,7 @@ def v2_input_register(args: argparse.Namespace) -> dict[str, Any]:
             "harness/skill-evaluation-harness.py",
             "text/x-python",
         ),
+        *provenance_objects,
     ]
     append_registry_tree_objects(
         objects, config_path.parent / "fixtures", "fixture"
@@ -2292,9 +2730,7 @@ def v2_input_register(args: argparse.Namespace) -> dict[str, Any]:
         "rubric_sha256": f"sha256:{digest(canonical(config['rubric']))}",
         "tool_policy_id": config["tool_policy_id"],
         "harness_executable_sha256": harness_sha,
-        "authoring_method": require_text(
-            args.authoring_method, "authoring method"
-        ),
+        "authoring_method": authoring_method,
         "source_identities": args.source_id,
         "tool_version": RUNNER_VERSION,
         "objects": objects,
@@ -6295,6 +6731,9 @@ def build_parser() -> argparse.ArgumentParser:
     input_register_parser.add_argument("--routing", required=True)
     input_register_parser.add_argument("--harness", required=True)
     input_register_parser.add_argument("--authoring-method", required=True)
+    input_register_parser.add_argument("--authoring-packet")
+    input_register_parser.add_argument("--authoring-draft")
+    input_register_parser.add_argument("--authoring-receipt")
     input_register_parser.add_argument(
         "--source-id", action="append", required=True
     )

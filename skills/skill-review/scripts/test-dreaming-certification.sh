@@ -463,6 +463,10 @@ assert (
     == packet["source_catalog"]["grader_tree_inventory"]
 )
 PY
+source_catalog_id="$(
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_catalog_id"])' \
+    "$AUTHORING/packet.json"
+)"
 registration="$(
   "$EVAL" v2-input-register "$AUTHORING/skill" \
     --suite "$AUTHORING/materialized/suite.json" \
@@ -471,14 +475,106 @@ registration="$(
     --routing "$AUTHORING/materialized/routing.json" \
     --harness "$HARNESS" \
     --authoring-method bounded-safe-author \
+    --authoring-packet "$AUTHORING/packet.json" \
+    --authoring-draft "$AUTHORING/draft.json" \
+    --authoring-receipt "$AUTHORING/materialized/authoring.json" \
     --source-id "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["packet_id"])' <<<"$materialization")" \
-    --source-id "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["draft_id"])' <<<"$materialization")"
+    --source-id "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["draft_id"])' <<<"$materialization")" \
+    --source-id "$source_catalog_id"
 )"
 manifest="$(
   python3 -c 'import json,sys; print(json.load(sys.stdin)["input_manifest_sha256"])' \
     <<<"$registration"
 )"
 "$EVAL" v2-input-validate "$AUTHORING/skill" --manifest "$manifest" >/dev/null
+python3 - "$registration" "$source_catalog_id" <<'PY'
+import json
+import sys
+
+registration = json.loads(sys.argv[1])
+manifest = json.load(open(registration["input_manifest"]))
+roles = {item["role"] for item in manifest["objects"]}
+assert {
+    "authoring_packet", "authoring_draft", "authoring_receipt"
+} <= roles
+assert sys.argv[2] in manifest["source_identities"]
+assert manifest["authoring_method"] == "bounded-safe-author"
+PY
+expect_refusal "authoring-provenance-required" "requires exact authoring provenance" \
+  "$EVAL" v2-input-register "$AUTHORING/skill" \
+    --suite "$AUTHORING/materialized/suite.json" \
+    --policy "$AUTHORING/materialized/policy.json" \
+    --config "$AUTHORING/materialized/compilation.json" \
+    --routing "$AUTHORING/materialized/routing.json" \
+    --harness "$HARNESS" --authoring-method bounded-safe-author \
+    --source-id "$source_catalog_id"
+forge_authoring_provenance() {
+  local mode="$1" prefix="$AUTHORING/forged-$1"
+  python3 - "$AUTHORING/packet.json" "$AUTHORING/draft.json" \
+    "$AUTHORING/materialized/authoring.json" "$prefix" "$mode" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+packet_path, draft_path, receipt_path, prefix_arg, mode = sys.argv[1:]
+prefix = Path(prefix_arg)
+def canonical(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+def identity(value):
+    return "sha256:" + hashlib.sha256(canonical(value)).hexdigest()
+packet = json.load(open(packet_path))
+if mode == "rubric":
+    packet["source_catalog"]["rubric"]["identity"] = "sha256:" + "9" * 64
+    packet["compilation_contract"]["rubric"] = packet["source_catalog"]["rubric"]
+elif mode == "source-kind":
+    packet["source_catalog"]["fixtures"][0]["source_kind"] = "private"
+packet["source_catalog_id"] = identity(packet["source_catalog"])
+packet_without_id = {key: value for key, value in packet.items() if key != "packet_id"}
+packet["packet_id"] = identity(packet_without_id)
+draft = json.load(open(draft_path))
+draft["packet_id"] = packet["packet_id"]
+draft_id = identity(draft)
+receipt = json.load(open(receipt_path))
+receipt["packet_id"] = packet["packet_id"]
+receipt["draft_id"] = draft_id
+receipt["source_catalog_id"] = packet["source_catalog_id"]
+for suffix, value in (
+    ("packet.json", packet), ("draft.json", draft), ("receipt.json", receipt)
+):
+    Path(f"{prefix}.{suffix}").write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":"))
+    )
+Path(f"{prefix}.meta.json").write_text(
+    json.dumps(
+        {
+            "packet_id": packet["packet_id"],
+            "draft_id": draft_id,
+            "source_catalog_id": packet["source_catalog_id"],
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+)
+PY
+}
+for forged in rubric source-kind; do
+  forge_authoring_provenance "$forged"
+  forged_prefix="$AUTHORING/forged-$forged"
+  expect_refusal "authoring-forged-$forged" "retained authoring catalog" \
+    "$EVAL" v2-input-register "$AUTHORING/skill" \
+      --suite "$AUTHORING/materialized/suite.json" \
+      --policy "$AUTHORING/materialized/policy.json" \
+      --config "$AUTHORING/materialized/compilation.json" \
+      --routing "$AUTHORING/materialized/routing.json" \
+      --harness "$HARNESS" --authoring-method bounded-safe-author \
+      --authoring-packet "$forged_prefix.packet.json" \
+      --authoring-draft "$forged_prefix.draft.json" \
+      --authoring-receipt "$forged_prefix.receipt.json" \
+      --source-id "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["packet_id"])' "$forged_prefix.meta.json")" \
+      --source-id "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["draft_id"])' "$forged_prefix.meta.json")" \
+      --source-id "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_catalog_id"])' "$forged_prefix.meta.json")"
+done
 for invalid_draft in fixture grader artifact semantic missing sensitive duplicate-task duplicate-prompt; do
   make_authoring_draft "$AUTHORING/packet.json" \
     "$AUTHORING/draft-$invalid_draft.json" "$invalid_draft"
