@@ -32,6 +32,10 @@ missing or stale.
 - Do not allow dashboard code to edit files or settings directly.
 - Do not treat missing usage, missing evaluation, or an inconclusive
   evaluation as positive evidence.
+- Do not call a decision that excludes active-session tails complete transcript
+  coverage.
+- Do not let an exhausted collection budget, an old unread transcript, or an
+  unresolved identity that could name the target become non-use evidence.
 - Do not treat provenance or ownership as evidence that a skill is useful.
 - Do not remove pins, bypass scheduled dependencies, discard Git history, or
   weaken restore verification.
@@ -143,7 +147,7 @@ report was generated.
 | Concern | Existing owner | Required extension |
 | --- | --- | --- |
 | Complete enabled-skill inventory | `dreaming-estate.py` census | Preserve one row per canonical enabled capability |
-| Verified usage | `dreaming-estate.py` usage collector | Expose 7, 30, and 90-day successful loads and completeness |
+| Verified usage | `dreaming-estate.py` usage collector | Expose 7, 30, and 90-day successful loads, global completeness, a collection watermark, and pending files classified by quiet-period recency, stable budget deferral, read failure, parse failure, and changed-during-read, including identity, modification time, count, bytes, and failure-record identity |
 | Candidate and active-skill evaluation | `skill-evaluation.py` and retained receipts | Join current exact-skill results into estate decisions |
 | Complete-catalog routing and portfolio cost | Existing portfolio benchmark | Evaluate proposed removals as well as additions |
 | Dependencies and pins | `scheduled-skill-deps.py` and curator inventory | Show blockers and bind them into actions |
@@ -233,7 +237,9 @@ changing the recommendation to `keep`.
    - successful loads in the last 7, 30, and 90 days;
    - distinct sessions or tasks when available;
    - last successful load;
-   - whether the usage corpus and capability attribution are complete.
+   - whether the usage corpus and capability attribution are complete;
+   - the per-capability 30-day decision coverage, including any excluded
+     active-session tails and any stable backlog or identity blocker.
 
 3. **Portfolio relationship**
    - overlapping or superseding skills;
@@ -255,6 +261,88 @@ still matters. They do not substitute for evaluation or usage when deciding
 whether an active skill should stay enabled.
 
 Provenance controls automatic authority. It does not increase value.
+
+### Thirty-day settled-use boundary
+
+Global usage coverage remains an audit fact. `complete`,
+`corpus_complete`, `attribution_complete`, pending sessions, failures, and the
+collection work budget retain their existing meanings. The decision engine
+does not relabel incomplete global coverage as complete.
+
+For the 30-day pruning policy, each enabled capability also receives a
+decision-coverage object with `window_days: 30` and one state:
+
+- `used_30d`: at least one verified successful load in the last 30 days;
+- `complete_zero_30d`: the complete retained corpus contains no successful
+  load in the last 30 days;
+- `settled_zero_30d`: every stable transcript eligible for collection whose
+  modification time intersects the 30-day window has been indexed, no
+  successful load appears in that settled corpus, and the only unread
+  transcript data intersecting the window is in files modified inside the
+  collector's existing quiet period;
+- `blocked_stable_backlog`: an eligible transcript whose modification time
+  intersects the decision window remains unread after the quiet period because
+  the work budget was reached, the file changed during collection, or it could
+  not be read or parsed;
+- `blocked_identity`: an unattributed observed name could identify this
+  capability through a reviewed alias or conflicting current mapping.
+
+The collector classifies every pending file before the decision engine derives
+coverage. The classification records the file identity, modification time,
+bytes, and one reason: quiet-period recency, stable budget deferral, read
+failure, parse failure, or changed during read. Aggregate counts do not
+substitute for these records. A read or parse failure remains retryable and
+visible in the global audit. It blocks a zero-use decision while its
+modification time intersects that decision's window; after it ages outside the
+window, it cannot contain an invocation inside the window and no longer blocks
+that decision. The engine never clears a relevant failure through guessed
+target attribution.
+
+`settled_zero_30d` is decision evidence under the versioned portfolio policy,
+not a claim that the transcript corpus is complete. Its bound object records
+the state, window boundaries, collection watermark and receipt identity,
+excluded recent file count and bytes, relevant stable-backlog count and bytes,
+pending-failure identities, and target-scoped identity blockers and candidate
+identities. The dashboard renders it as "No use in settled transcripts for 30
+days" and names the active-tail exclusion. It never renders "Never used" or
+"Complete zero."
+
+Archive maturity uses a separate decision-coverage object with
+`window_days: 60`. `decision_grade_zero_60d` means the 60-day object is
+`complete_zero_60d` or `settled_zero_60d` under the same active-tail,
+stable-backlog, failure-aging, and identity rules; the corresponding non-zero
+and blocked states are `used_60d`, `blocked_stable_backlog_60d`, and
+`blocked_identity_60d`. It is evaluated at archive decision time; continuity
+of earlier recommendations is not a substitute. A withdrawn skill must also
+have remained withdrawn for the full 60 days. A use inside that window,
+relevant stable unread file, or identity blocker prevents archive.
+
+An unattributed historical name with no reviewed alias and no current mapping
+candidate remains visible in the global audit but does not block unrelated
+current skills. A conflicting mapping blocks only its candidate capabilities
+when those identities are available. When the collector cannot identify the
+candidate set, zero-use decisions remain blocked rather than guessing.
+
+Direct usage and dependency evidence remain separate. A helper launched by an
+enabled skill, scheduled job, or plugin member can be required even when it has
+zero direct `skill` tool loads. Pins and complete dependency inventory override
+non-use mutation authority without changing the non-use value finding.
+
+The 30- and 60-day windows and active-tail exclusion are policy constants, not
+new runtime configuration. Immediately before every automatic
+removal-affecting dispatch, including withdrawal, archive, consolidation,
+individual plugin disablement, and whole-plugin disablement,
+`estate-action.py` acquires the writer lease, performs a fresh collection,
+derives and appends a new current decision, and rechecks the target, dependency
+set, disposition set, and policy identity. The earlier recommendation is only
+a trigger for reconsideration; it never authorizes dispatch. The action binds
+the newly appended decision and, when that decision still grants automatic
+authority, dispatches before releasing the lease. An advanced watermark, new
+receipt identity, shifted window, or changed active-tail count is expected and
+is evaluated as input to the new decision rather than compared byte-for-byte
+with the old one. A new verified use, relevant stable backlog, changed target
+identity, blocker, dependency, disposition, or policy refuses authority and
+creates no mutation receipt.
 
 ## Decision policy
 
@@ -279,13 +367,13 @@ Rules are evaluated in this order:
    `portfolio_value_unproven`.
 5. Recent verified use without a current evaluation produces
    `used_evaluation_missing`.
-6. Complete affirmative non-use for 30 days without a current passing
+6. `complete_zero_30d` or `settled_zero_30d` without a current passing
    evaluation produces `evaluate_now`.
-7. A failed or non-inferior-value evaluation with complete non-use produces
-   `disable_candidate`.
-8. A disabled or withdrawn personal skill with 60 days of complete non-use,
-   no passing unique-value evaluation, and no dependency produces
-   `archive_candidate`.
+7. A failed or non-inferior-value evaluation with `complete_zero_30d` or
+   `settled_zero_30d` produces `disable_candidate`.
+8. A personal skill that has remained disabled or withdrawn for 60 days, has
+   `decision_grade_zero_60d`, has no passing unique-value evaluation, and has
+   no dependency produces `archive_candidate`.
 9. Missing or conflicting primary evidence produces
     `insufficient_information`, never `proven_useful`.
 
@@ -338,7 +426,8 @@ automatically.
 Automatic withdrawal, archive, or consolidation requires:
 
 - `disable_candidate`, `archive_candidate`, or `merge_candidate`;
-- complete evaluation and usage evidence required by that recommendation;
+- complete evaluation evidence and decision-grade usage evidence required by
+  that recommendation;
 - complete dependency and pin inventory;
 - no unrelated dirty work;
 - exact provenance and target identity;
@@ -350,10 +439,11 @@ Automatic withdrawal, archive, or consolidation requires:
 A machine-created `disable_candidate` first enters a reversible withdrawn
 state through an `estate-action.py` `personal_withdraw` action. Withdrawal
 removes the skill from active loading without deleting its Git-backed package,
-writes a retirement record, and proves exact restore. After 60 days of complete
-non-use in the withdrawn state, an `archive_candidate` decision may authorize
-archive. Consolidation uses the same authority owner and may not bypass
-withdrawal or archive proof.
+writes a retirement record, and proves exact restore. After 60 days
+continuously in the withdrawn state and a current
+`decision_grade_zero_60d` result, an `archive_candidate` decision may authorize
+archive. Consolidation uses the same authority owner, fresh pre-dispatch
+collection, and restore proof, and may not bypass withdrawal or archive proof.
 
 ### User actions
 
@@ -595,12 +685,33 @@ transaction.
     "current": false
   },
   "usage": {
-    "complete": true,
+    "complete": false,
     "uses_7d": 0,
     "uses_30d": 0,
     "uses_90d": 0,
     "last_successful_invocation": null
   },
+  "decision_coverage": {
+    "window_days": 30,
+    "window_start": "timestamp",
+    "window_end": "timestamp",
+    "state": "settled_zero_30d",
+    "usage_receipt_sha256": "sha256:...",
+    "collection_watermark": "opaque monotonic identity",
+    "excluded_recent": {
+      "count": 2,
+      "bytes": 4096
+    },
+    "relevant_stable_backlog": {
+      "count": 0,
+      "bytes": 0,
+      "oldest_modified_at": null
+    },
+    "pending_failure_ids": [],
+    "identity_blockers": [],
+    "candidate_capability_ids": []
+  },
+  "archive_coverage": null,
   "dependencies": {
     "complete": true,
     "blocking": []
@@ -647,6 +758,11 @@ recommendation but never revives or executes a previously authorized action.
 | Evaluation stale | Show Stale evaluation and queue refresh |
 | Usage unavailable | Show Unknown; do not convert to zero |
 | No usage with complete corpus | Show the measured zero and apply policy |
+| No usage with only recent active tails unread | Show settled 30-day non-use, the excluded file count, and the collection watermark |
+| Collection stops with stable eligible transcripts unread | Keep affected zero-use decisions blocked and show the stable backlog |
+| Stable unread file cannot be read or parsed | Retry and show it in the global audit; block windows intersecting its modification time, then stop blocking only after it ages outside the window |
+| Historical name has no current mapping candidate | Keep it in the global audit without blocking unrelated current capabilities |
+| Direct-use zero belongs to an indirect dependency | Preserve the non-use value finding but block removal with the dependency |
 | Recommendation generated but no action taken | Show recommendation only; no receipt |
 | Completed action authority later changes | Keep the receipt as history, not current evidence |
 | User action targets stale census identity | Reject and require refreshed confirmation |
@@ -676,7 +792,8 @@ recommendation but never revives or executes a previously authorized action.
 2. Provenance never counts as value evidence.
 3. A recommendation never counts as an action receipt.
 4. Missing or inconclusive evaluation never becomes a passing evaluation.
-5. Missing usage never becomes zero usage.
+5. Missing usage never becomes zero usage. Settled 30-day non-use always names
+   its active-tail exclusion and never claims complete coverage.
 6. Every automatic personal mutation targets only
    `dreaming_managed` or `legacy_machine`.
 7. User-created and unknown-origin personal skills require explicit user
@@ -700,6 +817,17 @@ recommendation but never revives or executes a previously authorized action.
     that lock for at most 30 seconds, never begins within ten minutes of known
     interval eligibility, and never writes through the live boundary.
 18. Preview mode never registers or changes a launchd owner.
+19. Stable unread transcript work whose modification time intersects a decision
+    window blocks zero-use authority until collection drains it. Read and parse
+    failures remain visible and retryable; they stop blocking a window only
+    after their modification time predates it, never through guessed
+    attribution.
+20. An unmapped historical name blocks only capabilities it could identify;
+    indirect dependencies block removal even when direct usage is zero.
+21. Every automatic removal-affecting action binds and freshly re-derives the
+    complete decision-coverage object for its required window under the writer
+    lease, authorizes only the newly appended decision, and dispatches before
+    releasing that lease.
 
 ## Migration
 
@@ -707,7 +835,11 @@ recommendation but never revives or executes a previously authorized action.
 2. Render the new portfolio table and decision details while retaining the old
    estate API fields for compatibility.
 3. Backfill one decision for every enabled canonical capability.
-4. Join current evaluation receipts and usage summaries.
+4. Extend the existing usage receipt with the collection watermark and
+   per-pending-file reason, identity, modification time, and bytes. Join
+   current evaluation receipts and usage summaries, derive bound
+   per-capability 30- and 60-day decision coverage, and preserve the existing
+   global coverage facts unchanged.
 5. Generate individual plugin-skill recommendations.
 6. Add the human decision queue with all controls disabled.
 7. Qualify intent creation, idempotency, authentication, stale-state refusal,
@@ -774,6 +906,14 @@ Fail-closed rollback proof requires:
   evaluated skill.
 - Verified 7, 30, and 90-day usage and last use are visible or explicitly
   Unknown.
+- Zero-use skills distinguish complete zero, settled 30-day non-use with
+  active tails excluded, stable collection backlog, and identity ambiguity.
+- Every decision record binds its decision-window coverage, usage receipt and
+  watermark, excluded active tails, relevant stable backlog, terminal
+  failures, and target-scoped identity blockers.
+- Unmapped retired names do not make unrelated current skills unknown.
+- Direct-use zero never overrides a complete dependency or enabled plugin
+  member relationship.
 - Supporting occurrences are shown separately from evaluation and usage.
 - Recommendation reasons are plain and name the deciding facts.
 - Recommendation history is separate from completed action receipts.
@@ -857,12 +997,25 @@ Fail-closed rollback proof requires:
 
 - **Protects:** Decisions follow the declared policy.
 - **Setup:** Cover passing, failing, stale, missing, and inconclusive
-  evaluations with recent use, complete non-use, unknown usage, declared rare
-  cases, redundancy, pins, and required dependencies.
+  evaluations with recent use, complete non-use, settled 30-day non-use,
+  active recent tails, stable budget-blocked transcripts, read and parse
+  failures inside and outside the decision window, and a stable
+  budget-deferred file whose modification time predates the window. Include
+  target-specific and unrelated unmapped names, declared rare cases,
+  redundancy, pins, and direct or indirect dependencies. Assert each decision
+  record contains the source-receipt identity, watermark, window,
+  excluded-tail facts, relevant stable-backlog facts, pending failures, and
+  identity blockers used to derive its state.
 - **Pass:** Every matrix row produces the specified value state and reason
-  codes; pins and dependencies preserve but do not hide a regression.
+  codes; only recent active tails can produce `settled_zero_30d`; stable
+  backlog intersecting the decision window and target identity ambiguity
+  remain blocked; an older stable deferral does not block the current window;
+  unrelated retired names do not block; pins and dependencies preserve but do
+  not hide a regression.
 - **Failure:** Missing evidence becomes positive evidence, a critical
-  regression is labeled useful, or protection replaces its value state.
+  regression is labeled useful, a stable unread file becomes non-use evidence,
+  an unrelated old name blocks every skill, or protection replaces its value
+  state.
 - **Why:** It proves the primary evidence model.
 
 ### PORT-CHK-04: Recommendation is not evidence or receipt
@@ -956,15 +1109,29 @@ Fail-closed rollback proof requires:
 ### PORT-CHK-12: Automatic aggressive pruning
 
 - **Protects:** Aggressive policy remains evidence-bound.
-- **Setup:** Seed 30-day non-use, failing evaluation, redundancy, missing
-  evidence, pins, and dependencies across authority classes.
-- **Pass:** Eligible machine-created disable candidates withdraw, mature
-  withdrawn candidates archive, and protected, unknown, and user-decision
-  targets do not mutate. Automation remains report-only until every capability
-  has a current or explicit insufficient-information decision and two
-  consecutive daily dry-run comparisons agree.
-- **Failure:** Missing data authorizes removal or eligible machine-created work
-  remains permanently recommendation-only.
+- **Setup:** Seed complete and settled 30-day non-use, complete and settled
+  60-day non-use for withdrawn skills, a use in days 31 through 60, recent
+  active tails, stable collection backlog, read and parse failures inside and
+  outside each decision window, failing evaluation, redundancy, missing
+  evidence, pins, direct dependencies, indirect plugin-member dependencies,
+  and a new use that arrives between recommendation and dispatch. Exercise the
+  fresh-use race separately for withdrawal, archive, consolidation, individual
+  plugin disablement, and whole-plugin disablement.
+- **Pass:** Eligible machine-created disable candidates withdraw; only skills
+  withdrawn for 60 days with current decision-grade 60-day zero archive;
+  settled-zero decisions name their active-tail exclusion; failures block only
+  intersecting windows; and protected, stable-backlog, stale-action, and
+  user-decision targets do not mutate. Under one writer lease, every automatic
+  action kind collects again, appends and binds a new current decision, then
+  dispatches only if that new decision grants authority. A seeded active-tail
+  size change alone does not block an otherwise eligible action, while every
+  seeded fresh use prevents mutation and creates no mutation receipt.
+  Automation remains report-only until every capability has a current or
+  explicit insufficient-information decision and two consecutive daily
+  dry-run comparisons agree.
+- **Failure:** Missing or stable unread data authorizes removal, a dependency
+  is treated as unused, a fresh use fails to cancel dispatch, or eligible
+  machine-created work remains permanently recommendation-only.
 - **Why:** It proves both aggression and safety.
 
 ### PORT-CHK-13: Browser decision workflow
@@ -997,6 +1164,14 @@ Fail-closed rollback proof requires:
 - [ ] Every enabled skill receives a plain-language value recommendation
       independent of mutation authority.
 - [ ] Evaluation and verified usage are the primary keep-or-prune evidence.
+- [ ] Per-capability 30-day decision coverage permits settled non-use with
+      recent active tails excluded, while stable unread transcripts and
+      target identity ambiguity remain blocking.
+- [ ] The existing usage receipt classifies every pending transcript and every
+      decision binds the collector watermark, decision window, exclusions,
+      relevant backlog, failures, and identity blockers used to authorize it.
+- [ ] Archive requires a current decision-grade 60-day zero result in addition
+      to 60 continuous days withdrawn.
 - [ ] Supporting occurrences, recommendations, actions, and receipts are
       presented as distinct concepts.
 - [ ] Every plugin skill and complete plugin package receives a recommendation.
