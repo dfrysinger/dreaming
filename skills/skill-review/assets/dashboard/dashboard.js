@@ -89,7 +89,7 @@ function fullTime(value) {
 
 function badge(value) {
   const normalized = text(value).toLowerCase();
-  const className = ["healthy", "ok", "pass", "current", "completed", "reviewed"].some(word => normalized.includes(word))
+  const className = ["healthy", "ok", "pass", "current", "completed", "inspected"].some(word => normalized.includes(word))
     ? "ok" : ["failed", "error", "regression", "unhealthy", "invalid"].some(word => normalized.includes(word))
     ? "bad" : "warn";
   return `<span class="badge ${className}">${esc(value)}</span>`;
@@ -220,7 +220,7 @@ async function renderOverview() {
       <article class="card"><div class="label">Dreams remaining</div><div class="metric">${number(data.dreams.remaining)}</div><div class="submetric">${number(data.dreams.completed)} completed</div></article>
       <article class="card"><div class="label">Learned skills</div><div class="metric">${number(data.skills.count)}</div><div class="submetric">Git-backed agent-created skills</div></article>
       <article class="card"><div class="label">Enabled estate</div><div class="metric">${number(data.estate.totals?.canonical_capabilities)}</div><div class="submetric"><a class="link" href="#estate">${esc(data.estate.status)} · ${number(data.estate.totals?.physical_instances)} physical instances</a></div></article>
-      <article class="card"><div class="label">Shadow candidates</div><div class="metric">${number(data.candidates.total)}</div><div class="submetric"><a class="link" href="#candidates">${number(data.candidates.valid)} valid · ${number(data.candidates.invalid)} invalid · never active</a></div></article>
+      <article class="card"><div class="label">Unpublished drafts</div><div class="metric">${number(data.candidates.total)}</div><div class="submetric"><a class="link" href="#candidates">${number(data.candidates.valid)} valid · ${number(data.candidates.invalid)} invalid · never active</a></div></article>
       <article class="card"><div class="label">Capability improvement</div><div class="metric">${percent(capability.candidate_percent)}</div><div class="submetric">Control ${percent(capability.control_percent)} · ${capability.comparable_skills} comparable skills</div></article>
     </div>
     <div class="grid charts">
@@ -236,11 +236,11 @@ async function renderOverview() {
         ${lineChart(data.dreams.history, ["remaining"], ["#a98bff"])}
         <div class="legend"><span>Dreams remaining</span></div>
         <div class="capacity-grid">
-          <div><span class="label">Observed arrivals · 24h</span><strong>${number(data.dreams.arrivals_24h)}</strong></div>
-          <div><span class="label">Observed completions · 24h</span><strong>${number(data.dreams.completed_24h)}</strong></div>
+          <div><span class="label">Measured arrivals · 24h</span><strong>${number(data.dreams.arrivals_24h)}</strong></div>
+          <div><span class="label">Measured completions · 24h</span><strong>${number(data.dreams.completed_24h)}</strong></div>
           <div><span class="label">Oldest queued age</span><strong>${duration(data.dreams.oldest_queued_age_seconds)}</strong></div>
           <div><span class="label">Recovery required</span><strong>${number(data.dreams.recovery_required)}</strong></div>
-          <div><span class="label">Observed net · 24h</span><strong>${number(data.dreams.observed_net_24h)}</strong></div>
+          <div><span class="label">Measured net · 24h</span><strong>${number(data.dreams.observed_net_24h)}</strong></div>
           <div><span class="label">Burn-down state</span><strong>${esc(burnDownLabel(data.dreams))}</strong></div>
         </div>
       </article>
@@ -265,14 +265,20 @@ async function renderEstate() {
   const totals = data.totals || {};
   const actions = data.actions || {status:"unavailable", total:0, items:[]};
   const capabilityTotal = plugin => Object.values(plugin.capability_counts || {}).reduce((sum, value) => sum + Number(value || 0), 0);
-  const actionPanel = `<article class="panel full-span"><div class="panel-head"><h2>Governance decisions and actions</h2><span>${badge(actions.status)} · ${number(actions.total)} recorded</span></div>
+  const completedActions = (actions.items || []).filter(item => item.kind !== "recommendation");
+  const actionPanel = `<article class="panel full-span"><div class="panel-head"><h2>Action history</h2><span>${badge(actions.status)} · ${number(completedActions.length)} recorded</span></div>
     ${actions.message ? `<div class="notice">${esc(actions.message)}</div>` : ""}
     ${actions.recovery_required ? `<div class="notice"><strong>Recovery required:</strong> automatic estate changes are blocked until the recorded action state is reconciled.</div>` : ""}
-    <table><thead><tr><th>Target</th><th>Authority</th><th>Decision</th><th>Action</th><th>State</th><th>Evidence</th><th>Receipt</th><th>Observed</th></tr></thead><tbody>
-      ${(actions.items || []).map(item => `<tr><td>${esc(item.target || "Unknown target")}</td><td>${badge(item.authority || "unknown")}</td><td>${esc(item.decision || "not recorded")}</td><td>${esc((item.kind || "recommendation").replaceAll("_"," "))}</td><td>${badge(item.status)}</td><td>${badge(item.evidence_state || (item.stale ? "stale" : "current"))}</td><td>${esc(item.receipt_sha256 ? `${item.receipt_sha256.slice(0,18)}…` : "none")}</td><td>${relative(item.at)}</td></tr>`).join("") || `<tr><td colspan="8">No governed decisions or actions recorded.</td></tr>`}
+    <table><thead><tr><th>Target</th><th>Action</th><th>State</th><th>Receipt</th><th>Recorded</th></tr></thead><tbody>
+      ${completedActions.map(item => `<tr><td>${esc(item.target || "Unknown target")}</td><td>${esc((item.kind || "no action").replaceAll("_"," "))}</td><td>${badge(item.status)}</td><td>${esc(item.receipt_sha256 ? `${item.receipt_sha256.slice(0,18)}…` : "none")}</td><td>${relative(item.at)}</td></tr>`).join("") || `<tr><td colspan="5">No completed actions are retained.</td></tr>`}
+    </tbody></table></article>`;
+  const queue = data.portfolio_decisions || [];
+  const decisionPanel = `<article class="panel full-span portfolio-queue"><div class="panel-head"><h2>Decision queue</h2><span>${number(queue.length)} enabled capabilities</span></div>
+    <div class="toolbar"><input class="control" id="portfolio-query" placeholder="Filter skills or reasons"><select class="control" id="portfolio-filter"><option value="">All decisions</option><option value="needs-decision">Needs your decision</option><option value="failed">Evaluation failed</option><option value="needs-evaluation">Evaluation missing or stale</option><option value="unused-30">Unused 30 days</option><option value="unused-90">Unused 90 days</option><option value="plugin">Plugin skills</option><option value="protected">Protected dependencies</option><option value="insufficient">Insufficient information</option></select></div>
+    <table class="portfolio-table"><thead><tr><th>Skill</th><th>Installed from</th><th>Recommendation</th><th>Why</th><th>Evaluation</th><th>Use 30d</th><th>Last used</th><th>Dependencies</th><th>Who may change it</th><th>Next action</th></tr></thead><tbody id="portfolio-rows">
     </tbody></table></article>`;
   const usage = data.usage || {status:"unavailable"};
-  view.innerHTML = `${header("Skill estate", "Enabled capabilities and diagnostic physical copies from the bounded MacBook Copilot inventory.", badge(data.status))}
+  view.innerHTML = `${header("Portfolio decisions", "One plain-language recommendation per enabled capability. This preview cannot change skills or plugins.", badge(data.status))}
     ${!data.available ? `<div class="notice">${esc(data.message)}</div><div class="grid split">${actionPanel}</div>` : `
     <div class="grid metrics">
       <article class="card"><div class="label">Physical instances</div><div class="metric">${number(totals.physical_instances)}</div><div class="submetric">${number(totals.physical_only_instances)} inactive, cached, or stale</div></article>
@@ -280,12 +286,13 @@ async function renderEstate() {
       <article class="card"><div class="label">Unresolved mappings</div><div class="metric">${number(totals.unresolved_runtime_skills)}</div><div class="submetric">${data.complete ? "Bounded census complete" : "Automatic removal blocked"}</div></article>
       <article class="card"><div class="label">Plugin packages</div><div class="metric">${number(totals.plugin_packages)}</div><div class="submetric">${number(totals.enabled_plugin_packages)} effectively enabled</div></article>
       <article class="card"><div class="label">Freshness</div><div class="metric">${data.fresh ? "Current" : "Stale"}</div><div class="submetric">Collected ${relative(data.collected_at)}</div></article>
-      <article class="card"><div class="label">Governance actions</div><div class="metric">${number(actions.total)}</div><div class="submetric">${esc(actions.status)} · receipts are verification-only</div></article>
+      <article class="card"><div class="label">Recorded actions</div><div class="metric">${number(completedActions.length)}</div><div class="submetric">${esc(actions.status)} · receipts are verification-only</div></article>
     </div>
     <div class="notice"><strong>Bounded scope:</strong> ${esc(data.scope?.label)} Registered: ${esc((data.scope?.registered_context_ids || []).join(", ") || "none")}. Outside claim: ${esc((data.scope?.outside_context_ids || []).join(", ") || "none")}.</div>
     <div class="notice"><strong>Verified source:</strong> receiver ${esc(data.receiver?.id || "unavailable")} · census receipt ${esc(data.receipt_sha256 ? `${data.receipt_sha256.slice(0,18)}…` : "unavailable")} · settings ${esc(data.settings_sha256 ? `${data.settings_sha256.slice(0,16)}…` : "hash unavailable")}.</div>
-    <div class="notice"><strong>Usage evidence:</strong> ${esc(usage.source || "Unavailable")} · ${badge(usage.status || "unavailable")} · corpus ${badge(usage.corpus_complete === true ? "complete" : usage.corpus_complete === false ? "catching up" : "unknown")} · attribution ${badge(usage.attribution_complete === true ? "complete" : usage.attribution_complete === false ? "incomplete" : "unknown")} · ${number(usage.indexed_sessions)} of ${number(usage.discovered_sessions)} sessions indexed (${bytes(usage.indexed_bytes)} of ${bytes(usage.discovered_bytes)}) · ${number(usage.pending_sessions)} pending (${bytes(usage.pending_bytes)}) · this run parsed ${number(usage.sessions_parsed_this_run)} sessions / ${bytes(usage.bytes_parsed_this_run)}${usage.work_budget_stopped_run ? " before reaching its work budget" : ""}. Collected ${usage.collected_at ? relative(usage.collected_at) : "not recorded"}; retained history starts ${usage.earliest_retained_event ? fullTime(usage.earliest_retained_event) : "unknown"}. Missing or incomplete evidence is never shown as zero.</div>
+    <div class="notice"><strong>Verified usage:</strong> ${esc(usage.source || "Unavailable")} · ${badge(usage.status || "unavailable")} · corpus ${badge(usage.corpus_complete === true ? "complete" : usage.corpus_complete === false ? "catching up" : "unknown")} · attribution ${badge(usage.attribution_complete === true ? "complete" : usage.attribution_complete === false ? "incomplete" : "unknown")}. Missing or incomplete usage is never shown as zero.</div>
     <div class="notice"><strong>Personal means installation location, not authorship.</strong> Automation authority and origin evidence are shown separately.</div>
+    ${decisionPanel}
     <div class="grid split">
       <article class="panel"><div class="panel-head"><h2>Authority and provenance</h2></div><table><thead><tr><th>Class</th><th>Physical instances</th></tr></thead><tbody>
         ${Object.entries(data.authority_counts || {}).map(([name,count]) => `<tr><td>${badge(name)}</td><td>${number(count)}</td></tr>`).join("") || `<tr><td colspan="2">Unavailable</td></tr>`}
@@ -297,13 +304,49 @@ async function renderEstate() {
       <article class="panel full-span"><div class="panel-head"><h2>Plugins and complete capability sets</h2></div><table><thead><tr><th>Plugin</th><th>Version</th><th>State</th><th>Skills</th><th>Agents</th><th>Hooks</th><th>MCP</th><th>LSP</th><th>Inventory</th><th>Latest governance</th><th>Receipt</th></tr></thead><tbody>
         ${(data.plugins || []).map(item => `<tr><td>${esc(item.plugin_id)}</td><td>${esc(item.version)}</td><td>${badge(item.enabled ? "enabled" : "disabled")}</td><td>${number(item.capability_counts?.skills)}</td><td>${number(item.capability_counts?.agents)}</td><td>${number(item.capability_counts?.hooks)}</td><td>${number(item.capability_counts?.mcp_servers)}</td><td>${number(item.capability_counts?.lsp_servers)}</td><td>${badge(item.capability_inventory_complete ? `complete · ${capabilityTotal(item)}` : "incomplete")}</td><td>${item.latest_decision ? `${esc(item.latest_decision.decision || item.latest_decision.kind)} · ${badge(item.latest_decision.status)}` : "Not recorded"}</td><td>${esc(item.latest_decision?.receipt_sha256 ? `${item.latest_decision.receipt_sha256.slice(0,18)}…` : "none")}</td></tr>`).join("")}
       </tbody></table></article>
-      <article class="panel full-span"><div class="panel-head"><h2>Enabled skills</h2><span>${number((data.enabled_skills || []).length)} canonical capabilities</span></div><table><thead><tr><th>Skill</th><th>Installed from</th><th>Automation authority</th><th>Origin evidence</th><th>Recent use (7d / 30d / 90d)</th><th>Last used</th><th>State</th><th>Latest decision</th></tr></thead><tbody>
-        ${(data.enabled_skills || []).map(item => `<tr><td>${esc(item.skill_name)}</td><td>${esc(estateSource(item))}</td><td>${badge(authorityLabel(item.authority))}</td><td>${badge(originLabel(item.provenance_status))}</td><td>${recentUse(item)}</td><td>${esc(lastUse(item))}</td><td>${badge(item.state)}</td><td>${item.latest_decision ? `${esc(item.latest_decision.decision)} · ${badge(item.latest_decision.status)}` : "Not recorded"}</td></tr>`).join("") || `<tr><td colspan="8">No enabled skills were mapped by the current census.</td></tr>`}
-      </tbody></table></article>
       <article class="panel full-span"><div class="panel-head"><h2>Other physical copies</h2><span>${number((data.other_physical_copies || []).length)} diagnostic copies</span></div><table><thead><tr><th>Skill</th><th>Location</th><th>Reason</th><th>Automation authority</th><th>Origin evidence</th><th>Owner</th></tr></thead><tbody>
         ${(data.other_physical_copies || []).map(item => `<tr><td>${esc(item.skill_name)}</td><td>${esc(estateSource(item))}</td><td>${esc(item.reason)}</td><td>${badge(authorityLabel(item.authority))}</td><td>${badge(originLabel(item.provenance_status))}</td><td>${esc(item.owner)}</td></tr>`).join("") || `<tr><td colspan="6">No inactive, cached, stale, or duplicate physical copies.</td></tr>`}
       </tbody></table></article>
     </div>`}`;
+  if (data.available) bindPortfolioQueue(queue);
+}
+
+function bindPortfolioQueue(queue) {
+  const query = document.getElementById("portfolio-query");
+  const filter = document.getElementById("portfolio-filter");
+  const rows = document.getElementById("portfolio-rows");
+  const usage30d = item => {
+    if (item.usage_state === "unknown") return "Unknown";
+    const count = number(item.uses_30d);
+    return item.usage_state === "incomplete" ? `${count}+` : count;
+  };
+  const portfolioLastUse = item => {
+    if (item.usage_state === "unknown") return "Unknown";
+    if (item.last_successful_invocation) {
+      return `${relative(item.last_successful_invocation)}${item.usage_state === "incomplete" ? " · partial" : ""}`;
+    }
+    return item.usage_state === "incomplete" ? "No verified use yet · partial" : "Never observed";
+  };
+  const matches = item => {
+    const textMatch = `${item.skill_name} ${item.why} ${item.installed_from}`.toLowerCase().includes(query.value.toLowerCase());
+    if (!textMatch) return false;
+    if (!filter.value) return true;
+    if (filter.value === "needs-decision") return item.who_may_change === "Your decision";
+    if (filter.value === "failed") return item.evaluation?.state === "regression";
+    if (filter.value === "needs-evaluation") return ["missing", "stale"].includes(item.evaluation?.state);
+    if (filter.value === "unused-30") return item.usage_state === "complete" && item.uses_30d === 0;
+    if (filter.value === "unused-90") return item.usage_state === "complete" && item.uses_90d === 0;
+    if (filter.value === "plugin") return item.who_may_change === "Plugin package only";
+    if (filter.value === "protected") return item.dependencies?.state === "protected";
+    return item.recommendation === "insufficient_information";
+  };
+  const render = () => {
+    const visible = queue.filter(matches);
+    rows.innerHTML = visible.map(item => `<tr><td data-label="Skill">${esc(item.skill_name)}</td><td data-label="Installed from">${esc(item.installed_from)}</td><td data-label="Recommendation">${badge(item.recommendation_label)}</td><td data-label="Why">${esc(item.why)}</td><td data-label="Evaluation">${badge(item.evaluation?.label)}</td><td data-label="Use 30d">${usage30d(item)}</td><td data-label="Last used">${portfolioLastUse(item)}</td><td data-label="Dependencies">${badge(item.dependencies?.label)}</td><td data-label="Who may change it">${esc(item.who_may_change)}</td><td data-label="Next action"><button class="control" disabled title="${esc(item.next_action?.reason)}">${esc(item.next_action?.label)}</button><div class="submetric">${esc(item.next_action?.reason)}</div></td></tr>`).join("") || `<tr><td colspan="10">No decisions match this filter.</td></tr>`;
+  };
+  query.addEventListener("input", render);
+  filter.addEventListener("change", render);
+  render();
 }
 
 function skillTable(items) {
@@ -314,13 +357,13 @@ function skillTable(items) {
 
 async function renderActivity() {
   const data = await api("/api/v1/activity?limit=50");
-  view.innerHTML = `${header("Activity", "Scheduled executions contain their ordered passes and attributed reviews; older unlinked work remains separate.")}
+  view.innerHTML = `${header("Activity", "Scheduled executions contain their ordered passes and attributed conversation inspections; older unlinked work remains separate.")}
     <div class="run-stack">${data.items.length ? data.items.map(run => `
-      <article class="run"><header><div><div class="run-title"><h2>${run.kind === "scheduled" ? "Scheduled Dreaming run" : run.kind === "evaluation" ? "Skill evaluation" : run.parent_run_id ? "Scheduled dream review" : "Unattributed dream review"}</h2><time>${fullTime(run.started_at)}</time></div><div class="muted">${esc(run.id)}${run.parent_run_id ? ` · Parent ${esc(run.parent_run_id)}` : ""}</div></div>${badge(run.status)}</header>
+      <article class="run"><header><div><div class="run-title"><h2>${run.kind === "scheduled" ? "Scheduled Dreaming run" : run.kind === "evaluation" ? "Skill evaluation" : run.parent_run_id ? "Scheduled conversation inspection" : "Unattributed conversation inspection"}</h2><time>${fullTime(run.started_at)}</time></div><div class="muted">${esc(run.id)}${run.parent_run_id ? ` · Parent ${esc(run.parent_run_id)}` : ""}</div></div>${badge(run.status)}</header>
       ${run.kind === "scheduled" ? `<div class="steps">${["consolidate","roll","prune"].map((name,index) => {
         const step = (run.passes || []).find(item => item.name === name) || {status:"not recorded"};
         return `<div class="step"><span>${index + 1}</span><strong>${name[0].toUpperCase() + name.slice(1)}</strong><span>${esc(step.reason || "")}</span>${badge(step.status)}</div>`;
-      }).join("")}${(run.reviews || []).map(review => `<div class="step"><span>↳</span><strong>Dream review</strong><span>${esc(review.source || "Unknown CLI")} · ${esc(review.session_id || "Unknown dream")}</span>${badge(review.status)}</div>`).join("")}${run.maintenance ? `<div class="notice">${run.maintenance.days_until_due === null ? "Weekly maintenance is not due; the last successful run is unavailable." : `Weekly maintenance not due for ${run.maintenance.days_until_due} days (Last run ${fullTime(run.maintenance.last_run_at)})`}</div>` : ""}</div>` : ""}</article>`).join("") : `<div class="empty">No retained activity.</div>`}</div>`;
+      }).join("")}${(run.reviews || []).map(review => `<div class="step"><span>↳</span><strong>Conversation inspection</strong><span>${esc(review.source || "Unknown CLI")} · ${esc(review.session_id || "Unknown dream")}</span>${badge(review.status)}</div>`).join("")}${run.maintenance ? `<div class="notice">${run.maintenance.days_until_due === null ? "Weekly maintenance is not due; the last successful run is unavailable." : `Weekly maintenance not due for ${run.maintenance.days_until_due} days (Last run ${fullTime(run.maintenance.last_run_at)})`}</div>` : ""}</div>` : ""}</article>`).join("") : `<div class="empty">No retained activity.</div>`}</div>`;
 }
 
 function toolbar(kind) {
@@ -343,7 +386,7 @@ async function renderDreams(cursor = "") {
   view.innerHTML = `${header("Dreams", "Every known session revision, with honest backlog and learning status.")}
     ${toolbar("dreams")}
     <article class="panel"><table><thead><tr><th>Status</th><th>CLI</th><th>Dream</th><th>Updated</th><th>Activity</th><th>Learning result</th></tr></thead><tbody>
-    ${data.items.map(item => `<tr><td>${badge(item.raw_status)}</td><td>${esc(item.source)}</td><td>${esc(item.name)}</td><td>${relative(item.updated_at)}</td><td>${number(item.activity.user_turns)} user · ${number(item.activity.tool_calls)} tools</td><td>${esc(item.learning_result || "Not reviewed")}</td></tr>`).join("")}
+    ${data.items.map(item => `<tr><td>${badge(item.raw_status)}</td><td>${esc(item.source)}</td><td>${esc(item.name)}</td><td>${relative(item.updated_at)}</td><td>${number(item.activity.user_turns)} user · ${number(item.activity.tool_calls)} tools</td><td>${esc(item.learning_result || "Not inspected")}</td></tr>`).join("")}
     </tbody></table>${pager("dreams",data)}</article>`;
   bindCatalog("dreams", renderDreams);
 }
@@ -379,7 +422,7 @@ async function renderCandidates(cursor = "") {
   const params = new URLSearchParams({limit:"25", ...query});
   if (cursor) params.set("cursor", cursor);
   const data = await api(`/api/v1/candidates?${params}`);
-  view.innerHTML = `${header("Shadow candidates", "Read-only evidence packages awaiting conservative lifecycle decisions.", badge(data.authority))}
+  view.innerHTML = `${header("Unpublished drafts", "Read-only evidence packages awaiting conservative lifecycle decisions.", badge(data.authority))}
     ${candidateAuthority(data)}
     ${candidateToolbar()}
     <article class="panel"><table><thead><tr><th>Candidate</th><th>Lifecycle</th><th>Recurrence</th><th>Freshness</th><th>Evaluation</th><th>Exact candidate identity</th></tr></thead><tbody>
@@ -390,7 +433,7 @@ async function renderCandidates(cursor = "") {
       <td>${item.freshness ? `${item.freshness.fresh_evidence ? "Fresh evidence" : "No fresh evidence"} · ${item.freshness.days_until_expiry === null ? "No expiry" : `${number(item.freshness.days_until_expiry)}d to expiry`}` : "Unavailable"}</td>
       <td>${item.evaluation ? badge(item.evaluation.status_label) : badge("unavailable")}</td>
       <td class="mono">${esc(item.current_candidate_id)}</td>
-    </tr>`).join("") : `<tr><td colspan="6"><div class="empty">No shadow candidate records.</div></td></tr>`}
+    </tr>`).join("") : `<tr><td colspan="6"><div class="empty">No unpublished draft records.</div></td></tr>`}
     </tbody></table>${pager("candidates",data)}</article>`;
   bindCandidates();
 }
@@ -414,7 +457,7 @@ function bindCandidates() {
 async function renderCandidate(lifecycleId) {
   const data = await api(`/api/v1/candidates/${encodeURIComponent(lifecycleId)}`);
   const freshness = data.freshness;
-  view.innerHTML = `<a class="link back" href="#candidates">← Back to shadow candidates</a>
+  view.innerHTML = `<a class="link back" href="#candidates">← Back to unpublished drafts</a>
     ${header(data.proposed_name, "Candidate lifecycle, recurrence, freshness, and evaluation evidence.", badge(data.state_label))}
     ${candidateAuthority(data)}
     <div class="grid split">
@@ -473,7 +516,7 @@ function bindCatalog(kind, renderer) {
 async function renderSkill(name) {
   const data = await api(`/api/v1/skills/${encodeURIComponent(name)}`);
   view.innerHTML = `<a class="link back" href="#skills">← Back to all skills</a>
-    ${header(data.name, "Read the skill, inspect its evidence, and review its current authority.", badge(data.status))}
+    ${header(data.name, "Read the skill, inspect its evidence, and inspect its current authority.", badge(data.status))}
     <div class="grid split">
       <article class="panel"><div class="panel-head"><h2>Skill text</h2><span>${number(data.words)} words</span></div><pre class="skill-text">${esc(data.text)}</pre></article>
       <article class="panel"><div class="panel-head"><h2>Details</h2></div><dl class="definition">
@@ -484,7 +527,7 @@ async function renderSkill(name) {
         <dt>Published to</dt><dd>${data.publication_targets?.length ? esc(data.publication_targets.join(", ")) : "Not published"}</dd>
       </dl></article>
       <article class="panel full-span"><div class="panel-head"><h2>Evidence</h2><a class="link" href="#evidence/${encodeURIComponent(name)}">View all ${number(data.evidence_count)} summaries →</a></div>
-        <table><thead><tr><th>Observed</th><th>Dream</th><th>CLI</th><th>Kind</th><th>Saved summary preview</th><th>Task</th></tr></thead><tbody>
+        <table><thead><tr><th>Supporting occurrence</th><th>Dream</th><th>CLI</th><th>Kind</th><th>Saved summary preview</th><th>Task</th></tr></thead><tbody>
         ${data.evidence.slice(0,5).map(item => `<tr><td>${relative(item.observed_at)}</td><td>${esc(item.dream_name)}</td><td>${esc(item.source)}</td><td>${esc(item.evidence_kind)}</td><td><a class="link" href="#evidence/${encodeURIComponent(name)}/${item.id}">${esc(item.summary)}</a></td><td>${esc(item.independence)}</td></tr>`).join("")}
         </tbody></table></article>
     </div>`;

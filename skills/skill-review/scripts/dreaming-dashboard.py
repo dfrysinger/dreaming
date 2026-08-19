@@ -20,6 +20,7 @@ import threading
 import time
 import urllib.parse
 import math
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from http import HTTPStatus
@@ -34,6 +35,29 @@ OBSERVED_SKILL_RE = re.compile(r"^[a-z0-9](?:[a-z0-9:-]{0,198}[a-z0-9])?$")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 MAX_JSON_BYTES = 16 * 1024 * 1024
 MAX_SNAPSHOT_BYTES = 1_100_000
+PREVIEW_MANIFEST_NAME = "dashboard-preview-manifest.json"
+PREVIEW_ROOT_NAMES = (
+    "state",
+    "control_state",
+    "review_state",
+    "orchestrator_state",
+    "data",
+    "skills",
+)
+PREVIEW_DATA_SUBTREES = (
+    "snapshots",
+    "candidates/v1/packages",
+    "bundles",
+)
+PREVIEW_LOCK_RUNTIME_NAMES = (
+    "daemon.lock",
+    "daemon.lock-wal",
+    "daemon.lock-shm",
+    "daemon.lock-journal",
+)
+PREVIEW_CAPTURE_SECONDS = 30
+PREVIEW_ELIGIBILITY_MARGIN_SECONDS = 10 * 60
+PREVIEW_RELEASE_RESERVE_SECONDS = 2
 DEFAULT_LIMIT = 25
 MAX_LIMIT = 100
 EVALUATION_SIDECARS = {
@@ -312,6 +336,8 @@ class DashboardPaths:
     token: Path
     candidate_records: Path | None = None
     candidate_packages: Path | None = None
+    preview_root: Path | None = None
+    preview_manifest: Path | None = None
 
     @classmethod
     def defaults(cls) -> "DashboardPaths":
@@ -378,6 +404,568 @@ class DashboardPaths:
             candidate_packages,
         )
 
+    @classmethod
+    def preview(cls, root: Path, assets: Path) -> "DashboardPaths":
+        """Build paths exclusively from a verified private preview snapshot."""
+        root = root.absolute()
+        manifest = root / PREVIEW_MANIFEST_NAME
+        paths = cls(
+            state=root / "state",
+            control_state=root / "control_state",
+            review_state=root / "review_state",
+            orchestrator_state=root / "orchestrator_state",
+            data=root / "data",
+            skills=root / "skills",
+            repo=root,
+            assets=_preview_assets_path(assets),
+            token=root / "state" / "dashboard" / "access-token",
+            candidate_records=root / "state" / "skill-review/candidates/v1/records",
+            candidate_packages=root / "data" / "candidates/v1/packages",
+            preview_root=root,
+            preview_manifest=manifest,
+        )
+        verify_preview_manifest(paths)
+        return paths
+
+
+def _path_components(path: Path) -> list[Path]:
+    absolute = path.absolute()
+    parts = absolute.parts
+    current = Path(parts[0])
+    result = [current]
+    for part in parts[1:]:
+        current /= part
+        result.append(current)
+    return result
+
+
+def _require_real_directory(path: Path, source: str) -> None:
+    try:
+        for component in _path_components(path):
+            if component.is_symlink():
+                raise DashboardError(
+                    503, "preview_path_invalid", f"{source} contains a symlink", [source]
+                )
+        info = path.stat()
+    except OSError as exc:
+        raise DashboardError(
+            503, "preview_path_invalid", f"{source} is unavailable", [source]
+        ) from exc
+    if not stat.S_ISDIR(info.st_mode):
+        raise DashboardError(
+            503, "preview_path_invalid", f"{source} is not a directory", [source]
+        )
+
+
+def _preview_assets_path(assets: Path) -> Path:
+    expected = Path(__file__).resolve().parents[1] / "assets/dashboard"
+    provided = assets.absolute()
+    _require_real_directory(expected, "preview assets")
+    _require_real_directory(provided, "preview assets")
+    if provided.resolve() != expected.resolve():
+        raise DashboardError(
+            503,
+            "preview_assets_invalid",
+            "Preview assets must belong to this preview worktree",
+        )
+    return expected
+
+
+def _validated_capture_destination(
+    destination: Path, source_roots: dict[str, Path]
+) -> Path:
+    lexical = destination.absolute()
+    if lexical.exists() or lexical.is_symlink():
+        raise DashboardError(
+            2, "preview_capture_exists", "Preview destination already exists"
+        )
+    _require_real_directory(lexical.parent, "preview destination parent")
+    effective = lexical.resolve(strict=False)
+    for root in source_roots.values():
+        try:
+            if effective.is_relative_to(root.resolve(strict=True)):
+                raise DashboardError(
+                    2,
+                    "preview_capture_invalid",
+                    "Preview destination must not be inside an input root",
+                )
+        except OSError as exc:
+            raise DashboardError(
+                2, "preview_capture_invalid", "Preview input root is unavailable"
+            ) from exc
+    return lexical
+
+
+def _require_regular_path(path: Path, source: str) -> os.stat_result:
+    try:
+        for component in _path_components(path):
+            if component.is_symlink():
+                raise DashboardError(
+                    503, "preview_path_invalid", f"{source} contains a symlink", [source]
+                )
+        info = path.stat()
+    except OSError as exc:
+        raise DashboardError(
+            503, "preview_path_invalid", f"{source} is unavailable", [source]
+        ) from exc
+    if not stat.S_ISREG(info.st_mode):
+        raise DashboardError(
+            503, "preview_path_invalid", f"{source} is not a regular file", [source]
+        )
+    return info
+
+
+def _snapshot_files(
+    root: Path, source: str, excluded: frozenset[str] = frozenset()
+) -> dict[str, dict[str, Any]]:
+    """Return a non-following, deterministic inventory rooted at ``root``."""
+    try:
+        if root.is_symlink() or not root.is_dir():
+            raise DashboardError(
+                503, "preview_path_invalid", f"{source} is not a directory", [source]
+            )
+        for component in _path_components(root):
+            if component.is_symlink():
+                raise DashboardError(
+                    503, "preview_path_invalid", f"{source} contains a symlink", [source]
+                )
+    except OSError as exc:
+        raise DashboardError(
+            503, "preview_path_invalid", f"{source} is unavailable", [source]
+        ) from exc
+
+    files: dict[str, dict[str, Any]] = {}
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            entries = sorted(directory.iterdir(), key=lambda item: item.name)
+        except OSError as exc:
+            raise DashboardError(
+                503, "preview_path_invalid", f"{source} is unreadable", [source]
+            ) from exc
+        for entry in entries:
+            relative = entry.relative_to(root).as_posix()
+            try:
+                info = entry.lstat()
+            except OSError as exc:
+                raise DashboardError(
+                    503, "preview_path_invalid", f"{source} changed during inspection", [source]
+                ) from exc
+            if relative in excluded:
+                continue
+            if stat.S_ISLNK(info.st_mode):
+                raise DashboardError(
+                    503, "preview_path_invalid", f"{source} contains a symlink", [source]
+                )
+            if stat.S_ISDIR(info.st_mode):
+                pending.append(entry)
+                continue
+            if not stat.S_ISREG(info.st_mode):
+                raise DashboardError(
+                    503, "preview_path_invalid", f"{source} contains a non-file", [source]
+                )
+            try:
+                content = entry.read_bytes()
+                after = entry.stat()
+            except OSError as exc:
+                raise DashboardError(
+                    503, "preview_path_invalid", f"{source} changed during inspection", [source]
+                ) from exc
+            if (
+                after.st_dev != info.st_dev
+                or after.st_ino != info.st_ino
+                or after.st_size != info.st_size
+            ):
+                raise DashboardError(
+                    503, "preview_path_invalid", f"{source} changed during inspection", [source]
+                )
+            files[relative] = {
+                "device": info.st_dev,
+                "inode": info.st_ino,
+                "size": info.st_size,
+                "sha256": hashlib.sha256(content).hexdigest(),
+            }
+    return files
+
+
+def _preview_capture_files(
+    name: str, root: Path, excluded: frozenset[str] = frozenset()
+) -> dict[str, dict[str, Any]]:
+    """Inventory only the data subtrees that report-only dashboard routes read."""
+    if name != "data":
+        return _snapshot_files(root, f"source {name}", excluded)
+    # Validate the root itself, but deliberately do not traverse unrelated
+    # data such as the dependency-bundle cache under data/deps.
+    try:
+        if root.is_symlink() or not root.is_dir():
+            raise DashboardError(
+                503, "preview_path_invalid", "source data is not a directory", ["source data"]
+            )
+        for component in _path_components(root):
+            if component.is_symlink():
+                raise DashboardError(
+                    503, "preview_path_invalid", "source data contains a symlink", ["source data"]
+                )
+    except OSError as exc:
+        raise DashboardError(
+            503, "preview_path_invalid", "source data is unavailable", ["source data"]
+        ) from exc
+    files: dict[str, dict[str, Any]] = {}
+    for relative in PREVIEW_DATA_SUBTREES:
+        subtree = root / relative
+        if not subtree.exists():
+            continue
+        for path in _path_components(subtree):
+            if path.is_symlink():
+                raise DashboardError(
+                    503,
+                    "preview_path_invalid",
+                    f"source data/{relative} contains a symlink",
+                    [f"data/{relative}"],
+                )
+        for path, identity in _snapshot_files(
+            subtree, f"source data/{relative}"
+        ).items():
+            files[f"{relative}/{path}"] = identity
+    return files
+
+
+def _capture_lock_exclusions(
+    roots: dict[str, Path], lock_path: Path
+) -> dict[str, frozenset[str]]:
+    """Exclude only the concrete SQLite lease files owned by this capture."""
+    runtime_paths = [
+        lock_path.with_name(name) for name in PREVIEW_LOCK_RUNTIME_NAMES
+    ]
+    excluded: dict[str, frozenset[str]] = {}
+    for name, root in roots.items():
+        relative_paths = []
+        for runtime in runtime_paths:
+            try:
+                relative_paths.append(runtime.relative_to(root).as_posix())
+            except ValueError:
+                continue
+        excluded[name] = frozenset(relative_paths)
+    return excluded
+
+
+def verify_preview_manifest(paths: DashboardPaths) -> None:
+    """Fail closed unless every snapshot input still has its captured identity."""
+    root = paths.preview_root
+    manifest_path = paths.preview_manifest
+    if root is None or manifest_path is None:
+        return
+    manifest_info = _require_regular_path(manifest_path, "preview manifest")
+    if manifest_info.st_size > MAX_JSON_BYTES:
+        raise DashboardError(503, "preview_manifest_invalid", "Preview manifest is too large")
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+        raise DashboardError(
+            503, "preview_manifest_invalid", "Preview manifest is invalid"
+        ) from exc
+    if (
+        not isinstance(manifest, dict)
+        or set(manifest) != {"schema_version", "captured_at", "roots", "files"}
+        or manifest.get("schema_version") != 1
+        or not isinstance(manifest.get("roots"), dict)
+        or set(manifest["roots"]) != set(PREVIEW_ROOT_NAMES)
+        or not isinstance(manifest.get("files"), list)
+    ):
+        raise DashboardError(503, "preview_manifest_invalid", "Preview manifest is invalid")
+    expected_paths = {
+        name: root / name for name in PREVIEW_ROOT_NAMES
+    }
+    if any(
+        manifest["roots"].get(name) != name
+        or getattr(paths, name) != expected
+        for name, expected in expected_paths.items()
+    ):
+        raise DashboardError(
+            503, "preview_manifest_invalid", "Preview paths do not match the manifest"
+        )
+    expected: dict[str, dict[str, Any]] = {}
+    for item in manifest["files"]:
+        if (
+            not isinstance(item, dict)
+            or set(item)
+            != {
+                "path",
+                "device",
+                "inode",
+                "size",
+                "sha256",
+                "source_device",
+                "source_inode",
+                "source_size",
+                "source_sha256",
+            }
+            or not isinstance(item.get("path"), str)
+            or not isinstance(item.get("device"), int)
+            or not isinstance(item.get("inode"), int)
+            or not isinstance(item.get("size"), int)
+            or item["size"] < 0
+            or not SHA256_RE.fullmatch(str(item.get("sha256", "")))
+            or not isinstance(item.get("source_device"), int)
+            or not isinstance(item.get("source_inode"), int)
+            or not isinstance(item.get("source_size"), int)
+            or item["source_size"] < 0
+            or not SHA256_RE.fullmatch(str(item.get("source_sha256", "")))
+            or item["path"] in expected
+        ):
+            raise DashboardError(
+                503, "preview_manifest_invalid", "Preview manifest is invalid"
+            )
+        relative = Path(item["path"])
+        if relative.is_absolute() or ".." in relative.parts or len(relative.parts) < 2:
+            raise DashboardError(
+                503, "preview_manifest_invalid", "Preview manifest escapes its root"
+            )
+        if relative.parts[0] not in PREVIEW_ROOT_NAMES:
+            raise DashboardError(
+                503, "preview_manifest_invalid", "Preview manifest is invalid"
+            )
+        expected[item["path"]] = item
+    actual: dict[str, dict[str, Any]] = {}
+    for name, directory in expected_paths.items():
+        for relative, identity in _snapshot_files(directory, f"preview {name}").items():
+            actual[f"{name}/{relative}"] = identity
+    if set(actual) != set(expected):
+        raise DashboardError(
+            503, "preview_manifest_changed", "Preview snapshot files changed"
+        )
+    for path, identity in actual.items():
+        captured = expected[path]
+        if any(identity[key] != captured[key] for key in ("device", "inode", "size", "sha256")):
+            raise DashboardError(
+                503, "preview_manifest_changed", "Preview snapshot files changed", [path]
+            )
+
+
+def _copy_snapshot_file(source: Path, destination: Path, deadline: float) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    with source.open("rb") as input_handle, destination.open("xb") as output_handle:
+        while True:
+            if time.monotonic() >= deadline:
+                raise DashboardError(
+                    2, "preview_capture_timeout", "Preview capture exceeded thirty seconds"
+                )
+            chunk = input_handle.read(1024 * 1024)
+            if not chunk:
+                break
+            output_handle.write(chunk)
+    destination.chmod(0o600)
+
+
+def _snapshot_run_active(state: Path, orchestrator: Path) -> bool:
+    for path in (
+        state / "dreaming-run-active.json",
+        state / "run-active.json",
+        orchestrator / "active-run.json",
+    ):
+        if not path.exists():
+            continue
+        _require_regular_path(path, "run activity marker")
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError) as exc:
+            raise DashboardError(
+                503, "preview_capture_invalid", "Run activity marker is invalid"
+            ) from exc
+        if isinstance(value, dict) and (
+            value.get("active") is True or value.get("status") in {"running", "active"}
+        ):
+            return True
+    return False
+
+
+def _release_preview_lock(
+    lock_script: Path,
+    token: str,
+    environment: dict[str, str],
+    deadline: float,
+) -> None:
+    error: Exception | None = None
+    for _ in range(2):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            result = subprocess.run(
+                [
+                    os.sys.executable,
+                    str(lock_script),
+                    "release",
+                    token,
+                    "--idempotent",
+                ],
+                capture_output=True,
+                text=True,
+                env=environment,
+                timeout=min(1.0, remaining),
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            error = exc
+            continue
+        if result.returncode == 0:
+            return
+        error = RuntimeError(f"release returned {result.returncode}")
+    raise DashboardError(
+        2, "preview_capture_release_failed", "Preview capture could not release its writer lock"
+    ) from error
+
+
+def _reconcile_preview_acquire(
+    lock_script: Path,
+    token: str,
+    environment: dict[str, str],
+    deadline: float,
+) -> None:
+    _release_preview_lock(lock_script, token, environment, deadline)
+
+
+def capture_preview_snapshot(
+    *,
+    destination: Path,
+    roots: dict[str, Path],
+    lock_state: Path,
+    next_eligible_at: float | None = None,
+) -> None:
+    """Capture a disposable preview snapshot while holding the existing writer lease."""
+    deadline = time.monotonic() + PREVIEW_CAPTURE_SECONDS
+    if set(roots) != set(PREVIEW_ROOT_NAMES):
+        raise DashboardError(2, "preview_capture_invalid", "All preview roots are required")
+    if next_eligible_at is not None and next_eligible_at - time.time() < PREVIEW_ELIGIBILITY_MARGIN_SECONDS:
+        raise DashboardError(
+            2, "preview_capture_too_close", "Next interval eligibility is less than ten minutes away"
+        )
+    source_roots = {name: path.absolute() for name, path in roots.items()}
+    lock_path = lock_state.absolute() / "daemon.lock"
+    lock_exclusions = _capture_lock_exclusions(source_roots, lock_path)
+    destination = _validated_capture_destination(destination, source_roots)
+    if _snapshot_run_active(source_roots["state"], source_roots["orchestrator_state"]):
+        raise DashboardError(2, "preview_capture_active", "A Dreaming run is active")
+    lock_script = Path(__file__).with_name("daemon-lock.py")
+    environment = {
+        **os.environ,
+        "SKILLS_STATE_DIR": str(lock_state.absolute()),
+        "SKILLS_LOCK_DIR": str(lock_path),
+        "SKILLS_LOCK_NONBLOCKING": "1",
+    }
+    token = str(uuid.uuid4())
+    work_deadline = deadline - PREVIEW_RELEASE_RESERVE_SECONDS
+    acquire_timeout = work_deadline - time.monotonic()
+    if acquire_timeout <= 0:
+        raise DashboardError(
+            2, "preview_capture_timeout", "Preview capture exceeded thirty seconds"
+        )
+    try:
+        lock = subprocess.run(
+            [
+                os.sys.executable,
+                str(lock_script),
+                "acquire",
+                "--mode",
+                "session",
+                "--owner",
+                "dashboard-preview-capture",
+                "--token",
+                token,
+            ],
+            capture_output=True,
+            text=True,
+            env=environment,
+            timeout=min(1.0, acquire_timeout),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        _reconcile_preview_acquire(lock_script, token, environment, deadline)
+        raise DashboardError(
+            2,
+            "preview_capture_acquire_ambiguous",
+            "Preview capture could not confirm writer-lock acquisition",
+        ) from exc
+    if lock.returncode != 0:
+        _reconcile_preview_acquire(lock_script, token, environment, deadline)
+        raise DashboardError(2, "preview_capture_locked", "Writer lock is unavailable")
+    if lock.stdout.strip() != token:
+        _reconcile_preview_acquire(lock_script, token, environment, deadline)
+        raise DashboardError(
+            2,
+            "preview_capture_acquire_ambiguous",
+            "Preview capture could not confirm writer-lock acquisition",
+        )
+    created = False
+    failure: Exception | None = None
+    try:
+        if _snapshot_run_active(source_roots["state"], source_roots["orchestrator_state"]):
+            raise DashboardError(2, "preview_capture_active", "A Dreaming run is active")
+        before = {
+            name: _preview_capture_files(name, path, lock_exclusions[name])
+            for name, path in source_roots.items()
+        }
+        if time.monotonic() >= work_deadline:
+            raise DashboardError(2, "preview_capture_timeout", "Preview capture exceeded thirty seconds")
+        destination.mkdir(mode=0o700, parents=False)
+        created = True
+        for name, files in before.items():
+            (destination / name).mkdir(mode=0o700)
+            for relative in files:
+                _copy_snapshot_file(
+                    source_roots[name] / relative,
+                    destination / name / relative,
+                    work_deadline,
+                )
+                if time.monotonic() >= work_deadline:
+                    raise DashboardError(2, "preview_capture_timeout", "Preview capture exceeded thirty seconds")
+        after = {
+            name: _preview_capture_files(name, path, lock_exclusions[name])
+            for name, path in source_roots.items()
+        }
+        if before != after:
+            raise DashboardError(2, "preview_capture_changed", "Source inputs changed during capture")
+        files = []
+        for name in PREVIEW_ROOT_NAMES:
+            for relative, identity in _snapshot_files(destination / name, f"preview {name}").items():
+                source_identity = before[name][relative]
+                files.append(
+                    {
+                        "path": f"{name}/{relative}",
+                        **identity,
+                        "source_device": source_identity["device"],
+                        "source_inode": source_identity["inode"],
+                        "source_size": source_identity["size"],
+                        "source_sha256": source_identity["sha256"],
+                    }
+                )
+        manifest = {
+            "schema_version": 1,
+            "captured_at": now_iso(),
+            "roots": {name: name for name in PREVIEW_ROOT_NAMES},
+            "files": sorted(files, key=lambda item: item["path"]),
+        }
+        (destination / PREVIEW_MANIFEST_NAME).write_bytes(canonical(manifest))
+        preview_paths = DashboardPaths.preview(
+            destination, Path(__file__).parents[1] / "assets/dashboard"
+        )
+        verify_preview_manifest(preview_paths)
+        if time.monotonic() >= work_deadline:
+            raise DashboardError(2, "preview_capture_timeout", "Preview capture exceeded thirty seconds")
+    except Exception as exc:
+        failure = exc
+        if created and destination.exists():
+            shutil.rmtree(destination)
+    try:
+        _release_preview_lock(lock_script, token, environment, deadline)
+    except DashboardError as release_error:
+        if created and destination.exists():
+            shutil.rmtree(destination)
+        if failure is not None:
+            raise release_error from failure
+        raise
+    if failure is not None:
+        raise failure
+
 
 def read_token(path: Path) -> str:
     if path.is_symlink():
@@ -407,6 +995,30 @@ class DashboardData:
         self._evaluation_identity_cache: dict[
             tuple[str, str], tuple[str, str] | None
         ] = {}
+
+    def _adapter_config_path(self) -> Path:
+        return (
+            self.paths.state / "adapters.json"
+            if self.paths.preview_root is not None
+            else Path(
+                os.environ.get(
+                    "DREAMING_ADAPTER_CONFIG",
+                    self.paths.state / "adapters.json",
+                )
+            )
+        )
+
+    def _adapter_config(self) -> dict[str, Any]:
+        path = self._adapter_config_path()
+        value = self._json(path, {}, "adapter config") if path.exists() else {}
+        if not isinstance(value, dict):
+            raise DashboardError(
+                503,
+                "adapter_config_invalid",
+                "Adapter configuration is malformed",
+                ["adapter config"],
+            )
+        return value
 
     def _json(self, path: Path, default: Any, source: str) -> Any:
         if not path.exists():
@@ -768,17 +1380,7 @@ class DashboardData:
             summary = self._json(
                 remote_path, {}, "remote publication summary"
             )
-            config_path = Path(
-                os.environ.get(
-                    "DREAMING_ADAPTER_CONFIG",
-                    self.paths.state / "adapters.json",
-                )
-            )
-            config = (
-                self._json(config_path, {}, "adapter config")
-                if config_path.exists()
-                else {}
-            )
+            config = self._adapter_config()
             publisher = (
                 config.get("publishers", {}).get("copilot")
                 if isinstance(config, dict)
@@ -2943,6 +3545,7 @@ class DashboardData:
                 "recovery_required": recovery_path.exists(),
                 "actions": actions,
                 "message": "No estate census has been recorded.",
+                "portfolio_decisions": [],
             }
         try:
             current = self._json(
@@ -3049,6 +3652,7 @@ class DashboardData:
                 "recovery_required": recovery_path.exists(),
                 "actions": actions,
                 "message": error.message,
+                "portfolio_decisions": [],
             }
 
         collected_at = census.get("collected_at")
@@ -3447,6 +4051,13 @@ class DashboardData:
             else:
                 reason = "additional installed copy of an enabled capability"
             other_physical_copies.append({**item, "reason": reason})
+        portfolio_decisions = self._portfolio_decisions(
+            enabled_by_capability,
+            physical_by_instance,
+            usage_by_capability,
+            usage,
+            enabled_skills,
+        )
         return {
             **base,
             "usage": {
@@ -3460,9 +4071,218 @@ class DashboardData:
             "unresolved_mappings": unresolved,
             "plugins": plugins,
             "enabled_skills": enabled_skills,
+            "portfolio_decisions": portfolio_decisions,
             "other_physical_copies": other_physical_copies,
             "decisions": actions["items"],
         }
+
+    def _portfolio_decisions(
+        self,
+        enabled_by_capability: dict[str, list[dict[str, Any]]],
+        physical_by_instance: dict[str, dict[str, Any]],
+        usage_by_capability: dict[str, dict[str, Any]],
+        usage: dict[str, Any],
+        enabled_skills: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Project retained estate facts into one non-authorizing value judgment."""
+        skills_by_capability = {
+            item["canonical_capability_id"]: item
+            for item in enabled_skills
+            if isinstance(item.get("canonical_capability_id"), str)
+        }
+        rows = []
+        for capability_id, mappings in enabled_by_capability.items():
+            representative = next(
+                (
+                    physical_by_instance.get(safe_text(mapping.get("instance_id"), 80))
+                    for mapping in mappings
+                    if physical_by_instance.get(
+                        safe_text(mapping.get("instance_id"), 80)
+                    )
+                ),
+                None,
+            )
+            enabled = skills_by_capability.get(capability_id, {})
+            raw_evaluation = self._portfolio_fact(
+                "evaluation", "evaluation_state", mappings, representative
+            )
+            evaluation = self._portfolio_evaluation(raw_evaluation)
+            raw_dependencies = self._portfolio_fact(
+                "dependencies", "dependency_state", mappings, representative
+            )
+            dependency_complete = self._portfolio_fact(
+                "dependencies_complete", None, mappings, representative
+            )
+            dependencies = self._portfolio_dependencies(
+                raw_dependencies, dependency_complete
+            )
+            usage_row = usage_by_capability.get(capability_id)
+            usage_available = usage.get("available") is True and usage_row is not None
+            usage_complete = usage.get("complete") is True and usage_available
+            usage_state = (
+                "complete"
+                if usage_complete
+                else "incomplete"
+                if usage_available
+                else "unknown"
+            )
+            uses_7d = usage_row.get("uses_7d") if usage_available else None
+            uses_30d = usage_row.get("uses_30d") if usage_available else None
+            uses_90d = usage_row.get("uses_90d") if usage_available else None
+            last_used = (
+                usage_row.get("last_successful_invocation")
+                if usage_available
+                else None
+            )
+            recommendation, why = self._portfolio_recommendation(
+                evaluation["state"], usage_state, uses_30d
+            )
+            authority = (
+                representative.get("authority")
+                if representative is not None
+                else mappings[0].get("authority")
+            )
+            who_may_change = self._portfolio_authority(authority)
+            next_action = {
+                "disable_candidate": "Disable",
+                "proven_useful": "Keep",
+                "used_evaluation_missing": "Run evaluation",
+                "evaluate_now": "Run evaluation",
+                "insufficient_information": "Gather information",
+            }[recommendation]
+            skill_name = safe_text(
+                enabled.get("skill_name") or mappings[0].get("runtime_name"), 200
+            )
+            source = safe_text(
+                enabled.get("source")
+                or (representative or {}).get("source")
+                or "Unknown installation",
+                200,
+            )
+            rows.append(
+                {
+                    "canonical_capability_id": capability_id,
+                    "skill_name": skill_name,
+                    "installed_from": source,
+                    "recommendation": recommendation,
+                    "recommendation_label": {
+                        "disable_candidate": "Disable candidate",
+                        "proven_useful": "Proven useful",
+                        "used_evaluation_missing": "Used; evaluation needed",
+                        "evaluate_now": "Evaluate now",
+                        "insufficient_information": "Insufficient information",
+                    }[recommendation],
+                    "why": why,
+                    "evaluation": evaluation,
+                    "uses_7d": uses_7d,
+                    "uses_30d": uses_30d,
+                    "uses_90d": uses_90d,
+                    "last_successful_invocation": last_used,
+                    "usage_state": usage_state,
+                    "dependencies": dependencies,
+                    "who_may_change": who_may_change,
+                    "next_action": {
+                        "label": next_action,
+                        "enabled": False,
+                        "reason": "Unavailable: this preview is read-only.",
+                    },
+                    "preview_read_only": self.paths.preview_root is not None,
+                }
+            )
+        priority = {
+            "disable_candidate": 0,
+            "evaluate_now": 1,
+            "used_evaluation_missing": 2,
+            "insufficient_information": 3,
+            "proven_useful": 4,
+        }
+        return sorted(
+            rows,
+            key=lambda item: (
+                priority[item["recommendation"]],
+                item["skill_name"].casefold(),
+                item["canonical_capability_id"],
+            ),
+        )
+
+    @staticmethod
+    def _portfolio_fact(
+        primary: str,
+        alternate: str | None,
+        mappings: list[dict[str, Any]],
+        representative: dict[str, Any] | None,
+    ) -> Any:
+        for item in ([representative] if representative is not None else []) + mappings:
+            if not isinstance(item, dict):
+                continue
+            if primary in item:
+                return item[primary]
+            if alternate is not None and alternate in item:
+                return item[alternate]
+        return None
+
+    @staticmethod
+    def _portfolio_evaluation(value: Any) -> dict[str, str]:
+        current = True
+        if isinstance(value, dict):
+            current = value.get("current") is True
+            value = value.get("status")
+        normalized = safe_text(value, 80).casefold().replace("-", "_").replace(" ", "_")
+        if normalized in {"regression", "fail", "failed", "critical_regression"} and current:
+            return {"state": "regression", "label": "Current regression"}
+        if normalized in {"pass", "passed", "current_pass"} and current:
+            return {"state": "pass", "label": "Current pass"}
+        if normalized in {"stale", "expired"} or not current:
+            return {"state": "stale", "label": "Stale"}
+        if normalized in {"inconclusive", "queued", "running"}:
+            return {"state": normalized, "label": normalized.replace("_", " ").title()}
+        return {"state": "missing", "label": "Needs evaluation"}
+
+    @staticmethod
+    def _portfolio_dependencies(value: Any, complete: Any) -> dict[str, str]:
+        if isinstance(value, dict):
+            state = safe_text(value.get("state") or value.get("status"), 80).casefold()
+            blockers = value.get("blockers") or value.get("dependencies")
+            if isinstance(blockers, list) and blockers:
+                return {"state": "protected", "label": "Protected"}
+            if state in {"protected", "required", "blocked"}:
+                return {"state": "protected", "label": "Protected"}
+            if state in {"clear", "none"} and value.get("complete") is True:
+                return {"state": "clear", "label": "Clear"}
+        if isinstance(value, list) and value:
+            return {"state": "protected", "label": "Protected"}
+        if value in {"protected", "required", "blocked"}:
+            return {"state": "protected", "label": "Protected"}
+        if value in {"clear", "none"} and complete is True:
+            return {"state": "clear", "label": "Clear"}
+        return {
+            "state": "incomplete" if complete is False else "unknown",
+            "label": "Incomplete" if complete is False else "Unknown",
+        }
+
+    @staticmethod
+    def _portfolio_recommendation(
+        evaluation: str, usage_state: str, uses_30d: Any
+    ) -> tuple[str, str]:
+        if evaluation == "regression":
+            return "disable_candidate", "A current evaluation found a regression."
+        verified_recent_use = isinstance(uses_30d, int) and uses_30d > 0
+        if evaluation == "pass" and verified_recent_use:
+            return "proven_useful", "Current evaluation passed and verified recent use exists."
+        if verified_recent_use:
+            return "used_evaluation_missing", "Verified recent use exists, but no current passing evaluation is retained."
+        if usage_state == "complete" and uses_30d == 0 and evaluation != "pass":
+            return "evaluate_now", "Complete retained usage shows no successful load in 30 days."
+        return "insufficient_information", "Primary evaluation or verified usage evidence is missing or incomplete."
+
+    @staticmethod
+    def _portfolio_authority(authority: Any) -> str:
+        return {
+            "dreaming_managed": "Automatic",
+            "legacy_machine": "Automatic",
+            "plugin_managed": "Plugin package only",
+            "cli_builtin": "Immutable",
+        }.get(authority, "Your decision")
 
     def _estate_usage(
         self, census: dict[str, Any], census_receiver: dict[str, Any]
@@ -3946,17 +4766,7 @@ class DashboardData:
         }
 
     def system(self) -> dict[str, Any]:
-        config_path = Path(
-            os.environ.get(
-                "DREAMING_ADAPTER_CONFIG",
-                self.paths.state / "adapters.json",
-            )
-        )
-        config = (
-            self._json(config_path, {}, "adapter config")
-            if config_path.exists()
-            else {}
-        )
+        config = self._adapter_config()
         snapshot_bytes = config.get("max_snapshot_bytes", 100_000)
         if (
             not isinstance(snapshot_bytes, int)
@@ -3970,7 +4780,7 @@ class DashboardData:
                 ["adapter config"],
             )
         categories = []
-        for name, path in (
+        category_paths = [
             ("State", self.paths.state),
             ("Control state", self.paths.control_state),
             ("Orchestrator state", self.paths.orchestrator_state),
@@ -3979,8 +4789,10 @@ class DashboardData:
             ("Bundles", self.paths.data / "bundles"),
             ("Learned skills", self.paths.skills),
             ("Daemon logs", self.paths.control_state / "daemon-logs"),
-            ("Dashboard logs", Path.home() / "Library/Logs/Dreaming"),
-        ):
+        ]
+        if self.paths.preview_root is None:
+            category_paths.append(("Dashboard logs", Path.home() / "Library/Logs/Dreaming"))
+        for name, path in category_paths:
             size, count = tree_size(path)
             categories.append({"name": name, "bytes": size, "items": count})
         devices = {}
@@ -4199,6 +5011,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
         parsed = urllib.parse.urlsplit(self.path)
         api = parsed.path.startswith("/api/")
         self._request_guard(api)
+        if api:
+            verify_preview_manifest(self.data.paths)
         if not api:
             return self._static(parsed.path)
         params = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
@@ -4334,6 +5148,7 @@ def run_server(host: str, port: int, paths: DashboardPaths) -> None:
         )
     if not 1 <= port <= 65535:
         raise DashboardError(2, "port_invalid", "Dashboard port is invalid")
+    verify_preview_manifest(paths)
     token = read_token(paths.token)
     if not paths.assets.is_dir() or paths.assets.is_symlink():
         raise DashboardError(2, "asset_missing", "Dashboard assets are unavailable")
@@ -4366,7 +5181,35 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument(
         "--port",
         type=int,
-        default=int(os.environ.get("DREAMING_DASHBOARD_PORT", "47673")),
+        default=None,
+    )
+    parser.add_argument(
+        "--preview-snapshot",
+        type=Path,
+        help="Private manifested snapshot root for report-only preview mode",
+    )
+    parser.add_argument(
+        "--preview-assets",
+        type=Path,
+        help="Read-only dashboard assets for preview mode",
+    )
+    capture = parser.add_subparsers(dest="command")
+    snapshot = capture.add_parser(
+        "capture-preview-snapshot",
+        help="Capture one private dashboard preview snapshot",
+    )
+    snapshot.add_argument("--destination", type=Path, required=True)
+    for name in PREVIEW_ROOT_NAMES:
+        snapshot.add_argument(
+            f"--source-{name.replace('_', '-')}",
+            dest=f"source_{name}",
+            type=Path,
+            required=True,
+        )
+    snapshot.add_argument("--lock-state", type=Path, required=True)
+    snapshot.add_argument(
+        "--next-eligible-at",
+        help="Known next installed interval eligibility as ISO-8601 or epoch seconds",
     )
     return parser
 
@@ -4374,7 +5217,48 @@ def build_parser() -> argparse.ArgumentParser:
 def main() -> int:
     args = build_parser().parse_args()
     try:
-        run_server(args.host, args.port, DashboardPaths.defaults())
+        if args.command == "capture-preview-snapshot":
+            next_eligible = (
+                parse_time(args.next_eligible_at)
+                if args.next_eligible_at is not None
+                else None
+            )
+            if args.next_eligible_at is not None and next_eligible is None:
+                raise DashboardError(
+                    2, "preview_capture_invalid", "Next interval eligibility is invalid"
+                )
+            capture_preview_snapshot(
+                destination=args.destination,
+                roots={
+                    name: getattr(args, f"source_{name}")
+                    for name in PREVIEW_ROOT_NAMES
+                },
+                lock_state=args.lock_state,
+                next_eligible_at=next_eligible,
+            )
+            return 0
+        if args.preview_snapshot is not None:
+            if args.port is None or args.port == 47673:
+                raise DashboardError(
+                    2,
+                    "preview_port_required",
+                    "Preview mode requires a caller-supplied non-default port",
+                )
+            assets = args.preview_assets or (
+                Path(__file__).parents[1] / "assets/dashboard"
+            )
+            run_server(
+                args.host,
+                args.port,
+                DashboardPaths.preview(args.preview_snapshot, assets),
+            )
+            return 0
+        port = (
+            args.port
+            if args.port is not None
+            else int(os.environ.get("DREAMING_DASHBOARD_PORT", "47673"))
+        )
+        run_server(args.host, port, DashboardPaths.defaults())
         return 0
     except DashboardError as error:
         print(f"ERROR: {error.code}: {error.message}", file=os.sys.stderr)

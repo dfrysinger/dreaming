@@ -110,4 +110,38 @@ button.link:hover, a.link:hover { color: var(--blue); }
   .runtime { position: static; margin-top: 16px; }
   main { padding: 24px 18px; }
   .metrics, .charts, .split, .gate-grid, .capacity-grid { grid-template-columns: 1fr; }
+  .portfolio-queue { overflow: hidden; }
+  .portfolio-queue .portfolio-table,
+  .portfolio-queue .portfolio-table tbody,
+  .portfolio-queue .portfolio-table tr,
+  .portfolio-queue .portfolio-table td { display: block; width: 100%; }
+  .portfolio-queue .portfolio-table { table-layout: auto; }
+  .portfolio-queue .portfolio-table thead { display: none; }
+  .portfolio-queue .portfolio-table tr {
+    margin: 12px 0;
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    background: #10151d;
+    overflow: hidden;
+  }
+  .portfolio-queue .portfolio-table td {
+    display: grid;
+    grid-template-columns: minmax(104px, .8fr) minmax(0, 1.2fr);
+    gap: 10px;
+    padding: 10px 12px;
+    border-top: 1px solid var(--line);
+  }
+  .portfolio-queue .portfolio-table td:first-child { border-top: 0; }
+  .portfolio-queue .portfolio-table td::before {
+    content: attr(data-label);
+    color: var(--muted);
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+  }
+  .portfolio-queue .portfolio-table td[data-label="Next action"] .control {
+    width: 100%;
+  }
+  .portfolio-queue .portfolio-table .submetric { margin-top: 5px; }
 }

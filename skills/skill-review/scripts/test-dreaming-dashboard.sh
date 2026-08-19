@@ -55,6 +55,7 @@ assets = repo / "skills/skill-review/assets/dashboard"
 token_path = control / "dashboard/access-token"
 index_text = (assets / "index.html").read_text(encoding="utf-8")
 javascript = (assets / "dashboard.js").read_text(encoding="utf-8")
+stylesheet = (assets / "dashboard.css").read_text(encoding="utf-8")
 check('rel="icon"' in index_text and "data:image/svg+xml" in index_text, "static shell provides a self-contained favicon")
 check(
     "location.hash = `transcript/${button.dataset.transcript}`" in javascript
@@ -69,13 +70,13 @@ check(
     "browser routes expose candidate list and detail views",
 )
 check(
-    "Shadow candidates" in javascript
+    "Unpublished drafts" in javascript
     and "Not published" in javascript
     and "Not active" in javascript
     and "Not discoverable" in javascript
     and "Evaluation gates" in javascript
     and "Exact candidate identity" in javascript,
-    "candidate views conspicuously show shadow authority, identity, recurrence, freshness, and gates",
+    "candidate views conspicuously show unpublished authority, identity, recurrence, freshness, and gates",
 )
 check(
     'meta[name="dreaming-tailnet-host"]' in javascript
@@ -85,10 +86,42 @@ check(
     "browser uses tokenless API requests only on the exact injected HTTPS tailnet origin",
 )
 check(
-    "Governance decisions and actions" in javascript
+    "Portfolio decisions" in javascript
+    and "Decision queue" in javascript
+    and "Who may change it" in javascript
+    and "disabled title=" in javascript
     and "Recovery required:" in javascript
     and "receipts are verification-only" in javascript,
-    "estate view conspicuously reports action, receipt, and recovery state",
+    "portfolio view separates decisions, disabled actions, receipts, and recovery state",
+)
+check(
+    'class="portfolio-table"' in javascript
+    and 'data-label="Skill"' in javascript
+    and 'data-label="Next action"' in javascript
+    and '`${count}+`' in javascript
+    and '" · partial"' in javascript
+    and ".portfolio-queue .portfolio-table td::before" in stylesheet
+    and "@media (max-width: 700px)" in stylesheet,
+    "portfolio decisions use lower-bound wording and stack labeled fields on narrow screens",
+)
+check(
+    not any(
+        label in javascript
+        for label in (
+            "Governance decisions and actions",
+            "Evidence recommendation",
+            "Observed recommendation",
+            "Current recommendation",
+            "Historical action receipt",
+            "Dream review",
+            "Shadow candidates",
+            "<th>Observed</th>",
+            "Observed arrivals",
+            "Observed completions",
+            "Observed net",
+        )
+    ),
+    "dashboard omits ambiguous governance labels",
 )
 check(
     not any(
@@ -200,6 +233,7 @@ estate_snapshot = {
             "basis": "private-provenance-sentinel",
             "private_evidence_path": "/private/provenance/path",
         },
+        "evaluation_state": "pass",
     }, {
         "skill_name": "plugin-skill",
         "root_class": "plugin",
@@ -215,6 +249,7 @@ estate_snapshot = {
             "status": "verified",
             "basis": "exact_plugin_identity",
         },
+        "evaluation_state": "regression",
         "instance_id": "sha256:" + "3" * 64,
         "canonical_capability_id": "sha256:" + "4" * 64,
     }, {
@@ -1291,6 +1326,18 @@ try:
         and estate_view["authorizes_actions"] is False,
         "estate API reports bounded totals, authority, and plugin capability inventory",
     )
+    portfolio = {
+        item["skill_name"]: item
+        for item in estate_view["portfolio_decisions"]
+    }
+    check(
+        len(portfolio) == estate_view["totals"]["canonical_capabilities"]
+        and portfolio["fixture-skill"]["recommendation"] == "proven_useful"
+        and portfolio["plugin-skill"]["recommendation"] == "disable_candidate"
+        and portfolio["plugin-skill"]["who_may_change"] == "Plugin package only"
+        and all(item["next_action"]["enabled"] is False for item in portfolio.values()),
+        "portfolio decisions cover each enabled capability and separate value from authority",
+    )
     check(
         all(
             sentinel not in estate_body.decode()
@@ -1380,6 +1427,19 @@ try:
             for item in incomplete_usage_view["enabled_skills"]
         ),
         "incomplete coverage remains distinct from complete zero usage",
+    )
+    incomplete_portfolio = {
+        item["skill_name"]: item
+        for item in incomplete_usage_view["portfolio_decisions"]
+    }
+    check(
+        incomplete_portfolio["fixture-skill"]["usage_state"] == "incomplete"
+        and incomplete_portfolio["fixture-skill"]["uses_30d"] == 5
+        and incomplete_portfolio["fixture-skill"]["last_successful_invocation"]
+        == "2026-08-13T11:00:00+00:00"
+        and incomplete_portfolio["fixture-skill"]["recommendation"]
+        == "proven_useful",
+        "incomplete coverage preserves verified positive usage as a lower bound",
     )
     (state / "estate-usage-current.json").write_bytes(original_usage_current)
     incomplete_usage_receipt_path.unlink()
