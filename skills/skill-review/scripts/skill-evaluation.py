@@ -7,11 +7,11 @@ import argparse
 import fcntl
 import hashlib
 import json
-import math
 import os
 import re
 import shutil
 import subprocess
+import sys
 import tempfile
 from datetime import datetime, timezone
 from pathlib import Path
@@ -95,6 +95,10 @@ INPUT_REGISTRY_OPTIONAL_ROLES = {
     "authoring_receipt",
     "authoring_operation",
     "authoring_adapter",
+}
+INPUT_REVIEW_OBJECT_ROLES = {
+    "input_review_packet",
+    "input_review_adapter",
 }
 INPUT_READINESS_STATES = {
     "input_missing",
@@ -1494,6 +1498,7 @@ def registry_object_bytes(entry: Any, index: int) -> tuple[dict[str, Any], bytes
     if role not in (
         INPUT_REGISTRY_REQUIRED_ROLES
         | INPUT_REGISTRY_OPTIONAL_ROLES
+        | INPUT_REVIEW_OBJECT_ROLES
         | {"fixture", "grader"}
     ):
         raise EvaluationError(f"{field}.role is unsupported")
@@ -2354,6 +2359,7 @@ def validate_authoring_operation(
             "status",
             "vendor",
             "model",
+            "observed_model",
             "adapter_executable_sha256",
             "packet_id",
             "candidate_id",
@@ -2375,6 +2381,7 @@ def validate_authoring_operation(
         or operation.get("status") != "completed"
         or operation.get("vendor") != "copilot"
         or model == "default"
+        or operation.get("observed_model") != model
         or operation.get("adapter_executable_sha256") != adapter_sha256
         or operation.get("packet_id") != packet["packet_id"]
         or operation.get("candidate_id") != packet["candidate_id"]
@@ -2421,22 +2428,29 @@ def validate_authoring_operation(
     if not isinstance(billing, dict):
         raise EvaluationError("authoring operation.billing must be an object")
     require_exact_keys(
-        billing, "authoring operation.billing", {"status", "cost_usd"}
+        billing,
+        "authoring operation.billing",
+        {
+            "status",
+            "cost_usd",
+            "provider",
+            "unavailable_reason",
+            "native_line_item_id",
+            "native_event_sha256",
+            "native_event_size",
+        },
     )
     billing_status = billing.get("status")
     billing_cost = billing.get("cost_usd")
-    if (
-        billing_status == "unavailable"
-        and billing_cost is not None
-    ) or (
-        billing_status == "available"
-        and (
-            not isinstance(billing_cost, (int, float))
-            or isinstance(billing_cost, bool)
-            or not math.isfinite(billing_cost)
-            or billing_cost < 0
-        )
-    ) or billing_status not in {"available", "unavailable"}:
+    if billing_status != "unavailable" or billing != {
+        "status": "unavailable",
+        "cost_usd": None,
+        "provider": "copilot",
+        "unavailable_reason": "provider_telemetry_unavailable",
+        "native_line_item_id": None,
+        "native_event_sha256": None,
+        "native_event_size": None,
+    }:
         raise EvaluationError("authoring operation billing telemetry is invalid")
     elapsed_ms = require_nonnegative_int(
         operation.get("elapsed_ms"), "authoring operation.elapsed_ms"
@@ -2944,20 +2958,431 @@ def v2_input_review(args: argparse.Namespace) -> dict[str, Any]:
     resolved = validate_input_manifest(
         skill_dir, require_sha256(args.manifest, "input manifest digest")
     )
-    receipt = {
-        **input_receipt_binding(resolved, "evaluation_input_review"),
-        "reviewer": require_text(args.reviewer, "reviewer"),
-        "decision": args.decision,
-    }
+    bounded = resolved["manifest"]["authoring_method"] == "bounded-safe-author"
+    if bounded:
+        if (
+            not args.validation
+            or not args.model
+            or args.model == "default"
+            or args.reviewer
+            or args.decision
+        ):
+            raise EvaluationError(
+                "bounded-safe-author review requires exact validation and model identity"
+            )
+        validation_sha256 = require_sha256(
+            args.validation, "input review validation receipt"
+        )
+        require_positive_int(args.timeout, "input review timeout")
+        require_positive_int(args.token_budget, "input review token budget")
+        require_positive_int(args.output_bytes, "input review output-byte budget")
+        if (
+            args.timeout > 25 * 60
+            or args.token_budget > 112_000
+            or args.output_bytes > 1_000_000
+        ):
+            raise EvaluationError("input review process budget exceeds its hard bound")
+        packet = build_input_review_packet(
+            skill_dir,
+            resolved["input_manifest_sha256"],
+            validation_sha256,
+        )
+        adapter = trusted_authoring_adapter_path()
+        adapter_sha256 = sha256_file(adapter)
+        operation = run_trusted_input_review(
+            args, skill_dir, resolved["input_manifest_sha256"], packet, adapter
+        )
+        operation = validate_input_review_operation(
+            operation, packet, adapter_sha256
+        )
+        author_operation = packet["authoring_contract"]["operation"]
+        if operation["observed_model"] == author_operation["observed_model"]:
+            raise EvaluationError(
+                "input reviewer model must differ from the author model"
+            )
+        packet_entry = publish_registry_object(
+            canonical(packet),
+            "input_review_packet",
+            "reviews/packet.json",
+            "application/json",
+        )
+        adapter_entry = publish_registry_object(
+            adapter.read_bytes(),
+            "input_review_adapter",
+            "reviews/dreaming-vendor-adapter.py",
+            "text/x-python",
+        )
+        receipt = {
+            **input_receipt_binding(resolved, "evaluation_input_review"),
+            "reviewer": f"copilot:{operation['observed_model']}",
+            "decision": operation["decision"],
+            "review_packet": packet_entry,
+            "review_operation": operation,
+            "review_adapter": adapter_entry,
+        }
+    else:
+        if (
+            args.validation
+            or args.model
+            or not args.reviewer
+            or not args.decision
+        ):
+            raise EvaluationError(
+                "manual input review requires reviewer and decision only"
+            )
+        receipt = {
+            **input_receipt_binding(resolved, "evaluation_input_review"),
+            "reviewer": require_text(args.reviewer, "reviewer"),
+            "decision": args.decision,
+        }
     path, receipt_sha256 = write_input_registry_json(
         "reviews", receipt, "input review receipt"
     )
     return {
-        "decision": args.decision,
+        "decision": receipt["decision"],
         "receipt": str(path),
         "receipt_sha256": receipt_sha256,
         "input_manifest_sha256": resolved["input_manifest_sha256"],
     }
+
+
+def run_trusted_input_review(
+    args: argparse.Namespace,
+    skill_dir: Path,
+    manifest_sha256: str,
+    packet: dict[str, Any],
+    adapter: Path,
+) -> dict[str, Any]:
+    test_binary = input_review_test_binary(skill_dir)
+    with tempfile.TemporaryDirectory(prefix="dreaming-input-review-owner-") as work:
+        work_path = Path(work).resolve()
+        packet_path = work_path / "packet.json"
+        result_path = work_path / "operation.json"
+        packet_path.write_bytes(canonical(packet))
+        command = [
+            sys.executable,
+            str(adapter),
+            "--vendor",
+            "copilot",
+            "--role",
+            "evaluation-input-author",
+            "--model",
+            require_text(args.model, "input reviewer model"),
+            "--timeout",
+            str(args.timeout),
+            "--token-budget",
+            str(args.token_budget),
+            "--output-bytes",
+            str(args.output_bytes),
+        ]
+        if test_binary is not None:
+            command.extend(["--binary", str(test_binary)])
+        command.extend(
+            [
+                "run",
+                "--operation",
+                "review",
+                "--packet",
+                str(packet_path),
+                "--skill-dir",
+                str(skill_dir),
+                "--manifest",
+                manifest_sha256,
+                "--validation",
+                packet["validation_contract"]["receipt_sha256"],
+                "--result",
+                str(result_path),
+            ]
+        )
+        environment = dict(os.environ)
+        for key in list(environment):
+            if (
+                key == "DREAMING_COPILOT_BIN"
+                or key.startswith("DREAMING_EXECUTOR_TEST_")
+                or key.startswith("FAKE_")
+            ):
+                environment.pop(key, None)
+        if test_binary is not None:
+            environment["DREAMING_EXECUTOR_TEST_ALLOW_ROOT"] = str(
+                Path(__file__).resolve().parents[3] / ".test-work"
+            )
+        try:
+            completed = subprocess.run(
+                command,
+                cwd=work_path,
+                env=environment,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                timeout=args.timeout + 120,
+                check=False,
+            )
+        except (OSError, subprocess.TimeoutExpired) as exc:
+            raise EvaluationError(
+                f"trusted input reviewer execution failed: {exc}"
+            ) from exc
+        if completed.returncode != 0 or not result_path.is_file():
+            detail = (completed.stderr or completed.stdout).strip()[-1000:]
+            raise EvaluationError(
+                "trusted input reviewer refused"
+                + (f": {detail}" if detail else "")
+            )
+        operation = load_json(result_path)
+        if not isinstance(operation, dict):
+            raise EvaluationError("trusted input reviewer result must be an object")
+        return operation
+
+
+def input_review_test_binary(skill_dir: Path) -> Path | None:
+    if not os.environ.get("DREAMING_EXECUTOR_TEST_ALLOW_ROOT"):
+        return None
+    test_root = Path(__file__).resolve().parents[3] / ".test-work"
+    state_value = os.environ.get("SKILLS_STATE_DIR")
+    binary_value = os.environ.get("DREAMING_COPILOT_BIN")
+    if not state_value or not binary_value:
+        raise EvaluationError(
+            "input review test override requires isolated state and binary"
+        )
+    state_path = Path(state_value)
+    binary_path = Path(binary_value)
+    state = state_path.resolve()
+    binary = binary_path.resolve()
+    if (
+        state_path.is_symlink()
+        or binary_path.is_symlink()
+        or not state.is_relative_to(test_root)
+        or not skill_dir.is_relative_to(test_root)
+        or not binary.is_relative_to(test_root)
+        or not binary.is_file()
+    ):
+        raise EvaluationError(
+            "input review test override is limited to non-authoritative test roots"
+        )
+    return binary
+
+
+def build_input_review_packet(
+    skill_dir: Path,
+    manifest_sha256: str,
+    validation_sha256: str,
+) -> dict[str, Any]:
+    resolved = validate_input_manifest(skill_dir, manifest_sha256)
+    manifest = resolved["manifest"]
+    if manifest["authoring_method"] != "bounded-safe-author":
+        raise EvaluationError(
+            "model review packets require bounded-safe-author provenance"
+        )
+    validate_input_validation_receipt(resolved, validation_sha256)
+    validation = load_input_registry_receipt(validation_sha256)
+    objects = manifest["objects"]
+    authoring_packet = load_registry_json_object(
+        manifest_role(objects, "authoring_packet"), "authoring packet"
+    )
+    authoring_draft = load_registry_json_object(
+        manifest_role(objects, "authoring_draft"), "authoring draft"
+    )
+    materialization = load_registry_json_object(
+        manifest_role(objects, "authoring_receipt"), "authoring receipt"
+    )
+    author_operation = load_registry_json_object(
+        manifest_role(objects, "authoring_operation"), "authoring operation"
+    )
+    packet = {
+        "schema_version": AUTHORING_PACKET_SCHEMA_VERSION,
+        "kind": "safe_evaluation_input_review_packet",
+        "candidate_id": resolved["candidate_id"],
+        "input_manifest_sha256": resolved["input_manifest_sha256"],
+        "manifest_contract": {
+            "suite_id": resolved["suite_id"],
+            "policy_id": resolved["policy_id"],
+            "observation_plan_id": manifest["observation_plan_id"],
+            "harness_executable_sha256": manifest[
+                "harness_executable_sha256"
+            ],
+            "object_inventory": objects,
+        },
+        "validation_contract": {
+            "receipt_sha256": validation_sha256,
+            "status": validation["status"],
+            "validator": validation["validator"],
+        },
+        "skill_contract": authoring_packet["skill_contract"],
+        "candidate_inventory": authoring_packet["candidate_inventory"],
+        "suite": resolved["suite"],
+        "source_catalog": authoring_packet["source_catalog"],
+        "policy_contract": authoring_packet["policy_contract"],
+        "compilation_contract": authoring_packet["compilation_contract"],
+        "routing_contract": authoring_packet["routing_contract"],
+        "authoring_contract": {
+            "packet_id": authoring_packet["packet_id"],
+            "draft_id": f"sha256:{digest(canonical(authoring_draft))}",
+            "materialization": materialization,
+            "operation": author_operation,
+        },
+        "review_contract": {
+            "decision_values": ["accept", "reject"],
+            "accept_only_if": [
+                "every prompt is a realistic standalone task for its declared case class",
+                "prompts do not disclose expected answers, grader mechanics, or evaluation metadata",
+                "the skill contract and every required case class are covered",
+                "declared public or synthetic fixtures and objective graders can observe the outcome",
+                "task identities and prompts are distinct",
+                "no private or undeclared source is required",
+            ],
+        },
+    }
+    reject_authoring_sensitive_value(packet, "model-facing review packet")
+    packet["packet_id"] = f"sha256:{digest(canonical(packet))}"
+    return packet
+
+
+def v2_input_review_packet(args: argparse.Namespace) -> dict[str, Any]:
+    skill_dir = resolve_path(Path(args.skill_dir), "skill directory")
+    packet = build_input_review_packet(
+        skill_dir,
+        require_sha256(args.manifest, "input manifest digest"),
+        require_sha256(args.validation, "input validation receipt"),
+    )
+    output = authoring_output_path(
+        args.output, skill_dir, "input review packet output"
+    )
+    atomic_write(output, packet)
+    return {
+        "candidate_id": packet["candidate_id"],
+        "input_manifest_sha256": packet["input_manifest_sha256"],
+        "validation_receipt_sha256": packet["validation_contract"][
+            "receipt_sha256"
+        ],
+        "packet_id": packet["packet_id"],
+        "output": str(output),
+    }
+
+
+def validate_input_review_operation(
+    operation: dict[str, Any],
+    packet: dict[str, Any],
+    adapter_sha256: str,
+) -> dict[str, Any]:
+    require_exact_keys(
+        operation,
+        "input review operation",
+        {
+            "schema_version",
+            "kind",
+            "operation",
+            "status",
+            "vendor",
+            "model",
+            "observed_model",
+            "adapter_executable_sha256",
+            "packet_id",
+            "candidate_id",
+            "input_manifest_sha256",
+            "validation_receipt_sha256",
+            "decision",
+            "summary",
+            "reason",
+            "usage",
+            "billing",
+            "elapsed_ms",
+            "operation_id",
+        },
+    )
+    model = require_text(operation.get("model"), "input review operation.model")
+    if (
+        operation.get("schema_version") != AUTHORING_PACKET_SCHEMA_VERSION
+        or operation.get("kind") != "evaluation_input_model_operation"
+        or operation.get("operation") != "review"
+        or operation.get("status") != "completed"
+        or operation.get("vendor") != "copilot"
+        or model == "default"
+        or operation.get("observed_model") != model
+        or operation.get("adapter_executable_sha256") != adapter_sha256
+        or operation.get("packet_id") != packet["packet_id"]
+        or operation.get("candidate_id") != packet["candidate_id"]
+        or operation.get("input_manifest_sha256")
+        != packet["input_manifest_sha256"]
+        or operation.get("validation_receipt_sha256")
+        != packet["validation_contract"]["receipt_sha256"]
+        or operation.get("decision") not in {"accept", "reject"}
+        or (
+            operation.get("decision") == "accept"
+            and operation.get("reason") is not None
+        )
+        or (
+            operation.get("decision") == "reject"
+            and operation.get("reason")
+            not in {
+                "case_coverage_invalid",
+                "objective_outcome_unproved",
+                "privacy_boundary_violation",
+                "prompt_contract_mismatch",
+                "task_independence_invalid",
+            }
+        )
+    ):
+        raise EvaluationError(
+            "input review operation identity, decision, or manifest binding is invalid"
+        )
+    require_authoring_safe_text(
+        operation.get("summary"),
+        "input review operation.summary",
+        maximum=AUTHORING_MAX_DESCRIPTION_BYTES,
+    )
+    usage = operation.get("usage")
+    if not isinstance(usage, dict):
+        raise EvaluationError("input review operation.usage must be an object")
+    require_exact_keys(
+        usage,
+        "input review operation.usage",
+        {"normalized_tokens", "input_tokens", "output_tokens"},
+    )
+    normalized_tokens = require_positive_int(
+        usage.get("normalized_tokens"),
+        "input review operation.usage.normalized_tokens",
+    )
+    if normalized_tokens > 112_000:
+        raise EvaluationError(
+            "input review operation exceeds the normalized-token budget"
+        )
+    detailed = [
+        require_nonnegative_int(usage.get(field), f"input review operation.usage.{field}")
+        for field in ("input_tokens", "output_tokens")
+        if usage.get(field) is not None
+    ]
+    if detailed and (
+        len(detailed) != 2 or sum(detailed) != normalized_tokens
+    ):
+        raise EvaluationError(
+            "input review operation detailed usage does not match normalized tokens"
+        )
+    expected_billing = {
+        "status": "unavailable",
+        "cost_usd": None,
+        "provider": "copilot",
+        "unavailable_reason": "provider_telemetry_unavailable",
+        "native_line_item_id": None,
+        "native_event_sha256": None,
+        "native_event_size": None,
+    }
+    if operation.get("billing") != expected_billing:
+        raise EvaluationError("input review operation billing telemetry is invalid")
+    elapsed_ms = require_nonnegative_int(
+        operation.get("elapsed_ms"), "input review operation.elapsed_ms"
+    )
+    if elapsed_ms > 25 * 60 * 1000:
+        raise EvaluationError(
+            "input review operation exceeds the elapsed-time budget"
+        )
+    operation_without_id = {
+        key: value for key, value in operation.items() if key != "operation_id"
+    }
+    if operation.get("operation_id") != (
+        f"sha256:{digest(shadow_canonical(operation_without_id))}"
+    ):
+        raise EvaluationError("input review operation content identity is invalid")
+    return operation
 
 
 def load_input_registry_receipt(receipt_sha256: str) -> dict[str, Any]:
@@ -3022,17 +3447,78 @@ def validate_input_review_receipts(
     review_expected = input_receipt_binding(
         resolved, "evaluation_input_review"
     )
+    bounded = (
+        resolved["manifest"]["authoring_method"] == "bounded-safe-author"
+    )
+    author_model = None
+    if bounded:
+        author_operation = load_registry_json_object(
+            manifest_role(
+                resolved["manifest"]["objects"], "authoring_operation"
+            ),
+            "authoring operation",
+        )
+        author_model = author_operation["observed_model"]
     for index, receipt_sha256 in enumerate(review_sha256s):
         receipt = load_input_registry_receipt(receipt_sha256)
+        extra_keys = (
+            {"review_packet", "review_operation", "review_adapter"}
+            if bounded
+            else set()
+        )
         require_exact_keys(
             receipt,
             f"input review receipt {index}",
-            set(review_expected) | {"reviewer", "decision"},
+            set(review_expected) | {"reviewer", "decision"} | extra_keys,
         )
         reviewer = require_text(
             receipt.get("reviewer"), f"input review receipt {index}.reviewer"
         )
         decision = receipt.get("decision")
+        if bounded:
+            packet_entry, _ = registry_object_bytes(
+                receipt.get("review_packet"), index
+            )
+            adapter_entry, _ = registry_object_bytes(
+                receipt.get("review_adapter"), index
+            )
+            if (
+                packet_entry["role"] != "input_review_packet"
+                or packet_entry["logical_path"] != "reviews/packet.json"
+                or packet_entry["media_type"] != "application/json"
+                or adapter_entry["role"] != "input_review_adapter"
+                or adapter_entry["logical_path"]
+                != "reviews/dreaming-vendor-adapter.py"
+                or adapter_entry["media_type"] != "text/x-python"
+            ):
+                raise EvaluationError(
+                    "input review receipt retained object roles are invalid"
+                )
+            packet = load_registry_json_object(
+                packet_entry, "input review packet"
+            )
+            operation = receipt.get("review_operation")
+            if not isinstance(operation, dict):
+                raise EvaluationError(
+                    "input review receipt operation must be an object"
+                )
+            operation = validate_input_review_operation(
+                operation, packet, adapter_entry["sha256"]
+            )
+            expected_packet = build_input_review_packet(
+                Path(resolved["manifest"]["skill_path"]),
+                resolved["input_manifest_sha256"],
+                operation["validation_receipt_sha256"],
+            )
+            if (
+                packet != expected_packet
+                or reviewer != f"copilot:{operation['observed_model']}"
+                or decision != operation["decision"]
+                or operation["observed_model"] == author_model
+            ):
+                raise EvaluationError(
+                    "input review receipt model or packet provenance is invalid"
+                )
         if (
             any(receipt.get(key) != value for key, value in review_expected.items())
             or decision not in {"accept", "reject"}
@@ -6897,10 +7383,22 @@ def build_parser() -> argparse.ArgumentParser:
     input_review_parser = commands.add_parser("v2-input-review")
     input_review_parser.add_argument("skill_dir")
     input_review_parser.add_argument("--manifest", required=True)
-    input_review_parser.add_argument("--reviewer", required=True)
+    input_review_parser.add_argument("--reviewer")
     input_review_parser.add_argument(
-        "--decision", choices=("accept", "reject"), required=True
+        "--decision", choices=("accept", "reject")
     )
+    input_review_parser.add_argument("--validation")
+    input_review_parser.add_argument("--model")
+    input_review_parser.add_argument("--timeout", type=int, default=600)
+    input_review_parser.add_argument("--token-budget", type=int, default=18_000)
+    input_review_parser.add_argument("--output-bytes", type=int, default=100_000)
+    input_review_packet_parser = commands.add_parser(
+        "v2-input-review-packet"
+    )
+    input_review_packet_parser.add_argument("skill_dir")
+    input_review_packet_parser.add_argument("--manifest", required=True)
+    input_review_packet_parser.add_argument("--validation", required=True)
+    input_review_packet_parser.add_argument("--output", required=True)
     input_state_parser = commands.add_parser("v2-input-state")
     input_state_parser.add_argument("skill_dir")
     input_state_parser.add_argument(
@@ -7023,6 +7521,7 @@ def main() -> int:
             "v2-input-register": v2_input_register,
             "v2-input-validate": v2_input_validate,
             "v2-input-review": v2_input_review,
+            "v2-input-review-packet": v2_input_review_packet,
             "v2-input-state": v2_input_state,
             "v2-input-ready": v2_input_ready,
             "v2-prepare": v2_prepare,

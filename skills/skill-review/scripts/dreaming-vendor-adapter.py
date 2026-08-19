@@ -162,6 +162,13 @@ AUTHOR_REASON_CODES = {
     "safe_fixture_unavailable",
     "objective_grader_unavailable",
 }
+REVIEW_REASON_CODES = {
+    "case_coverage_invalid",
+    "objective_outcome_unproved",
+    "privacy_boundary_violation",
+    "prompt_contract_mismatch",
+    "task_independence_invalid",
+}
 
 
 class AdapterError(RuntimeError):
@@ -2022,6 +2029,44 @@ def evaluation_input_author_prompt(
     )
 
 
+def evaluation_input_review_schema() -> dict[str, Any]:
+    return {
+        "type": "object",
+        "properties": {
+            "decision": {"enum": ["accept", "reject"]},
+            "summary": {"type": "string"},
+            "reason": {
+                "anyOf": [
+                    {"type": "null"},
+                    {"enum": sorted(REVIEW_REASON_CODES)},
+                ]
+            },
+        },
+        "required": ["decision", "summary", "reason"],
+        "additionalProperties": False,
+    }
+
+
+def evaluation_input_review_prompt(
+    packet: dict[str, Any], schema: dict[str, Any]
+) -> str:
+    return "\n".join(
+        (
+            "EVALUATION_INPUT_REVIEW_OPERATION",
+            "Independently review the exact safe evaluation-input manifest packet.",
+            "Use only the supplied packet. Do not infer from transcripts, private history,",
+            "credentials, home state, dashboards, user dispositions, or unstated fixtures.",
+            "Accept only when every review_contract condition is established by the packet.",
+            "Reject with one allowed reason when any condition is not established.",
+            "Do not rewrite prompts, propose alternate fixtures, or act as an outcome grader.",
+            "Return JSON only, matching this result_schema:",
+            json.dumps(schema, sort_keys=True, separators=(",", ":")),
+            "review_packet:",
+            json.dumps(packet, sort_keys=True, separators=(",", ":")),
+        )
+    )
+
+
 def find_evaluation_input_result(value: Any) -> dict[str, Any] | None:
     if isinstance(value, dict):
         if value.get("outcome") in {"draft", "insufficient_information"}:
@@ -2058,6 +2103,66 @@ def parse_evaluation_input_result(text: str) -> dict[str, Any]:
     raise AdapterError(
         "malformed-authoring-result", "model returned no authoring result JSON"
     )
+
+
+def find_evaluation_input_review_result(
+    value: Any,
+) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        if value.get("decision") in {"accept", "reject"}:
+            return value
+        for child in value.values():
+            found = find_evaluation_input_review_result(child)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = find_evaluation_input_review_result(child)
+            if found is not None:
+                return found
+    elif isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return find_evaluation_input_review_result(parsed)
+    return None
+
+
+def parse_evaluation_input_review_result(text: str) -> dict[str, Any]:
+    candidates = [line.strip() for line in text.splitlines() if line.strip()]
+    candidates.append(text.strip())
+    for candidate in reversed(candidates):
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        found = find_evaluation_input_review_result(value)
+        if found is not None:
+            return found
+    raise AdapterError(
+        "malformed-review-result", "model returned no input-review result JSON"
+    )
+
+
+def normalize_evaluation_input_review_result(
+    model_result: dict[str, Any],
+) -> tuple[str, str, str | None]:
+    if set(model_result) != {"decision", "summary", "reason"}:
+        raise AdapterError("malformed-review-result", "review result keys")
+    decision = model_result.get("decision")
+    summary = model_result.get("summary")
+    reason = model_result.get("reason")
+    if (
+        decision not in {"accept", "reject"}
+        or not isinstance(summary, str)
+        or not summary.strip()
+        or len(summary.encode()) > 4096
+        or (decision == "accept" and reason is not None)
+        or (decision == "reject" and reason not in REVIEW_REASON_CODES)
+    ):
+        raise AdapterError("malformed-review-result", "review decision")
+    return decision, summary.strip(), reason
 
 
 def normalize_evaluation_input_author_result(
@@ -2134,15 +2239,19 @@ def normalize_evaluation_input_author_result(
 
 
 def evaluation_input_source_paths(args: argparse.Namespace) -> list[str]:
-    values = [
-        args.skill_dir,
-        args.suite,
-        args.policy,
-        args.config,
-        args.routing,
-        args.harness,
-        args.catalog,
-    ]
+    values = (
+        [
+            args.skill_dir,
+            args.suite,
+            args.policy,
+            args.config,
+            args.routing,
+            args.harness,
+            args.catalog,
+        ]
+        if args.operation == "author"
+        else [args.skill_dir, args.manifest, args.validation]
+    )
     if not all(isinstance(value, str) and value for value in values):
         raise AdapterError(
             "missing-argument", "exact evaluation-input authoring sources"
@@ -2162,26 +2271,40 @@ def validate_evaluation_input_packet(
             "authoring-boundary-unavailable", "trusted packet validator missing"
         )
     output = work_path / "validated-authoring-packet.json"
-    command = [
-        sys.executable,
-        str(evaluator_path),
-        "v2-input-author-packet",
-        sources[0],
-        "--suite",
-        sources[1],
-        "--policy",
-        sources[2],
-        "--config",
-        sources[3],
-        "--routing",
-        sources[4],
-        "--harness",
-        sources[5],
-        "--catalog",
-        sources[6],
-        "--output",
-        str(output),
-    ]
+    if args.operation == "author":
+        command = [
+            sys.executable,
+            str(evaluator_path),
+            "v2-input-author-packet",
+            sources[0],
+            "--suite",
+            sources[1],
+            "--policy",
+            sources[2],
+            "--config",
+            sources[3],
+            "--routing",
+            sources[4],
+            "--harness",
+            sources[5],
+            "--catalog",
+            sources[6],
+            "--output",
+            str(output),
+        ]
+    else:
+        command = [
+            sys.executable,
+            str(evaluator_path),
+            "v2-input-review-packet",
+            sources[0],
+            "--manifest",
+            sources[1],
+            "--validation",
+            sources[2],
+            "--output",
+            str(output),
+        ]
     validation_environment = {
         "HOME": os.environ.get("HOME", ""),
         "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"),
@@ -2191,6 +2314,12 @@ def validate_evaluation_input_packet(
         validation_environment["SKILLS_STATE_DIR"] = os.environ[
             "SKILLS_STATE_DIR"
         ]
+    for key in (
+        "DREAMING_EVALUATION_EXECUTORS",
+        "DREAMING_ADVISORY_EVALUATION_EXECUTORS",
+    ):
+        if os.environ.get(key):
+            validation_environment[key] = os.environ[key]
     validation = run_process_bounded(
         command,
         validation_environment,
@@ -2257,11 +2386,11 @@ def evaluation_input_author_run(args: argparse.Namespace) -> None:
             "authoring-boundary-unavailable",
             f"{args.vendor} CLI does not expose a qualified isolated no-tools authoring mode",
         )
-    if args.operation != "author" or not args.packet or not args.result:
-        raise AdapterError("missing-argument", "evaluation input author run")
+    if args.operation not in {"author", "review"} or not args.packet or not args.result:
+        raise AdapterError("missing-argument", "evaluation input model run")
     if not isinstance(args.model, str) or not args.model.strip() or args.model == "default":
-        raise AdapterError("exact-model-unproved", "explicit author model is required")
-    if not args.draft_output:
+        raise AdapterError("exact-model-unproved", "explicit model is required")
+    if args.operation == "author" and not args.draft_output:
         raise AdapterError("missing-argument", "author draft output")
     packet_path = Path(args.packet)
     if (
@@ -2274,7 +2403,12 @@ def evaluation_input_author_run(args: argparse.Namespace) -> None:
     if (
         not isinstance(packet, dict)
         or packet.get("schema_version") != 1
-        or packet.get("kind") != "safe_evaluation_input_authoring_packet"
+        or packet.get("kind")
+        != (
+            "safe_evaluation_input_authoring_packet"
+            if args.operation == "author"
+            else "safe_evaluation_input_review_packet"
+        )
         or not isinstance(packet.get("packet_id"), str)
         or not isinstance(packet.get("candidate_id"), str)
     ):
@@ -2282,12 +2416,16 @@ def evaluation_input_author_run(args: argparse.Namespace) -> None:
     binary = selected_executable(args.vendor, args.binary)
     started = time.monotonic()
     with tempfile.TemporaryDirectory(
-        prefix=f"dreaming-input-author-{args.vendor}-"
+        prefix=f"dreaming-input-{args.operation}-{args.vendor}-"
     ) as work:
         work_path = Path(work).resolve()
         validate_evaluation_input_packet(args, packet, work_path)
-        schema = evaluation_input_author_schema(packet)
-        prompt = evaluation_input_author_prompt(packet, schema)
+        if args.operation == "author":
+            schema = evaluation_input_author_schema(packet)
+            prompt = evaluation_input_author_prompt(packet, schema)
+        else:
+            schema = evaluation_input_review_schema()
+            prompt = evaluation_input_review_prompt(packet, schema)
         environment = evaluation_input_author_environment(work_path, binary)
         schema_path = work_path / "result-schema.json"
         schema_path.write_text(json.dumps(schema), encoding="utf-8")
@@ -2366,7 +2504,20 @@ def evaluation_input_author_run(args: argparse.Namespace) -> None:
                 binary,
                 [
                     *args.deny_root,
-                    *evaluation_input_source_paths(args),
+                    args.packet,
+                    args.skill_dir,
+                    *(
+                        [
+                            args.suite,
+                            args.policy,
+                            args.config,
+                            args.routing,
+                            args.harness,
+                            args.catalog,
+                        ]
+                        if args.operation == "author"
+                        else []
+                    ),
                 ],
                 "isolated",
             ),
@@ -2405,25 +2556,22 @@ def evaluation_input_author_run(args: argparse.Namespace) -> None:
         model_text = (
             output.read_text(encoding="utf-8") if output.exists() else result.stdout
         )
-        model_result = parse_evaluation_input_result(model_text)
-    draft, summary, reason = normalize_evaluation_input_author_result(
-        packet, model_result
-    )
-    draft_id = governance_sha(draft) if draft is not None else None
-    operation = {
+        model_result = (
+            parse_evaluation_input_result(model_text)
+            if args.operation == "author"
+            else parse_evaluation_input_review_result(model_text)
+        )
+    common = {
         "schema_version": 1,
         "kind": "evaluation_input_model_operation",
-        "operation": "author",
+        "operation": args.operation,
         "status": "completed",
         "vendor": args.vendor,
         "model": args.model,
+        "observed_model": observed_model,
         "adapter_executable_sha256": sha_bytes(Path(__file__).read_bytes()),
         "packet_id": packet["packet_id"],
         "candidate_id": packet["candidate_id"],
-        "outcome": model_result["outcome"],
-        "summary": summary,
-        "reason": reason,
-        "draft_id": draft_id,
         "usage": {
             "normalized_tokens": normalized_tokens,
             "input_tokens": (
@@ -2433,11 +2581,44 @@ def evaluation_input_author_run(args: argparse.Namespace) -> None:
                 detailed_usage["output_tokens"] if detailed_usage else None
             ),
         },
-        "billing": {"status": "unavailable", "cost_usd": None},
+        "billing": {
+            "status": "unavailable",
+            "cost_usd": None,
+            "provider": args.vendor,
+            "unavailable_reason": "provider_telemetry_unavailable",
+            "native_line_item_id": None,
+            "native_event_sha256": None,
+            "native_event_size": None,
+        },
         "elapsed_ms": max(0, int((time.monotonic() - started) * 1000)),
     }
+    if args.operation == "author":
+        draft, summary, reason = normalize_evaluation_input_author_result(
+            packet, model_result
+        )
+        operation = {
+            **common,
+            "outcome": model_result["outcome"],
+            "summary": summary,
+            "reason": reason,
+            "draft_id": governance_sha(draft) if draft is not None else None,
+        }
+    else:
+        decision, summary, reason = normalize_evaluation_input_review_result(
+            model_result
+        )
+        operation = {
+            **common,
+            "input_manifest_sha256": packet["input_manifest_sha256"],
+            "validation_receipt_sha256": packet["validation_contract"][
+                "receipt_sha256"
+            ],
+            "decision": decision,
+            "summary": summary,
+            "reason": reason,
+        }
     operation["operation_id"] = sha(operation)
-    if draft is not None:
+    if args.operation == "author" and draft is not None:
         atomic_json(Path(args.draft_output), draft)
     atomic_json(Path(args.result), operation)
     emit({"ok": True, **operation})
@@ -3419,6 +3600,7 @@ def validate_native_schema(vendor: str, values: list[dict[str, Any]]) -> None:
 
 
 def native_model(vendor: str, values: list[dict[str, Any]]) -> str | None:
+    observed: list[str] = []
     for value in values:
         for item in recursive_values(value):
             if vendor == "copilot" and item.get("type") in {
@@ -3428,10 +3610,10 @@ def native_model(vendor: str, values: list[dict[str, Any]]) -> str | None:
             }:
                 data = item.get("data", {})
                 if isinstance(data, dict) and isinstance(data.get("model"), str):
-                    return data["model"]
+                    observed.append(data["model"])
             if vendor == "claude" and item.get("type") == "system":
                 if isinstance(item.get("model"), str):
-                    return item["model"]
+                    observed.append(item["model"])
             if vendor == "codex" and (
                 item.get("type") == "turn_context"
                 or (
@@ -3442,8 +3624,14 @@ def native_model(vendor: str, values: list[dict[str, Any]]) -> str | None:
             ):
                 payload = item.get("payload", item)
                 if isinstance(payload, dict) and isinstance(payload.get("model"), str):
-                    return payload["model"]
-    return None
+                    observed.append(payload["model"])
+    identities = list(dict.fromkeys(observed))
+    if len(identities) > 1:
+        raise AdapterError(
+            "exact-model-unproved",
+            f"provider reported conflicting models: {', '.join(identities)}",
+        )
+    return identities[0] if identities else None
 
 
 def native_token_usage(vendor: str, values: list[dict[str, Any]]) -> int | None:
@@ -5010,6 +5198,8 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--packet")
     run.add_argument("--operation", choices=("author", "review"))
     run.add_argument("--draft-output")
+    run.add_argument("--manifest")
+    run.add_argument("--validation")
     run.add_argument("--skill-dir")
     run.add_argument("--suite")
     run.add_argument("--policy")

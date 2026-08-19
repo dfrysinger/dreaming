@@ -490,6 +490,7 @@ operation = {
     "status": "completed",
     "vendor": "copilot",
     "model": "fixture-author-model",
+    "observed_model": "fixture-author-model",
     "adapter_executable_sha256": "sha256:" + hashlib.sha256(
         adapter_path.read_bytes()
     ).hexdigest(),
@@ -504,7 +505,15 @@ operation = {
         "input_tokens": 100,
         "output_tokens": 40,
     },
-    "billing": {"status": "unavailable", "cost_usd": None},
+    "billing": {
+        "status": "unavailable",
+        "cost_usd": None,
+        "provider": "copilot",
+        "unavailable_reason": "provider_telemetry_unavailable",
+        "native_line_item_id": None,
+        "native_event_sha256": None,
+        "native_event_size": None,
+    },
     "elapsed_ms": 100,
 }
 operation["operation_id"] = "sha256:" + hashlib.sha256(adapter(operation)).hexdigest()
@@ -535,7 +544,145 @@ manifest="$(
   python3 -c 'import json,sys; print(json.load(sys.stdin)["input_manifest_sha256"])' \
     <<<"$registration"
 )"
-"$EVAL" v2-input-validate "$AUTHORING/skill" --manifest "$manifest" >/dev/null
+author_validation="$(
+  "$EVAL" v2-input-validate "$AUTHORING/skill" --manifest "$manifest"
+)"
+author_validation_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' \
+    <<<"$author_validation"
+)"
+"$EVAL" v2-input-review-packet "$AUTHORING/skill" \
+  --manifest "$manifest" \
+  --validation "$author_validation_id" \
+  --output "$AUTHORING/review-packet.json" >/dev/null
+python3 - "$AUTHORING/review-packet.json" "$manifest" \
+  "$author_validation_id" "$HOME" <<'PY'
+import hashlib
+import json
+import sys
+
+path, manifest_id, validation_id, home = sys.argv[1:]
+packet = json.load(open(path))
+packet_id = packet.pop("packet_id")
+canonical = json.dumps(
+    packet, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+).encode()
+assert packet_id == "sha256:" + hashlib.sha256(canonical).hexdigest()
+assert packet["kind"] == "safe_evaluation_input_review_packet"
+assert packet["input_manifest_sha256"] == manifest_id
+assert packet["validation_contract"]["receipt_sha256"] == validation_id
+assert packet["authoring_contract"]["operation"]["model"] == "fixture-author-model"
+assert {
+    case["class"] for case in packet["suite"]["cases"]
+} == {
+    "intended", "related", "activation_positive", "activation_negative"
+}
+encoded = json.dumps(packet, sort_keys=True)
+for forbidden in (
+    home,
+    ".copilot/session-state",
+    "transcript",
+    "PRIVATE_AMBIENT_SECRET",
+):
+    assert forbidden not in encoded
+PY
+mkdir -p "$AUTHORING/bin"
+cat >"$AUTHORING/bin/copilot" <<'PY'
+#!/usr/bin/env python3
+import json
+import sys
+
+args = sys.argv[1:]
+prompt = args[args.index("-p") + 1]
+json.loads(prompt.split("review_packet:\n", 1)[1])
+model = args[args.index("--model") + 1]
+input_tokens = 90
+output_tokens = 30
+payload = {
+    "decision": "accept",
+    "summary": f"Exact safe manifest accepted by {model}.",
+    "reason": None,
+}
+print(json.dumps({"events": [
+    {"type": "session.start", "data": {"model": model}},
+    {"type": "result", "data": payload},
+    {"type": "session.usage_checkpoint", "usage": {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": input_tokens + output_tokens,
+    }},
+]}))
+PY
+chmod +x "$AUTHORING/bin/copilot"
+python3 - "$EVAL" "$AUTHORING/bin/copilot" "$HOME" <<'PY'
+import importlib.util
+import os
+import sys
+from pathlib import Path
+from unittest import mock
+
+spec = importlib.util.spec_from_file_location("skill_evaluation", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(module)
+with mock.patch.dict(
+    os.environ,
+    {
+        "DREAMING_EXECUTOR_TEST_ALLOW_ROOT": sys.argv[2],
+        "DREAMING_COPILOT_BIN": sys.argv[2],
+        "SKILLS_STATE_DIR": str(Path(sys.argv[3]) / ".copilot/test-state"),
+    },
+    clear=False,
+):
+    try:
+        module.input_review_test_binary(Path(sys.argv[3]).resolve())
+    except module.EvaluationError as error:
+        assert "non-authoritative test roots" in str(error)
+    else:
+        raise AssertionError("live-root test override was accepted")
+PY
+run_trusted_review() {
+  local model="$1"
+  env \
+    DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$AUTHORING" \
+    DREAMING_COPILOT_BIN="$AUTHORING/bin/copilot" \
+    "$EVAL" v2-input-review "$AUTHORING/skill" --manifest "$manifest" \
+      --validation "$author_validation_id" --model "$model"
+}
+review_one="$(
+  run_trusted_review "fixture-review-model-one"
+)"
+review_one_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' \
+    <<<"$review_one"
+)"
+python3 -c 'import json,sys; assert json.load(sys.stdin)["decision"] == "accept"' \
+  <<<"$review_one"
+review_two="$(
+  run_trusted_review "fixture-review-model-two"
+)"
+review_two_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' \
+    <<<"$review_two"
+)"
+expect_refusal "author-reviewer-independence" \
+  "input reviewer model must differ from the author model" \
+  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$AUTHORING" \
+    DREAMING_COPILOT_BIN="$AUTHORING/bin/copilot" \
+    "$EVAL" v2-input-review "$AUTHORING/skill" --manifest "$manifest" \
+      --validation "$author_validation_id" --model "fixture-author-model"
+"$EVAL" v2-input-state "$AUTHORING/skill" \
+  --state drafting --reason authoring_claimed >/dev/null
+"$EVAL" v2-input-state "$AUTHORING/skill" \
+  --state review_required --reason validation_passed \
+  --manifest "$manifest" --validation "$author_validation_id" >/dev/null
+expect_refusal "distinct-reviewer-models" \
+  "input review receipts must be distinct" \
+  "$EVAL" v2-input-ready "$AUTHORING/skill" \
+    --manifest "$manifest" --validation "$author_validation_id" \
+    --review "$review_one_id" --review "$review_one_id"
+"$EVAL" v2-input-ready "$AUTHORING/skill" \
+  --manifest "$manifest" --validation "$author_validation_id" \
+  --review "$review_one_id" --review "$review_two_id" >/dev/null
 python3 - "$registration" "$source_catalog_id" <<'PY'
 import json
 import sys
@@ -647,7 +794,16 @@ mutations = {
     ),
     "elapsed-overrun": lambda value: value.__setitem__("elapsed_ms", 1500001),
     "false-billing": lambda value: value.__setitem__(
-        "billing", {"status": "available", "cost_usd": None}
+        "billing",
+        {
+            "status": "available",
+            "cost_usd": None,
+            "provider": "copilot",
+            "unavailable_reason": None,
+            "native_line_item_id": None,
+            "native_event_sha256": None,
+            "native_event_size": None,
+        },
     ),
 }
 for name, mutate in mutations.items():

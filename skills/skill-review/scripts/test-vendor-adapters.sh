@@ -312,6 +312,13 @@ def input_author_payload(prompt):
         for index, case in enumerate(packet["suite_template"]["cases"], 1)
       ],
     }
+def input_review_payload(prompt):
+    json.loads(prompt.split("review_packet:\\n", 1)[1])
+    return {
+      "decision": "accept",
+      "summary": "exact manifest satisfies the safe review contract",
+      "reason": None,
+    }
 if "--version" in args:
     print(vendor + " 1.0")
     raise SystemExit()
@@ -347,6 +354,17 @@ if vendor == "codex" and "--output-last-message" in args:
           "usage": {"input_tokens": 100, "output_tokens": 40, "total_tokens": 140},
         }))
         raise SystemExit()
+    review_prompt = next(
+      (arg for arg in args if "EVALUATION_INPUT_REVIEW_OPERATION" in arg), None
+    )
+    if review_prompt is not None:
+        requested_model = args[args.index("--model") + 1]
+        target.write_text(json.dumps(input_review_payload(review_prompt)))
+        print(json.dumps({
+          "type": "turn_context", "payload": {"model": requested_model},
+          "usage": {"input_tokens": 90, "output_tokens": 30, "total_tokens": 120},
+        }))
+        raise SystemExit()
     prompt = next((arg for arg in args if "result_schema" in arg), "")
     payload = (
         {"decision":"approve","summary":"independent fixture approval"}
@@ -377,6 +395,27 @@ if ("-p" in args or "--print" in args) and "plugin" not in args:
               "type": "system", "model": requested_model, "result": payload,
               "usage": {"input_tokens": 100, "output_tokens": 40,
                         "total_tokens": 140},
+            }))
+        raise SystemExit()
+    review_prompt = next(
+      (arg for arg in args if "EVALUATION_INPUT_REVIEW_OPERATION" in arg), None
+    )
+    if review_prompt is not None:
+        requested_model = args[args.index("--model") + 1]
+        payload = input_review_payload(review_prompt)
+        if vendor == "copilot":
+            print(json.dumps({"events": [
+              {"type": "session.start", "data": {"model": requested_model}},
+              {"type": "result", "data": payload},
+              {"type": "session.usage_checkpoint",
+               "usage": {"input_tokens": 90, "output_tokens": 30,
+                         "total_tokens": 120}},
+            ]}))
+        else:
+            print(json.dumps({
+              "type": "system", "model": requested_model, "result": payload,
+              "usage": {"input_tokens": 90, "output_tokens": 30,
+                        "total_tokens": 120},
             }))
         raise SystemExit()
     prompt = next((arg for arg in args if "result_schema" in arg), "")
@@ -1009,6 +1048,84 @@ print(json.dumps({"ok": True}))
                 self.assertEqual(
                     invocation[invocation.index("--allowedTools") + 1], ""
                 )
+
+        review_packet = self.case / "review-packet.json"
+        review_packet.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "kind": "safe_evaluation_input_review_packet",
+                    "packet_id": "sha256:" + "3" * 64,
+                    "candidate_id": "sha256:" + "2" * 64,
+                    "input_manifest_sha256": "sha256:" + "4" * 64,
+                    "validation_contract": {
+                        "receipt_sha256": "sha256:" + "5" * 64,
+                    },
+                    "review_contract": {"accept_only_if": ["safe"]},
+                }
+            )
+        )
+        review_result = self.case / "copilot-review-result.json"
+        review_args = argparse.Namespace(
+            vendor="copilot",
+            operation="review",
+            packet=str(review_packet),
+            result=str(review_result),
+            draft_output=None,
+            model="fixture-review-model",
+            binary=self.env["DREAMING_COPILOT_BIN"],
+            timeout=60,
+            output_bytes=100_000,
+            token_budget=120,
+            deny_root=[],
+            skill_dir="validated-by-test-double",
+            manifest="sha256:" + "4" * 64,
+            validation="sha256:" + "5" * 64,
+            suite=None,
+            policy=None,
+            config=None,
+            routing=None,
+            harness=None,
+            catalog=None,
+        )
+        with mock.patch.dict(os.environ, self.env, clear=False), mock.patch.object(
+            vendor_module, "validate_evaluation_input_packet"
+        ), self.assertRaises(SystemExit):
+            vendor_module.evaluation_input_author_run(review_args)
+        review = json.loads(review_result.read_text())
+        self.assertEqual(review["operation"], "review")
+        self.assertEqual(review["decision"], "accept")
+        self.assertEqual(review["model"], "fixture-review-model")
+        self.assertEqual(review["usage"]["normalized_tokens"], 120)
+        self.assertEqual(
+            review["input_manifest_sha256"], "sha256:" + "4" * 64
+        )
+        self.assertEqual(
+            review["validation_receipt_sha256"], "sha256:" + "5" * 64
+        )
+        self.assertEqual(
+            review["billing"]["unavailable_reason"],
+            "provider_telemetry_unavailable",
+        )
+        with self.assertRaises(vendor_module.AdapterError) as model_conflict:
+            vendor_module.native_model(
+                "copilot",
+                [
+                    {
+                        "events": [
+                            {
+                                "type": "session.start",
+                                "data": {"model": "fixture-review-model"},
+                            },
+                            {
+                                "type": "session.model_change",
+                                "data": {"model": "different-review-model"},
+                            },
+                        ]
+                    }
+                ],
+            )
+        self.assertEqual(model_conflict.exception.code, "exact-model-unproved")
 
     def test_executor_doctor_does_not_require_tomllib(self):
         blocked_stdlib = self.case / "blocked-stdlib"
