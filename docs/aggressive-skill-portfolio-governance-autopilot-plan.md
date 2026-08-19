@@ -476,6 +476,25 @@
   The halt- and lease-gated operator recovery command, model process-group
   monitor, sealed content/root-index validation, derived in-memory queue, and
   one-claim authoring orchestration remain the next prerequisites.
+- Halt-gated operator owner recovery is implemented and committed locally on
+  the isolated preview branch as `838c7f7`. The exact
+  `v2-input-owner-recover` command requires the halt file, inherited live
+  process-mode writer lease, claim ID, expected owner run ID, and explicit
+  confirmation, then independently proves the recorded owner and process group
+  absent, reused, or from a prior boot. A live identity, live group, or
+  same-boot unreadable identity refuses without signaling or mutation.
+  Readiness eligibility, a second fresh death proof, exact ledger
+  terminalization, pending-publication selection, transition publication, and
+  acknowledgement share the readiness lock, so another readiness writer
+  cannot race the terminal decision. Interrupted post-ledger publication
+  replays only the exact retained scheduled `invalid/owner_interrupted`
+  publication for the named claim and owner run. Validation passes 44 focused
+  claim/operator checks, 41 certification checks, 23 evaluator checks, 41
+  core checks, Python compilation, and the diff check. Opus and Terra closed
+  the incomplete-publication shape and readiness check/mutation race findings
+  with no unresolved material defect. Model process-group monitoring, sealed
+  content/root-index validation, the derived in-memory queue, and one-claim
+  authoring orchestration remain.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
