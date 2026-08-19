@@ -472,6 +472,18 @@ A different object at an existing address, a missing object, a digest or size
 mismatch, an unexpected role, an absolute or escaping logical path, or an
 unknown schema refuses the input set.
 
+The six primary roles are suite, policy, compilation, routing, authoring
+catalog, and harness. A manifest may also contain repeated fixture entries
+beneath `fixtures/` and grader entries beneath `graders/`. These support trees
+are part of the exact sealed inventory: every file and containing directory is
+path-, ownership-, permission-, size-, and digest-checked, and undeclared
+content refuses the input set.
+
+The sealed harness object is reproducibility evidence. Execution uses the
+installation-authorized sibling harness only after verifying that its bytes
+match the sealed object. A copied harness beneath the content root is never
+treated as an executable authority.
+
 For a bounded-safe-author initial manifest, the retained author operation binds
 the exact author packet and normalized draft digests, candidate ID, requested
 and provider-observed model identities, adapter object digest and size, actual

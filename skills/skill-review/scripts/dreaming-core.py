@@ -98,6 +98,10 @@ EVALUATION_INPUT_CONTENT_ROLES = {
     "catalog": "application/json",
     "harness": "text/x-python",
 }
+EVALUATION_INPUT_SUPPORT_ROLES = {
+    "fixture": "application/octet-stream",
+    "grader": "application/octet-stream",
+}
 EVALUATION_INPUT_INDEX_NAME = "root-index.json"
 EVALUATION_INPUT_MANIFEST_NAME = "input-manifest.json"
 EVALUATION_INPUT_MAX_CONTROL_BYTES = 64_000
@@ -2761,13 +2765,17 @@ def validate_evaluation_input_capability(
         )
     files: dict[str, Path] = {}
     declared_paths: set[str] = set()
+    allowed_roles = {
+        **EVALUATION_INPUT_CONTENT_ROLES,
+        **EVALUATION_INPUT_SUPPORT_ROLES,
+    }
     for position, item in enumerate(manifest["files"]):
         if (
             not isinstance(item, dict)
             or set(item) != {"role", "path", "size", "media_type", "sha256"}
-            or item.get("role") not in EVALUATION_INPUT_CONTENT_ROLES
+            or item.get("role") not in allowed_roles
             or item.get("media_type")
-            != EVALUATION_INPUT_CONTENT_ROLES.get(item.get("role"))
+            != allowed_roles.get(item.get("role"))
             or not isinstance(item.get("path"), str)
             or Path(item["path"]).is_absolute()
             or Path(item["path"]).as_posix() != item["path"]
@@ -2784,7 +2792,22 @@ def validate_evaluation_input_capability(
                 f"evaluation-input capability file {position} is malformed",
             )
         role = item["role"]
-        if role in files or item["path"] in declared_paths:
+        logical_path = Path(item["path"])
+        if (
+            (
+                role in EVALUATION_INPUT_CONTENT_ROLES
+                and role in files
+            )
+            or item["path"] in declared_paths
+            or (
+                role == "fixture"
+                and logical_path.parts[0] != "fixtures"
+            )
+            or (
+                role == "grader"
+                and logical_path.parts[0] != "graders"
+            )
+        ):
             raise RuntimeFailure(
                 "evaluation-input-not-ready", "evaluation-input capability files collide"
             )
@@ -2847,7 +2870,7 @@ def validate_evaluation_input_capability(
                 raise RuntimeFailure(
                     "evaluation-input-not-ready", "evaluation-input harness is not installation-authorized"
                 )
-        else:
+        elif role in EVALUATION_INPUT_CONTENT_ROLES:
             try:
                 if not isinstance(json.loads(content), dict):
                     raise ValueError("not an object")
@@ -2855,7 +2878,12 @@ def validate_evaluation_input_capability(
                 raise RuntimeFailure(
                     "evaluation-input-not-ready", f"evaluation-input {role} is not a JSON object"
                 ) from error
-        files[role] = resolved
+        if role in EVALUATION_INPUT_CONTENT_ROLES:
+            files[role] = (
+                trusted_harness.resolve()
+                if role == "harness"
+                else resolved
+            )
         declared_paths.add(item["path"])
     if set(files) != set(EVALUATION_INPUT_CONTENT_ROLES):
         raise RuntimeFailure(
@@ -2884,6 +2912,26 @@ def validate_evaluation_input_capability(
         for path in inventory
         if path.is_dir()
     }
+    for directory in (
+        path for path in inventory if path.is_dir()
+    ):
+        try:
+            metadata = directory.stat()
+        except OSError as error:
+            raise RuntimeFailure(
+                "evaluation-input-not-ready",
+                f"evaluation-input support directory is unreadable: {error}",
+            ) from error
+        if (
+            metadata.st_uid != os.getuid()
+            or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or not metadata.st_mode & stat.S_IRUSR
+            or not metadata.st_mode & stat.S_IXUSR
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-not-ready",
+                "evaluation-input support directory permissions are unsafe",
+            )
     if (
         actual != declared_paths
         or actual_directories != expected_directories
@@ -2897,6 +2945,379 @@ def validate_evaluation_input_capability(
         "manifest_sha256": entry["manifest_sha256"],
         "directory": str(capability_dir.resolve()),
         "files": {role: str(path) for role, path in sorted(files.items())},
+    }
+
+
+def validate_evaluation_input_seal_plan(
+    source_root: Path, plan_path: Path
+) -> list[dict[str, str]]:
+    try:
+        plan, raw = read_canonical_control_json(
+            plan_path, "evaluation-input seal plan"
+        )
+    except RuntimeFailure as error:
+        raise RuntimeFailure("evaluation-input-seal-invalid", error.message) from error
+    capabilities = plan.get("capabilities") if isinstance(plan, dict) else None
+    if (
+        len(raw) > EVALUATION_INPUT_MAX_CONTROL_BYTES
+        or set(plan) != {"schema_version", "kind", "capabilities"}
+        or plan.get("schema_version") != 1
+        or plan.get("kind") != "evaluation_input_seal_plan"
+        or not isinstance(capabilities, list)
+        or not capabilities
+    ):
+        raise RuntimeFailure(
+            "evaluation-input-seal-invalid",
+            "evaluation-input seal plan is malformed",
+        )
+    normalized: list[dict[str, str]] = []
+    seen_capabilities: set[str] = set()
+    seen_directories: set[str] = set()
+    for position, item in enumerate(capabilities):
+        if (
+            not isinstance(item, dict)
+            or set(item)
+            != {
+                "capability_id",
+                "directory",
+                "skill_path",
+                "source_directory",
+            }
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(item.get("capability_id"))
+            )
+            is None
+            or re.fullmatch(
+                r"[a-z0-9][a-z0-9._-]{0,127}", str(item.get("directory"))
+            )
+            is None
+            or not isinstance(item.get("source_directory"), str)
+            or Path(item["source_directory"]).is_absolute()
+            or Path(item["source_directory"]).as_posix()
+            != item["source_directory"]
+            or ".." in Path(item["source_directory"]).parts
+            or not isinstance(item.get("skill_path"), str)
+            or not Path(item["skill_path"]).is_absolute()
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-seal-invalid",
+                f"evaluation-input seal plan capability {position} is malformed",
+            )
+        capability_id = item["capability_id"]
+        directory = item["directory"]
+        if (
+            capability_id in seen_capabilities
+            or directory in seen_directories
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-seal-invalid",
+                "evaluation-input seal plan identities collide",
+            )
+        source_directory = source_root / item["source_directory"]
+        skill_path = Path(item["skill_path"])
+        if (
+            source_directory.is_symlink()
+            or not source_directory.is_dir()
+            or not source_directory.resolve().is_relative_to(
+                source_root.resolve()
+            )
+            or skill_path.is_symlink()
+            or not skill_path.is_dir()
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-seal-invalid",
+                "evaluation-input seal plan path is unavailable",
+            )
+        seen_capabilities.add(capability_id)
+        seen_directories.add(directory)
+        normalized.append(
+            {
+                "capability_id": capability_id,
+                "directory": directory,
+                "skill_path": str(skill_path.resolve()),
+                "source_directory": str(source_directory.resolve()),
+            }
+        )
+    if normalized != sorted(
+        normalized, key=lambda item: item["capability_id"]
+    ):
+        raise RuntimeFailure(
+            "evaluation-input-seal-invalid",
+            "evaluation-input seal plan must use canonical capability order",
+        )
+    return normalized
+
+
+def copy_evaluation_input_seal_file(
+    source: Path,
+    destination: Path,
+    *,
+    executable: bool = False,
+) -> dict[str, Any]:
+    if source.is_symlink() or not source.is_file():
+        raise RuntimeFailure(
+            "evaluation-input-seal-invalid",
+            "evaluation-input seal source is not a regular file",
+        )
+    try:
+        metadata = source.stat()
+        if metadata.st_size > EVALUATION_INPUT_MAX_FILE_BYTES:
+            raise RuntimeFailure(
+                "evaluation-input-seal-invalid",
+                "evaluation-input seal source exceeds its size bound",
+            )
+        content = source.read_bytes()
+    except OSError as error:
+        raise RuntimeFailure(
+            "evaluation-input-seal-invalid",
+            f"evaluation-input seal source is unreadable: {error}",
+        ) from error
+    if len(content) != metadata.st_size:
+        raise RuntimeFailure(
+            "evaluation-input-seal-invalid",
+            "evaluation-input seal source changed while being read",
+        )
+    destination.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    os.chmod(destination.parent, 0o700)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(destination, flags, 0o700 if executable else 0o600)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as stream:
+            stream.write(content)
+            stream.flush()
+            os.fsync(stream.fileno())
+    finally:
+        os.close(descriptor)
+    return {
+        "size": len(content),
+        "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+    }
+
+
+def validate_sealed_evaluation_input_packet(
+    evaluator: Path,
+    skill_path: str,
+    primary_files: dict[str, Path],
+) -> None:
+    with tempfile.TemporaryDirectory(
+        prefix="evaluation-input-packet."
+    ) as temporary:
+        output = Path(temporary) / "packet.json"
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(evaluator),
+                "v2-input-author-packet",
+                skill_path,
+                "--suite",
+                str(primary_files["suite"]),
+                "--policy",
+                str(primary_files["policy"]),
+                "--config",
+                str(primary_files["compilation"]),
+                "--routing",
+                str(primary_files["routing"]),
+                "--harness",
+                str(primary_files["harness"]),
+                "--catalog",
+                str(primary_files["catalog"]),
+                "--output",
+                str(output),
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+    if result.returncode != 0:
+        raise RuntimeFailure(
+            "evaluation-input-seal-invalid",
+            (result.stderr or result.stdout).strip()[-1000:]
+            or "evaluation-input author packet validation refused",
+        )
+    try:
+        values = [
+            json.loads(line)
+            for line in result.stdout.splitlines()
+            if line.strip()
+        ]
+    except json.JSONDecodeError as error:
+        raise RuntimeFailure(
+            "evaluation-input-seal-invalid",
+            f"evaluation-input author packet result is malformed: {error}",
+        ) from error
+    if len(values) != 1 or not isinstance(values[0], dict):
+        raise RuntimeFailure(
+            "evaluation-input-seal-invalid",
+            "evaluation-input author packet result is not singular",
+        )
+
+
+def seal_evaluation_input_root(
+    source_root: Path,
+    plan_path: Path,
+    output_root: Path,
+    *,
+    installed_skill_roots: Iterable[Path],
+) -> dict[str, Any]:
+    source_root = source_root.resolve()
+    output_parent = output_root.parent.resolve()
+    if (
+        source_root.is_symlink()
+        or not source_root.is_dir()
+        or output_root.exists()
+        or output_root.is_symlink()
+        or not output_parent.is_dir()
+        or output_root.resolve().is_relative_to(source_root)
+        or source_root.is_relative_to(output_root.resolve())
+    ):
+        raise RuntimeFailure(
+            "evaluation-input-seal-invalid",
+            "evaluation-input seal roots are unsafe or overlapping",
+        )
+    capabilities = validate_evaluation_input_seal_plan(
+        source_root, plan_path
+    )
+    installed_roots = tuple(installed_skill_roots)
+    evaluator = Path(__file__).with_name("skill-evaluation.py")
+    harness = Path(__file__).with_name("skill-evaluation-harness.py")
+    if evaluator.is_symlink() or not evaluator.is_file():
+        raise RuntimeFailure(
+            "evaluation-input-seal-invalid",
+            "evaluation-input evaluator is unavailable",
+        )
+    entries = []
+    with tempfile.TemporaryDirectory(
+        prefix=".evaluation-input-seal.", dir=output_parent
+    ) as temporary:
+        staging = Path(temporary) / "root"
+        staging.mkdir(mode=0o700)
+        for capability in capabilities:
+            source_directory = Path(capability["source_directory"])
+            destination = staging / capability["directory"]
+            destination.mkdir(mode=0o700)
+            primary_sources = {
+                "suite": source_directory / "suite.json",
+                "policy": source_directory / "policy.json",
+                "compilation": source_directory / "compilation.json",
+                "routing": source_directory / "routing.json",
+                "catalog": source_directory / "authoring-catalog.json",
+                "harness": harness,
+            }
+            primary_files: dict[str, Path] = {}
+            records = []
+            for role, source in primary_sources.items():
+                relative = (
+                    "skill-evaluation-harness.py"
+                    if role == "harness"
+                    else source.name
+                )
+                target = destination / relative
+                facts = copy_evaluation_input_seal_file(
+                    source, target, executable=role == "harness"
+                )
+                primary_files[role] = harness if role == "harness" else target
+                records.append(
+                    {
+                        "role": role,
+                        "path": relative,
+                        "size": facts["size"],
+                        "media_type": EVALUATION_INPUT_CONTENT_ROLES[role],
+                        "sha256": facts["sha256"],
+                    }
+                )
+            for role, directory_name in (
+                ("fixture", "fixtures"),
+                ("grader", "graders"),
+            ):
+                source_tree = source_directory / directory_name
+                if source_tree.is_symlink() or not source_tree.is_dir():
+                    raise RuntimeFailure(
+                        "evaluation-input-seal-invalid",
+                        f"evaluation-input {role} tree is unavailable",
+                    )
+                inventory = sorted(
+                    source_tree.rglob("*"),
+                    key=lambda path: path.relative_to(source_tree).as_posix(),
+                )
+                files = [path for path in inventory if path.is_file()]
+                if (
+                    not files
+                    or any(path.is_symlink() for path in inventory)
+                    or any(not path.is_file() and not path.is_dir() for path in inventory)
+                ):
+                    raise RuntimeFailure(
+                        "evaluation-input-seal-invalid",
+                        f"evaluation-input {role} tree is malformed",
+                    )
+                for source in files:
+                    relative = (
+                        Path(directory_name)
+                        / source.relative_to(source_tree)
+                    ).as_posix()
+                    facts = copy_evaluation_input_seal_file(
+                        source, destination / relative
+                    )
+                    records.append(
+                        {
+                            "role": role,
+                            "path": relative,
+                            "size": facts["size"],
+                            "media_type": EVALUATION_INPUT_SUPPORT_ROLES[role],
+                            "sha256": facts["sha256"],
+                        }
+                    )
+            records.sort(key=lambda item: (item["role"], item["path"]))
+            manifest = {
+                "schema_version": 1,
+                "kind": "evaluation_input_capability_manifest",
+                "capability_id": capability["capability_id"],
+                "files": records,
+            }
+            manifest_path = destination / EVALUATION_INPUT_MANIFEST_NAME
+            manifest_path.write_bytes(canonical(manifest))
+            os.chmod(manifest_path, 0o600)
+            validate_sealed_evaluation_input_packet(
+                evaluator, capability["skill_path"], primary_files
+            )
+            entries.append(
+                {
+                    "capability_id": capability["capability_id"],
+                    "directory": capability["directory"],
+                    "manifest_sha256": "sha256:"
+                    + hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+                }
+            )
+        index = {
+            "schema_version": 1,
+            "kind": "evaluation_input_content_root_index",
+            "capabilities": entries,
+        }
+        index["record_sha256"] = digest(index)
+        index_path = staging / EVALUATION_INPUT_INDEX_NAME
+        index_path.write_bytes(canonical(index))
+        os.chmod(index_path, 0o600)
+        owner = {"content_root": str(staging)}
+        indexed = load_evaluation_input_root(owner)
+        for capability in capabilities:
+            validate_evaluation_input_capability(
+                owner,
+                indexed[capability["capability_id"]],
+                installed_skill_roots=installed_roots,
+            )
+        os.replace(staging, output_root)
+    return {
+        "status": "sealed",
+        "output_root": str(output_root.resolve()),
+        "capability_count": len(entries),
+        "capability_ids": [
+            entry["capability_id"] for entry in entries
+        ],
+        "root_index_sha256": "sha256:"
+        + hashlib.sha256(
+            (output_root / EVALUATION_INPUT_INDEX_NAME).read_bytes()
+        ).hexdigest(),
     }
 
 
@@ -4774,6 +5195,13 @@ def build_parser() -> argparse.ArgumentParser:
     subcommands.add_parser("publish")
     subcommands.add_parser("unpublish")
     subcommands.add_parser("census")
+    seal_inputs = subcommands.add_parser("seal-inputs")
+    seal_inputs.add_argument("--source-root", required=True)
+    seal_inputs.add_argument("--plan", required=True)
+    seal_inputs.add_argument("--output-root", required=True)
+    seal_inputs.add_argument(
+        "--installed-root", action="append", required=True
+    )
     enqueue = subcommands.add_parser("enqueue")
     enqueue.add_argument("--source", required=True)
     enqueue.add_argument("--session", required=True)
@@ -4803,6 +5231,20 @@ def main() -> None:
             report = remove_publications()
         elif args.command == "census":
             report = census_only()
+        elif args.command == "seal-inputs":
+            report = {
+                "ok": True,
+                "runtime": "dreaming-core",
+                "command": "seal-inputs",
+                **seal_evaluation_input_root(
+                    Path(args.source_root),
+                    Path(args.plan),
+                    Path(args.output_root),
+                    installed_skill_roots=[
+                        Path(path) for path in args.installed_root
+                    ],
+                ),
+            }
         elif args.command == "enqueue":
             report = enqueue_session(args.source, args.session)
         else:

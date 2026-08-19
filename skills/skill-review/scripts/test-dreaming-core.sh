@@ -136,6 +136,16 @@ class RuntimeTest(unittest.TestCase):
             )
             os.chmod(harness, 0o700)
             files["harness"] = harness
+            support_files = []
+            for role, relative in (
+                ("fixture", "fixtures/synthetic.json"),
+                ("grader", "graders/contracts.json"),
+            ):
+                path = capability_dir / relative
+                path.parent.mkdir(mode=0o700)
+                path.write_bytes(runtime_module.canonical({"role": role}))
+                os.chmod(path, 0o600)
+                support_files.append((role, path))
             manifest = {
                 "schema_version": 1,
                 "kind": "evaluation_input_capability_manifest",
@@ -152,6 +162,19 @@ class RuntimeTest(unittest.TestCase):
                         + hashlib.sha256(path.read_bytes()).hexdigest(),
                     }
                     for role, path in sorted(files.items())
+                ]
+                + [
+                    {
+                        "role": role,
+                        "path": path.relative_to(capability_dir).as_posix(),
+                        "size": path.stat().st_size,
+                        "media_type": runtime_module.EVALUATION_INPUT_SUPPORT_ROLES[
+                            role
+                        ],
+                        "sha256": "sha256:"
+                        + hashlib.sha256(path.read_bytes()).hexdigest(),
+                    }
+                    for role, path in support_files
                 ],
             }
             manifest_path = (
@@ -575,6 +598,101 @@ class RuntimeTest(unittest.TestCase):
                 owner,
                 entry,
                 installed_skill_roots=[Path(owner["content_root"])],
+            )
+
+    def test_evaluation_input_sealer_includes_support_trees(self) -> None:
+        source_root = self.case / "input-source"
+        source = source_root / "pack"
+        (source / "fixtures").mkdir(parents=True)
+        (source / "graders").mkdir()
+        for name in (
+            "suite.json",
+            "policy.json",
+            "compilation.json",
+            "routing.json",
+            "authoring-catalog.json",
+        ):
+            (source / name).write_bytes(
+                runtime_module.canonical({"name": name})
+            )
+        (source / "fixtures" / "synthetic.json").write_bytes(
+            runtime_module.canonical({"fixture": "synthetic"})
+        )
+        (source / "graders" / "contracts.json").write_bytes(
+            runtime_module.canonical({"grader": "contracts"})
+        )
+        skill = self.case / "installed" / "skill"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("# Seal fixture\n")
+        capability_id = "sha256:" + "d" * 64
+        plan = self.case / "seal-plan.json"
+        plan.write_bytes(
+            runtime_module.canonical(
+                {
+                    "schema_version": 1,
+                    "kind": "evaluation_input_seal_plan",
+                    "capabilities": [
+                        {
+                            "capability_id": capability_id,
+                            "directory": "capability-000",
+                            "skill_path": str(skill.resolve()),
+                            "source_directory": "pack",
+                        }
+                    ],
+                }
+            )
+        )
+        output = self.case / "sealed-inputs"
+        with mock.patch.object(
+            runtime_module,
+            "validate_sealed_evaluation_input_packet",
+        ) as semantic:
+            result = runtime_module.seal_evaluation_input_root(
+                source_root,
+                plan,
+                output,
+                installed_skill_roots=[skill],
+            )
+        self.assertEqual(result["status"], "sealed")
+        self.assertEqual(result["capability_ids"], [capability_id])
+        semantic.assert_called_once()
+        owner = {"content_root": str(output)}
+        entry = runtime_module.load_evaluation_input_root(owner)[capability_id]
+        validated = runtime_module.validate_evaluation_input_capability(
+            owner, entry, installed_skill_roots=[skill]
+        )
+        self.assertEqual(set(validated["files"]), set(
+            runtime_module.EVALUATION_INPUT_CONTENT_ROLES
+        ))
+        manifest = json.loads(
+            (
+                output
+                / entry["directory"]
+                / runtime_module.EVALUATION_INPUT_MANIFEST_NAME
+            ).read_bytes()
+        )
+        self.assertEqual(
+            sorted(
+                item["role"]
+                for item in manifest["files"]
+                if item["role"] in {"fixture", "grader"}
+            ),
+            ["fixture", "grader"],
+        )
+        with self.assertRaisesRegex(
+            RuntimeFailure, "roots are unsafe or overlapping"
+        ):
+            runtime_module.seal_evaluation_input_root(
+                source_root,
+                plan,
+                output,
+                installed_skill_roots=[skill],
+            )
+        fixture = output / entry["directory"] / "fixtures" / "synthetic.json"
+        fixture.write_bytes(b"x" * fixture.stat().st_size)
+        with self.assertRaisesRegex(RuntimeFailure, "fixture identity is stale"):
+            runtime_module.validate_evaluation_input_capability(
+                owner, entry, installed_skill_roots=[skill]
             )
 
     def test_evaluation_input_queue_is_same_run_ordered_and_nonpersistent(self) -> None:

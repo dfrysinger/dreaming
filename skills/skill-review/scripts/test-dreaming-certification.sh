@@ -18,6 +18,7 @@ cleanup() {
 }
 trap cleanup EXIT
 EVAL="$SCRIPT_DIR/skill-evaluation.py"
+CORE="$SCRIPT_DIR/dreaming-core.py"
 HARNESS="$SCRIPT_DIR/skill-evaluation-harness.py"
 ADAPTER="$SCRIPT_DIR/fake-skill-evaluation-adapter.py"
 export SKILLS_STATE_DIR="$TMP/state"
@@ -329,6 +330,68 @@ author_packet() {
 
 AUTHORING="$TMP/authoring"
 make_fixture "$AUTHORING"
+SEAL_SOURCE="$TMP/seal-source"
+mkdir -p "$SEAL_SOURCE/pack"
+cp "$AUTHORING/skill/.skill-evaluation-cases.json" "$SEAL_SOURCE/pack/suite.json"
+cp "$AUTHORING/skill/.skill-evaluation-policy.json" "$SEAL_SOURCE/pack/policy.json"
+cp "$AUTHORING/config/compilation.json" "$SEAL_SOURCE/pack/compilation.json"
+cp "$AUTHORING/config/routing.json" "$SEAL_SOURCE/pack/routing.json"
+cp "$AUTHORING/config/authoring-catalog.json" \
+  "$SEAL_SOURCE/pack/authoring-catalog.json"
+cp -R "$AUTHORING/config/fixtures" "$SEAL_SOURCE/pack/fixtures"
+cp -R "$AUTHORING/config/graders" "$SEAL_SOURCE/pack/graders"
+python3 - "$TMP/seal-plan.json" "$AUTHORING/skill" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+path, skill = sys.argv[1:]
+value = {
+    "schema_version": 1,
+    "kind": "evaluation_input_seal_plan",
+    "capabilities": [
+        {
+            "capability_id": "sha256:" + hashlib.sha256(
+                b"certification-capability"
+            ).hexdigest(),
+            "directory": "certification-capability",
+            "skill_path": str(Path(skill).resolve()),
+            "source_directory": "pack",
+        }
+    ],
+}
+Path(path).write_bytes(
+    json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode()
+)
+PY
+"$CORE" seal-inputs \
+  --source-root "$SEAL_SOURCE" \
+  --plan "$TMP/seal-plan.json" \
+  --output-root "$TMP/sealed-inputs" \
+  --installed-root "$AUTHORING/skill" >"$TMP/seal-result.json"
+python3 - "$TMP/seal-result.json" "$TMP/sealed-inputs" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+result = json.load(open(sys.argv[1]))
+root = Path(sys.argv[2])
+assert result["ok"] is True
+assert result["status"] == "sealed"
+assert result["capability_count"] == 1
+index = json.load(open(root / "root-index.json"))
+capability = root / index["capabilities"][0]["directory"]
+manifest = json.load(open(capability / "input-manifest.json"))
+roles = [item["role"] for item in manifest["files"]]
+assert roles.count("fixture") == 2
+assert roles.count("grader") == 1
+assert (capability / "fixtures/correct.json").is_file()
+assert (capability / "graders/contracts.json").is_file()
+PY
+pass "sealed evaluation inputs retain semantically validated fixture and grader trees"
 authoring_skill_before="$(skill_tree_digest "$AUTHORING/skill")"
 author_packet "$AUTHORING" "$AUTHORING/packet.json" >/dev/null
 [[ "$(skill_tree_digest "$AUTHORING/skill")" == "$authoring_skill_before" ]] ||
