@@ -11,12 +11,29 @@ import os
 import pwd
 import re
 import shutil
+import sqlite3
 import subprocess
 import sys
 import tempfile
+from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
+
+from evaluation_input_claims import (  # noqa: E402
+    SLOT_DEFINITIONS as CLAIM_SLOT_DEFINITIONS,
+    ClaimLedgerError,
+    assert_ready as assert_claim_ready,
+    complete_claim_ready,
+    complete_slot as complete_claim_slot,
+    fail_dispatched_slot,
+    inspect_claim,
+    prepare_dispatch as prepare_claim_dispatch,
+    reserve_claim,
+    review_set_identity,
+)
 
 SCHEMA_VERSION = 1
 SUITE_SCHEMA_VERSION = 2
@@ -1437,6 +1454,17 @@ def input_readiness_dir(skill_dir: Path, current_candidate_id: str) -> Path:
 
 def input_current_path(skill_dir: Path) -> Path:
     return input_registry_component("current") / f"{latest_key(str(skill_dir))}.json"
+
+
+@contextmanager
+def input_readiness_state_lock():
+    root = input_registry_component("readiness", create=True)
+    directory_fd = os.open(root, os.O_RDONLY)
+    try:
+        fcntl.flock(directory_fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(directory_fd)
 
 
 def safe_registry_logical_path(value: Any, field: str) -> str:
@@ -3021,15 +3049,20 @@ def v2_input_review(args: argparse.Namespace) -> dict[str, Any]:
     )
     bounded = resolved["manifest"]["authoring_method"] == "bounded-safe-author"
     if bounded:
+        if args.slot not in {"review_a", "review_b"}:
+            raise EvaluationError(
+                f"input review slot {args.slot} is reserved for a later slice"
+            )
         if (
-            not args.validation
+            not args.claim_id
+            or not args.validation
             or not args.model
             or args.model == "default"
             or args.reviewer
             or args.decision
         ):
             raise EvaluationError(
-                "bounded-safe-author review requires exact validation and model identity"
+                "bounded-safe-author review requires claim, slot, validation, and exact model identity"
             )
         validation_sha256 = require_sha256(
             args.validation, "input review validation receipt"
@@ -3050,52 +3083,108 @@ def v2_input_review(args: argparse.Namespace) -> dict[str, Any]:
         )
         adapter = trusted_authoring_adapter_path()
         adapter_sha256 = sha256_file(adapter)
-        operation = run_trusted_input_review(
-            args, skill_dir, resolved["input_manifest_sha256"], packet, adapter
+        dispatch = prepare_claim_dispatch(
+            claim_id=require_sha256(args.claim_id, "claim ID"),
+            skill_path=str(skill_dir),
+            skill_key=latest_key(str(skill_dir)),
+            candidate_id=resolved["candidate_id"],
+            slot_name=args.slot,
+            model=require_text(args.model, "input review model"),
+            packet_id=packet["packet_id"],
+            manifest_sha256=resolved["input_manifest_sha256"],
+            validation_receipt_sha256=validation_sha256,
+            requested_token_budget=args.token_budget,
+            requested_timeout_seconds=args.timeout,
         )
-        operation = validate_input_review_operation(
-            operation, packet, adapter_sha256
-        )
-        author_operation = packet["authoring_contract"]["operation"]
-        if operation["observed_model"] == author_operation["observed_model"]:
-            raise EvaluationError(
-                "input reviewer model must differ from the author model"
+        trusted_args = argparse.Namespace(**vars(args))
+        trusted_args.token_budget = dispatch["token_budget"]
+        trusted_args.timeout = dispatch["timeout_seconds"]
+        phase = "model_execution"
+        try:
+            operation = run_trusted_input_review(
+                trusted_args,
+                skill_dir,
+                resolved["input_manifest_sha256"],
+                packet,
+                adapter,
             )
-        packet_entry = publish_registry_object(
-            canonical(packet),
-            "input_review_packet",
-            "reviews/packet.json",
-            "application/json",
-        )
-        adapter_entry = publish_registry_object(
-            adapter.read_bytes(),
-            "input_review_adapter",
-            "reviews/dreaming-vendor-adapter.py",
-            "text/x-python",
-        )
-        receipt = {
-            **input_receipt_binding(resolved, "evaluation_input_review"),
-            "reviewer": f"copilot:{operation['observed_model']}",
-            "decision": operation["decision"],
-            "review_packet": packet_entry,
-            "review_operation": operation,
-            "review_adapter": adapter_entry,
-        }
-    else:
-        if (
-            args.validation
-            or args.model
-            or not args.reviewer
-            or not args.decision
-        ):
-            raise EvaluationError(
-                "manual input review requires reviewer and decision only"
+            phase = "result_validation"
+            operation = validate_input_review_operation(
+                operation, packet, adapter_sha256
             )
-        receipt = {
-            **input_receipt_binding(resolved, "evaluation_input_review"),
-            "reviewer": require_text(args.reviewer, "reviewer"),
-            "decision": args.decision,
+            author_operation = packet["authoring_contract"]["operation"]
+            if operation["observed_model"] == author_operation["observed_model"]:
+                raise EvaluationError(
+                    "input reviewer model must differ from the author model"
+                )
+            phase = "materialization"
+            packet_entry = publish_registry_object(
+                canonical(packet),
+                "input_review_packet",
+                "reviews/packet.json",
+                "application/json",
+            )
+            adapter_entry = publish_registry_object(
+                adapter.read_bytes(),
+                "input_review_adapter",
+                "reviews/dreaming-vendor-adapter.py",
+                "text/x-python",
+            )
+            receipt = {
+                **input_receipt_binding(resolved, "evaluation_input_review"),
+                "reviewer": f"copilot:{operation['observed_model']}",
+                "decision": operation["decision"],
+                "review_packet": packet_entry,
+                "review_operation": operation,
+                "review_adapter": adapter_entry,
+            }
+            path, receipt_sha256 = write_input_registry_json(
+                "reviews", receipt, "input review receipt"
+            )
+            complete_claim_slot(
+                claim_id=args.claim_id,
+                slot_name=args.slot,
+                operation=operation,
+                manifest_sha256=resolved["input_manifest_sha256"],
+                review_receipt_sha256=receipt_sha256,
+                decision=operation["decision"],
+            )
+        except (
+            EvaluationError,
+            OSError,
+            subprocess.SubprocessError,
+            json.JSONDecodeError,
+        ) as error:
+            fail_dispatched_slot(
+                args.claim_id,
+                args.slot,
+                claim_failure_reason(phase, error),
+            )
+            raise
+        return {
+            "claim_id": args.claim_id,
+            "slot": args.slot,
+            "decision": receipt["decision"],
+            "receipt": str(path),
+            "receipt_sha256": receipt_sha256,
+            "input_manifest_sha256": resolved["input_manifest_sha256"],
         }
+    if (
+        args.claim_id
+        or args.slot
+        or args.validation
+        or args.model
+        or not args.reviewer
+        or not args.decision
+    ):
+        raise EvaluationError(
+            "manual input review requires reviewer and decision only"
+        )
+    receipt = {
+        **input_receipt_binding(resolved, "evaluation_input_review"),
+        "reviewer": require_text(args.reviewer, "reviewer"),
+        "decision": args.decision,
+    }
     path, receipt_sha256 = write_input_registry_json(
         "reviews", receipt, "input review receipt"
     )
@@ -3363,7 +3452,46 @@ def validate_input_model_budget(args: argparse.Namespace, field: str) -> None:
         raise EvaluationError(f"{field} process budget exceeds its hard bound")
 
 
+def v2_input_claim(args: argparse.Namespace) -> dict[str, Any]:
+    skill_dir = resolve_path(Path(args.skill_dir), "skill directory")
+    candidate, _ = candidate_id(skill_dir)
+    return reserve_claim(
+        skill_path=str(skill_dir),
+        skill_key=latest_key(str(skill_dir)),
+        candidate_id=candidate,
+        owner_run_id=require_text(args.owner_run_id, "claim owner run ID"),
+        author_model=require_text(args.author_model, "claim author model"),
+        reviewer_a_model=require_text(
+            args.reviewer_a_model, "claim reviewer A model"
+        ),
+        reviewer_b_model=require_text(
+            args.reviewer_b_model, "claim reviewer B model"
+        ),
+    )
+
+
+def v2_input_claim_inspect(args: argparse.Namespace) -> dict[str, Any]:
+    return inspect_claim(require_sha256(args.claim_id, "claim ID"))
+
+
+def claim_failure_reason(phase: str, error: BaseException) -> str:
+    detail = str(error).lower()
+    if phase == "model_execution":
+        if "timed out" in detail or "timeout" in detail:
+            return "trusted_operation_timeout"
+        if "refused" in detail:
+            return "trusted_operation_refused"
+        return "trusted_operation_crash"
+    if phase == "result_validation":
+        return "trusted_operation_malformed"
+    return "trusted_materialization_failed"
+
+
 def v2_input_author(args: argparse.Namespace) -> dict[str, Any]:
+    if args.slot != "author":
+        raise EvaluationError(
+            f"input author slot {args.slot} is reserved for a later slice"
+        )
     model = require_text(args.model, "input author model")
     if model == "default":
         raise EvaluationError("input author requires an explicit non-default model")
@@ -3400,70 +3528,119 @@ def v2_input_author(args: argparse.Namespace) -> dict[str, Any]:
         source_arguments.extend(
             [f"--{option}", str(resolve_path(Path(getattr(args, option)), option))]
         )
-    operation, draft_value = run_trusted_input_adapter(
-        args,
-        context["skill_dir"],
-        Path(args.skill_dir),
-        packet,
-        adapter,
-        "author",
-        source_arguments,
+    dispatch = prepare_claim_dispatch(
+        claim_id=require_sha256(args.claim_id, "claim ID"),
+        skill_path=str(context["skill_dir"]),
+        skill_key=latest_key(str(context["skill_dir"])),
+        candidate_id=packet["candidate_id"],
+        slot_name="author",
+        model=model,
+        packet_id=packet["packet_id"],
+        manifest_sha256=None,
+        validation_receipt_sha256=None,
+        requested_token_budget=args.token_budget,
+        requested_timeout_seconds=args.timeout,
     )
-    if operation.get("model") != model:
-        raise EvaluationError("trusted input author returned the wrong requested model")
-    if operation.get("outcome") == "insufficient_information":
-        if draft_value is not None:
-            raise EvaluationError(
-                "insufficient-information authoring returned an unexpected draft"
-            )
-        operation = validate_authoring_operation(
-            operation,
+    trusted_args = argparse.Namespace(**vars(args))
+    trusted_args.token_budget = dispatch["token_budget"]
+    trusted_args.timeout = dispatch["timeout_seconds"]
+    phase = "model_execution"
+    try:
+        operation, draft_value = run_trusted_input_adapter(
+            trusted_args,
+            context["skill_dir"],
+            Path(args.skill_dir),
             packet,
-            None,
-            adapter_sha256,
-            expected_outcome="insufficient_information",
+            adapter,
+            "author",
+            source_arguments,
         )
-        return {
-            "status": "insufficient_information",
-            "state": "insufficient_information",
-            "reason": operation["reason"],
-            "summary": operation["summary"],
-            "candidate_id": packet["candidate_id"],
-            "packet_id": packet["packet_id"],
-            "operation_id": operation["operation_id"],
-            "input_manifest": None,
-            "input_manifest_sha256": None,
-        }
-    if draft_value is None:
-        raise EvaluationError("trusted input author returned no draft")
-    draft_value, draft_id = validate_input_author_draft_value(
-        draft_value, packet, context
-    )
-    operation = validate_authoring_operation(
-        operation, packet, draft_id, adapter_sha256
-    )
-    materialization = materialize_input_author(
-        packet, context, draft_value, str(output)
-    )
-    receipt = load_json(Path(materialization["output_dir"]) / "authoring.json")
-    registration_args = argparse.Namespace(
-        skill_dir=str(context["skill_dir"]),
-        suite=materialization["suite"],
-        policy=materialization["policy"],
-        config=materialization["config"],
-        routing=materialization["routing"],
-        harness=str(trusted_harness_path()),
-        authoring_method="bounded-safe-author",
-        source_id=[],
-    )
-    registration = register_input_manifest(
-        registration_args,
-        (packet, draft_value, receipt, operation, adapter),
-    )
+        phase = "result_validation"
+        if operation.get("model") != model:
+            raise EvaluationError(
+                "trusted input author returned the wrong requested model"
+            )
+        if operation.get("outcome") == "insufficient_information":
+            if draft_value is not None:
+                raise EvaluationError(
+                    "insufficient-information authoring returned an unexpected draft"
+                )
+            operation = validate_authoring_operation(
+                operation,
+                packet,
+                None,
+                adapter_sha256,
+                expected_outcome="insufficient_information",
+            )
+            complete_claim_slot(
+                claim_id=args.claim_id,
+                slot_name="author",
+                operation=operation,
+                manifest_sha256=None,
+                terminal_reason="insufficient_information",
+            )
+            return {
+                "status": "insufficient_information",
+                "state": "insufficient_information",
+                "reason": operation["reason"],
+                "summary": operation["summary"],
+                "candidate_id": packet["candidate_id"],
+                "packet_id": packet["packet_id"],
+                "operation_id": operation["operation_id"],
+                "claim_id": args.claim_id,
+                "input_manifest": None,
+                "input_manifest_sha256": None,
+            }
+        if draft_value is None:
+            raise EvaluationError("trusted input author returned no draft")
+        draft_value, draft_id = validate_input_author_draft_value(
+            draft_value, packet, context
+        )
+        operation = validate_authoring_operation(
+            operation, packet, draft_id, adapter_sha256
+        )
+        phase = "materialization"
+        materialization = materialize_input_author(
+            packet, context, draft_value, str(output)
+        )
+        receipt = load_json(
+            Path(materialization["output_dir"]) / "authoring.json"
+        )
+        registration_args = argparse.Namespace(
+            skill_dir=str(context["skill_dir"]),
+            suite=materialization["suite"],
+            policy=materialization["policy"],
+            config=materialization["config"],
+            routing=materialization["routing"],
+            harness=str(trusted_harness_path()),
+            authoring_method="bounded-safe-author",
+            source_id=[],
+        )
+        registration = register_input_manifest(
+            registration_args,
+            (packet, draft_value, receipt, operation, adapter),
+        )
+        complete_claim_slot(
+            claim_id=args.claim_id,
+            slot_name="author",
+            operation=operation,
+            manifest_sha256=registration["input_manifest_sha256"],
+        )
+    except (
+        EvaluationError,
+        OSError,
+        subprocess.SubprocessError,
+        json.JSONDecodeError,
+    ) as error:
+        fail_dispatched_slot(
+            args.claim_id, "author", claim_failure_reason(phase, error)
+        )
+        raise
     return {
         "status": "review_required",
         "state": "review_required",
         "outcome": "draft",
+        "claim_id": args.claim_id,
         **materialization,
         **registration,
         "author_operation_id": operation["operation_id"],
@@ -3722,6 +3899,46 @@ def validate_input_receipts(
         )
 
 
+def bounded_review_set_id(
+    resolved: dict[str, Any],
+    claim_id: str,
+    review_sha256s: list[str],
+) -> str:
+    author_operation = load_registry_json_object(
+        manifest_role(
+            resolved["manifest"]["objects"], "authoring_operation"
+        ),
+        "authoring operation",
+    )
+    reviewer_models: list[str] = []
+    for receipt_sha256 in review_sha256s:
+        receipt = load_input_registry_receipt(receipt_sha256)
+        operation = receipt.get("review_operation")
+        if not isinstance(operation, dict):
+            raise EvaluationError(
+                "bounded input review receipt operation is unavailable"
+            )
+        reviewer_models.append(
+            require_text(
+                operation.get("observed_model"),
+                "bounded input review observed model",
+            )
+        )
+    try:
+        return review_set_identity(
+            require_sha256(claim_id, "claim ID"),
+            resolved["candidate_id"],
+            resolved["input_manifest_sha256"],
+            require_text(
+                author_operation.get("observed_model"),
+                "bounded input author observed model",
+            ),
+            reviewer_models,
+        )
+    except ClaimLedgerError as error:
+        raise EvaluationError(str(error)) from error
+
+
 def validate_input_validation_receipt(
     resolved: dict[str, Any], validation_sha256: str
 ) -> None:
@@ -3902,25 +4119,28 @@ def load_input_transition(
     transition = load_json(path)
     if raw != canonical(transition):
         raise EvaluationError("input readiness transition must be canonical JSON")
-    require_exact_keys(
-        transition,
-        "input readiness transition",
-        {
-            "schema_version",
-            "kind",
-            "skill_path",
-            "skill_key",
-            "candidate_id",
-            "input_manifest_sha256",
-            "prior_transition_id",
-            "state",
-            "reason",
-            "created_at",
-            "validation_receipt_sha256",
-            "review_receipt_sha256s",
-            "transition_id",
-        },
-    )
+    transition_keys = {
+        "schema_version",
+        "kind",
+        "skill_path",
+        "skill_key",
+        "candidate_id",
+        "input_manifest_sha256",
+        "prior_transition_id",
+        "state",
+        "reason",
+        "created_at",
+        "validation_receipt_sha256",
+        "review_receipt_sha256s",
+        "transition_id",
+    }
+    if set(transition) not in (
+        transition_keys,
+        transition_keys | {"claim_id", "review_set_id"},
+    ):
+        raise EvaluationError(
+            "input readiness transition has unexpected or missing fields"
+        )
     state = transition.get("state")
     reason = transition.get("reason")
     if (
@@ -3945,6 +4165,15 @@ def load_input_transition(
     manifest_sha256 = transition.get("input_manifest_sha256")
     validation_sha256 = transition.get("validation_receipt_sha256")
     reviews = transition.get("review_receipt_sha256s")
+    claim_id = transition.get("claim_id")
+    review_set_id = transition.get("review_set_id")
+    if (claim_id is None) != (review_set_id is None):
+        raise EvaluationError(
+            "input readiness claim and review set identities must appear together"
+        )
+    if claim_id is not None:
+        require_sha256(claim_id, "input readiness claim ID")
+        require_sha256(review_set_id, "input readiness review set ID")
     if not isinstance(reviews, list):
         raise EvaluationError("input readiness reviews must be a list")
     for index, receipt_sha256 in enumerate(reviews):
@@ -3952,7 +4181,12 @@ def load_input_transition(
             receipt_sha256, f"input readiness review receipt {index}"
         )
     if state in {"input_missing", "drafting", "insufficient_information"}:
-        if manifest_sha256 is not None or validation_sha256 is not None or reviews:
+        if (
+            manifest_sha256 is not None
+            or validation_sha256 is not None
+            or reviews
+            or claim_id is not None
+        ):
             raise EvaluationError(
                 f"{state} readiness cannot retain manifest or review authority"
             )
@@ -3985,10 +4219,58 @@ def load_input_transition(
         if validation_sha256 is None:
             raise EvaluationError("ready input requires validation")
         validate_input_receipts(resolved, validation_sha256, reviews)
+        bounded = (
+            resolved["manifest"]["authoring_method"] == "bounded-safe-author"
+        )
+        if bounded and claim_id is not None:
+            expected_review_set = bounded_review_set_id(
+                resolved, claim_id, reviews
+            )
+            if review_set_id != expected_review_set:
+                raise EvaluationError(
+                    "ready input review set identity is invalid"
+                )
+        elif not bounded and claim_id is not None:
+            raise EvaluationError(
+                "manual ready input cannot bind an authoring claim"
+            )
     return transition
 
 
-def write_input_transition(
+def input_transition_result(
+    skill_dir: Path, transition: dict[str, Any]
+) -> dict[str, Any]:
+    path = input_transition_path(
+        skill_dir, transition["candidate_id"], transition["transition_id"]
+    )
+    return {
+        "state": transition["state"],
+        "reason": transition["reason"],
+        "input_manifest_sha256": transition["input_manifest_sha256"],
+        "transition": str(path),
+        "transition_id": transition["transition_id"],
+        "current": str(input_current_path(skill_dir)),
+    }
+
+
+def write_input_current_pointer(
+    skill_dir: Path, candidate: str, transition_id: str
+) -> None:
+    pointer = {
+        "schema_version": INPUT_REGISTRY_SCHEMA_VERSION,
+        "kind": "evaluation_input_current",
+        "skill_path": str(skill_dir),
+        "skill_key": latest_key(str(skill_dir)),
+        "candidate_id": candidate,
+        "transition_id": transition_id,
+    }
+    pointer_path = input_current_path(skill_dir)
+    if pointer_path.is_symlink():
+        raise EvaluationError("input current pointer cannot be a symlink")
+    atomic_write(pointer_path, pointer)
+
+
+def _write_input_transition_locked(
     skill_dir: Path,
     *,
     state: str,
@@ -3997,6 +4279,8 @@ def write_input_transition(
     validation_receipt_sha256: str | None,
     review_receipt_sha256s: list[str],
     created_at: str,
+    claim_id: str | None = None,
+    review_set_id: str | None = None,
 ) -> dict[str, Any]:
     candidate, _ = candidate_id(skill_dir)
     current = load_input_current_pointer(skill_dir)
@@ -4027,30 +4311,47 @@ def write_input_transition(
         "validation_receipt_sha256": validation_receipt_sha256,
         "review_receipt_sha256s": sorted(review_receipt_sha256s),
     }
+    if claim_id is not None or review_set_id is not None:
+        transition["claim_id"] = require_sha256(
+            claim_id, "input readiness claim ID"
+        )
+        transition["review_set_id"] = require_sha256(
+            review_set_id, "input readiness review set ID"
+        )
     transition["transition_id"] = identity_with("transition_id", transition)
     path = input_transition_path(skill_dir, candidate, transition["transition_id"])
     create_only_bytes(path, canonical(transition), "input readiness transition")
-    pointer = {
-        "schema_version": INPUT_REGISTRY_SCHEMA_VERSION,
-        "kind": "evaluation_input_current",
-        "skill_path": str(skill_dir),
-        "skill_key": latest_key(str(skill_dir)),
-        "candidate_id": candidate,
-        "transition_id": transition["transition_id"],
-    }
-    pointer_path = input_current_path(skill_dir)
-    if pointer_path.is_symlink():
-        raise EvaluationError("input current pointer cannot be a symlink")
-    atomic_write(pointer_path, pointer)
+    write_input_current_pointer(
+        skill_dir, candidate, transition["transition_id"]
+    )
     resolve_input_readiness(skill_dir)
-    return {
-        "state": state,
-        "reason": reason,
-        "input_manifest_sha256": input_manifest_sha256,
-        "transition": str(path),
-        "transition_id": transition["transition_id"],
-        "current": str(pointer_path),
-    }
+    return input_transition_result(skill_dir, transition)
+
+
+def write_input_transition(
+    skill_dir: Path,
+    *,
+    state: str,
+    reason: str,
+    input_manifest_sha256: str | None,
+    validation_receipt_sha256: str | None,
+    review_receipt_sha256s: list[str],
+    created_at: str,
+    claim_id: str | None = None,
+    review_set_id: str | None = None,
+) -> dict[str, Any]:
+    with input_readiness_state_lock():
+        return _write_input_transition_locked(
+            skill_dir,
+            state=state,
+            reason=reason,
+            input_manifest_sha256=input_manifest_sha256,
+            validation_receipt_sha256=validation_receipt_sha256,
+            review_receipt_sha256s=review_receipt_sha256s,
+            created_at=created_at,
+            claim_id=claim_id,
+            review_set_id=review_set_id,
+        )
 
 
 def v2_input_state(args: argparse.Namespace) -> dict[str, Any]:
@@ -4114,6 +4415,42 @@ def v2_input_state(args: argparse.Namespace) -> dict[str, Any]:
     )
 
 
+def ready_transition_matches(
+    transition: dict[str, Any],
+    *,
+    manifest_sha256: str,
+    validation_sha256: str,
+    review_sha256s: list[str],
+    claim_id: str | None,
+    review_set_id: str | None,
+) -> bool:
+    return (
+        transition["state"] == "ready"
+        and transition["reason"] == "validated_and_reviewed"
+        and transition["input_manifest_sha256"] == manifest_sha256
+        and transition["validation_receipt_sha256"] == validation_sha256
+        and transition["review_receipt_sha256s"] == review_sha256s
+        and transition.get("claim_id") == claim_id
+        and transition.get("review_set_id") == review_set_id
+    )
+
+
+def ready_result(
+    skill_dir: Path,
+    transition: dict[str, Any],
+    claim_facts: dict[str, Any] | None,
+) -> dict[str, Any]:
+    result = input_transition_result(skill_dir, transition)
+    if claim_facts is not None:
+        result.update(
+            {
+                "claim_id": claim_facts["claim_id"],
+                "review_set_id": claim_facts["review_set_id"],
+            }
+        )
+    return result
+
+
 def v2_input_ready(args: argparse.Namespace) -> dict[str, Any]:
     skill_dir = resolve_path(Path(args.skill_dir), "skill directory")
     resolved = validate_input_manifest(
@@ -4128,17 +4465,222 @@ def v2_input_ready(args: argparse.Namespace) -> dict[str, Any]:
     validate_input_receipts(
         resolved, validation_sha256, review_sha256s
     )
-    result = write_input_transition(
-        skill_dir,
-        state="ready",
-        reason="validated_and_reviewed",
-        input_manifest_sha256=resolved["input_manifest_sha256"],
+    bounded = resolved["manifest"]["authoring_method"] == "bounded-safe-author"
+    claim_id = None
+    expected_review_set = None
+    if bounded:
+        if not args.claim_id:
+            raise EvaluationError(
+                "bounded-safe-author readiness requires an authoring claim"
+            )
+        claim_id = require_sha256(args.claim_id, "claim ID")
+        expected_review_set = bounded_review_set_id(
+            resolved, claim_id, review_sha256s
+        )
+    elif args.claim_id:
+        raise EvaluationError(
+            "manual readiness cannot bind an authoring claim"
+        )
+    with input_readiness_state_lock():
+        pointer = load_input_current_pointer(skill_dir)
+        if pointer is not None and pointer["candidate_id"] == resolved["candidate_id"]:
+            transitions, tips = load_input_transition_history(
+                skill_dir, resolved["candidate_id"]
+            )
+            if tips == {pointer["transition_id"]}:
+                validate_input_transition_chain(
+                    transitions, pointer["transition_id"]
+                )
+                current = transitions[pointer["transition_id"]]
+                if current["state"] == "ready":
+                    if ready_transition_matches(
+                        current,
+                        manifest_sha256=resolved["input_manifest_sha256"],
+                        validation_sha256=validation_sha256,
+                        review_sha256s=review_sha256s,
+                        claim_id=claim_id,
+                        review_set_id=expected_review_set,
+                    ):
+                        claim_facts = (
+                            complete_claim_ready(
+                                claim_id,
+                                skill_path=str(skill_dir),
+                                skill_key=latest_key(str(skill_dir)),
+                                candidate_id=resolved["candidate_id"],
+                                manifest_sha256=resolved["input_manifest_sha256"],
+                                validation_receipt_sha256=validation_sha256,
+                                review_receipt_sha256s=review_sha256s,
+                            )
+                            if bounded
+                            else None
+                        )
+                        resolve_ready_input(skill_dir)
+                        return ready_result(skill_dir, current, claim_facts)
+            else:
+                recoverable = [
+                    transition
+                    for transition in transitions.values()
+                    if transition["prior_transition_id"]
+                    == pointer["transition_id"]
+                    and ready_transition_matches(
+                        transition,
+                        manifest_sha256=resolved["input_manifest_sha256"],
+                        validation_sha256=validation_sha256,
+                        review_sha256s=review_sha256s,
+                        claim_id=claim_id,
+                        review_set_id=expected_review_set,
+                    )
+                ]
+                if len(recoverable) != 1 or tips != {
+                    recoverable[0]["transition_id"]
+                }:
+                    raise EvaluationError(
+                        "input readiness current pointer does not name the unique chain tip"
+                    )
+                recovered = recoverable[0]
+                validate_input_transition_chain(
+                    transitions, recovered["transition_id"]
+                )
+                claim_facts = (
+                    complete_claim_ready(
+                        claim_id,
+                        skill_path=str(skill_dir),
+                        skill_key=latest_key(str(skill_dir)),
+                        candidate_id=resolved["candidate_id"],
+                        manifest_sha256=resolved["input_manifest_sha256"],
+                        validation_receipt_sha256=validation_sha256,
+                        review_receipt_sha256s=review_sha256s,
+                    )
+                    if bounded
+                    else None
+                )
+                write_input_current_pointer(
+                    skill_dir,
+                    resolved["candidate_id"],
+                    recovered["transition_id"],
+                )
+                resolve_ready_input(skill_dir)
+                return ready_result(skill_dir, recovered, claim_facts)
+        claim_facts = (
+            complete_claim_ready(
+                claim_id,
+                skill_path=str(skill_dir),
+                skill_key=latest_key(str(skill_dir)),
+                candidate_id=resolved["candidate_id"],
+                manifest_sha256=resolved["input_manifest_sha256"],
+                validation_receipt_sha256=validation_sha256,
+                review_receipt_sha256s=review_sha256s,
+            )
+            if bounded
+            else None
+        )
+        result = _write_input_transition_locked(
+            skill_dir,
+            state="ready",
+            reason="validated_and_reviewed",
+            input_manifest_sha256=resolved["input_manifest_sha256"],
+            validation_receipt_sha256=validation_sha256,
+            review_receipt_sha256s=review_sha256s,
+            created_at=args.created_at or now_iso(),
+            claim_id=claim_facts["claim_id"] if claim_facts else None,
+            review_set_id=(
+                claim_facts["review_set_id"] if claim_facts else None
+            ),
+        )
+        resolve_ready_input(skill_dir)
+        return {
+            **result,
+            **(
+                {
+                    "claim_id": claim_facts["claim_id"],
+                    "review_set_id": claim_facts["review_set_id"],
+                }
+                if claim_facts
+                else {}
+            ),
+        }
+
+
+def v2_input_claim_assert_ready(args: argparse.Namespace) -> dict[str, Any]:
+    skill_dir = resolve_path(Path(args.skill_dir), "skill directory")
+    resolved = validate_input_manifest(
+        skill_dir, require_sha256(args.manifest, "input manifest digest")
+    )
+    if resolved["manifest"]["authoring_method"] != "bounded-safe-author":
+        raise EvaluationError(
+            "claim readiness assertion requires bounded-safe-author input"
+        )
+    validation_sha256 = require_sha256(
+        args.validation, "input validation receipt"
+    )
+    review_sha256s = sorted(
+        require_sha256(item, "input review receipt") for item in args.review
+    )
+    validate_input_receipts(
+        resolved, validation_sha256, review_sha256s
+    )
+    return assert_claim_ready(
+        require_sha256(args.claim_id, "claim ID"),
+        skill_path=str(skill_dir),
+        skill_key=latest_key(str(skill_dir)),
+        candidate_id=resolved["candidate_id"],
+        manifest_sha256=resolved["input_manifest_sha256"],
         validation_receipt_sha256=validation_sha256,
         review_receipt_sha256s=review_sha256s,
-        created_at=args.created_at or now_iso(),
     )
-    resolve_ready_input(skill_dir)
-    return result
+
+
+def load_input_transition_history(
+    skill_dir: Path, candidate: str
+) -> tuple[dict[str, dict[str, Any]], set[str]]:
+    readiness = input_readiness_dir(skill_dir, candidate)
+    if readiness.is_symlink() or not readiness.is_dir():
+        raise EvaluationError("input readiness transition root must be a real directory")
+    transitions: dict[str, dict[str, Any]] = {}
+    for path in sorted(readiness.iterdir()):
+        if path.suffix != ".json":
+            raise EvaluationError("input readiness transition root has an unknown entry")
+        transition_id = f"sha256:{path.stem}"
+        transitions[transition_id] = load_input_transition(
+            skill_dir, candidate, transition_id
+        )
+    if not transitions:
+        raise EvaluationError("input readiness transition chain is empty")
+    referenced: set[str] = set()
+    for transition in transitions.values():
+        prior_id = transition["prior_transition_id"]
+        if prior_id is None:
+            continue
+        if prior_id not in transitions:
+            raise EvaluationError(
+                "input readiness transition chain has a missing predecessor"
+            )
+        prior_state = transitions[prior_id]["state"]
+        if transition["state"] not in INPUT_READINESS_TRANSITIONS[prior_state]:
+            raise EvaluationError(
+                f"readiness cannot transition from {prior_state} "
+                f"to {transition['state']}"
+            )
+        referenced.add(prior_id)
+    return transitions, set(transitions) - referenced
+
+
+def validate_input_transition_chain(
+    transitions: dict[str, dict[str, Any]], tip_id: str
+) -> None:
+    seen: set[str] = set()
+    transition_id: str | None = tip_id
+    while transition_id is not None:
+        if transition_id in seen:
+            raise EvaluationError("input readiness transition chain contains a cycle")
+        if transition_id not in transitions:
+            raise EvaluationError(
+                "input readiness transition chain has a missing predecessor"
+            )
+        seen.add(transition_id)
+        transition_id = transitions[transition_id]["prior_transition_id"]
+    if seen != set(transitions):
+        raise EvaluationError("input readiness transition history is disconnected")
 
 
 def resolve_input_readiness(
@@ -4171,48 +4713,12 @@ def resolve_input_readiness(
         if missing_ok:
             return None
         raise EvaluationError("external evaluation input readiness is missing")
-    readiness = input_readiness_dir(skill_dir, candidate)
-    if readiness.is_symlink() or not readiness.is_dir():
-        raise EvaluationError("input readiness transition root must be a real directory")
-    transitions: dict[str, dict[str, Any]] = {}
-    for path in sorted(readiness.iterdir()):
-        if path.suffix != ".json":
-            raise EvaluationError("input readiness transition root has an unknown entry")
-        transition_id = f"sha256:{path.stem}"
-        transition = load_input_transition(skill_dir, candidate, transition_id)
-        transitions[transition_id] = transition
-    if not transitions:
-        raise EvaluationError("input readiness transition chain is empty")
-    referenced: set[str] = set()
-    for transition in transitions.values():
-        prior_id = transition["prior_transition_id"]
-        if prior_id is None:
-            continue
-        if prior_id not in transitions:
-            raise EvaluationError(
-                "input readiness transition chain has a missing predecessor"
-            )
-        prior_state = transitions[prior_id]["state"]
-        if transition["state"] not in INPUT_READINESS_TRANSITIONS[prior_state]:
-            raise EvaluationError(
-                f"readiness cannot transition from {prior_state} "
-                f"to {transition['state']}"
-            )
-        referenced.add(prior_id)
-    tips = set(transitions) - referenced
+    transitions, tips = load_input_transition_history(skill_dir, candidate)
     if tips != {pointer["transition_id"]}:
         raise EvaluationError(
             "input readiness current pointer does not name the unique chain tip"
         )
-    seen: set[str] = set()
-    transition_id: str | None = pointer["transition_id"]
-    while transition_id is not None:
-        if transition_id in seen:
-            raise EvaluationError("input readiness transition chain contains a cycle")
-        seen.add(transition_id)
-        transition_id = transitions[transition_id]["prior_transition_id"]
-    if seen != set(transitions):
-        raise EvaluationError("input readiness transition history is disconnected")
+    validate_input_transition_chain(transitions, pointer["transition_id"])
     return transitions[pointer["transition_id"]]
 
 
@@ -7658,8 +8164,24 @@ def build_parser() -> argparse.ArgumentParser:
     input_author_packet_parser.add_argument("--harness", required=True)
     input_author_packet_parser.add_argument("--catalog", required=True)
     input_author_packet_parser.add_argument("--output", required=True)
+    input_claim_parser = commands.add_parser("v2-input-claim")
+    input_claim_parser.add_argument("skill_dir")
+    input_claim_parser.add_argument("--owner-run-id", required=True)
+    input_claim_parser.add_argument("--author-model", required=True)
+    input_claim_parser.add_argument("--reviewer-a-model", required=True)
+    input_claim_parser.add_argument("--reviewer-b-model", required=True)
+    input_claim_inspect_parser = commands.add_parser(
+        "v2-input-claim-inspect"
+    )
+    input_claim_inspect_parser.add_argument("--claim-id", required=True)
     input_author_parser = commands.add_parser("v2-input-author")
     input_author_parser.add_argument("skill_dir")
+    input_author_parser.add_argument("--claim-id", required=True)
+    input_author_parser.add_argument(
+        "--slot",
+        choices=[item[0] for item in CLAIM_SLOT_DEFINITIONS],
+        default="author",
+    )
     input_author_parser.add_argument("--suite", required=True)
     input_author_parser.add_argument("--policy", required=True)
     input_author_parser.add_argument("--config", required=True)
@@ -7713,6 +8235,11 @@ def build_parser() -> argparse.ArgumentParser:
     input_review_parser = commands.add_parser("v2-input-review")
     input_review_parser.add_argument("skill_dir")
     input_review_parser.add_argument("--manifest", required=True)
+    input_review_parser.add_argument("--claim-id")
+    input_review_parser.add_argument(
+        "--slot",
+        choices=[item[0] for item in CLAIM_SLOT_DEFINITIONS],
+    )
     input_review_parser.add_argument("--reviewer")
     input_review_parser.add_argument(
         "--decision", choices=("accept", "reject")
@@ -7743,12 +8270,23 @@ def build_parser() -> argparse.ArgumentParser:
     input_state_parser.add_argument("--created-at")
     input_ready_parser = commands.add_parser("v2-input-ready")
     input_ready_parser.add_argument("skill_dir")
+    input_ready_parser.add_argument("--claim-id")
     input_ready_parser.add_argument("--manifest", required=True)
     input_ready_parser.add_argument("--validation", required=True)
     input_ready_parser.add_argument(
         "--review", action="append", required=True
     )
     input_ready_parser.add_argument("--created-at")
+    input_claim_assert_parser = commands.add_parser(
+        "v2-input-claim-assert-ready"
+    )
+    input_claim_assert_parser.add_argument("skill_dir")
+    input_claim_assert_parser.add_argument("--claim-id", required=True)
+    input_claim_assert_parser.add_argument("--manifest", required=True)
+    input_claim_assert_parser.add_argument("--validation", required=True)
+    input_claim_assert_parser.add_argument(
+        "--review", action="append", required=True
+    )
     v2_prepare_parser = commands.add_parser("v2-prepare")
     v2_prepare_parser.add_argument("skill_dir")
     v2_prepare_parser.add_argument("--suite")
@@ -7847,6 +8385,8 @@ def main() -> int:
             "v2-suite-validate": v2_suite_validate,
             "v2-policy-validate": v2_policy_validate,
             "v2-input-author-packet": v2_input_author_packet,
+            "v2-input-claim": v2_input_claim,
+            "v2-input-claim-inspect": v2_input_claim_inspect,
             "v2-input-author": v2_input_author,
             "v2-input-author-materialize": v2_input_author_materialize,
             "v2-input-register": v2_input_register,
@@ -7855,6 +8395,7 @@ def main() -> int:
             "v2-input-review-packet": v2_input_review_packet,
             "v2-input-state": v2_input_state,
             "v2-input-ready": v2_input_ready,
+            "v2-input-claim-assert-ready": v2_input_claim_assert_ready,
             "v2-prepare": v2_prepare,
             "v2-run-compile": v2_run_compile,
             "v2-run-execute": v2_run_execute,
@@ -7870,7 +8411,15 @@ def main() -> int:
         }[args.command](args)
         print(json.dumps(result, sort_keys=True))
         return 0
-    except (EvaluationError, KeyError, OSError, subprocess.SubprocessError, json.JSONDecodeError) as exc:
+    except (
+        ClaimLedgerError,
+        EvaluationError,
+        KeyError,
+        OSError,
+        sqlite3.Error,
+        subprocess.SubprocessError,
+        json.JSONDecodeError,
+    ) as exc:
         print(f"REFUSED: {exc}", file=os.sys.stderr)
         return 1
 

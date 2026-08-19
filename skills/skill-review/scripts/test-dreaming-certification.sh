@@ -100,6 +100,9 @@ expect_refusal() {
     fail "$name omitted expected refusal: $expected"
 }
 
+bash "$SCRIPT_DIR/test-evaluation-input-claims.sh"
+pass "aggregate evaluation-input claim ledger foundation is fail closed"
+
 make_fixture() {
   local root="$1" profile="${2:-gate}" kind="${3:-capability_uplift}" fixture="${4:-correct}"
   mkdir -p "$root/skill" "$root/config/fixtures" "$root/config/graders"
@@ -575,6 +578,17 @@ print(json.dumps({"events": [
 ]}))
 PY
 chmod +x "$AUTHORING/author-bin/copilot"
+author_claim="$(
+  "$EVAL" v2-input-claim "$AUTHORING/skill" \
+    --owner-run-id certification-author-run \
+    --author-model fixture-author-model \
+    --reviewer-a-model fixture-review-model-one \
+    --reviewer-b-model fixture-review-model-two
+)"
+author_claim_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["claim_id"])' \
+    <<<"$author_claim"
+)"
 registration="$(
   env \
     DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
@@ -582,6 +596,7 @@ registration="$(
     UNTRUSTED_PROVIDER_REDIRECT="$HOME/should-not-cross" \
     FAKE_PROVIDER_ROUTE="$HOME/should-not-cross" \
     "$EVAL" v2-input-author "$AUTHORING/skill" \
+    --claim-id "$author_claim_id" \
     --suite "$AUTHORING/skill/.skill-evaluation-cases.json" \
     --policy "$AUTHORING/skill/.skill-evaluation-policy.json" \
     --config "$AUTHORING/config/compilation.json" \
@@ -702,16 +717,17 @@ with mock.patch.dict(
         raise AssertionError("live-root test override was accepted")
 PY
 run_trusted_review() {
-  local model="$1"
+  local slot="$1" model="$2"
   env \
     DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
     DREAMING_COPILOT_BIN="$AUTHORING/bin/copilot" \
     UNTRUSTED_PROVIDER_REDIRECT="$HOME/should-not-cross" \
     "$EVAL" v2-input-review "$AUTHORING/skill" --manifest "$manifest" \
+      --claim-id "$author_claim_id" --slot "$slot" \
       --validation "$author_validation_id" --model "$model"
 }
 review_one="$(
-  run_trusted_review "fixture-review-model-one"
+  run_trusted_review review_a "fixture-review-model-one"
 )"
 review_one_id="$(
   python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' \
@@ -720,18 +736,12 @@ review_one_id="$(
 python3 -c 'import json,sys; assert json.load(sys.stdin)["decision"] == "accept"' \
   <<<"$review_one"
 review_two="$(
-  run_trusted_review "fixture-review-model-two"
+  run_trusted_review review_b "fixture-review-model-two"
 )"
 review_two_id="$(
   python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' \
     <<<"$review_two"
 )"
-expect_refusal "author-reviewer-independence" \
-  "input reviewer model must differ from the author model" \
-  env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
-    DREAMING_COPILOT_BIN="$AUTHORING/bin/copilot" \
-    "$EVAL" v2-input-review "$AUTHORING/skill" --manifest "$manifest" \
-      --validation "$author_validation_id" --model "fixture-author-model"
 "$EVAL" v2-input-state "$AUTHORING/skill" \
   --state drafting --reason authoring_claimed >/dev/null
 "$EVAL" v2-input-state "$AUTHORING/skill" \
@@ -740,11 +750,93 @@ expect_refusal "author-reviewer-independence" \
 expect_refusal "distinct-reviewer-models" \
   "input review receipts must be distinct" \
   "$EVAL" v2-input-ready "$AUTHORING/skill" \
-    --manifest "$manifest" --validation "$author_validation_id" \
+    --claim-id "$author_claim_id" --manifest "$manifest" \
+    --validation "$author_validation_id" \
     --review "$review_one_id" --review "$review_one_id"
-"$EVAL" v2-input-ready "$AUTHORING/skill" \
-  --manifest "$manifest" --validation "$author_validation_id" \
-  --review "$review_one_id" --review "$review_two_id" >/dev/null
+python3 - "$SCRIPT_DIR" "$author_claim_id" "$AUTHORING/skill" \
+  "$manifest" "$author_validation_id" "$review_one_id" "$review_two_id" <<'PY'
+import sys
+from pathlib import Path
+
+script_dir, claim_id, skill_arg, manifest, validation, *reviews = sys.argv[1:]
+sys.path.insert(0, script_dir)
+import evaluation_input_claims as claims
+
+claim = claims.inspect_claim(claim_id)
+claims.complete_claim_ready(
+    claim_id,
+    skill_path=str(Path(skill_arg).resolve()),
+    skill_key=claim["skill_key"],
+    candidate_id=claim["candidate_id"],
+    manifest_sha256=manifest,
+    validation_receipt_sha256=validation,
+    review_receipt_sha256s=reviews,
+)
+PY
+ready="$(
+  python3 - "$EVAL" "$author_claim_id" "$AUTHORING/skill" \
+    "$manifest" "$author_validation_id" "$review_one_id" "$review_two_id" <<'PY'
+import json
+import subprocess
+import sys
+from pathlib import Path
+
+evaluator, claim_id, skill, manifest, validation, *reviews = sys.argv[1:]
+command = [
+    evaluator,
+    "v2-input-ready",
+    skill,
+    "--claim-id",
+    claim_id,
+    "--manifest",
+    manifest,
+    "--validation",
+    validation,
+]
+for review in reviews:
+    command.extend(("--review", review))
+processes = [
+    subprocess.Popen(command, text=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    for _ in range(2)
+]
+results = []
+for process in processes:
+    stdout, stderr = process.communicate()
+    if process.returncode != 0:
+        raise AssertionError(f"concurrent readiness failed: {stderr}")
+    results.append(json.loads(stdout))
+assert results[0]["transition_id"] == results[1]["transition_id"]
+transition_path = Path(results[0]["transition"])
+transitions = [
+    json.loads(path.read_text())
+    for path in sorted(transition_path.parent.glob("*.json"))
+]
+tips = {item["transition_id"] for item in transitions} - {
+    item["prior_transition_id"]
+    for item in transitions
+    if item["prior_transition_id"] is not None
+}
+assert tips == {results[0]["transition_id"]}
+assert sum(item["state"] == "ready" for item in transitions) == 1
+
+ready_transition = json.loads(transition_path.read_text())
+pointer_path = Path(results[0]["current"])
+pointer = json.loads(pointer_path.read_text())
+pointer["transition_id"] = ready_transition["prior_transition_id"]
+pointer_path.write_text(json.dumps(pointer, indent=2, sort_keys=True) + "\n")
+recovered = subprocess.run(
+    command, text=True, capture_output=True, check=False
+)
+if recovered.returncode != 0:
+    raise AssertionError(f"readiness recovery failed: {recovered.stderr}")
+recovered_result = json.loads(recovered.stdout)
+assert recovered_result["transition_id"] == results[0]["transition_id"]
+assert json.loads(pointer_path.read_text())["transition_id"] == results[0]["transition_id"]
+assert len(list(transition_path.parent.glob("*.json"))) == len(transitions)
+print(json.dumps(results[0], sort_keys=True, separators=(",", ":")))
+PY
+)"
+pass "concurrent claim readiness publishes one tip and recovers an interrupted pointer"
 python3 - "$registration" "$source_catalog_id" <<'PY'
 import json
 import sys
@@ -759,10 +851,22 @@ assert {
 assert sys.argv[2] in manifest["source_identities"]
 assert manifest["authoring_method"] == "bounded-safe-author"
 PY
+model_mismatch_claim="$(
+  "$EVAL" v2-input-claim "$AUTHORING/skill" \
+    --owner-run-id certification-model-mismatch-run \
+    --author-model fixture-author-model-mismatch \
+    --reviewer-a-model mismatch-reviewer-one \
+    --reviewer-b-model mismatch-reviewer-two
+)"
+model_mismatch_claim_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["claim_id"])' \
+    <<<"$model_mismatch_claim"
+)"
 expect_refusal "author-model-mismatch" "exact-model-unproved" \
   env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
     DREAMING_COPILOT_BIN="$AUTHORING/author-bin/copilot" \
     "$EVAL" v2-input-author "$AUTHORING/skill" \
+      --claim-id "$model_mismatch_claim_id" \
       --suite "$AUTHORING/skill/.skill-evaluation-cases.json" \
       --policy "$AUTHORING/skill/.skill-evaluation-policy.json" \
       --config "$AUTHORING/config/compilation.json" \
@@ -774,10 +878,22 @@ expect_refusal "author-model-mismatch" "exact-model-unproved" \
       --output-dir "$AUTHORING/model-mismatch-materialized"
 [[ ! -e "$AUTHORING/model-mismatch-materialized" ]] ||
   fail "author model mismatch left materialized output"
+insufficient_claim="$(
+  "$EVAL" v2-input-claim "$AUTHORING/skill" \
+    --owner-run-id certification-insufficient-run \
+    --author-model fixture-author-insufficient \
+    --reviewer-a-model insufficient-reviewer-one \
+    --reviewer-b-model insufficient-reviewer-two
+)"
+insufficient_claim_id="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["claim_id"])' \
+    <<<"$insufficient_claim"
+)"
 insufficient="$(
   env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \
     DREAMING_COPILOT_BIN="$AUTHORING/author-bin/copilot" \
     "$EVAL" v2-input-author "$AUTHORING/skill" \
+      --claim-id "$insufficient_claim_id" \
       --suite "$AUTHORING/skill/.skill-evaluation-cases.json" \
       --policy "$AUTHORING/skill/.skill-evaluation-policy.json" \
       --config "$AUTHORING/config/compilation.json" \
@@ -1866,8 +1982,28 @@ assert value["current"] is False
 assert value["evaluated_at"] is None
 assert value["input_manifest_sha256"] == manifest
 PY
+review_three="$(
+  "$EVAL" v2-input-review "$READINESS/skill" --manifest "$manifest" \
+    --reviewer readiness-reviewer-three --decision accept
+)"
+review_three_sha="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' <<<"$review_three")"
+ready_republished="$(
+  "$EVAL" v2-input-ready "$READINESS/skill" --manifest "$manifest" \
+    --validation "$validation_sha" --review "$review_one_sha" \
+    --review "$review_three_sha" --created-at 2026-01-01T00:06:00Z
+)"
+python3 - "$ready" "$ready_republished" <<'PY'
+import json
+import sys
+
+first, second = map(json.loads, sys.argv[1:])
+assert first["transition_id"] != second["transition_id"]
+second_transition = json.load(open(second["transition"]))
+assert second_transition["prior_transition_id"] == first["transition_id"]
+assert second["state"] == "ready"
+PY
 readiness_current="$(
-  python3 - "$ready" <<'PY'
+  python3 - "$ready_republished" <<'PY'
 import json, sys
 print(json.loads(sys.argv[1])["current"])
 PY
