@@ -40,6 +40,7 @@ from evaluation_input_claims import (  # noqa: E402
     recover_open_scheduled_claim,
     reserve_claim,
     review_set_identity,
+    terminalize_open_scheduled_claim,
 )
 
 SCHEMA_VERSION = 1
@@ -3088,6 +3089,9 @@ def v2_input_validate(args: argparse.Namespace) -> dict[str, Any]:
         "observation_plan_id": resolved["manifest"]["observation_plan_id"],
         "validator": RUNNER_VERSION,
     }
+    authority_check = getattr(args, "authority_check", None)
+    if authority_check is not None:
+        authority_check()
     path, receipt_sha256 = write_input_registry_json(
         "reviews", receipt, "input validation receipt"
     )
@@ -3106,6 +3110,7 @@ def v2_input_review(args: argparse.Namespace) -> dict[str, Any]:
     )
     bounded = is_bounded_input_manifest(resolved["manifest"])
     if bounded:
+        authority_check = getattr(args, "authority_check", None)
         expected_slots = (
             {"rereview_a", "rereview_b"}
             if resolved["manifest"]["authoring_method"] == "bounded-safe-repair"
@@ -3157,6 +3162,7 @@ def v2_input_review(args: argparse.Namespace) -> dict[str, Any]:
             validation_receipt_sha256=validation_sha256,
             requested_token_budget=args.token_budget,
             requested_timeout_seconds=args.timeout,
+            authority_check=authority_check,
         )
         trusted_args = argparse.Namespace(**vars(args))
         trusted_args.token_budget = dispatch["token_budget"]
@@ -3180,6 +3186,8 @@ def v2_input_review(args: argparse.Namespace) -> dict[str, Any]:
                     "input reviewer model must differ from the author model"
                 )
             phase = "materialization"
+            if authority_check is not None:
+                authority_check()
             packet_entry = publish_registry_object(
                 canonical(packet),
                 "input_review_packet",
@@ -3210,6 +3218,7 @@ def v2_input_review(args: argparse.Namespace) -> dict[str, Any]:
                 manifest_sha256=resolved["input_manifest_sha256"],
                 review_receipt_sha256=receipt_sha256,
                 decision=operation["decision"],
+                authority_check=authority_check,
             )
         except (
             EvaluationError,
@@ -3221,6 +3230,7 @@ def v2_input_review(args: argparse.Namespace) -> dict[str, Any]:
                 args.claim_id,
                 args.slot,
                 claim_failure_reason(phase, error),
+                authority_check=authority_check,
             )
             raise
         return {
@@ -3558,6 +3568,7 @@ def v2_input_author(args: argparse.Namespace) -> dict[str, Any]:
     if model == "default":
         raise EvaluationError("input author requires an explicit non-default model")
     validate_input_model_budget(args, "input author")
+    authority_check = getattr(args, "authority_check", None)
     packet, context = build_input_author_packet(args)
     adapter = trusted_authoring_adapter_path()
     adapter_sha256 = sha256_file(adapter)
@@ -3602,6 +3613,7 @@ def v2_input_author(args: argparse.Namespace) -> dict[str, Any]:
         validation_receipt_sha256=None,
         requested_token_budget=args.token_budget,
         requested_timeout_seconds=args.timeout,
+        authority_check=authority_check,
     )
     trusted_args = argparse.Namespace(**vars(args))
     trusted_args.token_budget = dispatch["token_budget"]
@@ -3640,6 +3652,7 @@ def v2_input_author(args: argparse.Namespace) -> dict[str, Any]:
                 operation=operation,
                 manifest_sha256=None,
                 terminal_reason="insufficient_information",
+                authority_check=authority_check,
             )
             return {
                 "status": "insufficient_information",
@@ -3662,6 +3675,8 @@ def v2_input_author(args: argparse.Namespace) -> dict[str, Any]:
             operation, packet, draft_id, adapter_sha256
         )
         phase = "materialization"
+        if authority_check is not None:
+            authority_check()
         materialization = materialize_input_author(
             packet, context, draft_value, str(output)
         )
@@ -3687,6 +3702,7 @@ def v2_input_author(args: argparse.Namespace) -> dict[str, Any]:
             slot_name="author",
             operation=operation,
             manifest_sha256=registration["input_manifest_sha256"],
+            authority_check=authority_check,
         )
     except (
         EvaluationError,
@@ -3695,7 +3711,10 @@ def v2_input_author(args: argparse.Namespace) -> dict[str, Any]:
         json.JSONDecodeError,
     ) as error:
         fail_dispatched_slot(
-            args.claim_id, "author", claim_failure_reason(phase, error)
+            args.claim_id,
+            "author",
+            claim_failure_reason(phase, error),
+            authority_check=authority_check,
         )
         raise
     return {
@@ -4245,6 +4264,7 @@ def v2_input_repair(args: argparse.Namespace) -> dict[str, Any]:
     if model == "default":
         raise EvaluationError("input repair requires an explicit original model")
     validate_input_model_budget(args, "input repair")
+    authority_check = getattr(args, "authority_check", None)
     skill_dir = resolve_path(Path(args.skill_dir), "skill directory")
     initial = validate_input_manifest(
         skill_dir, require_sha256(args.manifest, "initial manifest")
@@ -4295,6 +4315,7 @@ def v2_input_repair(args: argparse.Namespace) -> dict[str, Any]:
         requested_token_budget=args.token_budget,
         requested_timeout_seconds=args.timeout,
         lineage_receipt_sha256s=packet["initial_review_receipt_sha256s"],
+        authority_check=authority_check,
     )
     trusted_args = argparse.Namespace(**vars(args))
     trusted_args.model = model
@@ -4342,6 +4363,7 @@ def v2_input_repair(args: argparse.Namespace) -> dict[str, Any]:
                 operation=operation,
                 manifest_sha256=None,
                 terminal_reason="repair_insufficient_information",
+                authority_check=authority_check,
             )
             return {
                 "status": "insufficient_information",
@@ -4364,6 +4386,8 @@ def v2_input_repair(args: argparse.Namespace) -> dict[str, Any]:
             operation, packet, draft_id, adapter_sha256
         )
         phase = "materialization"
+        if authority_check is not None:
+            authority_check()
         materialization = materialize_input_repair(
             packet, context, draft_value, str(output)
         )
@@ -4375,6 +4399,7 @@ def v2_input_repair(args: argparse.Namespace) -> dict[str, Any]:
             slot_name="repair",
             operation=operation,
             manifest_sha256=registration["input_manifest_sha256"],
+            authority_check=authority_check,
         )
     except (
         EvaluationError,
@@ -4383,7 +4408,10 @@ def v2_input_repair(args: argparse.Namespace) -> dict[str, Any]:
         json.JSONDecodeError,
     ) as error:
         fail_dispatched_slot(
-            args.claim_id, "repair", claim_failure_reason(phase, error)
+            args.claim_id,
+            "repair",
+            claim_failure_reason(phase, error),
+            authority_check=authority_check,
         )
         raise
     return {
@@ -5282,6 +5310,20 @@ def write_input_current_pointer(
     atomic_write(pointer_path, pointer)
 
 
+def input_readiness_transition_allowed(
+    prior: dict[str, Any], next_state: str
+) -> bool:
+    prior_state = prior["state"]
+    return (
+        next_state in INPUT_READINESS_TRANSITIONS[prior_state]
+        or (
+            prior_state == "insufficient_information"
+            and prior.get("claim_id") is not None
+            and next_state == "drafting"
+        )
+    )
+
+
 def _write_input_transition_locked(
     skill_dir: Path,
     *,
@@ -5301,7 +5343,7 @@ def _write_input_transition_locked(
     if current is not None and current["candidate_id"] == candidate:
         prior = resolve_input_readiness(skill_dir)
         prior_state = prior["state"]
-        if state not in INPUT_READINESS_TRANSITIONS[prior_state]:
+        if not input_readiness_transition_allowed(prior, state):
             raise EvaluationError(
                 f"readiness cannot transition from {prior_state} to {state}"
             )
@@ -5745,6 +5787,382 @@ def assert_input_owner_operator_authority() -> None:
         )
 
 
+def write_input_owner_claim_fence(
+    path: Path, *, claim_id: str, owner_run_id: str
+) -> None:
+    if path.exists() or path.is_symlink():
+        raise EvaluationError("evaluation-input owner claim fence already exists")
+    parent = path.parent
+    if (
+        parent.is_symlink()
+        or not parent.is_dir()
+        or parent.stat().st_uid != os.getuid()
+        or parent.stat().st_mode & 0o077
+    ):
+        raise EvaluationError(
+            "evaluation-input owner claim fence directory is not private"
+        )
+    value = {
+        "schema_version": 1,
+        "claim_id": require_sha256(claim_id, "owner claim fence claim ID"),
+        "owner_run_id": require_text(
+            owner_run_id, "owner claim fence owner run ID"
+        ),
+    }
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = os.open(path, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb", closefd=False) as stream:
+            stream.write(canonical(value))
+            stream.flush()
+            os.fsync(stream.fileno())
+    finally:
+        os.close(descriptor)
+
+
+def write_input_owner_state(
+    skill_dir: Path,
+    *,
+    state: str,
+    reason: str,
+    manifest_sha256: str | None = None,
+    validation_receipt_sha256: str | None = None,
+) -> dict[str, Any]:
+    with input_readiness_state_lock():
+        return _write_input_transition_locked(
+            skill_dir,
+            state=state,
+            reason=reason,
+            input_manifest_sha256=manifest_sha256,
+            validation_receipt_sha256=validation_receipt_sha256,
+            review_receipt_sha256s=[],
+            created_at=now_iso(),
+            before_persist=assert_input_owner_authority,
+        )
+
+
+def publish_input_owner_terminal(claim_id: str) -> dict[str, Any]:
+    publications = [
+        publication
+        for publication in pending_terminal_publications()
+        if publication["claim_id"] == claim_id
+    ]
+    if len(publications) != 1:
+        raise EvaluationError(
+            "evaluation-input owner claim lacks one exact pending terminal"
+        )
+    return publish_pending_terminal(
+        publications[0], authority_check=assert_input_owner_authority
+    )
+
+
+def input_owner_operation_terminal(
+    claim_id: str, error: BaseException
+) -> dict[str, Any]:
+    claim = inspect_claim(claim_id)
+    if claim["status"] == "open":
+        raise error
+    terminal = publish_input_owner_terminal(claim_id)
+    return {
+        "status": claim["terminal_reason"],
+        "claim_id": claim_id,
+        "terminal": terminal,
+    }
+
+
+def input_owner_operation_args(
+    args: argparse.Namespace, **values: Any
+) -> argparse.Namespace:
+    return argparse.Namespace(
+        timeout=args.timeout,
+        token_budget=args.token_budget,
+        output_bytes=args.output_bytes,
+        authority_check=assert_input_owner_authority,
+        **values,
+    )
+
+
+def v2_input_owner_run(args: argparse.Namespace) -> dict[str, Any]:
+    assert_input_owner_authority()
+    owner_run_id = require_text(args.owner_run_id, "owner run ID")
+    owner_pid = os.getpid()
+    if os.getpgrp() != owner_pid:
+        raise EvaluationError(
+            "evaluation-input owner must lead its own process group"
+        )
+    owner_process = inspect_process_identity(owner_pid)
+    if owner_process["status"] != "present":
+        raise EvaluationError(
+            "evaluation-input owner process identity is unavailable"
+        )
+    skill_dir = resolve_path(Path(args.skill_dir), "skill directory")
+    candidate, _ = candidate_id(skill_dir)
+    owner_fence = {
+        "owner_pid": owner_pid,
+        "owner_process_identity": owner_process["identity"],
+        "owner_process_group_identity": process_group_identity(owner_pid),
+        "owner_boot_identity": host_boot_identity(),
+        "owner_config_sha256": require_sha256(
+            args.owner_config_sha256, "owner configuration digest"
+        ),
+    }
+    assert_input_owner_authority()
+    claim = reserve_claim(
+        skill_path=str(skill_dir),
+        skill_key=latest_key(str(skill_dir)),
+        candidate_id=candidate,
+        owner_run_id=owner_run_id,
+        author_model=require_text(args.author_model, "owner author model"),
+        reviewer_a_model=require_text(
+            args.reviewer_a_model, "owner reviewer A model"
+        ),
+        reviewer_b_model=require_text(
+            args.reviewer_b_model, "owner reviewer B model"
+        ),
+        owner_fence=owner_fence,
+        authority_check=assert_input_owner_authority,
+    )
+    claim_id = claim["claim_id"]
+    claim_models = claim["models"]
+    write_input_owner_claim_fence(
+        resolve_path(
+            Path(args.claim_fence).parent, "owner claim fence directory"
+        )
+        / Path(args.claim_fence).name,
+        claim_id=claim_id,
+        owner_run_id=owner_run_id,
+    )
+    write_input_owner_state(
+        skill_dir, state="drafting", reason="authoring_claimed"
+    )
+    test_root = Path(__file__).resolve().parents[3] / ".test-work"
+    temporary_parent = None
+    if os.environ.get("DREAMING_INPUT_TEST_BINARY"):
+        test_root.mkdir(parents=True, exist_ok=True)
+        temporary_parent = str(test_root)
+    with tempfile.TemporaryDirectory(
+        prefix="evaluation-input-owner.", dir=temporary_parent
+    ) as temporary:
+        author_args = input_owner_operation_args(
+            args,
+            skill_dir=str(skill_dir),
+            claim_id=claim_id,
+            slot="author",
+            suite=args.suite,
+            policy=args.policy,
+            config=args.config,
+            routing=args.routing,
+            harness=args.harness,
+            catalog=args.catalog,
+            model=args.author_model,
+            output_dir=str(Path(temporary) / "author"),
+        )
+        assert_input_owner_authority()
+        try:
+            author = v2_input_author(author_args)
+        except (
+            EvaluationError,
+            ClaimLedgerError,
+            OSError,
+            subprocess.SubprocessError,
+            json.JSONDecodeError,
+        ) as error:
+            return input_owner_operation_terminal(claim_id, error)
+        if author["status"] == "insufficient_information":
+            return {
+                "status": "insufficient_information",
+                "claim_id": claim_id,
+                "terminal": publish_input_owner_terminal(claim_id),
+            }
+        manifest = author["input_manifest_sha256"]
+        assert_input_owner_authority()
+        try:
+            validation = v2_input_validate(
+                argparse.Namespace(
+                    skill_dir=str(skill_dir),
+                    manifest=manifest,
+                    authority_check=assert_input_owner_authority,
+                )
+            )
+        except (EvaluationError, OSError, json.JSONDecodeError):
+            assert_input_owner_authority()
+            terminalize_open_scheduled_claim(
+                claim_id,
+                expected_owner_run_id=owner_run_id,
+                reason="deterministic_validation_failed",
+                authority_check=assert_input_owner_authority,
+            )
+            return {
+                "status": "deterministic_validation_failed",
+                "claim_id": claim_id,
+                "terminal": publish_input_owner_terminal(claim_id),
+            }
+        validation_sha256 = validation["receipt_sha256"]
+        write_input_owner_state(
+            skill_dir,
+            state="review_required",
+            reason="validation_passed",
+            manifest_sha256=manifest,
+            validation_receipt_sha256=validation_sha256,
+        )
+        review_results = []
+        for slot, model in (
+            ("review_a", claim_models["reviewer_a"]),
+            ("review_b", claim_models["reviewer_b"]),
+        ):
+            assert_input_owner_authority()
+            try:
+                review_results.append(
+                    v2_input_review(
+                        input_owner_operation_args(
+                            args,
+                            skill_dir=str(skill_dir),
+                            manifest=manifest,
+                            claim_id=claim_id,
+                            slot=slot,
+                            reviewer=None,
+                            decision=None,
+                            validation=validation_sha256,
+                            model=model,
+                        )
+                    )
+                )
+            except (
+                EvaluationError,
+                ClaimLedgerError,
+                OSError,
+                subprocess.SubprocessError,
+                json.JSONDecodeError,
+            ) as error:
+                return input_owner_operation_terminal(claim_id, error)
+        review_receipts = [
+            result["receipt_sha256"] for result in review_results
+        ]
+        if any(result["decision"] == "reject" for result in review_results):
+            assert_input_owner_authority()
+            try:
+                repair = v2_input_repair(
+                    input_owner_operation_args(
+                        args,
+                        skill_dir=str(skill_dir),
+                        claim_id=claim_id,
+                        manifest=manifest,
+                        validation=validation_sha256,
+                        review=review_receipts,
+                        original_author_model=claim_models["author"],
+                        output_dir=str(Path(temporary) / "repair"),
+                    )
+                )
+            except (
+                EvaluationError,
+                ClaimLedgerError,
+                OSError,
+                subprocess.SubprocessError,
+                json.JSONDecodeError,
+            ) as error:
+                return input_owner_operation_terminal(claim_id, error)
+            if repair["status"] == "insufficient_information":
+                return {
+                    "status": "insufficient_information",
+                    "claim_id": claim_id,
+                    "terminal": publish_input_owner_terminal(claim_id),
+                }
+            manifest = repair["input_manifest_sha256"]
+            assert_input_owner_authority()
+            try:
+                validation = v2_input_validate(
+                    argparse.Namespace(
+                        skill_dir=str(skill_dir),
+                        manifest=manifest,
+                        authority_check=assert_input_owner_authority,
+                    )
+                )
+            except (EvaluationError, OSError, json.JSONDecodeError):
+                assert_input_owner_authority()
+                terminalize_open_scheduled_claim(
+                    claim_id,
+                    expected_owner_run_id=owner_run_id,
+                    reason="deterministic_validation_failed",
+                    authority_check=assert_input_owner_authority,
+                )
+                return {
+                    "status": "deterministic_validation_failed",
+                    "claim_id": claim_id,
+                    "terminal": publish_input_owner_terminal(claim_id),
+                }
+            validation_sha256 = validation["receipt_sha256"]
+            write_input_owner_state(
+                skill_dir,
+                state="review_required",
+                reason="validation_passed",
+                manifest_sha256=manifest,
+                validation_receipt_sha256=validation_sha256,
+            )
+            review_results = []
+            for slot, model in (
+                ("rereview_a", claim_models["reviewer_a"]),
+                ("rereview_b", claim_models["reviewer_b"]),
+            ):
+                assert_input_owner_authority()
+                try:
+                    review_results.append(
+                        v2_input_review(
+                            input_owner_operation_args(
+                                args,
+                                skill_dir=str(skill_dir),
+                                manifest=manifest,
+                                claim_id=claim_id,
+                                slot=slot,
+                                reviewer=None,
+                                decision=None,
+                                validation=validation_sha256,
+                                model=model,
+                            )
+                        )
+                    )
+                except (
+                    EvaluationError,
+                    ClaimLedgerError,
+                    OSError,
+                    subprocess.SubprocessError,
+                    json.JSONDecodeError,
+                ) as error:
+                    return input_owner_operation_terminal(claim_id, error)
+            review_receipts = [
+                result["receipt_sha256"] for result in review_results
+            ]
+            if any(
+                result["decision"] == "reject" for result in review_results
+            ):
+                return {
+                    "status": "independent_rereview_rejected",
+                    "claim_id": claim_id,
+                    "terminal": publish_input_owner_terminal(claim_id),
+                }
+        resolved = validate_input_manifest(skill_dir, manifest)
+        validate_input_receipts(
+            resolved, validation_sha256, sorted(review_receipts)
+        )
+        assert_input_owner_authority()
+        complete_claim_ready(
+            claim_id,
+            skill_path=str(skill_dir),
+            skill_key=latest_key(str(skill_dir)),
+            candidate_id=candidate,
+            manifest_sha256=manifest,
+            validation_receipt_sha256=validation_sha256,
+            review_receipt_sha256s=sorted(review_receipts),
+            authority_check=assert_input_owner_authority,
+        )
+        return {
+            "status": "ready",
+            "claim_id": claim_id,
+            "terminal": publish_input_owner_terminal(claim_id),
+        }
+
+
 def boot_identity_from_sysctl(value: str) -> str:
     matches = re.findall(
         r"\{\s*sec\s*=\s*([0-9]+),\s*usec\s*=\s*([0-9]+)\s*\}",
@@ -5862,6 +6280,83 @@ def inspect_recorded_process_group(value: str) -> dict[str, Any]:
         "status": "present",
         "pgid": pgid,
         "leader_status": leader["status"],
+    }
+
+
+def v2_input_owner_terminal(args: argparse.Namespace) -> dict[str, Any]:
+    assert_input_owner_lease()
+    if args.reason == "halted":
+        if not input_owner_halt_file().exists():
+            raise EvaluationError(
+                "halted owner terminalization requires the Dreaming halt file"
+            )
+    elif input_owner_halt_file().exists():
+        raise EvaluationError(
+            "elapsed owner terminalization refuses while Dreaming is halted"
+        )
+    expected_owner_run_id = require_text(
+        args.expected_owner_run_id, "owner terminal run ID"
+    )
+    candidates = [
+        claim
+        for claim in open_scheduled_claims()
+        if claim["owner_run_id"] == expected_owner_run_id
+    ]
+    if args.claim_id is None and not candidates:
+        return {
+            "status": args.reason,
+            "claim_id": None,
+            "terminal": None,
+        }
+    if args.claim_id is not None:
+        claim_id = require_sha256(args.claim_id, "owner terminal claim ID")
+        candidates = [
+            claim for claim in candidates if claim["claim_id"] == claim_id
+        ]
+    if len(candidates) != 1:
+        raise EvaluationError(
+            "owner terminalization requires one exact open owner claim"
+        )
+    claim_id = candidates[0]["claim_id"]
+    claim = inspect_claim(claim_id)
+    fence = claim["lock_fence"]
+    if (
+        claim["status"] != "open"
+        or claim["owner_run_id"] != expected_owner_run_id
+        or fence["owner_mode"] != "scheduled"
+        or fence["owner_boot_identity"] != host_boot_identity()
+    ):
+        raise EvaluationError(
+            "owner terminalization does not match one open current-boot claim"
+        )
+    owner = inspect_recorded_process(
+        fence["owner_pid"], fence["owner_process_identity"]
+    )
+    group = inspect_recorded_process_group(
+        fence["owner_process_group_identity"]
+    )
+    if owner["status"] not in {"absent", "reused"} or group["status"] not in {
+        "absent",
+        "reused",
+    }:
+        raise EvaluationError(
+            "owner terminalization requires the exact owner group to be absent"
+        )
+    assert_input_owner_lease()
+    terminal = terminalize_open_scheduled_claim(
+        claim_id,
+        expected_owner_run_id=expected_owner_run_id,
+        reason=args.reason,
+        authority_check=assert_input_owner_lease,
+    )
+    publication = publish_pending_terminal(
+        terminal["terminal_publication"],
+        authority_check=assert_input_owner_lease,
+    )
+    return {
+        "status": args.reason,
+        "claim_id": claim_id,
+        "terminal": publication,
     }
 
 
@@ -6579,8 +7074,11 @@ def load_input_transition_history(
             raise EvaluationError(
                 "input readiness transition chain has a missing predecessor"
             )
-        prior_state = transitions[prior_id]["state"]
-        if transition["state"] not in INPUT_READINESS_TRANSITIONS[prior_state]:
+        prior = transitions[prior_id]
+        prior_state = prior["state"]
+        if not input_readiness_transition_allowed(
+            prior, transition["state"]
+        ):
             raise EvaluationError(
                 f"readiness cannot transition from {prior_state} "
                 f"to {transition['state']}"
@@ -10098,6 +10596,41 @@ def build_parser() -> argparse.ArgumentParser:
         "v2-input-claim-inspect"
     )
     input_claim_inspect_parser.add_argument("--claim-id", required=True)
+    input_owner_run_parser = commands.add_parser("v2-input-owner-run")
+    input_owner_run_parser.add_argument("skill_dir")
+    input_owner_run_parser.add_argument("--owner-run-id", required=True)
+    input_owner_run_parser.add_argument("--claim-fence", required=True)
+    input_owner_run_parser.add_argument(
+        "--owner-config-sha256", required=True
+    )
+    input_owner_run_parser.add_argument("--suite", required=True)
+    input_owner_run_parser.add_argument("--policy", required=True)
+    input_owner_run_parser.add_argument("--config", required=True)
+    input_owner_run_parser.add_argument("--routing", required=True)
+    input_owner_run_parser.add_argument("--harness", required=True)
+    input_owner_run_parser.add_argument("--catalog", required=True)
+    input_owner_run_parser.add_argument("--author-model", required=True)
+    input_owner_run_parser.add_argument("--reviewer-a-model", required=True)
+    input_owner_run_parser.add_argument("--reviewer-b-model", required=True)
+    input_owner_run_parser.add_argument("--timeout", type=int, default=600)
+    input_owner_run_parser.add_argument(
+        "--token-budget", type=int, default=18_000
+    )
+    input_owner_run_parser.add_argument(
+        "--output-bytes", type=int, default=100_000
+    )
+    input_owner_terminal_parser = commands.add_parser(
+        "v2-input-owner-terminal"
+    )
+    input_owner_terminal_parser.add_argument("--claim-id")
+    input_owner_terminal_parser.add_argument(
+        "--expected-owner-run-id", required=True
+    )
+    input_owner_terminal_parser.add_argument(
+        "--reason",
+        choices=("halted", "skill_elapsed_budget_exhausted"),
+        required=True,
+    )
     input_author_parser = commands.add_parser("v2-input-author")
     input_author_parser.add_argument("skill_dir")
     input_author_parser.add_argument("--claim-id", required=True)
@@ -10349,6 +10882,8 @@ def main() -> int:
             "v2-input-author-packet": v2_input_author_packet,
             "v2-input-claim": v2_input_claim,
             "v2-input-claim-inspect": v2_input_claim_inspect,
+            "v2-input-owner-run": v2_input_owner_run,
+            "v2-input-owner-terminal": v2_input_owner_terminal,
             "v2-input-author": v2_input_author,
             "v2-input-repair-packet": v2_input_repair_packet,
             "v2-input-repair": v2_input_repair,

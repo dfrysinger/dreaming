@@ -1319,6 +1319,283 @@ assert dispatch_inspection["slots"][0]["usage_status"] == "unavailable"
 assert dispatch_inspection["slots"][0]["failure_reason"] == "owner_interrupted"
 passed("interrupted dispatch is retained as unknown-spent before claim closure")
 
+use_state("scheduled-owner-exact-terminal")
+os.environ["SKILLS_LOCK_TOKEN"] = "00000000-0000-4000-8000-000000000005"
+scheduled_terminal = claims.reserve_claim(
+    skill_path=str(root / "skill"),
+    skill_key="fixture-skill-key",
+    candidate_id=sha("candidate"),
+    owner_run_id="scheduled-terminal-run",
+    author_model="scheduled-author",
+    reviewer_a_model="scheduled-review-a",
+    reviewer_b_model="scheduled-review-b",
+    owner_fence=owner_fence,
+)
+del os.environ["SKILLS_LOCK_TOKEN"]
+before_wrong_terminal = claims.inspect_claim(scheduled_terminal["claim_id"])
+try:
+    claims.terminalize_open_scheduled_claim(
+        scheduled_terminal["claim_id"],
+        expected_owner_run_id="different-owner-run",
+        reason="halted",
+    )
+except claims.ClaimLedgerError as error:
+    assert "differs from expected owner" in str(error)
+else:
+    raise AssertionError("scheduled terminalizer accepted a different owner run")
+assert claims.inspect_claim(scheduled_terminal["claim_id"]) == (
+    before_wrong_terminal
+)
+halted = claims.terminalize_open_scheduled_claim(
+    scheduled_terminal["claim_id"],
+    expected_owner_run_id="scheduled-terminal-run",
+    reason="halted",
+)
+assert halted["terminal_reason"] == "halted"
+assert halted["dispatching_slots"] == []
+halted_inspection = claims.inspect_claim(scheduled_terminal["claim_id"])
+assert halted_inspection["status"] == "invalid"
+assert halted_inspection["terminal_publication"]["readiness_reason"] == "halted"
+try:
+    claims.terminalize_open_scheduled_claim(
+        scheduled_terminal["claim_id"],
+        expected_owner_run_id="scheduled-terminal-run",
+        reason="halted",
+    )
+except claims.ClaimLedgerError as error:
+    assert "open scheduled claim" in str(error)
+else:
+    raise AssertionError("scheduled terminalizer reopened a spent claim")
+passed("scheduled halt terminalization is exact and never refunds a claim")
+
+use_state("scheduled-authority-commit-fence")
+os.environ["SKILLS_LOCK_TOKEN"] = "00000000-0000-4000-8000-000000000006"
+def refuse_commit():
+    raise RuntimeError("lease lost before commit")
+try:
+    claims.reserve_claim(
+        skill_path=str(root / "skill"),
+        skill_key="fixture-skill-key",
+        candidate_id=sha("candidate"),
+        owner_run_id="authority-fenced-owner-run",
+        author_model="scheduled-author",
+        reviewer_a_model="scheduled-review-a",
+        reviewer_b_model="scheduled-review-b",
+        owner_fence=owner_fence,
+        authority_check=refuse_commit,
+    )
+except RuntimeError as error:
+    assert "lease lost before commit" in str(error)
+else:
+    raise AssertionError("claim reservation committed after authority loss")
+authority_claim = claims.reserve_claim(
+    skill_path=str(root / "skill"),
+    skill_key="fixture-skill-key",
+    candidate_id=sha("candidate"),
+    owner_run_id="authority-fenced-owner-run",
+    author_model="scheduled-author",
+    reviewer_a_model="scheduled-review-a",
+    reviewer_b_model="scheduled-review-b",
+    owner_fence=owner_fence,
+)
+del os.environ["SKILLS_LOCK_TOKEN"]
+assert authority_claim["status"] == "open"
+passed("scheduled claim transactions roll back when commit authority is lost")
+
+owner_halt = Path(os.environ["SKILLS_STATE_DIR"]) / "skill-review" / "disable-daemon"
+owner_halt.parent.mkdir(parents=True, exist_ok=True)
+owner_halt.touch()
+with (
+    mock.patch.object(evaluator, "assert_input_owner_lease"),
+    mock.patch.object(
+        evaluator, "host_boot_identity", return_value=owner_fence["owner_boot_identity"]
+    ),
+    mock.patch.object(
+        evaluator,
+        "inspect_recorded_process",
+        return_value={"status": "absent"},
+    ),
+    mock.patch.object(
+        evaluator,
+        "inspect_recorded_process_group",
+        return_value={"status": "absent"},
+    ),
+    mock.patch.object(
+        evaluator,
+        "publish_pending_terminal",
+        return_value={"state": "invalid", "reason": "halted"},
+    ),
+):
+    resolved_gap = evaluator.v2_input_owner_terminal(
+        __import__("argparse").Namespace(
+            claim_id=None,
+            expected_owner_run_id="authority-fenced-owner-run",
+            reason="halted",
+        )
+    )
+assert resolved_gap["claim_id"] == authority_claim["claim_id"]
+assert claims.inspect_claim(authority_claim["claim_id"])["terminal_reason"] == (
+    "halted"
+)
+passed("halt resolves an exact owner-run claim across the handoff gap")
+
+use_state("scheduled-owner-lifecycle")
+owner_fence_dir = root / "owner-fence"
+owner_fence_dir.mkdir(mode=0o700)
+owner_claim_id = sha("owner-lifecycle-claim")
+owner_states = []
+owner_reviews = []
+owner_ready = []
+review_outcomes = iter(
+    [
+        {
+            "slot": "review_a",
+            "decision": "reject",
+            "receipt_sha256": sha("review-a"),
+        },
+        {
+            "slot": "review_b",
+            "decision": "accept",
+            "receipt_sha256": sha("review-b"),
+        },
+        {
+            "slot": "rereview_a",
+            "decision": "accept",
+            "receipt_sha256": sha("rereview-a"),
+        },
+        {
+            "slot": "rereview_b",
+            "decision": "accept",
+            "receipt_sha256": sha("rereview-b"),
+        },
+    ]
+)
+owner_args = __import__("argparse").Namespace(
+    skill_dir=str(root / "skill"),
+    owner_run_id="scheduled-lifecycle-run",
+    claim_fence=str(owner_fence_dir / "claim.json"),
+    owner_config_sha256=sha("owner-config"),
+    suite=str(root / "suite.json"),
+    policy=str(root / "policy.json"),
+    config=str(root / "config.json"),
+    routing=str(root / "routing.json"),
+    harness=str(root / "harness.py"),
+    catalog=str(root / "catalog.json"),
+    author_model="author-model",
+    reviewer_a_model="z-reviewer-model",
+    reviewer_b_model="a-reviewer-model",
+    timeout=60,
+    token_budget=1000,
+    output_bytes=10000,
+)
+with (
+    mock.patch.object(evaluator, "assert_input_owner_authority"),
+    mock.patch.object(evaluator.os, "getpid", return_value=4242),
+    mock.patch.object(evaluator.os, "getpgrp", return_value=4242),
+    mock.patch.object(
+        evaluator,
+        "inspect_process_identity",
+        return_value={"status": "present", "identity": "owner-identity"},
+    ),
+    mock.patch.object(
+        evaluator,
+        "process_group_identity",
+        return_value="pgid:4242:leader:owner-identity",
+    ),
+    mock.patch.object(evaluator, "host_boot_identity", return_value=sha("boot")),
+    mock.patch.object(
+        evaluator,
+        "candidate_id",
+        return_value=(sha("candidate"), str(root / "skill")),
+    ),
+    mock.patch.object(evaluator, "latest_key", return_value="skill-key"),
+    mock.patch.object(
+        evaluator,
+        "reserve_claim",
+        return_value={
+            "claim_id": owner_claim_id,
+            "models": {
+                "author": "author-model",
+                "reviewer_a": "a-reviewer-model",
+                "reviewer_b": "z-reviewer-model",
+            },
+        },
+    ),
+    mock.patch.object(
+        evaluator,
+        "write_input_owner_state",
+        side_effect=lambda skill, **facts: owner_states.append(facts) or facts,
+    ),
+    mock.patch.object(
+        evaluator,
+        "v2_input_author",
+        return_value={
+            "status": "review_required",
+            "input_manifest_sha256": sha("initial-manifest"),
+        },
+    ),
+    mock.patch.object(
+        evaluator,
+        "v2_input_validate",
+        side_effect=[
+            {"receipt_sha256": sha("initial-validation")},
+            {"receipt_sha256": sha("repaired-validation")},
+        ],
+    ),
+    mock.patch.object(
+        evaluator,
+        "v2_input_review",
+        side_effect=lambda args: owner_reviews.append((args.slot, args.model))
+        or next(review_outcomes),
+    ),
+    mock.patch.object(
+        evaluator,
+        "v2_input_repair",
+        return_value={
+            "status": "review_required",
+            "input_manifest_sha256": sha("repaired-manifest"),
+        },
+    ),
+    mock.patch.object(evaluator, "validate_input_manifest", return_value={}),
+    mock.patch.object(evaluator, "validate_input_receipts"),
+    mock.patch.object(
+        evaluator,
+        "complete_claim_ready",
+        side_effect=lambda *args, **facts: owner_ready.append(facts) or facts,
+    ),
+    mock.patch.object(
+        evaluator,
+        "publish_input_owner_terminal",
+        return_value={"state": "ready"},
+    ),
+):
+    lifecycle = evaluator.v2_input_owner_run(owner_args)
+assert lifecycle["status"] == "ready"
+assert owner_reviews == [
+    ("review_a", "a-reviewer-model"),
+    ("review_b", "z-reviewer-model"),
+    ("rereview_a", "a-reviewer-model"),
+    ("rereview_b", "z-reviewer-model"),
+]
+assert [state["state"] for state in owner_states] == [
+    "drafting",
+    "review_required",
+    "review_required",
+]
+assert owner_ready[0]["manifest_sha256"] == sha("repaired-manifest")
+assert owner_ready[0]["review_receipt_sha256s"] == sorted(
+    [sha("rereview-a"), sha("rereview-b")]
+)
+owner_fence_value = json.loads(
+    (owner_fence_dir / "claim.json").read_text()
+)
+assert owner_fence_value == {
+    "schema_version": 1,
+    "claim_id": owner_claim_id,
+    "owner_run_id": "scheduled-lifecycle-run",
+}
+passed("scheduled owner runs one claim through repair and accepted rereviews")
+
 use_state("empty-owner-recovery")
 with mock.patch.object(
     evaluator, "host_boot_identity", side_effect=AssertionError("not called")
@@ -2118,6 +2395,6 @@ assert "one exact open or pending" in operator_with_halt.stderr
 passed("operator recovery requires both halt and the inherited writer lease")
 passed("historical inspection is stable and owner reconciliation requires authority")
 
-assert passes == 44
+assert passes == 48
 print(f"PASS  {passes} deterministic evaluation-input claim ledger checks")
 PY

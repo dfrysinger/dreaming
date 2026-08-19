@@ -19,6 +19,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 import uuid
 from dataclasses import dataclass
@@ -101,6 +102,8 @@ EVALUATION_INPUT_INDEX_NAME = "root-index.json"
 EVALUATION_INPUT_MANIFEST_NAME = "input-manifest.json"
 EVALUATION_INPUT_MAX_CONTROL_BYTES = 64_000
 EVALUATION_INPUT_MAX_FILE_BYTES = 1_048_576
+EVALUATION_INPUT_OWNER_MAX_SECONDS = 25 * 60
+EVALUATION_INPUT_OWNER_STOP_SECONDS = 10
 EVALUATION_INPUT_QUEUE_STATES = {
     "pass",
     "regression",
@@ -3390,6 +3393,440 @@ def derive_evaluation_input_queue(
     }
 
 
+def evaluation_input_process_identity(pid: int) -> str | None:
+    result = subprocess.run(
+        ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    identity = " ".join(result.stdout.split())
+    return identity if result.returncode == 0 and identity else None
+
+
+def evaluation_input_process_group_status(
+    pgid: int, expected_leader_identity: str
+) -> str:
+    observed_identity = evaluation_input_process_identity(pgid)
+    if (
+        observed_identity is not None
+        and observed_identity != expected_leader_identity
+    ):
+        return "reused"
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return "absent"
+    except (PermissionError, OSError) as error:
+        raise RuntimeFailure(
+            "evaluation-input-owner-group-unreadable", str(error)
+        ) from error
+    return "present" if observed_identity is not None else "leaderless"
+
+
+def stop_evaluation_input_process_group(
+    process: subprocess.Popen[str],
+    *,
+    leader_identity: str,
+    timeout_seconds: int,
+) -> None:
+    status = evaluation_input_process_group_status(
+        process.pid, leader_identity
+    )
+    if status == "present":
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    elif status not in {"absent", "reused"}:
+        raise RuntimeFailure(
+            "evaluation-input-owner-group-unreadable",
+            "evaluation-input owner group leader identity is unavailable",
+        )
+    try:
+        process.wait(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired:
+        raise RuntimeFailure(
+            "evaluation-input-owner-group-live",
+            "evaluation-input owner did not exit after exact group termination",
+        )
+    deadline = time.monotonic() + timeout_seconds
+    while time.monotonic() < deadline:
+        status = evaluation_input_process_group_status(
+            process.pid, leader_identity
+        )
+        if status in {"absent", "reused"}:
+            break
+        time.sleep(0.05)
+    if status not in {"absent", "reused"}:
+        raise RuntimeFailure(
+            "evaluation-input-owner-group-live",
+            "evaluation-input owner process group survived termination",
+        )
+    try:
+        process.communicate(timeout=timeout_seconds)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeFailure(
+            "evaluation-input-owner-pipe-live",
+            "evaluation-input owner pipes did not close after termination",
+        ) from error
+
+
+def read_evaluation_input_claim_fence(
+    path: Path, expected_owner_run_id: str
+) -> dict[str, str] | None:
+    if not path.exists():
+        return None
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeFailure(
+            "evaluation-input-owner-claim-invalid",
+            "evaluation-input owner claim fence is not a regular file",
+        )
+    try:
+        value = json.loads(path.read_bytes())
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeFailure(
+            "evaluation-input-owner-claim-invalid",
+            f"evaluation-input owner claim fence is unreadable: {error}",
+        ) from error
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"schema_version", "claim_id", "owner_run_id"}
+        or value.get("schema_version") != 1
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(value.get("claim_id"))) is None
+        or value.get("owner_run_id") != expected_owner_run_id
+    ):
+        raise RuntimeFailure(
+            "evaluation-input-owner-claim-invalid",
+            "evaluation-input owner claim fence is malformed",
+        )
+    return {
+        "claim_id": value["claim_id"],
+        "owner_run_id": value["owner_run_id"],
+    }
+
+
+def run_evaluation_input_owner_process(
+    command: list[str],
+    *,
+    owner_run_id: str,
+    claim_fence_path: Path,
+    halt_check: Callable[[], bool],
+    lease_check: Callable[[], bool],
+    terminalize: Callable[
+        [dict[str, str] | None, str], dict[str, Any]
+    ],
+    timeout_seconds: int = EVALUATION_INPUT_OWNER_MAX_SECONDS,
+    stop_seconds: int = EVALUATION_INPUT_OWNER_STOP_SECONDS,
+    poll_seconds: float = 0.1,
+) -> dict[str, Any]:
+    if not lease_check():
+        return {"status": "lock_lost", "claim": None}
+    if halt_check():
+        return {"status": "halted", "claim": None}
+    try:
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            start_new_session=True,
+        )
+    except OSError as error:
+        raise RuntimeFailure(
+            "evaluation-input-owner-start-failed", str(error)
+        ) from error
+    leader_identity = None
+    identity_deadline = time.monotonic() + 1
+    while time.monotonic() < identity_deadline:
+        leader_identity = evaluation_input_process_identity(process.pid)
+        if leader_identity is not None:
+            break
+        if process.poll() is not None:
+            break
+        time.sleep(0.01)
+    if leader_identity is None:
+        try:
+            process.communicate(timeout=stop_seconds)
+        except subprocess.TimeoutExpired:
+            pass
+        raise RuntimeFailure(
+            "evaluation-input-owner-identity-unavailable",
+            "evaluation-input owner process identity could not be captured",
+        )
+    started = time.monotonic()
+    stop_reason = None
+    while process.poll() is None:
+        if halt_check():
+            stop_reason = "halted"
+            break
+        if not lease_check():
+            stop_reason = "lock_lost"
+            break
+        if time.monotonic() - started >= timeout_seconds:
+            stop_reason = "skill_elapsed_budget_exhausted"
+            break
+        time.sleep(poll_seconds)
+    if stop_reason is not None:
+        stop_evaluation_input_process_group(
+            process,
+            leader_identity=leader_identity,
+            timeout_seconds=stop_seconds,
+        )
+        claim = read_evaluation_input_claim_fence(
+            claim_fence_path, owner_run_id
+        )
+        if stop_reason == "lock_lost" or not lease_check():
+            return {
+                "status": "lock_lost",
+                "claim": claim,
+                "process_group_id": process.pid,
+            }
+        terminal = terminalize(claim, stop_reason)
+        return {
+            "status": stop_reason,
+            "claim": claim,
+            "terminal": terminal,
+            "process_group_id": process.pid,
+        }
+    group_status = evaluation_input_process_group_status(
+        process.pid, leader_identity
+    )
+    if group_status not in {"absent", "reused"}:
+        if process.stdout is not None:
+            process.stdout.close()
+        if process.stderr is not None:
+            process.stderr.close()
+        raise RuntimeFailure(
+            "evaluation-input-owner-group-leaked",
+            "evaluation-input owner left a live process group",
+        )
+    try:
+        stdout, stderr = process.communicate(timeout=stop_seconds)
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeFailure(
+            "evaluation-input-owner-pipe-live",
+            "evaluation-input owner pipes remained open after group exit",
+        ) from error
+    try:
+        values = [
+            json.loads(line)
+            for line in stdout.splitlines()
+            if line.strip()
+        ]
+    except json.JSONDecodeError as error:
+        raise RuntimeFailure(
+            "evaluation-input-owner-malformed", str(error)
+        ) from error
+    if (
+        process.returncode != 0
+        or len(values) != 1
+        or not isinstance(values[0], dict)
+    ):
+        detail = (stderr or stdout).strip()[-1000:]
+        raise RuntimeFailure(
+            "evaluation-input-owner-failed",
+            detail or f"evaluation-input owner exited {process.returncode}",
+        )
+    return values[0]
+
+
+def evaluation_input_owner_lease_valid() -> bool:
+    required = (
+        "SKILLS_LOCK_TOKEN",
+        "SKILLS_LOCK_OWNER_PID",
+        "SKILLS_LOCK_OWNER_IDENTITY",
+    )
+    if (
+        os.environ.get("DREAMING_ORCHESTRATED") != "1"
+        or os.environ.get("SKILLS_LOCK_HELD_BY_PARENT") != "1"
+        or any(not os.environ.get(key) for key in required)
+    ):
+        return False
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(Path(__file__).with_name("daemon-lock.py")),
+            "assert",
+            os.environ["SKILLS_LOCK_TOKEN"],
+            "--pid",
+            os.environ["SKILLS_LOCK_OWNER_PID"],
+            "--process-identity",
+            os.environ["SKILLS_LOCK_OWNER_IDENTITY"],
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    return result.returncode == 0
+
+
+def evaluation_input_owner_halt_path(paths: RuntimePaths) -> Path:
+    return Path(
+        os.environ.get(
+            "DREAMING_HALT_FILE",
+            paths.state / "skill-review" / "disable-daemon",
+        )
+    )
+
+
+def evaluation_input_owner_content(
+    owner: dict[str, Any],
+    census: dict[str, Any],
+    capability_id: str,
+) -> dict[str, Any]:
+    entries = load_evaluation_input_root(owner)
+    entry = entries.get(capability_id)
+    physical = census.get("physical_instances")
+    if entry is None or not isinstance(physical, list):
+        raise RuntimeFailure(
+            "evaluation-input-not-ready",
+            "selected evaluation-input content is unavailable",
+        )
+    installed_roots = [
+        Path(item["absolute_path"])
+        for item in physical
+        if isinstance(item, dict)
+        and isinstance(item.get("absolute_path"), str)
+    ]
+    return validate_evaluation_input_capability(
+        owner, entry, installed_skill_roots=installed_roots
+    )
+
+
+def evaluation_input_owner_terminal_command(
+    owner: dict[str, Any],
+    claim: dict[str, str] | None,
+    reason: str,
+    owner_run_id: str,
+) -> dict[str, Any]:
+    command = [
+        sys.executable,
+        owner["evaluator"],
+        "v2-input-owner-terminal",
+        "--expected-owner-run-id",
+        owner_run_id,
+        "--reason",
+        reason,
+    ]
+    if claim is not None:
+        command.extend(["--claim-id", claim["claim_id"]])
+    try:
+        result = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeFailure(
+            "evaluation-input-owner-terminal-failed", str(error)
+        ) from error
+    try:
+        values = [
+            json.loads(line)
+            for line in result.stdout.splitlines()
+            if line.strip()
+        ]
+    except json.JSONDecodeError as error:
+        raise RuntimeFailure(
+            "evaluation-input-owner-terminal-malformed", str(error)
+        ) from error
+    if (
+        result.returncode != 0
+        or len(values) != 1
+        or not isinstance(values[0], dict)
+    ):
+        detail = (result.stderr or result.stdout).strip()[-1000:]
+        raise RuntimeFailure(
+            "evaluation-input-owner-terminal-failed",
+            detail or "evaluation-input owner terminalization refused",
+        )
+    return values[0]
+
+
+def execute_evaluation_input_owner(
+    owner: dict[str, Any],
+    census: dict[str, Any],
+    queue: dict[str, Any],
+    paths: RuntimePaths,
+) -> dict[str, Any]:
+    row = next(
+        (
+            item
+            for item in queue["rows"]
+            if item.get("runnable_phase") == "authoring"
+        ),
+        None,
+    )
+    if row is None:
+        return {"status": "idle", "selected_capability_id": None}
+    owner_run_id = os.environ.get("DREAMING_PARENT_RUN_ID")
+    if not owner_run_id:
+        raise RuntimeFailure(
+            "evaluation-input-owner-unorchestrated",
+            "evaluation-input owner requires a parent run identity",
+        )
+    content = evaluation_input_owner_content(
+        owner, census, row["capability_id"]
+    )
+    files = content["files"]
+    paths.state.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".evaluation-input-owner.", dir=paths.state
+    ) as temporary:
+        claim_fence = Path(temporary) / "claim.json"
+        command = [
+            sys.executable,
+            owner["evaluator"],
+            "v2-input-owner-run",
+            row["skill_path"],
+            "--owner-run-id",
+            owner_run_id,
+            "--claim-fence",
+            str(claim_fence),
+            "--owner-config-sha256",
+            owner["config_sha256"],
+            "--suite",
+            files["suite"],
+            "--policy",
+            files["policy"],
+            "--config",
+            files["compilation"],
+            "--routing",
+            files["routing"],
+            "--harness",
+            files["harness"],
+            "--catalog",
+            files["catalog"],
+            "--author-model",
+            owner["author_model"],
+            "--reviewer-a-model",
+            owner["reviewer_a_model"],
+            "--reviewer-b-model",
+            owner["reviewer_b_model"],
+        ]
+        result = run_evaluation_input_owner_process(
+            command,
+            owner_run_id=owner_run_id,
+            claim_fence_path=claim_fence,
+            halt_check=lambda: evaluation_input_owner_halt_path(paths).exists(),
+            lease_check=evaluation_input_owner_lease_valid,
+            terminalize=lambda claim, reason: (
+                evaluation_input_owner_terminal_command(
+                    owner, claim, reason, owner_run_id
+                )
+            ),
+        )
+    return {
+        "selected_capability_id": row["capability_id"],
+        "selected_priority": row["priority"],
+        **result,
+    }
+
+
 def reconcile_evaluation_input_owner(owner: dict[str, Any]) -> dict[str, Any]:
     try:
         process = subprocess.run(
@@ -4031,7 +4468,7 @@ def scheduled_run() -> dict[str, Any]:
                     "evaluation-input-evidence-invalid",
                     "evaluation-input usage evidence is unavailable",
                 )
-            report["evaluation_input"]["queue"] = derive_evaluation_input_queue(
+            derived_queue = derive_evaluation_input_queue(
                 evaluation_owner,
                 queue_evidence["census"],
                 usage,
@@ -4039,14 +4476,46 @@ def scheduled_run() -> dict[str, Any]:
                 census_receipt_sha256=queue_evidence["summary"]["receipt_sha256"],
                 usage_receipt_sha256=usage_summary["receipt_sha256"],
             )
-        except RuntimeFailure as error:
-            report["evaluation_input"]["queue"] = {
-                "status": "refused",
-                "code": error.code,
-            }
-            report["errors"].append(
-                {"phase": "evaluation-input-queue", "code": error.code}
+            report["evaluation_input"]["queue"] = derived_queue
+            report["evaluation_input"]["run"] = execute_evaluation_input_owner(
+                evaluation_owner,
+                queue_evidence["census"],
+                derived_queue,
+                paths,
             )
+            if report["evaluation_input"]["run"]["status"] == "lock_lost":
+                report["errors"].append(
+                    {
+                        "phase": "evaluation-input-run",
+                        "code": "writer-lock-lost",
+                    }
+                )
+                report["ok"] = False
+                return report
+        except RuntimeFailure as error:
+            if "queue" not in report["evaluation_input"]:
+                report["evaluation_input"]["queue"] = {
+                    "status": "refused",
+                    "code": error.code,
+                }
+            else:
+                report["evaluation_input"]["run"] = {
+                    "status": "refused",
+                    "code": error.code,
+                }
+            report["errors"].append(
+                {
+                    "phase": (
+                        "evaluation-input-run"
+                        if "run" in report["evaluation_input"]
+                        else "evaluation-input-queue"
+                    ),
+                    "code": error.code,
+                }
+            )
+            if not evaluation_input_owner_lease_valid():
+                report["ok"] = False
+                return report
     recovery_state = paths.state / "publication-recovery-required.json"
     if recovery_state.exists():
         report["publication_recovery_required"] = True

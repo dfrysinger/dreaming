@@ -851,6 +851,185 @@ class RuntimeTest(unittest.TestCase):
                 usage_receipt_sha256=usage_receipt_sha256,
             )
 
+    def test_evaluation_input_owner_process_group_is_reaped_on_stop(self) -> None:
+        owner_run_id = "owner-run-fixture"
+        claim_id = "sha256:" + "a" * 64
+        claim_fence = self.case / "claim.json"
+        child = (
+            "import json,subprocess,sys,time;"
+            "from pathlib import Path;"
+            f"Path({str(claim_fence)!r}).write_text(json.dumps("
+            f"{{'schema_version':1,'claim_id':{claim_id!r},"
+            f"'owner_run_id':{owner_run_id!r}}}));"
+            "subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']);"
+            "time.sleep(60)"
+        )
+        halt_checks = iter([False, False, True])
+        terminals = []
+        halted = runtime_module.run_evaluation_input_owner_process(
+            [sys.executable, "-c", child],
+            owner_run_id=owner_run_id,
+            claim_fence_path=claim_fence,
+            halt_check=lambda: next(halt_checks, True),
+            lease_check=lambda: True,
+            terminalize=lambda claim, reason: terminals.append(
+                (claim, reason)
+            ) or {"status": "published"},
+            timeout_seconds=5,
+            stop_seconds=2,
+            poll_seconds=0.05,
+        )
+        self.assertEqual(halted["status"], "halted")
+        self.assertEqual(
+            terminals,
+            [
+                (
+                    {"claim_id": claim_id, "owner_run_id": owner_run_id},
+                    "halted",
+                )
+            ],
+        )
+        with self.assertRaises(ProcessLookupError):
+            os.killpg(halted["process_group_id"], 0)
+
+        claim_fence.unlink()
+        lease_checks = iter([True, True, False])
+        terminals.clear()
+        lock_lost = runtime_module.run_evaluation_input_owner_process(
+            [sys.executable, "-c", child],
+            owner_run_id=owner_run_id,
+            claim_fence_path=claim_fence,
+            halt_check=lambda: False,
+            lease_check=lambda: next(lease_checks, False),
+            terminalize=lambda claim, reason: terminals.append(
+                (claim, reason)
+            ) or {},
+            timeout_seconds=5,
+            stop_seconds=2,
+            poll_seconds=0.05,
+        )
+        self.assertEqual(lock_lost["status"], "lock_lost")
+        self.assertEqual(lock_lost["claim"]["claim_id"], claim_id)
+        self.assertEqual(terminals, [])
+
+        missing_fence = self.case / "missing-claim.json"
+        halt_checks = iter([False, False, True])
+        missing_terminals = []
+        missing = runtime_module.run_evaluation_input_owner_process(
+            [
+                sys.executable,
+                "-c",
+                "import time;time.sleep(60)",
+            ],
+            owner_run_id=owner_run_id,
+            claim_fence_path=missing_fence,
+            halt_check=lambda: next(halt_checks, True),
+            lease_check=lambda: True,
+            terminalize=lambda claim, reason: missing_terminals.append(
+                (claim, reason)
+            ) or {"status": "no_claim"},
+            timeout_seconds=5,
+            stop_seconds=2,
+            poll_seconds=0.05,
+        )
+        self.assertEqual(missing["status"], "halted")
+        self.assertEqual(missing["claim"], None)
+        self.assertEqual(missing_terminals, [(None, "halted")])
+
+        claim_fence.unlink()
+        completed = runtime_module.run_evaluation_input_owner_process(
+            [
+                sys.executable,
+                "-c",
+                "import json,time;print(json.dumps({'status':'complete'}));"
+                "time.sleep(0.1)",
+            ],
+            owner_run_id=owner_run_id,
+            claim_fence_path=claim_fence,
+            halt_check=lambda: False,
+            lease_check=lambda: True,
+            terminalize=lambda claim, reason: {},
+            timeout_seconds=5,
+            stop_seconds=2,
+            poll_seconds=0.05,
+        )
+        self.assertEqual(completed, {"status": "complete"})
+
+    def test_evaluation_input_owner_selects_first_authorable_row(self) -> None:
+        owner = {
+            "evaluator": str(self.case / "skill-evaluation.py"),
+            "config_sha256": "sha256:" + "1" * 64,
+            "author_model": "author-model",
+            "reviewer_a_model": "reviewer-a-model",
+            "reviewer_b_model": "reviewer-b-model",
+        }
+        queue = {
+            "rows": [
+                {
+                    "capability_id": "sha256:" + "a" * 64,
+                    "skill_path": str(self.case / "blocked"),
+                    "priority": 1,
+                    "runnable_phase": None,
+                },
+                {
+                    "capability_id": "sha256:" + "b" * 64,
+                    "skill_path": str(self.case / "selected"),
+                    "priority": 2,
+                    "runnable_phase": "authoring",
+                },
+            ]
+        }
+        files = {
+            "suite": str(self.case / "suite.json"),
+            "policy": str(self.case / "policy.json"),
+            "compilation": str(self.case / "compilation.json"),
+            "routing": str(self.case / "routing.json"),
+            "harness": str(self.case / "harness.py"),
+            "catalog": str(self.case / "catalog.json"),
+        }
+        captured = {}
+        with (
+            mock.patch.dict(
+                os.environ,
+                {"DREAMING_PARENT_RUN_ID": "scheduled-parent-run"},
+            ),
+            mock.patch.object(
+                runtime_module,
+                "evaluation_input_owner_content",
+                return_value={"files": files},
+            ) as content,
+            mock.patch.object(
+                runtime_module,
+                "run_evaluation_input_owner_process",
+                side_effect=lambda command, **facts: captured.update(
+                    {"command": command, **facts}
+                )
+                or {"status": "ready", "claim_id": "sha256:" + "c" * 64},
+            ),
+        ):
+            result = runtime_module.execute_evaluation_input_owner(
+                owner, {}, queue, self.paths
+            )
+        self.assertEqual(
+            result["selected_capability_id"], "sha256:" + "b" * 64
+        )
+        self.assertEqual(result["selected_priority"], 2)
+        self.assertEqual(result["status"], "ready")
+        content.assert_called_once_with(
+            owner, {}, "sha256:" + "b" * 64
+        )
+        self.assertEqual(
+            captured["owner_run_id"], "scheduled-parent-run"
+        )
+        command = captured["command"]
+        self.assertEqual(
+            command[command.index("--config") + 1], files["compilation"]
+        )
+        self.assertEqual(
+            command[command.index("--reviewer-b-model") + 1],
+            "reviewer-b-model",
+        )
+
     def test_disabled_evaluation_owner_recovers_before_census(self) -> None:
         adapters = {
             "session-source": {},

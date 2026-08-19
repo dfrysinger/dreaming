@@ -12,7 +12,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any, Callable, Iterator
 
 SCHEMA_VERSION = 3
 OWNER_INTEGRATION_STATUS = "scheduled_owner_integration_v1"
@@ -515,6 +515,7 @@ def reserve_claim(
     reviewer_a_model: str,
     reviewer_b_model: str,
     owner_fence: dict[str, Any] | None = None,
+    authority_check: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     skill_path = str(Path(require_text(skill_path, "skill path")).resolve())
     skill_key = require_text(skill_key, "skill key")
@@ -652,6 +653,8 @@ def reserve_claim(
             },
             created_epoch=created,
         )
+        if authority_check is not None:
+            authority_check()
     return inspect_claim(claim_id)
 
 
@@ -1021,7 +1024,13 @@ def _fail_slot(
     )
 
 
-def fail_dispatched_slot(claim_id: str, slot_name: str, reason: str) -> None:
+def fail_dispatched_slot(
+    claim_id: str,
+    slot_name: str,
+    reason: str,
+    *,
+    authority_check: Callable[[], None] | None = None,
+) -> None:
     reason = require_text(reason, "slot failure reason")
     with transaction() as connection:
         claim = _claim(connection, claim_id)
@@ -1031,6 +1040,8 @@ def fail_dispatched_slot(claim_id: str, slot_name: str, reason: str) -> None:
                 "only a dispatching slot can be failed; spent slots cannot retry"
             )
         _fail_slot(connection, claim, slot, reason)
+        if authority_check is not None:
+            authority_check()
 
 
 def open_scheduled_claims() -> list[dict[str, Any]]:
@@ -1196,6 +1207,118 @@ def recover_open_scheduled_claim(
         }
 
 
+def terminalize_open_scheduled_claim(
+    claim_id: str,
+    *,
+    expected_owner_run_id: str,
+    reason: str,
+    authority_check: Callable[[], None] | None = None,
+) -> dict[str, Any]:
+    expected_owner_run_id = require_text(
+        expected_owner_run_id, "expected owner run ID"
+    )
+    reason = require_text(reason, "scheduled claim terminal reason")
+    if reason not in {
+        "halted",
+        "skill_elapsed_budget_exhausted",
+        "deterministic_validation_failed",
+        "insufficient_information",
+    }:
+        raise ClaimLedgerError("unsupported scheduled claim terminal reason")
+    with transaction() as connection:
+        claim = _claim(connection, claim_id)
+        if claim["status"] != "open" or claim["owner_mode"] != "scheduled":
+            raise ClaimLedgerError(
+                "only an open scheduled claim can be terminalized"
+            )
+        if claim["owner_run_id"] != expected_owner_run_id:
+            raise ClaimLedgerError(
+                "scheduled claim owner run differs from expected owner"
+            )
+        current = now_epoch()
+        dispatching = connection.execute(
+            """
+            SELECT * FROM claim_slots
+            WHERE claim_id=? AND status='dispatching'
+            ORDER BY slot_index
+            """,
+            (claim["claim_id"],),
+        ).fetchall()
+        for slot in dispatching:
+            connection.execute(
+                """
+                UPDATE claim_slots
+                SET status='failed', terminal_epoch=?,
+                    usage_status='unavailable', normalized_tokens=NULL,
+                    input_tokens=NULL, output_tokens=NULL, elapsed_ms=NULL,
+                    billing_status=NULL, billing_cost_usd=NULL,
+                    billing_provider=NULL, billing_unavailable_reason=NULL,
+                    billing_native_line_item_id=NULL,
+                    billing_native_event_sha256=NULL,
+                    billing_native_event_size=NULL, operation_id=NULL,
+                    observed_model=NULL, review_receipt_sha256=NULL,
+                    decision=NULL, failure_reason=?
+                WHERE claim_id=? AND slot_name=? AND status='dispatching'
+                """,
+                (
+                    current,
+                    reason,
+                    claim["claim_id"],
+                    slot["slot_name"],
+                ),
+            )
+            append_event(
+                connection,
+                claim["claim_id"],
+                "slot_failed_unknown_spent",
+                {"failure_reason": reason, "usage_status": "unavailable"},
+                slot_name=slot["slot_name"],
+                created_epoch=current,
+            )
+        connection.execute(
+            """
+            UPDATE claims
+            SET status='invalid', terminal_reason=?, terminal_epoch=?
+            WHERE claim_id=? AND status='open'
+            """,
+            (reason, current, claim["claim_id"]),
+        )
+        append_event(
+            connection,
+            claim["claim_id"],
+            "claim_terminal",
+            {
+                "dispatching_slots": [
+                    slot["slot_name"] for slot in dispatching
+                ],
+                "reason": reason,
+                "status": "invalid",
+            },
+            created_epoch=current,
+        )
+        publication = _record_retained_terminal(
+            connection,
+            claim["claim_id"],
+            readiness_state=(
+                "insufficient_information"
+                if reason == "insufficient_information"
+                else "invalid"
+            ),
+            readiness_reason=reason,
+        )
+        if authority_check is not None:
+            authority_check()
+        return {
+            "claim_id": claim["claim_id"],
+            "dispatching_slots": [
+                slot["slot_name"] for slot in dispatching
+            ],
+            "status": "invalid",
+            "terminal_reason": reason,
+            "terminal_publication": publication,
+        }
+
+
 def _reconcile_dispatching(
     connection: sqlite3.Connection, claim: sqlite3.Row
 ) -> list[str]:
@@ -1226,6 +1349,7 @@ def prepare_dispatch(
     requested_token_budget: int,
     requested_timeout_seconds: int,
     lineage_receipt_sha256s: list[str] | None = None,
+    authority_check: Callable[[], None] | None = None,
 ) -> dict[str, int | str]:
     skill_path = str(Path(require_text(skill_path, "skill path")).resolve())
     skill_key = require_text(skill_key, "skill key")
@@ -1662,6 +1786,8 @@ def prepare_dispatch(
                                 "token_budget": effective_tokens,
                                 "timeout_seconds": effective_timeout,
                             }
+        if authority_check is not None:
+            authority_check()
     if error is not None:
         raise ClaimLedgerError(error)
     if result is None:
@@ -1728,6 +1854,7 @@ def complete_slot(
     review_receipt_sha256: str | None = None,
     decision: str | None = None,
     terminal_reason: str | None = None,
+    authority_check: Callable[[], None] | None = None,
 ) -> None:
     if not isinstance(operation, dict):
         raise ClaimLedgerError("trusted operation must be an in-memory object")
@@ -2000,6 +2127,8 @@ def complete_slot(
                             readiness_state="invalid",
                             readiness_reason="independent_rereview_rejected",
                         )
+        if authority_check is not None:
+            authority_check()
     if error is not None:
         raise ClaimLedgerError(error)
 
@@ -2139,6 +2268,7 @@ def complete_claim_ready(
     manifest_sha256: str,
     validation_receipt_sha256: str,
     review_receipt_sha256s: list[str],
+    authority_check: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     with transaction() as connection:
         facts = _ready_facts(
@@ -2183,6 +2313,8 @@ def complete_claim_ready(
             validation_receipt_sha256=validation_receipt_sha256,
             review_receipt_sha256s=review_receipt_sha256s,
         )
+        if authority_check is not None:
+            authority_check()
         return {**facts, "terminal_publication": publication}
 
 
