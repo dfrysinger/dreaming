@@ -239,9 +239,25 @@
   canonical encoding for cross-tool draft identity. Validation passes all 26
   vendor-adapter tests. Paired Opus/Terra review closed unvalidated packet
   forwarding, real-home/keychain exposure, and non-ASCII identity drift with no
-  unresolved material finding. Author-operation provenance integration,
-  reviewer operations, aggregate authoring budgets, and real zero-use cohort
-  progression remain outstanding.
+  unresolved material finding.
+- Author-operation provenance is committed locally on the isolated preview
+  branch as `6bf207f`. Every `bounded-safe-author` manifest now retains the
+  normalized completed Copilot operation report and exact content-addressed
+  author-adapter executable in addition to its packet, draft, and
+  materialization receipt. Registration binds an explicit model, packet,
+  candidate, normalized draft, adapter bytes, actual normalized-token use,
+  honest billing availability, elapsed time, and adapter-canonical operation
+  identity; every later manifest resolution replays those claims against the
+  retained executable. Default models, partial or inconsistent usage, false
+  billing claims, over-budget operations, forged identities, and incomplete
+  source identities refuse. Both evaluator-to-adapter and
+  adapter-to-evaluator sibling trust anchors resolve the real invoking script
+  before selecting reviewed siblings, with alias regression coverage.
+  Validation passes 37 certification checks and all 26 vendor-adapter tests.
+  Paired Opus/Terra review closed both trust-anchor findings and withdrew the
+  inapplicable preview-only migration concern with no unresolved material
+  finding. Reviewer operations, aggregate authoring budgets, and real zero-use
+  cohort progression remain outstanding.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
