@@ -380,6 +380,28 @@
   claim-status coupling and pre-dispatch model-binding findings with no
   unresolved material defect. Existing-owner lease integration remains the
   next prerequisite.
+- The existing-owner evaluation-input integration contract is reviewed and
+  committed locally on the isolated preview branch as `216fe61`. Automatic
+  work remains an optional, installation-sealed extension of the existing
+  four-hour `dreaming-core.py` pass, with no second scheduler or durable queue.
+  It derives candidate paths only from exact same-run census, usage, readiness,
+  evaluation, dependency, and enabled-state evidence; verifies sealed
+  per-capability input manifests outside installed skill roots; and separates
+  visible queue priority from the currently runnable authoring phase. Claims
+  bind the writer fence, parent run, process and process-group identities, host
+  boot identity, and configuration digest. A lease monitor terminates owned
+  model groups on halt or lease loss; the losing process performs no
+  post-lease write; the next fenced owner completes pending terminal
+  publication, proves or clears prior process liveness, and reconciles open
+  claims before new work. Recovery remains lane-scoped and has a halt- and
+  lease-gated command for inspected dead or prior-boot owners. Every author,
+  validation, review, repair, budget, halt, and crash outcome closes through
+  one recoverable pending-terminal protocol, while disabled configuration
+  remains reconcile-only. Paired design review closed configuration trust,
+  lease-loss mutation, in-flight overlap, queue liveness, transition ordering,
+  cross-store publication, budget termination, and recovery-escape findings
+  with no unresolved material defect. Implementation of this reviewed contract
+  is the next prerequisite.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
