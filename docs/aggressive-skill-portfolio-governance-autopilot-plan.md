@@ -51,8 +51,19 @@
   `20260818T165513Z-41055` restored the daily 09:15 schedule behind halt with
   `RunAtLoad=false` and no `StartInterval`; the adapter digest and all 426
   evidence hashes remained identical, and enable correctly failed before
-  restored self-test. The restored generation self-test is currently running.
-  Retained traces are under
+  restored self-test. That first self-test failed only because rollback had
+  removed the managed Copilot instruction that the restored self-test requires.
+  The installer now reinstalls that prerequisite and invalidates the prior
+  self-test stamp before its first rollback mutation, so every partial failure
+  remains unable to enable. The targeted installer check passes; Opus and Terra
+  independently report the original fail-open finding resolved with no new
+  finding. The correction is committed locally as `6d27fff` and was
+  transferred without a remote to the clean Mac mini worktree.
+- Fixed rollback replay generation
+  `20260819T043509Z-rollback-27327` again restored daily 09:15 behind halt,
+  verified the managed instruction, preserved the adapter and all 426 evidence
+  hashes, and rejected enable before self-test. Its full restored-generation
+  self-test is currently running. Retained traces are under
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/behavior-validation-review-capacity-f2b4fcb/traces/SC-025/`.
 - Capacity work remaining: let the restored self-test finish without
   disturbance, enable and verify the restored daily generation, reinstall the
