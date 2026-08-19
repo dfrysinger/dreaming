@@ -440,6 +440,22 @@
   with no unresolved material defect. Core run-start invocation, open-claim
   liveness recovery, sealed owner configuration, the derived in-memory queue,
   and one-claim authoring orchestration remain.
+- Scheduled-owner run-start recovery is integrated and committed locally on
+  the isolated preview branch as `3e54b89`. The existing
+  `dreaming-core.py run` pass validates the optional owner object only from the
+  canonical managed adapter configuration whose exact byte digest is sealed
+  into the installed launch environment. Enabled and disabled configurations
+  reconcile pending terminal publications before estate census, while disabled
+  mode remains reconcile-only and any configuration or recovery failure
+  returns before census, review, publication, or model work. Installed
+  deterministic self-tests scrub owner-configuration authority before running
+  isolated suites. Validation passes 41 core checks under both neutral and
+  deliberately inherited managed-config authority, all 12 installer integration
+  groups, Python and shell syntax checks, and the diff check. Paired
+  implementation review closed the installed-selftest environment leak with no
+  unresolved material finding. Open-claim liveness recovery, the lane-scoped
+  recovery-required state, sealed content validation, the derived in-memory
+  queue, and one-claim authoring orchestration remain.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
