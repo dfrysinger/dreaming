@@ -29,6 +29,9 @@ missing or stale.
 - Do not uninstall plugins automatically.
 - Do not automatically edit, consolidate, or archive user-created or
   unknown-origin personal skills.
+- Do not treat free-form reviewer labels, repeated calls to one model, shared
+  model conversations, or a reviewer reading the author's private workspace as
+  independent evaluation-input review.
 - Do not allow dashboard code to edit files or settings directly.
 - Do not treat missing usage, missing evaluation, or an inconclusive
   evaluation as positive evidence.
@@ -453,6 +456,8 @@ canonical JSON whose filename is the SHA-256 of its canonical bytes. It binds:
 - compilation configuration, routing, fixture, grader, rubric, and harness
   identities required to reproduce the run;
 - the authoring method and safe source identities;
+- for bounded safe authoring, the exact immutable author operation and adapter
+  objects;
 - the registry schema and tool version.
 
 The complete normalized policy object is addressed separately from
@@ -467,17 +472,61 @@ A different object at an existing address, a missing object, a digest or size
 mismatch, an unexpected role, an absolute or escaping logical path, or an
 unknown schema refuses the input set.
 
+For a bounded-safe-author initial manifest, the retained author operation binds
+the exact author packet and normalized draft digests, candidate ID, requested
+and provider-observed model identities, adapter object digest and size, actual
+normalized-token usage, elapsed time, and provider billing provenance in the
+same available-or-explicitly-unavailable form required for reviews. The
+manifest object inventory binds that operation and exact adapter bytes.
+Manifest resolution revalidates the author operation before any review receipt
+or readiness transition can be accepted. A repaired manifest additionally
+binds the initial manifest digest, review set ID, and an immutable repair
+operation with the same fields. The repair's requested and observed model must
+equal the original retained author model; substitution refuses before a model
+call.
+
 Every readiness transition is canonical content-addressed JSON. It binds the
 exact skill path, candidate ID, manifest digest or explicit null, prior
 transition ID, state, reason, creation time, and transition ID. A `ready`
 transition additionally binds the deterministic-validation receipt and two
-independent accepting review receipt digests for that same manifest. Review
-receipts bind their reviewer, decision, candidate ID, manifest digest, and
-reviewed object inventory. A readiness transition cannot borrow validation or
-review from another manifest. The manifest does not contain validation or
-review receipt identities: those receipts are created only after the immutable
+independent accepting review receipt digests for that same manifest.
+
+For a bounded-safe-author manifest, each review receipt binds the exact review
+packet digest, candidate ID, manifest digest, reviewed object inventory,
+decision, requested and provider-observed model identities, adapter object
+digest and size, actual normalized-token usage, elapsed time, and provider
+billing provenance. An available measured cost binds the canonical
+provider-native billing event or line-item bytes, provider identity, native
+line-item identity when present, digest, and size. Unavailable billing binds
+the explicit unavailable reason and null event, line-item identity, digest,
+size, and cost. Missing observed model identity or disagreement between the
+requested and provider-observed identity refuses the operation; the requested
+label never substitutes for provider evidence.
+
+The author operation and two initial review receipts define a canonical review
+set ID from the daily claim ID, candidate ID, initial manifest digest, author
+model identity, and the two sorted reviewer model identities. The two reviewer
+models must differ from each other and from the author model. Initial
+readiness binds that review set ID. Consumers resolve the retained author
+operation from the initial manifest, recompute requested-versus-observed
+agreement and three-way model distinctness from the author and review
+receipts, and recompute the review set ID rather than trusting its stored
+value. A repaired manifest binds the initial manifest digest and review set
+ID. Its `ready` transition binds the two original review receipt digests as
+identity-only lineage and two accepting re-review receipt digests for the
+repaired manifest. Consumers revalidate the initial manifest's author
+operation, repair operation, and original receipts, require the repair to use
+the original author model, and require both repaired receipts to use the same
+two observed reviewer model identities. Original receipts remain immutable
+history but cannot authorize the repaired manifest.
+
+A readiness transition cannot borrow validation or review from another
+manifest or claim. The manifest does not contain validation or initial review
+receipt identities: those receipts are created only after the immutable
 manifest exists, and the later readiness transition binds all of them without
-a circular content address.
+a circular content address. A repaired manifest may bind prior manifest,
+claim, and review-set identities because those inputs already exist before the
+repair is materialized.
 
 The mutable current pointer is only a discovery aid. It names the exact skill
 path, candidate ID, and latest readiness transition ID. The transition, not
@@ -574,11 +623,48 @@ Each ready suite contains intended-use, related-use, activation-positive, and
 activation-negative cases, three trials per treatment arm, objective observable
 outcomes, and allowlisted graders. A generated draft receives deterministic
 schema, path, fixture, grader, privacy, and candidate-binding validation,
-followed by two independent reviews of the exact manifest. Review disagreement
-or a requested correction keeps the input non-ready. At most one bounded repair may be attempted under the same daily claim. The
+followed by two independent reviews of the exact manifest.
+
+Trusted code builds each review packet from the resolved content-addressed
+manifest rather than from caller-authored review context. The packet binds the
+manifest and candidate identities, normalized suite and prompts, skill
+contract, objective grader and rubric declarations, declared fixture metadata,
+projected execution contracts, validation receipt, and retained safe-authoring
+provenance. It excludes fixture bytes, grader implementation bytes, transcript
+text, credentials, home state, unrelated files, dashboard state, user
+dispositions, and private historical prompts. The same privacy and size scans
+used for authoring apply before the packet reaches a reviewer.
+
+While Copilot is the only qualified isolated no-tools authoring boundary, one
+explicit pinned Copilot model authors and two different explicit pinned Copilot
+models review. The requested model must exactly equal a provider-observed model
+identity for every operation, and all three observed identities must be
+distinct. Missing, aliased, or mismatched provider model evidence refuses
+rather than falling back to the requested label. Each review is a fresh
+process with a fresh synthetic home and workspace, no shared conversation or
+tools, source-path and real-home sandbox denies, and the exact packet rebuilt
+by the trusted sibling evaluator. A reviewer returns only `accept` or `reject`,
+a bounded summary, and an allowed correction reason. Trusted code records the
+packet, exact manifest, requested and observed models, exact adapter bytes,
+actual normalized-token use, canonical provider-native billing provenance or
+an explicit unavailable record, elapsed time, decision, and content identity
+in the immutable review receipt. Free-form labels do not establish
+independence.
+
+Review disagreement or a requested correction keeps the input non-ready. At
+most one bounded repair may be attempted under the same daily claim. The
 repair creates a new manifest and invalidates all reviews of the prior
-manifest. Both independent reviewers must accept the repaired manifest before
-it becomes ready; otherwise the row remains `invalid` or `review_required`.
+manifest. The original author model performs the repair, and both original
+reviewer model identities independently re-review and accept the repaired
+manifest before it becomes ready. A substituted author or reviewer is refused
+before a model call, records `author_identity_unavailable` or
+`reviewer_identity_unavailable`, spends no additional operation slot, and
+leaves the current claim `invalid`. If the original author or reviewer is
+unavailable or any required slot is already spent, the claim cannot become
+ready. A later daily claim may start a new six-slot authoring lifecycle with a
+new initial manifest and review set; it cannot carry forward the failed
+claim's draft, repair, validation, or review authority. Otherwise the row
+remains `invalid` or `review_required`.
 
 When the contract does not expose a safe deterministic outcome, the author
 writes `insufficient_information` with a reason such as
@@ -639,10 +725,19 @@ enforced. The lower applicable bound always wins.
 These numbers are safety ceilings. They are not forecasts, billing-credit
 measurements, or permission to consume the full amount. A provider-supplied
 usage receipt records actual normalized usage and, when available, measured
-billing cost. Missing billing telemetry is shown as unavailable, not estimated
-from token counts. Crossing any skill, process, or daily bound terminates the
-owned process group, records the incomplete state, spends the claim, and leaves
-the capability queued without mutation authority.
+billing cost and canonical provider-native billing provenance. Missing billing
+telemetry is shown as unavailable with an exact reason, not estimated from
+token counts. Available telemetry without the native event or line-item
+identity and content digest is invalid. Every started author, review, repair,
+or re-review operation counts even when it times out, refuses, crashes, or
+returns malformed output. A pre-call identity mismatch refuses without
+starting or spending an extra model operation, while the already-failed
+required slot remains spent. The aggregate ledger binds all six ordered
+operation slots to one daily claim, candidate, initial manifest, optional
+repaired manifest, author model, two reviewer models, review set ID, actual
+usage, elapsed time, and billing provenance. Crossing any skill, process, or
+daily bound terminates the owned process group, records the incomplete state,
+spends the claim, and leaves the capability queued without mutation authority.
 
 #### Evaluation-input rollback
 
@@ -692,13 +787,25 @@ inventory and dashboard projection remain available.
 
 - **Protects:** Generated tests are safe, objective, and independently checked.
 - **Setup:** Exercise valid cases, unsafe transcript-derived input, secret and
-  home-path fixtures, subjective graders, missing case classes, disagreement,
-  one repair, and an untestable contract.
+  home-path fixtures, subjective graders, missing case classes, substituted
+  review packets, repeated or author-equal reviewer models, missing or
+  mismatched retained author operations, shared review state, disagreement,
+  one repair, stale pre-repair reviews, author or reviewer substitution, and
+  an untestable contract.
 - **Pass:** Only the exact validated and twice-accepted manifest becomes
-  `ready`; unsafe input never reaches an executor; the untestable contract
-  becomes explicit `insufficient_information`.
+  `ready`; both review receipts bind the exact packet, manifest, distinct
+  provider-observed models, retained adapter, usage, billing provenance, and
+  elapsed time; missing or mismatched observed model evidence refuses;
+  repaired readiness binds its initial manifest and review set and uses two
+  re-reviews by the original reviewer model identities; repair uses the
+  original author model; author or reviewer substitution refuses before a
+  model call and leaves the claim invalid; unsafe input never reaches a
+  reviewer or executor; the untestable contract becomes explicit
+  `insufficient_information`.
 - **Failure:** A draft executes, model opinion becomes a grader, private input
-  leaves the boundary, or inability to test becomes pass.
+  leaves the boundary, labels or repeated models satisfy independence, an old
+  review authorizes a repaired manifest, a substituted author or reviewer
+  completes a claim, or inability to test becomes pass.
 - **Why:** It prevents evaluation bootstrap from manufacturing evidence.
 
 #### PORT-CHK-EVAL-INPUT-04: Bounded single-owner execution
@@ -717,11 +824,14 @@ inventory and dashboard projection remain available.
 
 - **Protects:** Operation, token, time, and billing claims remain honest.
 - **Setup:** Reach each per-operation, per-skill, per-process, and per-day
-  boundary independently, with and without provider billing telemetry.
+  boundary independently, including failed author, review, repair, and
+  re-review slots, with and without provider billing telemetry.
 - **Pass:** The lower bound stops work and records actual operation,
   normalized-token, elapsed-time, and available provider cost facts; missing
-  cost remains unavailable; no stopped result gains current or mutation
-  authority.
+  cost remains unavailable; available cost binds its canonical provider-native
+  event or line item; swapped, missing, or mismatched billing provenance
+  refuses; all started operations remain charged to the claim; no stopped
+  result gains current or mutation authority.
 - **Failure:** Work exceeds a bound, token counts are labeled billing credits,
   or a stopped result becomes pass.
 - **Why:** It gives the aggressive catch-up lane a finite cost and time box.
@@ -1554,8 +1664,12 @@ Fail-closed rollback proof requires:
       skill root, including `.agent-created.json`; external authority
       validation and currentness do not read an in-root authority pointer.
 - [ ] Safe authoring uses only the skill contract and allowlisted public or
-      synthetic fixtures, passes deterministic validation and two independent
-      reviews, and records untestable skills as
+      synthetic fixtures, passes deterministic validation and two isolated
+      reviews whose exact observed models differ from the author and each
+      other, retains and revalidates exact author, repair, review-packet,
+      manifest, adapter, usage, billing, observed-model, review-set,
+      repair-lineage, and elapsed-time provenance, and records untestable
+      skills as
       `insufficient_information`.
 - [ ] The dashboard distinguishes Needs test cases, Test design in progress,
       Test design rejected, Cannot test safely, Ready to test, Testing now,
