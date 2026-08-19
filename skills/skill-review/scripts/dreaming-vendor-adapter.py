@@ -48,6 +48,17 @@ PROTOCOLS = {
             "exact-execution-identity",
         ],
     ),
+    "evaluation-input-author": (
+        "dreaming.evaluation-input-author",
+        [
+            "transcript-blind",
+            "no-tools",
+            "structured-draft",
+            "exact-model",
+            "usage-receipt",
+            "bounded-execution",
+        ],
+    ),
     "skill-publisher": (
         "dreaming.skill-publisher",
         ["content-addressed-bundle", "ownership-safe-remove", "exact-inventory"],
@@ -145,6 +156,12 @@ CODEX_EVENT_TYPES = {
     "session_meta",
     "turn_context",
 }
+AUTHOR_TASK_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{7,}$")
+AUTHOR_REASON_CODES = {
+    "evaluation_case_unavailable",
+    "safe_fixture_unavailable",
+    "objective_grader_unavailable",
+}
 
 
 class AdapterError(RuntimeError):
@@ -166,6 +183,13 @@ def sha(value: Any) -> str:
 
 def sha_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
+
+
+def governance_sha(value: Any) -> str:
+    encoded = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+    ).encode()
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
 
 
 def emit(value: dict[str, Any], status: int = 0) -> None:
@@ -1942,6 +1966,498 @@ def executor_run(args: argparse.Namespace) -> None:
     }
     atomic_json(Path(args.result), final)
     emit({"ok": True, **final})
+
+
+def evaluation_input_author_schema(packet: dict[str, Any]) -> dict[str, Any]:
+    cases = packet.get("suite_template", {}).get("cases")
+    if not isinstance(cases, list) or not cases:
+        raise AdapterError("authoring-packet-invalid", "suite template cases")
+    return {
+        "type": "object",
+        "properties": {
+            "outcome": {"enum": ["draft", "insufficient_information"]},
+            "summary": {"type": "string"},
+            "reason": {
+                "enum": sorted(AUTHOR_REASON_CODES),
+            },
+            "cases": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "task_id": {"type": "string"},
+                        "prompt": {"type": "string"},
+                    },
+                    "required": ["id", "task_id", "prompt"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+        "required": ["outcome", "summary"],
+        "additionalProperties": False,
+    }
+
+
+def evaluation_input_author_prompt(
+    packet: dict[str, Any], schema: dict[str, Any]
+) -> str:
+    return "\n".join(
+        (
+            "EVALUATION_INPUT_AUTHOR_OPERATION",
+            "You are designing safe evaluation prompts for exactly one skill.",
+            "Use only the supplied packet. Do not infer from transcripts, private history,",
+            "credentials, home state, dashboards, or unstated fixtures.",
+            "Return outcome=draft only when the fixed fixtures and objective graders can",
+            "observe the skill contract safely. Otherwise return outcome=insufficient_information",
+            "with one allowed reason. For a draft, return exactly one id/task_id/prompt row",
+            "for every template case, in template order. Do not change or invent IDs.",
+            "Prompts must be realistic standalone user tasks, distinct from one another,",
+            "and must not reveal expected answers, grader mechanics, or evaluation metadata.",
+            "Return JSON only, matching this result_schema:",
+            json.dumps(schema, sort_keys=True, separators=(",", ":")),
+            "authoring_packet:",
+            json.dumps(packet, sort_keys=True, separators=(",", ":")),
+        )
+    )
+
+
+def find_evaluation_input_result(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        if value.get("outcome") in {"draft", "insufficient_information"}:
+            return value
+        for child in value.values():
+            found = find_evaluation_input_result(child)
+            if found is not None:
+                return found
+    elif isinstance(value, list):
+        for child in value:
+            found = find_evaluation_input_result(child)
+            if found is not None:
+                return found
+    elif isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except json.JSONDecodeError:
+            return None
+        return find_evaluation_input_result(parsed)
+    return None
+
+
+def parse_evaluation_input_result(text: str) -> dict[str, Any]:
+    candidates = [line.strip() for line in text.splitlines() if line.strip()]
+    candidates.append(text.strip())
+    for candidate in reversed(candidates):
+        try:
+            value = json.loads(candidate)
+        except json.JSONDecodeError:
+            continue
+        found = find_evaluation_input_result(value)
+        if found is not None:
+            return found
+    raise AdapterError(
+        "malformed-authoring-result", "model returned no authoring result JSON"
+    )
+
+
+def normalize_evaluation_input_author_result(
+    packet: dict[str, Any], model_result: dict[str, Any]
+) -> tuple[dict[str, Any] | None, str, str | None]:
+    outcome = model_result.get("outcome")
+    summary = model_result.get("summary")
+    if not isinstance(summary, str) or not summary.strip() or len(summary.encode()) > 4096:
+        raise AdapterError("malformed-authoring-result", "summary")
+    if outcome == "insufficient_information":
+        if set(model_result) != {"outcome", "summary", "reason"}:
+            raise AdapterError(
+                "malformed-authoring-result", "insufficient-information keys"
+            )
+        reason = model_result.get("reason")
+        if reason not in AUTHOR_REASON_CODES:
+            raise AdapterError("malformed-authoring-result", "reason")
+        return None, summary.strip(), reason
+    if outcome != "draft" or set(model_result) != {"outcome", "summary", "cases"}:
+        raise AdapterError("malformed-authoring-result", "draft keys")
+    values = model_result.get("cases")
+    template_cases = packet["suite_template"]["cases"]
+    runtime = {
+        item["id"]: item
+        for item in packet["compilation_contract"]["case_runtime"]
+    }
+    if not isinstance(values, list) or len(values) != len(template_cases):
+        raise AdapterError("malformed-authoring-result", "case count")
+    task_ids: set[str] = set()
+    prompts: set[str] = set()
+    cases: list[dict[str, Any]] = []
+    for index, (value, template) in enumerate(zip(values, template_cases)):
+        if not isinstance(value, dict) or set(value) != {"id", "task_id", "prompt"}:
+            raise AdapterError("malformed-authoring-result", f"case {index}")
+        task_id = value.get("task_id")
+        prompt = value.get("prompt")
+        if value.get("id") != template["id"]:
+            raise AdapterError("malformed-authoring-result", f"case {index} id")
+        if (
+            not isinstance(task_id, str)
+            or not AUTHOR_TASK_ID_RE.fullmatch(task_id)
+            or task_id in task_ids
+        ):
+            raise AdapterError("malformed-authoring-result", f"case {index} task_id")
+        if (
+            not isinstance(prompt, str)
+            or not prompt.strip()
+            or len(prompt.encode()) > 4096
+            or prompt in prompts
+        ):
+            raise AdapterError("malformed-authoring-result", f"case {index} prompt")
+        task_ids.add(task_id)
+        prompts.add(prompt)
+        case_runtime = runtime[template["id"]]
+        cases.append(
+            {
+                "id": template["id"],
+                "class": template["class"],
+                "task_id": task_id,
+                "prompt": prompt,
+                "deterministic_graders": template["deterministic_graders"],
+                "fixture": case_runtime["fixture"],
+                "artifacts": case_runtime["artifacts"],
+                "semantic": case_runtime["semantic"],
+            }
+        )
+    return {
+        "schema_version": 1,
+        "kind": "safe_evaluation_input_draft",
+        "packet_id": packet["packet_id"],
+        "candidate_id": packet["candidate_id"],
+        "cases": cases,
+    }, summary.strip(), None
+
+
+def evaluation_input_source_paths(args: argparse.Namespace) -> list[str]:
+    values = [
+        args.skill_dir,
+        args.suite,
+        args.policy,
+        args.config,
+        args.routing,
+        args.harness,
+        args.catalog,
+    ]
+    if not all(isinstance(value, str) and value for value in values):
+        raise AdapterError(
+            "missing-argument", "exact evaluation-input authoring sources"
+        )
+    return values
+
+
+def validate_evaluation_input_packet(
+    args: argparse.Namespace,
+    packet: dict[str, Any],
+    work_path: Path,
+) -> None:
+    sources = evaluation_input_source_paths(args)
+    evaluator_path = Path(__file__).with_name("skill-evaluation.py")
+    if evaluator_path.is_symlink() or not evaluator_path.is_file():
+        raise AdapterError(
+            "authoring-boundary-unavailable", "trusted packet validator missing"
+        )
+    evaluator = evaluator_path.resolve()
+    output = work_path / "validated-authoring-packet.json"
+    command = [
+        sys.executable,
+        str(evaluator),
+        "v2-input-author-packet",
+        sources[0],
+        "--suite",
+        sources[1],
+        "--policy",
+        sources[2],
+        "--config",
+        sources[3],
+        "--routing",
+        sources[4],
+        "--harness",
+        sources[5],
+        "--catalog",
+        sources[6],
+        "--output",
+        str(output),
+    ]
+    validation_environment = {
+        "HOME": os.environ.get("HOME", ""),
+        "PATH": os.environ.get("PATH", "/usr/bin:/bin:/usr/sbin:/sbin"),
+        "TMPDIR": str(work_path),
+    }
+    if os.environ.get("SKILLS_STATE_DIR"):
+        validation_environment["SKILLS_STATE_DIR"] = os.environ[
+            "SKILLS_STATE_DIR"
+        ]
+    validation = run_process_bounded(
+        command,
+        validation_environment,
+        min(args.timeout, 120),
+        min(args.output_bytes, 100_000),
+        work_path,
+    )
+    if validation.returncode != 0 or not output.is_file() or output.is_symlink():
+        raise AdapterError(
+            "authoring-packet-invalid",
+            (validation.stderr or validation.stdout).strip()[-1000:]
+            or "trusted validator refused packet",
+        )
+    if load_json(output) != packet:
+        raise AdapterError(
+            "authoring-packet-invalid",
+            "packet differs from exact current candidate and trusted sources",
+        )
+
+
+def evaluation_input_author_environment(
+    work_path: Path, binary: str
+) -> dict[str, str]:
+    source = executor_environment("copilot", work_path, binary)
+    allowed = {
+        "HOME",
+        "TMPDIR",
+        "XDG_CACHE_HOME",
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_STATE_HOME",
+        "CLAUDE_CODE_TMPDIR",
+        "PATH",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+    }
+    environment = {
+        key: value
+        for key, value in source.items()
+        if key in allowed and isinstance(value, str)
+    }
+    if os.environ.get("DREAMING_EXECUTOR_TEST_ALLOW_ROOT"):
+        environment.update(
+            {
+                key: value
+                for key, value in os.environ.items()
+                if key.startswith("FAKE_")
+                or key in {
+                    "CODEX_HOME",
+                    "DREAMING_EXECUTOR_TEST_ALLOW_ROOT",
+                    "DREAMING_EXECUTOR_TEST_ALLOW_ROOTS",
+                }
+            }
+        )
+    return environment
+
+
+def evaluation_input_author_run(args: argparse.Namespace) -> None:
+    if args.vendor != "copilot":
+        raise AdapterError(
+            "authoring-boundary-unavailable",
+            f"{args.vendor} CLI does not expose a qualified isolated no-tools authoring mode",
+        )
+    if args.operation != "author" or not args.packet or not args.result:
+        raise AdapterError("missing-argument", "evaluation input author run")
+    if not args.draft_output:
+        raise AdapterError("missing-argument", "author draft output")
+    packet_path = Path(args.packet)
+    if (
+        packet_path.is_symlink()
+        or not packet_path.is_file()
+        or packet_path.stat().st_size > 1_048_576
+    ):
+        raise AdapterError("authoring-packet-invalid", args.packet)
+    packet = load_json(packet_path)
+    if (
+        not isinstance(packet, dict)
+        or packet.get("schema_version") != 1
+        or packet.get("kind") != "safe_evaluation_input_authoring_packet"
+        or not isinstance(packet.get("packet_id"), str)
+        or not isinstance(packet.get("candidate_id"), str)
+    ):
+        raise AdapterError("authoring-packet-invalid", args.packet)
+    binary = selected_executable(args.vendor, args.binary)
+    started = time.monotonic()
+    with tempfile.TemporaryDirectory(
+        prefix=f"dreaming-input-author-{args.vendor}-"
+    ) as work:
+        work_path = Path(work).resolve()
+        validate_evaluation_input_packet(args, packet, work_path)
+        schema = evaluation_input_author_schema(packet)
+        prompt = evaluation_input_author_prompt(packet, schema)
+        environment = evaluation_input_author_environment(work_path, binary)
+        schema_path = work_path / "result-schema.json"
+        schema_path.write_text(json.dumps(schema), encoding="utf-8")
+        output = work_path / "last-message.json"
+        if args.vendor == "copilot":
+            command = [
+                binary,
+                "-p",
+                prompt,
+                "--model",
+                args.model,
+                "--allow-all-tools",
+                "--available-tools=__dreaming_no_tools__",
+                "--disable-builtin-mcps",
+                "--no-custom-instructions",
+                "--no-ask-user",
+                "--no-remote",
+                "--no-remote-export",
+                "--no-color",
+                "--output-format",
+                "json",
+                "-C",
+                str(work_path),
+            ]
+        elif args.vendor == "claude":
+            command = [
+                binary,
+                "--print",
+                prompt,
+                "--model",
+                args.model,
+                "--safe-mode",
+                "--disable-slash-commands",
+                "--setting-sources",
+                "",
+                "--settings",
+                "{}",
+                "--allowedTools",
+                "",
+                "--permission-mode",
+                "dontAsk",
+                "--max-budget-usd",
+                os.environ.get("DREAMING_CLAUDE_MAX_BUDGET_USD", "1.00"),
+                "--no-session-persistence",
+                "--output-format",
+                "json",
+                "--json-schema",
+                schema_path.read_text(encoding="utf-8"),
+            ]
+        else:
+            command = [
+                binary,
+                "--ask-for-approval",
+                "never",
+                "exec",
+                prompt,
+                "--model",
+                args.model,
+                "--ephemeral",
+                "--ignore-user-config",
+                "--ignore-rules",
+                "--sandbox",
+                "read-only",
+                "--skip-git-repo-check",
+                "--output-schema",
+                str(schema_path),
+                "--output-last-message",
+                str(output),
+                "-C",
+                str(work_path),
+            ]
+        result = run_process_bounded(
+            sandboxed_command(
+                command,
+                work_path,
+                binary,
+                [
+                    *args.deny_root,
+                    *evaluation_input_source_paths(args),
+                ],
+                "isolated",
+            ),
+            environment,
+            args.timeout,
+            args.output_bytes,
+            work_path,
+        )
+        if result.returncode != 0:
+            raise AdapterError(
+                "authoring-executor-failed",
+                (result.stderr or result.stdout).strip()[-1000:] or args.vendor,
+            )
+        native_values = native_objects(result.stdout)
+        observed_model = native_model(args.vendor, native_values)
+        if args.vendor == "codex" and observed_model is None:
+            observed_model = args.model
+        if observed_model != args.model:
+            raise AdapterError(
+                "exact-model-unproved",
+                f"expected {args.model}, observed {observed_model or 'none'}",
+            )
+        detailed_usage = native_detailed_usage(args.vendor, native_values)
+        normalized_tokens = (
+            detailed_usage["total_tokens"]
+            if detailed_usage is not None
+            else native_token_usage(args.vendor, native_values)
+        )
+        if normalized_tokens is None:
+            raise AdapterError("usage-unproved", args.vendor)
+        if normalized_tokens > args.token_budget:
+            raise AdapterError(
+                "token-limit-exceeded",
+                f"{normalized_tokens} > {args.token_budget}",
+            )
+        model_text = (
+            output.read_text(encoding="utf-8") if output.exists() else result.stdout
+        )
+        model_result = parse_evaluation_input_result(model_text)
+    draft, summary, reason = normalize_evaluation_input_author_result(
+        packet, model_result
+    )
+    draft_id = governance_sha(draft) if draft is not None else None
+    operation = {
+        "schema_version": 1,
+        "kind": "evaluation_input_model_operation",
+        "operation": "author",
+        "status": "completed",
+        "vendor": args.vendor,
+        "model": args.model,
+        "adapter_executable_sha256": sha_bytes(Path(__file__).read_bytes()),
+        "packet_id": packet["packet_id"],
+        "candidate_id": packet["candidate_id"],
+        "outcome": model_result["outcome"],
+        "summary": summary,
+        "reason": reason,
+        "draft_id": draft_id,
+        "usage": {
+            "normalized_tokens": normalized_tokens,
+            "input_tokens": (
+                detailed_usage["input_tokens"] if detailed_usage else None
+            ),
+            "output_tokens": (
+                detailed_usage["output_tokens"] if detailed_usage else None
+            ),
+        },
+        "billing": {"status": "unavailable", "cost_usd": None},
+        "elapsed_ms": max(0, int((time.monotonic() - started) * 1000)),
+    }
+    operation["operation_id"] = sha(operation)
+    if draft is not None:
+        atomic_json(Path(args.draft_output), draft)
+    atomic_json(Path(args.result), operation)
+    emit({"ok": True, **operation})
+
+
+def evaluation_input_author_doctor(args: argparse.Namespace) -> None:
+    selected_executable(args.vendor, args.binary)
+    qualified = args.vendor == "copilot"
+    emit(
+        {
+            "ok": True,
+            "healthy": qualified,
+            "boundary_ready": qualified,
+            "vendor": args.vendor,
+            "reason": (
+                None
+                if qualified
+                else f"{args.vendor} CLI does not expose a qualified isolated no-tools authoring mode"
+            ),
+        }
+    )
 
 
 EVALUATION_ADAPTER_VERSION = 1
@@ -4490,6 +5006,16 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--trial")
     run.add_argument("--prepared")
     run.add_argument("--output")
+    run.add_argument("--packet")
+    run.add_argument("--operation", choices=("author", "review"))
+    run.add_argument("--draft-output")
+    run.add_argument("--skill-dir")
+    run.add_argument("--suite")
+    run.add_argument("--policy")
+    run.add_argument("--config")
+    run.add_argument("--routing")
+    run.add_argument("--harness")
+    run.add_argument("--catalog")
     prepare = sub.add_parser("prepare")
     prepare.add_argument("--trial", required=True)
     normalize = sub.add_parser("normalize")
@@ -4555,6 +5081,22 @@ def main() -> None:
                 evaluation_normalize(args)
             if args.command == "collect":
                 evaluation_collect(args)
+            raise AdapterError("unsupported-command", args.command)
+        if args.role == "evaluation-input-author":
+            if args.command == "doctor":
+                evaluation_input_author_doctor(args)
+            if args.command == "version":
+                emit(
+                    {
+                        "adapter_executable_sha256": sha_bytes(
+                            Path(__file__).read_bytes()
+                        ),
+                        "protocol": PROTOCOLS[args.role][0],
+                        "version": 1,
+                    }
+                )
+            if args.command == "run":
+                evaluation_input_author_run(args)
             raise AdapterError("unsupported-command", args.command)
         publisher_command(args)
     except AdapterError as error:
