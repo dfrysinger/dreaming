@@ -3185,6 +3185,263 @@ def current_gate(args: argparse.Namespace) -> dict[str, Any]:
     return {"status": "waived", "candidate_id": candidate, "receipt_sha256": waiver_sha}
 
 
+def portfolio_now(value: str | None) -> datetime:
+    if value is None:
+        return datetime.now(timezone.utc)
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise EvaluationError("portfolio now must be an ISO-8601 timestamp") from exc
+    if parsed.tzinfo is None:
+        raise EvaluationError("portfolio now must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def portfolio_transition_time(value: Any) -> datetime:
+    try:
+        parsed = datetime.fromisoformat(
+            require_text(value, "transition.effective_at").replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise EvaluationError("transition.effective_at must be ISO-8601") from exc
+    if parsed.tzinfo is None:
+        raise EvaluationError("transition.effective_at must include a timezone")
+    return parsed.astimezone(timezone.utc)
+
+
+def require_hex_sha256(value: Any, field: str) -> str:
+    if (
+        not isinstance(value, str)
+        or re.fullmatch(r"[0-9a-f]{64}", value) is None
+    ):
+        raise EvaluationError(f"{field} must be a hexadecimal sha256 identity")
+    return value
+
+
+def portfolio_transition(
+    path: Path,
+    skill_key: str,
+) -> tuple[dict[str, Any], datetime]:
+    if path.is_symlink() or not path.is_file():
+        raise EvaluationError("portfolio transition must be a regular file")
+    value = load_json(path)
+    require_exact_keys(
+        value,
+        "portfolio transition",
+        {
+            "schema_version",
+            "kind",
+            "effective_at",
+            "skill_key",
+            "candidate_id",
+            "status",
+            "authority_sha256",
+            "aggregate_receipt_sha256",
+            "portfolio_receipt_sha256",
+            "transition_id",
+        },
+    )
+    if (
+        value.get("schema_version") != 1
+        or value.get("kind") != "dashboard_authority_transition"
+        or value.get("skill_key") != skill_key
+        or value.get("status")
+        not in {"pass", "regression", "inconclusive", "revoked"}
+        or value.get("transition_id") != identity_with("transition_id", value)
+        or path.name
+        != f"{str(value.get('transition_id')).removeprefix('sha256:')}.json"
+    ):
+        raise EvaluationError("portfolio transition identity is malformed")
+    require_sha256(value.get("candidate_id"), "transition.candidate_id")
+    status = value["status"]
+    authority_sha = value.get("authority_sha256")
+    aggregate_sha = value.get("aggregate_receipt_sha256")
+    portfolio_sha = value.get("portfolio_receipt_sha256")
+    if status == "pass":
+        for field, item in (
+            ("authority_sha256", authority_sha),
+            ("aggregate_receipt_sha256", aggregate_sha),
+            ("portfolio_receipt_sha256", portfolio_sha),
+        ):
+            require_hex_sha256(item, f"transition.{field}")
+    elif status in {"regression", "inconclusive"}:
+        if authority_sha is not None:
+            raise EvaluationError("non-passing transition cannot retain authority")
+        require_hex_sha256(
+            aggregate_sha, "transition.aggregate_receipt_sha256"
+        )
+        require_hex_sha256(
+            portfolio_sha, "transition.portfolio_receipt_sha256"
+        )
+    elif any(item is not None for item in (authority_sha, aggregate_sha, portfolio_sha)):
+        raise EvaluationError("revoked transition cannot retain evaluation authority")
+    return value, portfolio_transition_time(value["effective_at"])
+
+
+def portfolio_current_value(
+    skill_dir: Path,
+    *,
+    observed_at: datetime,
+    max_age_days: int,
+) -> dict[str, Any]:
+    skill_dir = resolve_path(skill_dir, "skill directory")
+    candidate, _ = candidate_id(skill_dir)
+    skill_key = latest_key(str(skill_dir))
+    transition_root = v2_transition_dir(skill_dir)
+    if not transition_root.exists():
+        return {
+            "state": "missing",
+            "status": "missing",
+            "current": False,
+            "evaluated_at": None,
+            "receipt_sha256": None,
+            "transition_id": None,
+            "cases": [],
+        }
+    if transition_root.is_symlink() or not transition_root.is_dir():
+        raise EvaluationError("portfolio transition root must be a real directory")
+    matching: list[tuple[datetime, dict[str, Any]]] = []
+    historical: list[tuple[datetime, dict[str, Any]]] = []
+    transition_times: set[datetime] = set()
+    for path in sorted(transition_root.iterdir()):
+        transition, effective_at = portfolio_transition(path, skill_key)
+        if effective_at > observed_at:
+            raise EvaluationError("portfolio transition is from the future")
+        if effective_at in transition_times:
+            raise EvaluationError("portfolio transitions share an effective time")
+        transition_times.add(effective_at)
+        historical.append((effective_at, transition))
+        if transition["candidate_id"] == candidate:
+            matching.append((effective_at, transition))
+    if not historical:
+        return {
+            "state": "missing",
+            "status": "missing",
+            "current": False,
+            "evaluated_at": None,
+            "receipt_sha256": None,
+            "transition_id": None,
+            "cases": [],
+        }
+    if not matching:
+        effective_at, transition = max(historical, key=lambda item: item[0])
+        return {
+            "state": "stale",
+            "status": transition["status"],
+            "current": False,
+            "evaluated_at": effective_at.isoformat(),
+            "receipt_sha256": transition.get("aggregate_receipt_sha256"),
+            "transition_id": transition["transition_id"],
+            "cases": [],
+        }
+    effective_at, transition = max(matching, key=lambda item: item[0])
+    status = transition["status"]
+    if status == "revoked":
+        return {
+            "state": "stale",
+            "status": "revoked",
+            "current": False,
+            "evaluated_at": effective_at.isoformat(),
+            "receipt_sha256": None,
+            "transition_id": transition["transition_id"],
+            "cases": [],
+        }
+    candidate_id_value, _, suite, suite_id, policy, policy_id = load_v2_inputs(
+        skill_dir, None, None
+    )
+    aggregate_sha = transition["aggregate_receipt_sha256"]
+    aggregate, verified_sha = load_v2_receipt(v2_receipt_path(aggregate_sha))
+    if verified_sha != aggregate_sha:
+        raise EvaluationError("portfolio aggregate receipt identity is malformed")
+    aggregate = validate_aggregate(
+        aggregate,
+        skill_dir,
+        candidate_id_value,
+        suite,
+        suite_id,
+        policy,
+        policy_id,
+    )
+    if aggregate["status"] != status:
+        raise EvaluationError("portfolio transition status differs from its aggregate")
+    portfolio, portfolio_sha = load_portfolio_for_aggregate(aggregate_sha)
+    if (
+        transition["portfolio_receipt_sha256"] != portfolio_sha
+        or portfolio.get("status") != status
+        or portfolio.get("candidate_id") != candidate
+    ):
+        raise EvaluationError("portfolio transition differs from its portfolio receipt")
+    if status == "pass":
+        authority_args = argparse.Namespace(
+            skill_dir=str(skill_dir),
+            authority=None,
+            suite=None,
+            policy=None,
+        )
+        authority_result = v2_authority_validate(authority_args)
+        if authority_result.get("authority_sha256") != transition["authority_sha256"]:
+            raise EvaluationError("portfolio transition authority is stale")
+    age_seconds = (observed_at - effective_at).total_seconds()
+    current = age_seconds <= max_age_days * 24 * 60 * 60
+    return {
+        "state": status if current else "stale",
+        "status": status,
+        "current": current,
+        "evaluated_at": effective_at.isoformat(),
+        "receipt_sha256": aggregate_sha,
+        "transition_id": transition["transition_id"],
+        "cases": portfolio["cases"][:100],
+    }
+
+
+def portfolio_current(args: argparse.Namespace) -> dict[str, Any]:
+    if args.max_age_days <= 0:
+        raise EvaluationError("max-age-days must be positive")
+    return portfolio_current_value(
+        Path(args.skill_dir),
+        observed_at=portfolio_now(args.now),
+        max_age_days=args.max_age_days,
+    )
+
+
+def portfolio_inventory(args: argparse.Namespace) -> dict[str, Any]:
+    if args.max_age_days <= 0:
+        raise EvaluationError("max-age-days must be positive")
+    observed_at = portfolio_now(args.now)
+    rows = []
+    seen: set[str] = set()
+    for value in args.skill_dir:
+        skill_path = os.path.abspath(value)
+        try:
+            skill_dir = resolve_path(Path(value), "skill directory")
+            skill_path = str(skill_dir)
+            evaluation = portfolio_current_value(
+                skill_dir,
+                observed_at=observed_at,
+                max_age_days=args.max_age_days,
+            )
+        except (EvaluationError, KeyError, OSError, subprocess.SubprocessError):
+            evaluation = {
+                "state": "invalid",
+                "status": "invalid",
+                "current": False,
+                "evaluated_at": None,
+                "receipt_sha256": None,
+                "transition_id": None,
+                "cases": [],
+            }
+        if skill_path in seen:
+            continue
+        seen.add(skill_path)
+        rows.append({"skill_path": skill_path, "evaluation": evaluation})
+    return {
+        "schema_version": 1,
+        "observed_at": observed_at.isoformat(),
+        "max_age_days": args.max_age_days,
+        "evaluations": rows,
+    }
+
+
 SHADOW_SUITE_VERSION = 2
 SHADOW_HARNESS_VERSION = 2
 
@@ -3727,6 +3984,14 @@ def build_parser() -> argparse.ArgumentParser:
     gate_parser.add_argument("skill_dir")
     current_gate_parser = commands.add_parser("current-gate")
     current_gate_parser.add_argument("skill_dir")
+    portfolio_current_parser = commands.add_parser("portfolio-current")
+    portfolio_current_parser.add_argument("skill_dir")
+    portfolio_current_parser.add_argument("--now")
+    portfolio_current_parser.add_argument("--max-age-days", type=int, default=90)
+    portfolio_inventory_parser = commands.add_parser("portfolio-inventory")
+    portfolio_inventory_parser.add_argument("skill_dir", nargs="+")
+    portfolio_inventory_parser.add_argument("--now")
+    portfolio_inventory_parser.add_argument("--max-age-days", type=int, default=90)
     waive_parser = commands.add_parser("waive")
     waive_parser.add_argument("skill_dir")
     waive_parser.add_argument("--base-receipt", required=True)
@@ -3829,6 +4094,8 @@ def main() -> int:
             "finalize": finalize,
             "gate": gate,
             "current-gate": current_gate,
+            "portfolio-current": portfolio_current,
+            "portfolio-inventory": portfolio_inventory,
             "waive": waive,
             "v2-suite-validate": v2_suite_validate,
             "v2-policy-validate": v2_policy_validate,

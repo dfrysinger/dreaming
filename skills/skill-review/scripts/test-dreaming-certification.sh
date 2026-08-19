@@ -305,6 +305,92 @@ expect_refusal authority-symlink-loop "cannot" \
 [[ "$(grep -c '^REFUSED:' "$TMP/authority-symlink-loop.err")" == "1" ]] ||
   fail "authority symlink loop did not emit one public REFUSED line"
 "$EVAL" current-gate "$BASE/skill" >/dev/null
+transition_path="$(find "$SKILLS_STATE_DIR/skill-review/evaluations/v2/dashboard-v1/authority-transitions" -type f -name '*.json' | head -1)"
+read -r current_at stale_at < <(
+  python3 - "$transition_path" <<'PY'
+import datetime, json, sys
+value = json.load(open(sys.argv[1]))
+at = datetime.datetime.fromisoformat(value["effective_at"])
+print(
+    (at + datetime.timedelta(days=1)).isoformat(),
+    (at + datetime.timedelta(days=91)).isoformat(),
+)
+PY
+)
+portfolio_current="$("$EVAL" portfolio-current "$BASE/skill" --now "$current_at")"
+python3 - "$portfolio_current" <<'PY'
+import json, sys
+value = json.loads(sys.argv[1])
+assert value["state"] == "pass"
+assert value["status"] == "pass"
+assert value["current"] is True
+assert value["receipt_sha256"]
+assert value["transition_id"].startswith("sha256:")
+assert value["cases"]
+PY
+pass "portfolio inventory validates a current passing evaluation"
+portfolio_stale="$("$EVAL" portfolio-current "$BASE/skill" --now "$stale_at")"
+python3 - "$portfolio_stale" <<'PY'
+import json, sys
+value = json.loads(sys.argv[1])
+assert value["state"] == "stale"
+assert value["status"] == "pass"
+assert value["current"] is False
+PY
+pass "portfolio inventory expires evaluation authority after 90 days"
+transition_tie="$(
+  python3 - "$transition_path" <<'PY'
+import hashlib, json, pathlib, sys
+source = pathlib.Path(sys.argv[1])
+value = json.loads(source.read_text())
+value.update({
+    "candidate_id": "sha256:" + "f" * 64,
+    "status": "revoked",
+    "authority_sha256": None,
+    "aggregate_receipt_sha256": None,
+    "portfolio_receipt_sha256": None,
+})
+value.pop("transition_id")
+raw = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+value["transition_id"] = "sha256:" + hashlib.sha256(raw).hexdigest()
+target = source.with_name(value["transition_id"].removeprefix("sha256:") + ".json")
+target.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+print(target)
+PY
+)"
+expect_refusal portfolio-transition-time-collision "share an effective time" \
+  "$EVAL" portfolio-current "$BASE/skill" --now "$current_at"
+rm "$transition_tie"
+pass "portfolio inventory rejects ambiguous transition ordering"
+mkdir -p "$TMP/missing-evaluation"
+printf '%s\n' '# Missing evaluation fixture' > "$TMP/missing-evaluation/SKILL.md"
+portfolio_inventory="$(
+  "$EVAL" portfolio-inventory "$BASE/skill" "$BASE/skill/../skill" \
+    "$TMP/missing-evaluation" \
+    --now "$current_at"
+)"
+python3 - "$portfolio_inventory" "$BASE/skill" "$TMP/missing-evaluation" <<'PY'
+import json, sys
+value = json.loads(sys.argv[1])
+rows = {item["skill_path"]: item["evaluation"] for item in value["evaluations"]}
+assert len(value["evaluations"]) == 2
+assert rows[sys.argv[2]]["state"] == "pass"
+assert rows[sys.argv[3]]["state"] == "missing"
+PY
+pass "bounded portfolio inventory deduplicates paths and retains missing evaluations"
+ln -s "$TMP/unresolvable-loop" "$TMP/unresolvable-loop"
+unresolvable_inventory="$(
+  "$EVAL" portfolio-inventory "$BASE/skill" "$TMP/unresolvable-loop" \
+    --now "$current_at"
+)"
+python3 - "$unresolvable_inventory" "$BASE/skill" "$TMP/unresolvable-loop" <<'PY'
+import json, os, sys
+value = json.loads(sys.argv[1])
+rows = {item["skill_path"]: item["evaluation"] for item in value["evaluations"]}
+assert rows[sys.argv[2]]["state"] == "pass"
+assert rows[os.path.abspath(sys.argv[3])]["state"] == "invalid"
+PY
+pass "unresolvable paths cannot suppress valid portfolio inventory rows"
 [[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["authoritative"])' <<<"$certification")" == "True" ]] ||
   fail "passing gate result was not marked authoritative"
 pass "compile, execute, independent verify, certificates, aggregate, and canonical authority paths pass end to end"

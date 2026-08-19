@@ -102,6 +102,8 @@ check(
     and "+ · partial" in javascript
     and "Unknown · stable backlog" in javascript
     and "No settled use in 30 days" in javascript
+    and "Evaluation queue" in javascript
+    and "evaluation_queue_position" in javascript
     and "enablement is not required" in javascript
     and 'filesUsedBy.join(", ")' in javascript
     and ".portfolio-queue .portfolio-table td::before" in stylesheet
@@ -135,6 +137,34 @@ check(
     and malformed_dependencies["required_by"] == []
     and malformed_dependencies["files_used_by"] == [],
     "malformed dependency dictionaries cannot claim completeness or disclose values",
+)
+malformed_evaluation = dashboard.DashboardData._portfolio_evaluation(
+    {
+        "state": "pass",
+        "status": "pass",
+        "current": True,
+        "evaluated_at": "2026-08-12T00:00:00+00:00",
+        "receipt_sha256": "a" * 64,
+        "transition_id": "sha256:" + "b" * 64,
+        "cases": [{
+            "executor": "copilot",
+            "case_id": "fixture",
+            "evaluation_class": "capability_uplift",
+            "candidate_valid_trials": {"private": "do-not-disclose"},
+            "candidate_successful_trials": 3,
+            "control_valid_trials": 3,
+            "control_successful_trials": 1,
+            "comparable": True,
+            "exclusion_reason": None,
+        }],
+    },
+    True,
+)
+check(
+    malformed_evaluation["state"] == "invalid"
+    and malformed_evaluation["current"] is False
+    and malformed_evaluation["cases"] == [],
+    "malformed evaluation cases fail closed without disclosing their values",
 )
 missing_kind_dependencies = dashboard.DashboardData._portfolio_dependencies(
     {
@@ -278,7 +308,26 @@ estate_snapshot = {
             "basis": "private-provenance-sentinel",
             "private_evidence_path": "/private/provenance/path",
         },
-        "evaluation_state": "pass",
+        "evaluation_complete": True,
+        "evaluation": {
+            "state": "pass",
+            "status": "pass",
+            "current": True,
+            "evaluated_at": "2026-08-12T00:00:00+00:00",
+            "receipt_sha256": "a" * 64,
+            "transition_id": "sha256:" + "b" * 64,
+            "cases": [{
+                "executor": "copilot",
+                "case_id": "fixture-intended",
+                "evaluation_class": "capability_uplift",
+                "candidate_valid_trials": 3,
+                "candidate_successful_trials": 3,
+                "control_valid_trials": 3,
+                "control_successful_trials": 1,
+                "comparable": True,
+                "exclusion_reason": None,
+            }],
+        },
         "dependencies_complete": True,
         "dependencies": {
             "state": "protected",
@@ -313,7 +362,16 @@ estate_snapshot = {
             "status": "verified",
             "basis": "exact_plugin_identity",
         },
-        "evaluation_state": "regression",
+        "evaluation_complete": True,
+        "evaluation": {
+            "state": "regression",
+            "status": "regression",
+            "current": True,
+            "evaluated_at": "2026-08-12T00:00:00+00:00",
+            "receipt_sha256": "c" * 64,
+            "transition_id": "sha256:" + "d" * 64,
+            "cases": [],
+        },
         "dependencies_complete": True,
         "dependencies": {
             "complete": True,
@@ -1408,6 +1466,19 @@ try:
         and portfolio["plugin-skill"]["who_may_change"] == "Plugin package only"
         and portfolio["plugin-skill"]["dependencies"]["state"] == "incomplete"
         and portfolio["plugin-skill"]["dependencies"]["complete"] is False
+        and estate_view["evaluation_queue"] == {
+            "queued": 1,
+            "current": 2,
+            "missing": 0,
+            "stale": 0,
+            "invalid": 0,
+        }
+        and portfolio["plugin-skill"]["evaluation_queue_position"] == 1
+        and portfolio["plugin-skill"]["evaluation_queue_reason"]
+        == "No successful use in 30 days"
+        and portfolio["fixture-skill"]["evaluation_queue_position"] is None
+        and portfolio["fixture-skill"]["evaluation"]["cases"][0]["case_id"]
+        == "fixture-intended"
         and portfolio["fixture-skill"]["dependencies"]["required_by"]
         == ["plugin-skill"]
         and portfolio["fixture-skill"]["dependencies"]["files_used_by"]

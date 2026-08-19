@@ -266,14 +266,15 @@ async function renderEstate() {
   const actions = data.actions || {status:"unavailable", total:0, items:[]};
   const capabilityTotal = plugin => Object.values(plugin.capability_counts || {}).reduce((sum, value) => sum + Number(value || 0), 0);
   const completedActions = (actions.items || []).filter(item => item.kind !== "recommendation");
-  const actionPanel = `<article class="panel full-span"><div class="panel-head"><h2>Action history</h2><span>${badge(actions.status)} · ${number(completedActions.length)} recorded</span></div>
+  const actionPanel = `<article class="panel full-span"><div class="panel-head"><h2>Action history</h2><span>${badge(actions.status)} · ${number(completedActions.length)} recorded · receipts are verification-only</span></div>
     ${actions.message ? `<div class="notice">${esc(actions.message)}</div>` : ""}
     ${actions.recovery_required ? `<div class="notice"><strong>Recovery required:</strong> automatic estate changes are blocked until the recorded action state is reconciled.</div>` : ""}
     <table><thead><tr><th>Target</th><th>Action</th><th>State</th><th>Receipt</th><th>Recorded</th></tr></thead><tbody>
       ${completedActions.map(item => `<tr><td>${esc(item.target || "Unknown target")}</td><td>${esc((item.kind || "no action").replaceAll("_"," "))}</td><td>${badge(item.status)}</td><td>${esc(item.receipt_sha256 ? `${item.receipt_sha256.slice(0,18)}…` : "none")}</td><td>${relative(item.at)}</td></tr>`).join("") || `<tr><td colspan="5">No completed actions are retained.</td></tr>`}
     </tbody></table></article>`;
   const queue = data.portfolio_decisions || [];
-  const decisionPanel = `<article class="panel full-span portfolio-queue"><div class="panel-head"><h2>Decision queue</h2><span>${number(queue.length)} enabled capabilities</span></div>
+  const evaluationQueue = data.evaluation_queue || {};
+  const decisionPanel = `<article class="panel full-span portfolio-queue"><div class="panel-head"><h2>Decision queue</h2><span>${number(evaluationQueue.queued)} evaluations waiting · ${number(queue.length)} enabled capabilities</span></div>
     <div class="toolbar"><input class="control" id="portfolio-query" placeholder="Filter skills or reasons"><select class="control" id="portfolio-filter"><option value="">All decisions</option><option value="needs-decision">Needs your decision</option><option value="failed">Evaluation failed</option><option value="needs-evaluation">Evaluation missing or stale</option><option value="unused-30">Unused 30 days</option><option value="unused-90">Unused 90 days</option><option value="plugin">Plugin skills</option><option value="protected">Protected dependencies</option><option value="insufficient">Insufficient information</option></select></div>
     <table class="portfolio-table"><thead><tr><th>Skill</th><th>Installed from</th><th>Recommendation</th><th>Why</th><th>Evaluation</th><th>Use 30d</th><th>Last used</th><th>Dependencies</th><th>Who may change it</th><th>Next action</th></tr></thead><tbody id="portfolio-rows">
     </tbody></table></article>`;
@@ -286,7 +287,7 @@ async function renderEstate() {
       <article class="card"><div class="label">Unresolved mappings</div><div class="metric">${number(totals.unresolved_runtime_skills)}</div><div class="submetric">${data.complete ? "Bounded census complete" : "Automatic removal blocked"}</div></article>
       <article class="card"><div class="label">Plugin packages</div><div class="metric">${number(totals.plugin_packages)}</div><div class="submetric">${number(totals.enabled_plugin_packages)} effectively enabled</div></article>
       <article class="card"><div class="label">Freshness</div><div class="metric">${data.fresh ? "Current" : "Stale"}</div><div class="submetric">Collected ${relative(data.collected_at)}</div></article>
-      <article class="card"><div class="label">Recorded actions</div><div class="metric">${number(completedActions.length)}</div><div class="submetric">${esc(actions.status)} · receipts are verification-only</div></article>
+      <article class="card"><div class="label">Evaluation queue</div><div class="metric">${number(evaluationQueue.queued)}</div><div class="submetric">${number(evaluationQueue.current)} current · ${number(evaluationQueue.missing)} missing</div></article>
     </div>
     <div class="notice"><strong>Bounded scope:</strong> ${esc(data.scope?.label)} Registered: ${esc((data.scope?.registered_context_ids || []).join(", ") || "none")}. Outside claim: ${esc((data.scope?.outside_context_ids || []).join(", ") || "none")}.</div>
     <div class="notice"><strong>Verified source:</strong> receiver ${esc(data.receiver?.id || "unavailable")} · census receipt ${esc(data.receipt_sha256 ? `${data.receipt_sha256.slice(0,18)}…` : "unavailable")} · settings ${esc(data.settings_sha256 ? `${data.settings_sha256.slice(0,16)}…` : "hash unavailable")}.</div>
@@ -344,13 +345,25 @@ function bindPortfolioQueue(queue) {
     }
     return `${badge(item.dependencies?.label)}${details.map(detail => `<div class="submetric">${esc(detail)}</div>`).join("")}`;
   };
+  const evaluationSummary = item => {
+    const details = [];
+    if (item.evaluation_queue_position) {
+      details.push(`Queue ${number(item.evaluation_queue_position)} · ${item.evaluation_queue_reason}`);
+    } else if (item.evaluation?.evaluated_at) {
+      details.push(`Evaluated ${relative(item.evaluation.evaluated_at)}`);
+    }
+    if (item.evaluation?.receipt_sha256) {
+      details.push(`Receipt ${item.evaluation.receipt_sha256.slice(0, 12)}…`);
+    }
+    return `${badge(item.evaluation?.label)}${details.map(detail => `<div class="submetric">${esc(detail)}</div>`).join("")}`;
+  };
   const matches = item => {
-    const textMatch = `${item.skill_name} ${item.why} ${item.installed_from}`.toLowerCase().includes(query.value.toLowerCase());
+    const textMatch = `${item.skill_name} ${item.why} ${item.installed_from} ${item.evaluation_queue_reason || ""}`.toLowerCase().includes(query.value.toLowerCase());
     if (!textMatch) return false;
     if (!filter.value) return true;
     if (filter.value === "needs-decision") return item.who_may_change === "Your decision";
     if (filter.value === "failed") return item.evaluation?.state === "regression";
-    if (filter.value === "needs-evaluation") return ["missing", "stale"].includes(item.evaluation?.state);
+    if (filter.value === "needs-evaluation") return ["missing", "stale", "inconclusive", "invalid"].includes(item.evaluation?.state);
     if (filter.value === "unused-30") return ["complete_zero_30d", "settled_zero_30d"].includes(item.usage_state) && item.uses_30d === 0;
     if (filter.value === "unused-90") return item.usage_state === "complete_zero_30d" && item.uses_90d === 0;
     if (filter.value === "plugin") return item.who_may_change === "Plugin package only";
@@ -359,7 +372,7 @@ function bindPortfolioQueue(queue) {
   };
   const render = () => {
     const visible = queue.filter(matches);
-    rows.innerHTML = visible.map(item => `<tr><td data-label="Skill">${esc(item.skill_name)}</td><td data-label="Installed from">${esc(item.installed_from)}</td><td data-label="Recommendation">${badge(item.recommendation_label)}</td><td data-label="Why">${esc(item.why)}</td><td data-label="Evaluation">${badge(item.evaluation?.label)}</td><td data-label="Use 30d">${usage30d(item)}</td><td data-label="Last used">${portfolioLastUse(item)}</td><td data-label="Dependencies">${dependencySummary(item)}</td><td data-label="Who may change it">${esc(item.who_may_change)}</td><td data-label="Next action"><button class="control" disabled title="${esc(item.next_action?.reason)}">${esc(item.next_action?.label)}</button><div class="submetric">${esc(item.next_action?.reason)}</div></td></tr>`).join("") || `<tr><td colspan="10">No decisions match this filter.</td></tr>`;
+    rows.innerHTML = visible.map(item => `<tr><td data-label="Skill">${esc(item.skill_name)}</td><td data-label="Installed from">${esc(item.installed_from)}</td><td data-label="Recommendation">${badge(item.recommendation_label)}</td><td data-label="Why">${esc(item.why)}</td><td data-label="Evaluation">${evaluationSummary(item)}</td><td data-label="Use 30d">${usage30d(item)}</td><td data-label="Last used">${portfolioLastUse(item)}</td><td data-label="Dependencies">${dependencySummary(item)}</td><td data-label="Who may change it">${esc(item.who_may_change)}</td><td data-label="Next action"><button class="control" disabled title="${esc(item.next_action?.reason)}">${esc(item.next_action?.label)}</button><div class="submetric">${esc(item.next_action?.reason)}</div></td></tr>`).join("") || `<tr><td colspan="10">No decisions match this filter.</td></tr>`;
   };
   query.addEventListener("input", render);
   filter.addEventListener("change", render);

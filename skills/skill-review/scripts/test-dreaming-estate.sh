@@ -739,6 +739,147 @@ class EstateCensusTest(unittest.TestCase):
             ]
         )
 
+    def test_evaluation_inventory_is_exact_and_fails_closed(self) -> None:
+        root = self.case / "skills"
+        root.mkdir()
+        evaluated = self.skill(root, "evaluated")
+        missing = self.skill(root, "missing")
+        contexts = [{
+            "id": "user",
+            "kind": "user",
+            "registered": True,
+            "runtime_skills": [
+                {
+                    "name": skill.name,
+                    "source": "fixture",
+                    "path": str(skill),
+                    "enabled": True,
+                }
+                for skill in (evaluated, missing)
+            ],
+        }]
+        census = module.reconcile(
+            host_id="macbook",
+            roots=[self.root("fixture", "custom", root, "unknown_provenance")],
+            contexts=contexts,
+            collected_at="2026-08-18T00:00:00+00:00",
+            durable_dependency_inventory={
+                "complete": True,
+                "dependencies": [],
+                "skills": [
+                    {"name": "evaluated", "pinned": False},
+                    {"name": "missing", "pinned": False},
+                ],
+            },
+        )
+        evaluation = {
+            "state": "pass",
+            "status": "pass",
+            "current": True,
+            "evaluated_at": "2026-08-17T00:00:00+00:00",
+            "receipt_sha256": "1" * 64,
+            "transition_id": "sha256:" + "2" * 64,
+            "cases": [{
+                "executor": "copilot",
+                "case_id": "intended",
+                "evaluation_class": "capability_uplift",
+                "candidate_valid_trials": 3,
+                "candidate_successful_trials": 3,
+                "control_valid_trials": 3,
+                "control_successful_trials": 1,
+                "comparable": True,
+                "exclusion_reason": None,
+            }],
+        }
+        missing_evaluation = {
+            "state": "missing",
+            "status": "missing",
+            "current": False,
+            "evaluated_at": None,
+            "receipt_sha256": None,
+            "transition_id": None,
+            "cases": [],
+        }
+        inventory = {
+            "complete": True,
+            "schema_version": 1,
+            "evaluator_sha256": "sha256:" + "3" * 64,
+            "observed_at": "2026-08-18T00:00:00+00:00",
+            "max_age_days": 90,
+            "evaluations": [
+                {"skill_path": str(evaluated), "evaluation": evaluation},
+                {
+                    "skill_path": str(missing),
+                    "evaluation": missing_evaluation,
+                },
+            ],
+        }
+        module.apply_evaluation_inventory(census, inventory)
+        instances = {
+            item["skill_name"]: item for item in census["physical_instances"]
+        }
+        self.assertEqual(instances["evaluated"]["evaluation"]["state"], "pass")
+        self.assertTrue(instances["evaluated"]["evaluation_complete"])
+        self.assertEqual(instances["missing"]["evaluation"]["state"], "missing")
+        self.assertEqual(
+            census["evidence"]["evaluation_inventory"]["state_counts"]["pass"],
+            1,
+        )
+        malformed = json.loads(json.dumps(inventory))
+        malformed["evaluations"][0]["evaluation"]["state"] = []
+        module.apply_evaluation_inventory(census, malformed)
+        self.assertTrue(
+            all(
+                item["evaluation"]["state"] == "invalid"
+                and item["evaluation_complete"] is False
+                for item in census["physical_instances"]
+            )
+        )
+        module.apply_evaluation_inventory(census, inventory)
+        inventory["evaluations"].pop()
+        module.apply_evaluation_inventory(census, inventory)
+        self.assertFalse(
+            census["evidence"]["evaluation_inventory"]["complete"]
+        )
+        self.assertTrue(
+            all(
+                item["evaluation"]["state"] == "invalid"
+                and item["evaluation_complete"] is False
+                for item in census["physical_instances"]
+            )
+        )
+
+    def test_evaluation_collector_requires_the_exact_protocol(self) -> None:
+        evaluator = self.case / "evaluator.py"
+        evaluator.write_text(
+            "import json\n"
+            "print(json.dumps({'observed_at': '2026-08-18T00:00:00+00:00',"
+            " 'max_age_days': 90, 'evaluations': []}))\n",
+            encoding="utf-8",
+        )
+        inventory = module.collect_evaluation_inventory(
+            {"evaluation_script": str(evaluator)},
+            [],
+            "2026-08-18T00:00:00+00:00",
+        )
+        self.assertFalse(inventory["complete"])
+        self.assertEqual(inventory["evaluations"], [])
+
+    def test_evaluation_collector_bounds_combined_output(self) -> None:
+        evaluator = self.case / "noisy-evaluator.py"
+        evaluator.write_text(
+            "import sys\n"
+            f"sys.stdout.write('x' * {module.MAX_EVALUATION_OUTPUT_BYTES + 1})\n",
+            encoding="utf-8",
+        )
+        inventory = module.collect_evaluation_inventory(
+            {"evaluation_script": str(evaluator)},
+            [],
+            "2026-08-18T00:00:00+00:00",
+        )
+        self.assertFalse(inventory["complete"])
+        self.assertEqual(inventory["evaluations"], [])
+
     def test_chk02_classifies_the_full_provenance_authority_matrix(self) -> None:
         personal = self.case / "personal"
         personal.mkdir()

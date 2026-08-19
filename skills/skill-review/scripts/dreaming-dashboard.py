@@ -3803,8 +3803,14 @@ class DashboardData:
                     "owner": safe_text(owner, 200),
                     "source": safe_text(source, 200),
                     "provenance_status": provenance_status,
-                    "evaluation_state": safe_text(
-                        item.get("evaluation_state"), 80
+                    "evaluation_complete": (
+                        item.get("evaluation_complete")
+                        if isinstance(item.get("evaluation_complete"), bool)
+                        else None
+                    ),
+                    "evaluation": self._portfolio_evaluation(
+                        item.get("evaluation", item.get("evaluation_state")),
+                        item.get("evaluation_complete"),
                     ),
                     "usage_complete": (
                         item.get("usage_complete")
@@ -4061,6 +4067,11 @@ class DashboardData:
             usage,
             enabled_skills,
         )
+        evaluation_queue = [
+            item
+            for item in portfolio_decisions
+            if item.get("evaluation_queue_position") is not None
+        ]
         return {
             **base,
             "usage": {
@@ -4082,6 +4093,25 @@ class DashboardData:
             "plugins": plugins,
             "enabled_skills": enabled_skills,
             "portfolio_decisions": portfolio_decisions,
+            "evaluation_queue": {
+                "queued": len(evaluation_queue),
+                "current": sum(
+                    item["evaluation"].get("current") is True
+                    for item in portfolio_decisions
+                ),
+                "missing": sum(
+                    item["evaluation"].get("state") == "missing"
+                    for item in portfolio_decisions
+                ),
+                "stale": sum(
+                    item["evaluation"].get("state") == "stale"
+                    for item in portfolio_decisions
+                ),
+                "invalid": sum(
+                    item["evaluation"].get("state") == "invalid"
+                    for item in portfolio_decisions
+                ),
+            },
             "other_physical_copies": other_physical_copies,
             "decisions": actions["items"],
         }
@@ -4116,7 +4146,12 @@ class DashboardData:
             raw_evaluation = self._portfolio_fact(
                 "evaluation", "evaluation_state", mappings, representative
             )
-            evaluation = self._portfolio_evaluation(raw_evaluation)
+            evaluation_complete = self._portfolio_fact(
+                "evaluation_complete", None, mappings, representative
+            )
+            evaluation = self._portfolio_evaluation(
+                raw_evaluation, evaluation_complete
+            )
             raw_dependencies = self._portfolio_fact(
                 "dependencies", "dependency_state", mappings, representative
             )
@@ -4196,6 +4231,12 @@ class DashboardData:
                         "reason": "Unavailable: this preview is read-only.",
                     },
                     "preview_read_only": self.paths.preview_root is not None,
+                    "_evaluation_priority": self._portfolio_evaluation_priority(
+                        evaluation,
+                        usage_state,
+                        enabled.get("root_class")
+                        or (representative or {}).get("root_class"),
+                    ),
                 }
             )
         priority = {
@@ -4205,14 +4246,30 @@ class DashboardData:
             "insufficient_information": 3,
             "proven_useful": 4,
         }
-        return sorted(
+        ordered = sorted(
             rows,
             key=lambda item: (
+                (
+                    item["_evaluation_priority"][0]
+                    if item["_evaluation_priority"] is not None
+                    else 99
+                ),
                 priority[item["recommendation"]],
                 item["skill_name"].casefold(),
                 item["canonical_capability_id"],
             ),
         )
+        queue_position = 0
+        for item in ordered:
+            evaluation_priority = item.pop("_evaluation_priority")
+            if evaluation_priority is None:
+                item["evaluation_queue_position"] = None
+                item["evaluation_queue_reason"] = None
+                continue
+            queue_position += 1
+            item["evaluation_queue_position"] = queue_position
+            item["evaluation_queue_reason"] = evaluation_priority[1]
+        return ordered
 
     @staticmethod
     def _portfolio_fact(
@@ -4231,21 +4288,147 @@ class DashboardData:
         return None
 
     @staticmethod
-    def _portfolio_evaluation(value: Any) -> dict[str, str]:
-        current = True
+    def _portfolio_evaluation_case(value: Any) -> dict[str, Any] | None:
+        if not isinstance(value, dict) or set(value) != {
+            "executor",
+            "case_id",
+            "evaluation_class",
+            "candidate_valid_trials",
+            "candidate_successful_trials",
+            "control_valid_trials",
+            "control_successful_trials",
+            "comparable",
+            "exclusion_reason",
+        }:
+            return None
+        for field in ("executor", "case_id", "evaluation_class"):
+            if not isinstance(value[field], str) or not value[field]:
+                return None
+        for field in (
+            "candidate_valid_trials",
+            "candidate_successful_trials",
+            "control_valid_trials",
+            "control_successful_trials",
+        ):
+            count = value[field]
+            if (
+                isinstance(count, bool)
+                or not isinstance(count, int)
+                or not 0 <= count <= 3
+            ):
+                return None
+        if not isinstance(value["comparable"], bool) or not (
+            value["exclusion_reason"] is None
+            or isinstance(value["exclusion_reason"], str)
+        ):
+            return None
+        return {
+            "executor": safe_text(value["executor"], 80),
+            "case_id": safe_text(value["case_id"], 200),
+            "evaluation_class": safe_text(value["evaluation_class"], 80),
+            "candidate_valid_trials": value["candidate_valid_trials"],
+            "candidate_successful_trials": value[
+                "candidate_successful_trials"
+            ],
+            "control_valid_trials": value["control_valid_trials"],
+            "control_successful_trials": value[
+                "control_successful_trials"
+            ],
+            "comparable": value["comparable"],
+            "exclusion_reason": safe_text(value["exclusion_reason"], 80),
+        }
+
+    @staticmethod
+    def _portfolio_evaluation(
+        value: Any, complete: Any = None
+    ) -> dict[str, Any]:
+        receipt_sha256 = None
+        transition_id = None
+        evaluated_at = None
+        cases: list[dict[str, Any]] = []
+        current = not isinstance(value, dict)
+        historical_status = None
         if isinstance(value, dict):
             current = value.get("current") is True
-            value = value.get("status")
+            historical_status = safe_text(value.get("status"), 80).casefold()
+            evaluated_at = safe_text(value.get("evaluated_at"), 80) or None
+            receipt = value.get("receipt_sha256")
+            if isinstance(receipt, str) and SHA256_RE.fullmatch(receipt):
+                receipt_sha256 = receipt
+            transition = value.get("transition_id")
+            if (
+                isinstance(transition, str)
+                and transition.startswith("sha256:")
+                and SHA256_RE.fullmatch(transition.removeprefix("sha256:"))
+            ):
+                transition_id = transition
+            raw_cases = value.get("cases")
+            if not isinstance(raw_cases, list) or len(raw_cases) > 100:
+                complete = False
+            else:
+                for item in raw_cases[:100]:
+                    projected = DashboardData._portfolio_evaluation_case(item)
+                    if projected is None:
+                        complete = False
+                        cases = []
+                        break
+                    cases.append(projected)
+            value = value.get("state") or value.get("status")
         normalized = safe_text(value, 80).casefold().replace("-", "_").replace(" ", "_")
-        if normalized in {"regression", "fail", "failed", "critical_regression"} and current:
-            return {"state": "regression", "label": "Current regression"}
-        if normalized in {"pass", "passed", "current_pass"} and current:
-            return {"state": "pass", "label": "Current pass"}
-        if normalized in {"stale", "expired"} or not current:
-            return {"state": "stale", "label": "Stale"}
-        if normalized in {"inconclusive", "queued", "running"}:
-            return {"state": normalized, "label": normalized.replace("_", " ").title()}
-        return {"state": "missing", "label": "Needs evaluation"}
+        if complete is False or normalized in {"invalid", "incomplete"}:
+            state, label, current = "invalid", "Evaluation data invalid", False
+        elif normalized in {"missing", "not_evaluated", ""}:
+            state, label, current = "missing", "Needs evaluation", False
+        elif normalized in {"stale", "expired", "revoked"} or not current:
+            state, label, current = "stale", "Stale evaluation", False
+        elif normalized in {
+            "regression",
+            "fail",
+            "failed",
+            "critical_regression",
+        }:
+            state, label = "regression", "Current regression"
+        elif normalized in {"pass", "passed", "current_pass", "waived"}:
+            state, label = "pass", "Current pass"
+        elif normalized in {"inconclusive", "queued", "running"}:
+            state = normalized
+            label = normalized.replace("_", " ").title()
+        else:
+            state, label, current = "invalid", "Evaluation data invalid", False
+        return {
+            "state": state,
+            "status": historical_status or normalized or "missing",
+            "label": label,
+            "current": current,
+            "evaluated_at": evaluated_at,
+            "receipt_sha256": receipt_sha256,
+            "transition_id": transition_id,
+            "cases": cases,
+        }
+
+    @staticmethod
+    def _portfolio_evaluation_priority(
+        evaluation: dict[str, Any],
+        usage_state: str,
+        root_class: Any,
+    ) -> tuple[int, str] | None:
+        if usage_state in {"complete_zero_30d", "settled_zero_30d"}:
+            return (1, "No successful use in 30 days")
+        state = evaluation.get("state")
+        if state in {"missing", "inconclusive", "invalid"}:
+            return (2, "No current conclusive evaluation")
+        if state == "regression":
+            return (4, "Current evaluation found a regression")
+        if root_class == "plugin":
+            return (5, "Plugin capability needs package-level judgment")
+        if state == "stale":
+            return (
+                6 if evaluation.get("status") == "pass" else 2,
+                "Passing evaluation is stale"
+                if evaluation.get("status") == "pass"
+                else "No current conclusive evaluation",
+            )
+        return None
 
     @staticmethod
     def _portfolio_dependency_fact(value: Any) -> Any:

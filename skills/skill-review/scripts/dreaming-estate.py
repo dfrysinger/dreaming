@@ -8,10 +8,13 @@ import hashlib
 import json
 import os
 import re
+import selectors
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
@@ -45,6 +48,18 @@ USAGE_INDEX_SCHEMA_VERSION = 1
 USAGE_PARSER_REVISION = 2
 USAGE_QUIET_SECONDS = 300
 MAX_USAGE_SESSION_ISSUES = 32
+EVALUATION_STATES = {
+    "pass",
+    "regression",
+    "inconclusive",
+    "stale",
+    "missing",
+    "invalid",
+}
+MAX_EVALUATION_CASES = 100
+MAX_EVALUATION_OUTPUT_BYTES = 2_000_000
+EVALUATION_READ_CHUNK_BYTES = 65_536
+EVALUATION_TIMEOUT_SECONDS = 120
 USAGE_ALIASES = {
     "architecture-guardrails": {
         "target": "guardrails",
@@ -3601,6 +3616,332 @@ def collect_durable_dependency_inventory(config: dict[str, Any]) -> dict[str, An
     return inventory
 
 
+def incomplete_evaluation() -> dict[str, Any]:
+    return {
+        "state": "invalid",
+        "status": "invalid",
+        "current": False,
+        "evaluated_at": None,
+        "receipt_sha256": None,
+        "transition_id": None,
+        "cases": [],
+    }
+
+
+def run_bounded_evaluator(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
+    try:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError:
+        return None
+    captured = {"stdout": bytearray(), "stderr": bytearray()}
+    total = 0
+    failed = False
+    deadline = time.monotonic() + EVALUATION_TIMEOUT_SECONDS
+    selector = selectors.DefaultSelector()
+    assert process.stdout is not None
+    assert process.stderr is not None
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failed = True
+                break
+            for key, _ in selector.select(min(remaining, 0.25)):
+                data = os.read(key.fileobj.fileno(), EVALUATION_READ_CHUNK_BYTES)
+                if not data:
+                    selector.unregister(key.fileobj)
+                    continue
+                total += len(data)
+                if total > MAX_EVALUATION_OUTPUT_BYTES:
+                    failed = True
+                    break
+                captured[key.data].extend(data)
+            if failed:
+                break
+        if not failed:
+            try:
+                process.wait(timeout=max(deadline - time.monotonic(), 0))
+            except subprocess.TimeoutExpired:
+                failed = True
+    finally:
+        selector.close()
+        if failed or process.poll() is None:
+            for number in (signal.SIGTERM, signal.SIGKILL):
+                if process.poll() is not None:
+                    break
+                try:
+                    os.killpg(os.getpgid(process.pid), number)
+                except (ProcessLookupError, PermissionError, OSError):
+                    break
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    continue
+        for stream in (process.stdout, process.stderr):
+            try:
+                stream.close()
+            except OSError:
+                pass
+    if failed or process.returncode is None:
+        return None
+    return subprocess.CompletedProcess(
+        argv,
+        process.returncode,
+        bytes(captured["stdout"]).decode("utf-8", errors="replace"),
+        bytes(captured["stderr"]).decode("utf-8", errors="replace"),
+    )
+
+
+def collect_evaluation_inventory(
+    config: dict[str, Any],
+    physical_instances: list[dict[str, Any]],
+    observed_at: str,
+) -> dict[str, Any]:
+    evaluator = Path(
+        config.get(
+            "evaluation_script",
+            Path(__file__).with_name("skill-evaluation.py"),
+        )
+    ).expanduser().resolve()
+    paths = sorted(
+        {
+            item["absolute_path"]
+            for item in physical_instances
+            if isinstance(item.get("absolute_path"), str)
+        }
+    )
+    if not evaluator.is_file() or evaluator.is_symlink():
+        return {
+            "complete": False,
+            "evaluator_sha256": None,
+            "evaluations": [],
+        }
+    try:
+        evaluator_sha256 = f"sha256:{file_sha256(evaluator)}"
+    except OSError:
+        return {
+            "complete": False,
+            "evaluator_sha256": None,
+            "evaluations": [],
+        }
+    completed = run_bounded_evaluator(
+        [
+            sys.executable,
+            str(evaluator),
+            "portfolio-inventory",
+            *paths,
+            "--now",
+            observed_at,
+            "--max-age-days",
+            "90",
+        ]
+    )
+    try:
+        evaluator_unchanged = (
+            evaluator.is_file()
+            and not evaluator.is_symlink()
+            and f"sha256:{file_sha256(evaluator)}" == evaluator_sha256
+        )
+    except OSError:
+        evaluator_unchanged = False
+    if completed is None or completed.returncode != 0 or not evaluator_unchanged:
+        return {
+            "complete": False,
+            "evaluator_sha256": evaluator_sha256,
+            "evaluations": [],
+        }
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        result = None
+    if not isinstance(result, dict):
+        return {
+            "complete": False,
+            "evaluator_sha256": evaluator_sha256,
+            "evaluations": [],
+        }
+    if (
+        set(result)
+        != {"schema_version", "observed_at", "max_age_days", "evaluations"}
+        or result.get("schema_version") != 1
+        or result.get("observed_at") != observed_at
+        or result.get("max_age_days") != 90
+        or not isinstance(result.get("evaluations"), list)
+    ):
+        return {
+            "complete": False,
+            "evaluator_sha256": evaluator_sha256,
+            "evaluations": [],
+        }
+    return {
+        "complete": True,
+        "schema_version": result["schema_version"],
+        "evaluator_sha256": evaluator_sha256,
+        "observed_at": result["observed_at"],
+        "max_age_days": result["max_age_days"],
+        "evaluations": result["evaluations"],
+    }
+
+
+def valid_evaluation_case(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "executor",
+        "case_id",
+        "evaluation_class",
+        "candidate_valid_trials",
+        "candidate_successful_trials",
+        "control_valid_trials",
+        "control_successful_trials",
+        "comparable",
+        "exclusion_reason",
+    }:
+        return False
+    for field in ("executor", "case_id", "evaluation_class"):
+        if not isinstance(value[field], str) or not value[field]:
+            return False
+    for field in (
+        "candidate_valid_trials",
+        "candidate_successful_trials",
+        "control_valid_trials",
+        "control_successful_trials",
+    ):
+        count = value[field]
+        if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 3:
+            return False
+    return (
+        isinstance(value["comparable"], bool)
+        and (
+            value["exclusion_reason"] is None
+            or isinstance(value["exclusion_reason"], str)
+        )
+    )
+
+
+def apply_evaluation_inventory(
+    census: dict[str, Any],
+    inventory: dict[str, Any],
+) -> None:
+    physical = census["physical_instances"]
+    expected_paths = {
+        item["absolute_path"]
+        for item in physical
+        if isinstance(item.get("absolute_path"), str)
+    }
+    rows = inventory.get("evaluations")
+    complete = (
+        inventory.get("complete") is True
+        and inventory.get("schema_version") == 1
+        and isinstance(inventory.get("evaluator_sha256"), str)
+        and SHA256_ID_RE.fullmatch(inventory["evaluator_sha256"]) is not None
+        and inventory.get("observed_at") == census.get("collected_at")
+        and inventory.get("max_age_days") == 90
+        and isinstance(rows, list)
+    )
+    by_path: dict[str, dict[str, Any]] = {}
+    if complete:
+        for row in rows:
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"skill_path", "evaluation"}
+                or not isinstance(row.get("skill_path"), str)
+                or row["skill_path"] in by_path
+                or not isinstance(row.get("evaluation"), dict)
+            ):
+                complete = False
+                break
+            evaluation = row["evaluation"]
+            if (
+                set(evaluation)
+                != {
+                    "state",
+                    "status",
+                    "current",
+                    "evaluated_at",
+                    "receipt_sha256",
+                    "transition_id",
+                    "cases",
+                }
+                or not isinstance(evaluation["state"], str)
+                or evaluation["state"] not in EVALUATION_STATES
+                or not isinstance(evaluation["status"], str)
+                or not isinstance(evaluation["current"], bool)
+                or (
+                    evaluation["current"]
+                    and evaluation["state"]
+                    not in {"pass", "regression", "inconclusive"}
+                )
+                or (
+                    evaluation["evaluated_at"] is not None
+                    and not isinstance(evaluation["evaluated_at"], str)
+                )
+                or (
+                    evaluation["receipt_sha256"] is not None
+                    and (
+                        not isinstance(evaluation["receipt_sha256"], str)
+                        or HEX_SHA256_RE.fullmatch(
+                            evaluation["receipt_sha256"]
+                        )
+                        is None
+                    )
+                )
+                or (
+                    evaluation["transition_id"] is not None
+                    and (
+                        not isinstance(evaluation["transition_id"], str)
+                        or SHA256_ID_RE.fullmatch(
+                            evaluation["transition_id"]
+                        )
+                        is None
+                    )
+                )
+                or not isinstance(evaluation["cases"], list)
+                or len(evaluation["cases"]) > MAX_EVALUATION_CASES
+                or not all(valid_evaluation_case(item) for item in evaluation["cases"])
+            ):
+                complete = False
+                break
+            by_path[row["skill_path"]] = evaluation
+    if set(by_path) != expected_paths:
+        complete = False
+    counts = Counter()
+    for item in physical:
+        evaluation = (
+            dict(by_path[item["absolute_path"]])
+            if complete
+            else incomplete_evaluation()
+        )
+        item["evaluation"] = evaluation
+        item["evaluation_complete"] = complete
+        counts[evaluation["state"]] += 1
+    census.setdefault("evidence", {})["evaluation_inventory"] = {
+        "complete": complete,
+        "evaluator_sha256": (
+            inventory.get("evaluator_sha256")
+            if isinstance(inventory.get("evaluator_sha256"), str)
+            else None
+        ),
+        "observed_at": (
+            inventory.get("observed_at")
+            if isinstance(inventory.get("observed_at"), str)
+            else None
+        ),
+        "max_age_days": 90,
+        "physical_instance_count": len(physical),
+        "state_counts": {
+            state: counts.get(state, 0) for state in sorted(EVALUATION_STATES)
+        },
+    }
+
+
 def collect(config: dict[str, Any]) -> dict[str, Any]:
     host_id = config.get("host_id")
     binary = config.get("copilot_binary", "copilot")
@@ -3661,17 +4002,26 @@ def collect(config: dict[str, Any]) -> dict[str, Any]:
         enabled_plugin_names,
     )
     durable_dependency_inventory = collect_durable_dependency_inventory(config)
+    collected_at = datetime.now(timezone.utc).isoformat()
     census = reconcile(
         host_id=host_id,
         roots=roots,
         contexts=contexts,
-        collected_at=datetime.now(timezone.utc).isoformat(),
+        collected_at=collected_at,
         evidence={
             "copilot_version": version,
             "settings_path": str(settings),
             "settings_sha256": settings_sha256,
         },
         durable_dependency_inventory=durable_dependency_inventory,
+    )
+    apply_evaluation_inventory(
+        census,
+        collect_evaluation_inventory(
+            config,
+            census["physical_instances"],
+            collected_at,
+        ),
     )
     census["plugins"] = plugins
     census["totals"]["plugin_packages"] = len(plugins)
