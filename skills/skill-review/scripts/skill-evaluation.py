@@ -9,6 +9,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import tempfile
 from datetime import datetime, timezone
@@ -1814,7 +1815,8 @@ def validate_authoring_catalog(
             "authoring catalog rubric differs from the compilation rubric"
         )
     grader_root = config_path.parent / "graders"
-    for entry in canonical_file_inventory(grader_root):
+    grader_inventory = canonical_file_inventory(grader_root)
+    for entry in grader_inventory:
         grader_path = grader_root / entry["path"]
         if entry["size"] > AUTHORING_MAX_FIXTURE_BYTES:
             raise EvaluationError(
@@ -1829,12 +1831,16 @@ def validate_authoring_catalog(
         "fixtures": fixtures,
         "graders": graders,
         "rubric": normalized_rubric,
+        "grader_tree_inventory": grader_inventory,
+        "grader_tree_id": f"sha256:{digest(canonical(grader_inventory))}",
     }
     reject_authoring_sensitive_value(normalized, "authoring catalog")
     return normalized, f"sha256:{digest(canonical(normalized))}"
 
 
-def v2_input_author_packet(args: argparse.Namespace) -> dict[str, Any]:
+def build_input_author_packet(
+    args: argparse.Namespace,
+) -> tuple[dict[str, Any], dict[str, Any]]:
     skill_dir = resolve_path(Path(args.skill_dir), "skill directory")
     candidate, files = candidate_id(skill_dir)
     contract_path = skill_dir / "SKILL.md"
@@ -1852,6 +1858,13 @@ def v2_input_author_packet(args: argparse.Namespace) -> dict[str, Any]:
     )
 
     suite, suite_id = load_suite(resolve_path(Path(args.suite), "suite template"))
+    if (
+        suite["compiled_from_schema_version"] is not None
+        or suite["cross_executor_authority"] is not True
+    ):
+        raise EvaluationError(
+            "safe authoring requires a cross-executor schema-2 suite template"
+        )
     for index, case in enumerate(suite["cases"]):
         require_authoring_safe_text(
             case["prompt"],
@@ -1927,26 +1940,291 @@ def v2_input_author_packet(args: argparse.Namespace) -> dict[str, Any]:
         "source_catalog_id": catalog_id,
         "policy_contract": policy,
         "policy_id": policy_id,
+        "compilation_source_id": f"sha256:{digest(canonical(config))}",
         "compilation_contract": compilation_contract,
+        "routing_source_id": f"sha256:{digest(canonical(routing))}",
         "routing_contract": routing_contract,
         "harness_executable_sha256": harness_sha,
     }
     packet["packet_id"] = f"sha256:{digest(canonical(packet))}"
-    output = resolve_path(Path(args.output).parent, "authoring packet output parent") / Path(args.output).name
+    return packet, {
+        "skill_dir": skill_dir,
+        "suite": suite,
+        "policy": policy,
+        "config": config,
+        "config_path": config_path,
+        "routing": routing,
+        "harness_sha": harness_sha,
+        "catalog_id": catalog_id,
+    }
+
+
+def authoring_output_path(value: str, skill_dir: Path, field: str) -> Path:
+    supplied = Path(value)
+    output = resolve_path(supplied.parent, f"{field} parent") / supplied.name
     if output.is_symlink() or output.exists():
-        raise EvaluationError("authoring packet output must not already exist")
+        raise EvaluationError(f"{field} must not already exist")
     try:
         output.relative_to(skill_dir)
     except ValueError:
         pass
     else:
-        raise EvaluationError("authoring packet cannot be written inside the skill root")
+        raise EvaluationError(f"{field} cannot be written inside the skill root")
+    return output
+
+
+def v2_input_author_packet(args: argparse.Namespace) -> dict[str, Any]:
+    packet, context = build_input_author_packet(args)
+    output = authoring_output_path(
+        args.output, context["skill_dir"], "authoring packet output"
+    )
     atomic_write(output, packet)
     return {
-        "candidate_id": candidate,
+        "candidate_id": packet["candidate_id"],
         "packet": str(output),
         "packet_id": packet["packet_id"],
-        "source_catalog_id": catalog_id,
+        "source_catalog_id": context["catalog_id"],
+    }
+
+
+def validate_input_author_draft(
+    path: Path,
+    packet: dict[str, Any],
+    context: dict[str, Any],
+) -> tuple[dict[str, Any], str]:
+    raw = path.read_bytes()
+    if len(raw) > AUTHORING_MAX_SKILL_CONTRACT_BYTES:
+        raise EvaluationError("authoring draft exceeds the authoring size limit")
+    draft = load_json(path)
+    require_exact_keys(
+        draft,
+        "authoring draft",
+        {"schema_version", "kind", "packet_id", "candidate_id", "cases"},
+    )
+    if (
+        draft.get("schema_version") != AUTHORING_PACKET_SCHEMA_VERSION
+        or draft.get("kind") != "safe_evaluation_input_draft"
+        or draft.get("packet_id") != packet["packet_id"]
+        or draft.get("candidate_id") != packet["candidate_id"]
+    ):
+        raise EvaluationError(
+            "authoring draft schema, packet, or candidate identity is invalid"
+        )
+    values = draft.get("cases")
+    template_cases = context["suite"]["cases"]
+    runtime = {
+        item["id"]: item for item in context["config"]["case_runtime"]
+    }
+    if not isinstance(values, list) or len(values) != len(template_cases):
+        raise EvaluationError(
+            "authoring draft must define every template case exactly once"
+        )
+    cases: list[dict[str, Any]] = []
+    task_ids: set[str] = set()
+    prompts: set[str] = set()
+    for index, (value, template) in enumerate(zip(values, template_cases)):
+        field = f"authoring draft.cases[{index}]"
+        if not isinstance(value, dict):
+            raise EvaluationError(f"{field} must be an object")
+        require_exact_keys(
+            value,
+            field,
+            {
+                "id",
+                "class",
+                "task_id",
+                "prompt",
+                "deterministic_graders",
+                "fixture",
+                "artifacts",
+                "semantic",
+            },
+        )
+        source_runtime = runtime[template["id"]]
+        fixed = {
+            "id": template["id"],
+            "class": template["class"],
+            "deterministic_graders": template["deterministic_graders"],
+            "fixture": source_runtime["fixture"],
+            "artifacts": source_runtime["artifacts"],
+            "semantic": source_runtime["semantic"],
+        }
+        if any(value.get(key) != expected for key, expected in fixed.items()):
+            raise EvaluationError(
+                f"{field} changes a trusted case, fixture, grader, or runtime field"
+            )
+        task_id = require_text(value.get("task_id"), f"{field}.task_id")
+        if not TASK_ID_RE.fullmatch(task_id) or task_id in task_ids:
+            raise EvaluationError(f"{field}.task_id is invalid or duplicated")
+        prompt = require_authoring_safe_text(
+            value.get("prompt"),
+            f"{field}.prompt",
+            maximum=AUTHORING_MAX_DESCRIPTION_BYTES,
+        )
+        if prompt in prompts:
+            raise EvaluationError(f"{field}.prompt duplicates another case prompt")
+        task_ids.add(task_id)
+        prompts.add(prompt)
+        cases.append({**fixed, "task_id": task_id, "prompt": prompt})
+    normalized = {
+        "schema_version": AUTHORING_PACKET_SCHEMA_VERSION,
+        "kind": "safe_evaluation_input_draft",
+        "packet_id": packet["packet_id"],
+        "candidate_id": packet["candidate_id"],
+        "cases": cases,
+    }
+    reject_authoring_sensitive_value(normalized, "authoring draft")
+    return normalized, f"sha256:{digest(canonical(normalized))}"
+
+
+def validate_materialized_authoring_trees(
+    staging: Path,
+    packet: dict[str, Any],
+) -> None:
+    catalog = packet["source_catalog"]
+    expected_fixtures = sorted(
+        [
+            {
+                "path": item["path"],
+                "sha256": item["sha256"],
+                "size": item["size"],
+            }
+            for item in catalog["fixtures"]
+        ],
+        key=lambda item: item["path"],
+    )
+    actual_fixtures = canonical_file_inventory(staging / "fixtures")
+    if actual_fixtures != expected_fixtures:
+        raise EvaluationError(
+            "materialized fixture tree differs from the packet-bound inventory"
+        )
+    actual_graders = canonical_file_inventory(staging / "graders")
+    if (
+        actual_graders != catalog["grader_tree_inventory"]
+        or f"sha256:{digest(canonical(actual_graders))}"
+        != catalog["grader_tree_id"]
+    ):
+        raise EvaluationError(
+            "materialized grader tree differs from the packet-bound inventory"
+        )
+    for tree_name, inventory_values in (
+        ("fixtures", actual_fixtures),
+        ("graders", actual_graders),
+    ):
+        for entry in inventory_values:
+            reject_authoring_sensitive_bytes(
+                (staging / tree_name / entry["path"]).read_bytes(),
+                f"materialized {tree_name} object {entry['path']}",
+            )
+
+
+def v2_input_author_materialize(args: argparse.Namespace) -> dict[str, Any]:
+    expected_packet, context = build_input_author_packet(args)
+    supplied_packet = load_json(resolve_path(Path(args.packet), "authoring packet"))
+    if supplied_packet != expected_packet:
+        raise EvaluationError(
+            "authoring packet differs from the current candidate and trusted sources"
+        )
+    draft, draft_id = validate_input_author_draft(
+        resolve_path(Path(args.draft), "authoring draft"),
+        expected_packet,
+        context,
+    )
+    output = authoring_output_path(
+        args.output_dir, context["skill_dir"], "authoring materialization output"
+    )
+    parent = output.parent
+    if parent.is_symlink() or not parent.is_dir():
+        raise EvaluationError("authoring materialization parent must be a real directory")
+
+    runtime = {
+        item["id"]: item for item in context["config"]["case_runtime"]
+    }
+    materialized_cases: list[dict[str, Any]] = []
+    for draft_case, template in zip(draft["cases"], context["suite"]["cases"]):
+        case = {
+            "id": template["id"],
+            "class": template["class"],
+            "task_id": draft_case["task_id"],
+            "prompt": draft_case["prompt"],
+            "deterministic_graders": template["deterministic_graders"],
+        }
+        if "activation" in template:
+            case["activation"] = template["activation"]
+        materialized_cases.append(case)
+    suite = {
+        **context["suite"],
+        "cases": materialized_cases,
+    }
+    suite_id = f"sha256:{digest(canonical(suite))}"
+    config = {
+        **context["config"],
+        "case_runtime": [
+            {
+                "id": case["id"],
+                "fixture": runtime[case["id"]]["fixture"],
+                "artifacts": runtime[case["id"]]["artifacts"],
+                "semantic": runtime[case["id"]]["semantic"],
+            }
+            for case in materialized_cases
+        ],
+    }
+    staging = Path(
+        tempfile.mkdtemp(prefix=f".{output.name}.", dir=parent)
+    )
+    try:
+        for tree_name in ("fixtures", "graders"):
+            source = context["config_path"].parent / tree_name
+            if source.exists():
+                shutil.copytree(source, staging / tree_name)
+        atomic_write(staging / "suite.json", suite)
+        atomic_write(staging / "policy.json", context["policy"])
+        atomic_write(staging / "compilation.json", config)
+        atomic_write(staging / "routing.json", context["routing"])
+        atomic_write(
+            staging / "authoring.json",
+            {
+                "schema_version": AUTHORING_PACKET_SCHEMA_VERSION,
+                "kind": "safe_evaluation_input_materialization",
+                "candidate_id": expected_packet["candidate_id"],
+                "packet_id": expected_packet["packet_id"],
+                "draft_id": draft_id,
+                "suite_id": suite_id,
+                "source_catalog_id": expected_packet["source_catalog_id"],
+            },
+        )
+        staged_suite, staged_suite_id = load_suite(staging / "suite.json")
+        if staged_suite != suite or staged_suite_id != suite_id:
+            raise EvaluationError(
+                "materialized suite differs from its trusted in-memory form"
+            )
+        validate_compilation_config(
+            staging / "compilation.json",
+            staged_suite,
+            context["policy"],
+            context["harness_sha"],
+        )
+        validate_routing(
+            staging / "routing.json",
+            config["executors"],
+            config["comparator"],
+        )
+        validate_materialized_authoring_trees(staging, expected_packet)
+        os.replace(staging, output)
+    except BaseException:
+        if staging.exists():
+            shutil.rmtree(staging)
+        raise
+    return {
+        "candidate_id": expected_packet["candidate_id"],
+        "packet_id": expected_packet["packet_id"],
+        "draft_id": draft_id,
+        "suite_id": suite_id,
+        "output_dir": str(output),
+        "suite": str(output / "suite.json"),
+        "policy": str(output / "policy.json"),
+        "config": str(output / "compilation.json"),
+        "routing": str(output / "routing.json"),
     }
 
 
@@ -5996,6 +6274,19 @@ def build_parser() -> argparse.ArgumentParser:
     input_author_packet_parser.add_argument("--harness", required=True)
     input_author_packet_parser.add_argument("--catalog", required=True)
     input_author_packet_parser.add_argument("--output", required=True)
+    input_author_materialize_parser = commands.add_parser(
+        "v2-input-author-materialize"
+    )
+    input_author_materialize_parser.add_argument("skill_dir")
+    input_author_materialize_parser.add_argument("--suite", required=True)
+    input_author_materialize_parser.add_argument("--policy", required=True)
+    input_author_materialize_parser.add_argument("--config", required=True)
+    input_author_materialize_parser.add_argument("--routing", required=True)
+    input_author_materialize_parser.add_argument("--harness", required=True)
+    input_author_materialize_parser.add_argument("--catalog", required=True)
+    input_author_materialize_parser.add_argument("--packet", required=True)
+    input_author_materialize_parser.add_argument("--draft", required=True)
+    input_author_materialize_parser.add_argument("--output-dir", required=True)
     input_register_parser = commands.add_parser("v2-input-register")
     input_register_parser.add_argument("skill_dir")
     input_register_parser.add_argument("--suite", required=True)
@@ -6135,6 +6426,7 @@ def main() -> int:
             "v2-suite-validate": v2_suite_validate,
             "v2-policy-validate": v2_policy_validate,
             "v2-input-author-packet": v2_input_author_packet,
+            "v2-input-author-materialize": v2_input_author_materialize,
             "v2-input-register": v2_input_register,
             "v2-input-validate": v2_input_validate,
             "v2-input-review": v2_input_review,

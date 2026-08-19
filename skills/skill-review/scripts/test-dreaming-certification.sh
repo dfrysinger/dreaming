@@ -348,8 +348,206 @@ assert {item["class"] for item in packet["suite_template"]["cases"]} == {
 serialized = json.dumps(packet, sort_keys=True)
 assert "/Users/" not in serialized
 assert '"argv"' not in serialized
+assert '"identity_markers"' not in serialized
+assert '"instruction"' not in serialized
 assert "fixture-session" not in serialized
 PY
+
+make_authoring_draft() {
+  local packet="$1" output="$2" mode="${3:-valid}"
+  python3 - "$packet" "$output" "$mode" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+packet_path = Path(sys.argv[1])
+output_path = Path(sys.argv[2])
+mode = sys.argv[3]
+packet = json.loads(packet_path.read_text())
+runtime = {
+    item["id"]: item
+    for item in packet["compilation_contract"]["case_runtime"]
+}
+cases = []
+for index, template in enumerate(packet["suite_template"]["cases"], 1):
+    case_runtime = runtime[template["id"]]
+    cases.append(
+        {
+            "id": template["id"],
+            "class": template["class"],
+            "task_id": f"authored:{template['class']}-{index:04d}",
+            "prompt": f"Complete the synthetic {template['class']} task {index}.",
+            "deterministic_graders": template["deterministic_graders"],
+            "fixture": case_runtime["fixture"],
+            "artifacts": case_runtime["artifacts"],
+            "semantic": case_runtime["semantic"],
+        }
+    )
+if mode == "fixture":
+    cases[0]["fixture"] = "undeclared"
+elif mode == "grader":
+    cases[0]["deterministic_graders"] = ["undeclared"]
+elif mode == "artifact":
+    cases[0]["artifacts"] = ["/Users/alice/private.txt"]
+elif mode == "semantic":
+    cases[0]["semantic"] = not cases[0]["semantic"]
+elif mode == "missing":
+    cases.pop()
+elif mode == "sensitive":
+    cases[0]["prompt"] = "Use raw transcript copied from a private session."
+elif mode == "duplicate-task":
+    cases[1]["task_id"] = cases[0]["task_id"]
+elif mode == "duplicate-prompt":
+    cases[1]["prompt"] = cases[0]["prompt"]
+draft = {
+    "schema_version": 1,
+    "kind": "safe_evaluation_input_draft",
+    "packet_id": packet["packet_id"],
+    "candidate_id": packet["candidate_id"],
+    "cases": cases,
+}
+output_path.write_text(json.dumps(draft, sort_keys=True, separators=(",", ":")))
+PY
+}
+
+materialize_authoring() {
+  local root="$1" packet="$2" draft="$3" output="$4"
+  "$EVAL" v2-input-author-materialize "$root/skill" \
+    --suite "$root/skill/.skill-evaluation-cases.json" \
+    --policy "$root/skill/.skill-evaluation-policy.json" \
+    --config "$root/config/compilation.json" \
+    --routing "$root/config/routing.json" \
+    --harness "$HARNESS" \
+    --catalog "$root/config/authoring-catalog.json" \
+    --packet "$packet" --draft "$draft" --output-dir "$output"
+}
+
+make_authoring_draft "$AUTHORING/packet.json" "$AUTHORING/draft.json"
+materialization="$(
+  materialize_authoring "$AUTHORING" "$AUTHORING/packet.json" \
+    "$AUTHORING/draft.json" "$AUTHORING/materialized"
+)"
+[[ "$(skill_tree_digest "$AUTHORING/skill")" == "$authoring_skill_before" ]] ||
+  fail "trusted materialization changed the candidate root"
+python3 - "$AUTHORING/packet.json" "$AUTHORING/materialized" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+packet = json.load(open(sys.argv[1]))
+root = Path(sys.argv[2])
+def inventory(tree):
+    values = []
+    for path in sorted(tree.rglob("*")):
+        if path.is_file():
+            content = path.read_bytes()
+            values.append(
+                {
+                    "path": path.relative_to(tree).as_posix(),
+                    "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+                    "size": len(content),
+                }
+            )
+    return values
+expected_fixtures = sorted(
+    [
+        {key: item[key] for key in ("path", "sha256", "size")}
+        for item in packet["source_catalog"]["fixtures"]
+    ],
+    key=lambda item: item["path"],
+)
+assert inventory(root / "fixtures") == expected_fixtures
+assert (
+    inventory(root / "graders")
+    == packet["source_catalog"]["grader_tree_inventory"]
+)
+PY
+registration="$(
+  "$EVAL" v2-input-register "$AUTHORING/skill" \
+    --suite "$AUTHORING/materialized/suite.json" \
+    --policy "$AUTHORING/materialized/policy.json" \
+    --config "$AUTHORING/materialized/compilation.json" \
+    --routing "$AUTHORING/materialized/routing.json" \
+    --harness "$HARNESS" \
+    --authoring-method bounded-safe-author \
+    --source-id "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["packet_id"])' <<<"$materialization")" \
+    --source-id "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["draft_id"])' <<<"$materialization")"
+)"
+manifest="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["input_manifest_sha256"])' \
+    <<<"$registration"
+)"
+"$EVAL" v2-input-validate "$AUTHORING/skill" --manifest "$manifest" >/dev/null
+for invalid_draft in fixture grader artifact semantic missing sensitive duplicate-task duplicate-prompt; do
+  make_authoring_draft "$AUTHORING/packet.json" \
+    "$AUTHORING/draft-$invalid_draft.json" "$invalid_draft"
+  expect_refusal "authoring-draft-$invalid_draft" "REFUSED:" \
+    materialize_authoring "$AUTHORING" "$AUTHORING/packet.json" \
+      "$AUTHORING/draft-$invalid_draft.json" \
+      "$AUTHORING/materialized-$invalid_draft"
+done
+expect_refusal "authoring-materialize-inside-skill" "cannot be written inside the skill root" \
+  materialize_authoring "$AUTHORING" "$AUTHORING/packet.json" \
+    "$AUTHORING/draft.json" "$AUTHORING/skill/materialized"
+AUTHORING_DRIFT="$TMP/authoring-drift"
+make_fixture "$AUTHORING_DRIFT"
+author_packet "$AUTHORING_DRIFT" "$AUTHORING_DRIFT/packet.json" >/dev/null
+make_authoring_draft "$AUTHORING_DRIFT/packet.json" "$AUTHORING_DRIFT/draft.json"
+python3 - "$AUTHORING_DRIFT/config/compilation.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["identity_markers"].append("changed-safe-marker")
+path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+expect_refusal "authoring-source-drift" "differs from the current candidate and trusted sources" \
+  materialize_authoring "$AUTHORING_DRIFT" "$AUTHORING_DRIFT/packet.json" \
+    "$AUTHORING_DRIFT/draft.json" "$AUTHORING_DRIFT/materialized"
+AUTHORING_CANDIDATE_DRIFT="$TMP/authoring-candidate-drift"
+make_fixture "$AUTHORING_CANDIDATE_DRIFT"
+author_packet "$AUTHORING_CANDIDATE_DRIFT" \
+  "$AUTHORING_CANDIDATE_DRIFT/packet.json" >/dev/null
+make_authoring_draft "$AUTHORING_CANDIDATE_DRIFT/packet.json" \
+  "$AUTHORING_CANDIDATE_DRIFT/draft.json"
+printf 'candidate changed\n' >"$AUTHORING_CANDIDATE_DRIFT/skill/reference.txt"
+expect_refusal "authoring-candidate-drift" "differs from the current candidate and trusted sources" \
+  materialize_authoring "$AUTHORING_CANDIDATE_DRIFT" \
+    "$AUTHORING_CANDIDATE_DRIFT/packet.json" \
+    "$AUTHORING_CANDIDATE_DRIFT/draft.json" \
+    "$AUTHORING_CANDIDATE_DRIFT/materialized"
+AUTHORING_LEGACY="$TMP/authoring-legacy"
+make_fixture "$AUTHORING_LEGACY"
+python3 - "$AUTHORING_LEGACY/skill/.skill-evaluation-cases.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+case = lambda task, prompt: {
+    "task_id": task,
+    "prompt": prompt,
+    "required_regex": [{"id": "success", "pattern": "SUCCESS"}],
+    "forbidden_regex": [],
+    "friction_regex": [],
+}
+Path(sys.argv[1]).write_text(
+    json.dumps(
+        {
+            "schema_version": 1,
+            "source": case("legacy:source-0001", "Complete the source task."),
+            "sibling": case("legacy:sibling-0002", "Complete the sibling task."),
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+)
+PY
+expect_refusal "authoring-legacy-suite" "requires a cross-executor schema-2 suite template" \
+  author_packet "$AUTHORING_LEGACY" "$AUTHORING_LEGACY/packet.json"
+pass "trusted materialization changes only prompts and task identities, rebinds current sources, and registers an exact external manifest"
 
 make_unsafe_authoring_fixture() {
   local root="$1" mode="$2"
