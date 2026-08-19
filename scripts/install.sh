@@ -996,6 +996,7 @@ cmd_rollback() {
     echo "rollback backup must contain exactly one selftest LaunchAgent" >&2
     return 1
   }
+  rm -f "$SELFTEST_GENERATION_FILE"
   attempt_unpublish
 
   while IFS= read -r label; do
@@ -1021,10 +1022,12 @@ cmd_rollback() {
     "$LAUNCHCTL" enable "$DOMAIN/$label" >/dev/null 2>&1 || true
     echo "restored $label"
   done
+  if [[ "$DREAMING_ENABLE_COPILOT_COMPAT" == "1" ]]; then
+    "$DREAMING_REPO_ROOT/scripts/manage-instructions.sh" install
+  fi
   generation="$(date -u +%Y%m%dT%H%M%SZ)-rollback-$$"
   atomic_pointer "$generation" "$GENERATION_FILE"
   atomic_pointer "$(basename "$selftest_plist" .plist)" "$SELFTEST_LABEL_FILE"
-  rm -f "$SELFTEST_GENERATION_FILE"
   if [[ "$PUBLICATION_RESIDUAL" == "1" ]]; then
     echo "rollback loaded behind halt from $backup; publication residuals remain; run restored selftest, then enable explicitly"
   else

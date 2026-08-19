@@ -1015,6 +1015,22 @@ grep -q "executable missing or not executable" "$TMP/rollback.err"
   { echo "rollback mutated launchd before validating all executables" >&2; exit 1; }
 printf '#!/usr/bin/env bash\n:\n' > "$OLD"
 chmod +x "$OLD"
+echo "rollback drift fixture" >> "$INSTRUCTIONS"
+if run_install rollback "$BACKUP" >"$TMP/rollback-drift.out" \
+    2>"$TMP/rollback-drift.err"; then
+  echo "rollback accepted a drifted managed instruction" >&2
+  exit 1
+fi
+[[ -f "$STATE/skill-review/disable-daemon" ]] ||
+  { echo "failed rollback removed halt" >&2; exit 1; }
+[[ ! -e "$STATE/dreaming/selftest-passed-generation" ]] ||
+  { echo "failed rollback retained the prior selftest generation" >&2; exit 1; }
+if run_install enable >"$TMP/enable-after-failed-rollback.out" \
+    2>"$TMP/enable-after-failed-rollback.err"; then
+  echo "enable accepted a partially restored generation" >&2
+  exit 1
+fi
+cp "$ROOT/config/dreaming.instructions.md" "$INSTRUCTIONS"
 run_install rollback "$BACKUP" >/dev/null
 [[ -f "$STATE/skill-review/disable-daemon" ]] ||
   { echo "rollback removed halt" >&2; exit 1; }
@@ -1032,9 +1048,10 @@ fi
   { echo "rollback restored a dashboard absent from its backup" >&2; exit 1; }
 DREAMING_SKIP_DASHBOARD_HEALTH_CHECK=0 run_install selftest >/dev/null
 run_install enable >/dev/null
-[[ ! -e "$INSTRUCTIONS" ]] ||
-  { echo "rollback retained the managed Copilot instruction" >&2; exit 1; }
-echo "PASS  rollback refuses missing executables and requires restored selftest"
+[[ -f "$INSTRUCTIONS" ]] ||
+  { echo "rollback omitted the managed Copilot instruction" >&2; exit 1; }
+grep -q "managed-instructions=verified" <<<"$(run_install status)"
+echo "PASS  rollback refuses missing executables and restores selftest prerequisites"
 
 run_install install >/dev/null
 MIGRATION_LEGACY_SKILLS="$TMP/migration-legacy-skills"
