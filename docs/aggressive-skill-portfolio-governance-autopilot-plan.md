@@ -295,6 +295,23 @@
   sandbox-root widening with no unresolved material finding. Aggregate
   six-operation budgeting, repair/re-review lineage, trusted author
   orchestration, and real zero-use cohort progression remain outstanding.
+- The fail-closed author/repair causal handoff is now a reviewed work order,
+  committed locally on the isolated preview branch as `bf0130f`. Every author,
+  repair, review, and re-review call must be launched and privately consumed by
+  the trusted evaluator; caller-authored operation JSON is integrity data, not
+  causal proof. Authoritative adapter processes use a versioned allowlist-built
+  environment with no inherited unknown variables. The adapter is the fixed
+  regular non-symlink sibling of the resolved evaluator and must match the path
+  and byte identity pre-authorized by reviewed owner/installation authority
+  before launch. The deterministic provider seam uses that same environment
+  construction and is confined to fixed disposable `.test-work` roots. The
+  deterministic check contract now fails caller-authored operations,
+  inherited provider redirection, caller-selected or byte-substituted
+  adapters, and authoritative fake providers. Bounded Opus/Terra design review
+  found the environment and adapter-authorization omissions; both families
+  verified those findings closed in round two with no material regression.
+  Implementation of this reviewed handoff is the next prerequisite before the
+  aggregate six-operation ledger.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
