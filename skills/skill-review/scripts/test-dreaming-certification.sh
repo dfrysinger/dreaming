@@ -467,6 +467,53 @@ source_catalog_id="$(
   python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_catalog_id"])' \
     "$AUTHORING/packet.json"
 )"
+python3 - "$AUTHORING/packet.json" "$AUTHORING/draft.json" \
+  "$SCRIPT_DIR/dreaming-vendor-adapter.py" "$AUTHORING/author-operation.json" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+packet_path, draft_path, adapter_path, output_path = map(Path, sys.argv[1:])
+packet = json.loads(packet_path.read_text())
+draft = json.loads(draft_path.read_text())
+governance = lambda value: json.dumps(
+    value, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+).encode()
+adapter = lambda value: json.dumps(
+    value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+).encode()
+operation = {
+    "schema_version": 1,
+    "kind": "evaluation_input_model_operation",
+    "operation": "author",
+    "status": "completed",
+    "vendor": "copilot",
+    "model": "fixture-author-model",
+    "adapter_executable_sha256": "sha256:" + hashlib.sha256(
+        adapter_path.read_bytes()
+    ).hexdigest(),
+    "packet_id": packet["packet_id"],
+    "candidate_id": packet["candidate_id"],
+    "outcome": "draft",
+    "summary": "Safe synthetic fixture cases.",
+    "reason": None,
+    "draft_id": "sha256:" + hashlib.sha256(governance(draft)).hexdigest(),
+    "usage": {
+        "normalized_tokens": 140,
+        "input_tokens": 100,
+        "output_tokens": 40,
+    },
+    "billing": {"status": "unavailable", "cost_usd": None},
+    "elapsed_ms": 100,
+}
+operation["operation_id"] = "sha256:" + hashlib.sha256(adapter(operation)).hexdigest()
+output_path.write_text(json.dumps(operation, sort_keys=True, separators=(",", ":")))
+PY
+author_operation_id="$(
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["operation_id"])' \
+    "$AUTHORING/author-operation.json"
+)"
 registration="$(
   "$EVAL" v2-input-register "$AUTHORING/skill" \
     --suite "$AUTHORING/materialized/suite.json" \
@@ -478,9 +525,11 @@ registration="$(
     --authoring-packet "$AUTHORING/packet.json" \
     --authoring-draft "$AUTHORING/draft.json" \
     --authoring-receipt "$AUTHORING/materialized/authoring.json" \
+    --authoring-operation "$AUTHORING/author-operation.json" \
     --source-id "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["packet_id"])' <<<"$materialization")" \
     --source-id "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["draft_id"])' <<<"$materialization")" \
-    --source-id "$source_catalog_id"
+    --source-id "$source_catalog_id" \
+    --source-id "$author_operation_id"
 )"
 manifest="$(
   python3 -c 'import json,sys; print(json.load(sys.stdin)["input_manifest_sha256"])' \
@@ -495,10 +544,39 @@ registration = json.loads(sys.argv[1])
 manifest = json.load(open(registration["input_manifest"]))
 roles = {item["role"] for item in manifest["objects"]}
 assert {
-    "authoring_packet", "authoring_draft", "authoring_receipt"
+    "authoring_packet", "authoring_draft", "authoring_receipt",
+    "authoring_operation", "authoring_adapter"
 } <= roles
 assert sys.argv[2] in manifest["source_identities"]
 assert manifest["authoring_method"] == "bounded-safe-author"
+PY
+mkdir -p "$AUTHORING/evaluator-alias"
+ln -s "$EVAL" "$AUTHORING/evaluator-alias/skill-evaluation.py"
+alias_registration="$(
+  "$AUTHORING/evaluator-alias/skill-evaluation.py" \
+    v2-input-register "$AUTHORING/skill" \
+    --suite "$AUTHORING/materialized/suite.json" \
+    --policy "$AUTHORING/materialized/policy.json" \
+    --config "$AUTHORING/materialized/compilation.json" \
+    --routing "$AUTHORING/materialized/routing.json" \
+    --harness "$HARNESS" \
+    --authoring-method bounded-safe-author \
+    --authoring-packet "$AUTHORING/packet.json" \
+    --authoring-draft "$AUTHORING/draft.json" \
+    --authoring-receipt "$AUTHORING/materialized/authoring.json" \
+    --authoring-operation "$AUTHORING/author-operation.json" \
+    --source-id "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["packet_id"])' <<<"$materialization")" \
+    --source-id "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["draft_id"])' <<<"$materialization")" \
+    --source-id "$source_catalog_id" \
+    --source-id "$author_operation_id"
+)"
+python3 - "$registration" "$alias_registration" <<'PY'
+import json
+import sys
+
+direct = json.loads(sys.argv[1])
+aliased = json.loads(sys.argv[2])
+assert aliased["input_manifest_sha256"] == direct["input_manifest_sha256"]
 PY
 expect_refusal "authoring-provenance-required" "requires exact authoring provenance" \
   "$EVAL" v2-input-register "$AUTHORING/skill" \
@@ -508,6 +586,140 @@ expect_refusal "authoring-provenance-required" "requires exact authoring provena
     --routing "$AUTHORING/materialized/routing.json" \
     --harness "$HARNESS" --authoring-method bounded-safe-author \
     --source-id "$source_catalog_id"
+python3 - "$AUTHORING/author-operation.json" \
+  "$AUTHORING/overspent-author-operation.json" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+source, output = map(Path, sys.argv[1:])
+value = json.loads(source.read_text())
+value["usage"] = {
+    "normalized_tokens": 112001,
+    "input_tokens": 112000,
+    "output_tokens": 1,
+}
+value.pop("operation_id")
+canonical = json.dumps(
+    value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+).encode()
+value["operation_id"] = "sha256:" + hashlib.sha256(canonical).hexdigest()
+output.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")))
+PY
+overspent_operation_id="$(
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["operation_id"])' \
+    "$AUTHORING/overspent-author-operation.json"
+)"
+expect_refusal "authoring-operation-budget" "exceeds the normalized-token budget" \
+  "$EVAL" v2-input-register "$AUTHORING/skill" \
+    --suite "$AUTHORING/materialized/suite.json" \
+    --policy "$AUTHORING/materialized/policy.json" \
+    --config "$AUTHORING/materialized/compilation.json" \
+    --routing "$AUTHORING/materialized/routing.json" \
+    --harness "$HARNESS" --authoring-method bounded-safe-author \
+    --authoring-packet "$AUTHORING/packet.json" \
+    --authoring-draft "$AUTHORING/draft.json" \
+    --authoring-receipt "$AUTHORING/materialized/authoring.json" \
+    --authoring-operation "$AUTHORING/overspent-author-operation.json" \
+    --source-id "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["packet_id"])' <<<"$materialization")" \
+    --source-id "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["draft_id"])' <<<"$materialization")" \
+    --source-id "$source_catalog_id" \
+    --source-id "$overspent_operation_id"
+python3 - "$AUTHORING/author-operation.json" "$AUTHORING" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+source = json.loads(Path(sys.argv[1]).read_text())
+output = Path(sys.argv[2])
+mutations = {
+    "default-model": lambda value: value.__setitem__("model", "default"),
+    "wrong-adapter": lambda value: value.__setitem__(
+        "adapter_executable_sha256", "sha256:" + "0" * 64
+    ),
+    "wrong-packet": lambda value: value.__setitem__(
+        "packet_id", "sha256:" + "1" * 64
+    ),
+    "wrong-draft": lambda value: value.__setitem__(
+        "draft_id", "sha256:" + "2" * 64
+    ),
+    "elapsed-overrun": lambda value: value.__setitem__("elapsed_ms", 1500001),
+    "false-billing": lambda value: value.__setitem__(
+        "billing", {"status": "available", "cost_usd": None}
+    ),
+}
+for name, mutate in mutations.items():
+    value = json.loads(json.dumps(source))
+    value.pop("operation_id")
+    mutate(value)
+    canonical = json.dumps(
+        value, sort_keys=True, separators=(",", ":"), ensure_ascii=False
+    ).encode()
+    value["operation_id"] = "sha256:" + hashlib.sha256(canonical).hexdigest()
+    (output / f"{name}-author-operation.json").write_text(
+        json.dumps(value, sort_keys=True, separators=(",", ":"))
+    )
+forged = json.loads(json.dumps(source))
+forged["operation_id"] = "sha256:" + "3" * 64
+(output / "forged-id-author-operation.json").write_text(
+    json.dumps(forged, sort_keys=True, separators=(",", ":"))
+)
+PY
+expect_author_operation_refusal() {
+  local label="$1"
+  local expected="$2"
+  local operation_path="$3"
+  local operation_id
+  operation_id="$(
+    python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["operation_id"])' \
+      "$operation_path"
+  )"
+  expect_refusal "$label" "$expected" \
+    "$EVAL" v2-input-register "$AUTHORING/skill" \
+      --suite "$AUTHORING/materialized/suite.json" \
+      --policy "$AUTHORING/materialized/policy.json" \
+      --config "$AUTHORING/materialized/compilation.json" \
+      --routing "$AUTHORING/materialized/routing.json" \
+      --harness "$HARNESS" --authoring-method bounded-safe-author \
+      --authoring-packet "$AUTHORING/packet.json" \
+      --authoring-draft "$AUTHORING/draft.json" \
+      --authoring-receipt "$AUTHORING/materialized/authoring.json" \
+      --authoring-operation "$operation_path" \
+      --source-id "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["packet_id"])' <<<"$materialization")" \
+      --source-id "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["draft_id"])' <<<"$materialization")" \
+      --source-id "$source_catalog_id" \
+      --source-id "$operation_id"
+}
+expect_author_operation_refusal \
+  "authoring-operation-default-model" \
+  "authoring operation identity, outcome, or draft binding is invalid" \
+  "$AUTHORING/default-model-author-operation.json"
+expect_author_operation_refusal \
+  "authoring-operation-wrong-adapter" \
+  "authoring operation identity, outcome, or draft binding is invalid" \
+  "$AUTHORING/wrong-adapter-author-operation.json"
+expect_author_operation_refusal \
+  "authoring-operation-wrong-packet" \
+  "authoring operation identity, outcome, or draft binding is invalid" \
+  "$AUTHORING/wrong-packet-author-operation.json"
+expect_author_operation_refusal \
+  "authoring-operation-wrong-draft" \
+  "authoring operation identity, outcome, or draft binding is invalid" \
+  "$AUTHORING/wrong-draft-author-operation.json"
+expect_author_operation_refusal \
+  "authoring-operation-elapsed-overrun" \
+  "authoring operation exceeds the elapsed-time budget" \
+  "$AUTHORING/elapsed-overrun-author-operation.json"
+expect_author_operation_refusal \
+  "authoring-operation-false-billing" \
+  "authoring operation billing telemetry is invalid" \
+  "$AUTHORING/false-billing-author-operation.json"
+expect_author_operation_refusal \
+  "authoring-operation-forged-id" \
+  "authoring operation content identity is invalid" \
+  "$AUTHORING/forged-id-author-operation.json"
 forge_authoring_provenance() {
   local mode="$1" prefix="$AUTHORING/forged-$1"
   python3 - "$AUTHORING/packet.json" "$AUTHORING/draft.json" \
@@ -571,9 +783,11 @@ for forged in rubric source-kind; do
       --authoring-packet "$forged_prefix.packet.json" \
       --authoring-draft "$forged_prefix.draft.json" \
       --authoring-receipt "$forged_prefix.receipt.json" \
+      --authoring-operation "$AUTHORING/author-operation.json" \
       --source-id "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["packet_id"])' "$forged_prefix.meta.json")" \
       --source-id "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["draft_id"])' "$forged_prefix.meta.json")" \
-      --source-id "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_catalog_id"])' "$forged_prefix.meta.json")"
+      --source-id "$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["source_catalog_id"])' "$forged_prefix.meta.json")" \
+      --source-id "$author_operation_id"
 done
 for invalid_draft in fixture grader artifact semantic missing sensitive duplicate-task duplicate-prompt; do
   make_authoring_draft "$AUTHORING/packet.json" \

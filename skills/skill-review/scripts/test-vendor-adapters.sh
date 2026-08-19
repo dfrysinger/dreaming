@@ -340,9 +340,10 @@ if vendor == "codex" and "--output-last-message" in args:
       (arg for arg in args if "EVALUATION_INPUT_AUTHOR_OPERATION" in arg), None
     )
     if author_prompt is not None:
+        requested_model = args[args.index("--model") + 1]
         target.write_text(json.dumps(input_author_payload(author_prompt)))
         print(json.dumps({
-          "type": "turn_context", "payload": {"model": "default"},
+          "type": "turn_context", "payload": {"model": requested_model},
           "usage": {"input_tokens": 100, "output_tokens": 40, "total_tokens": 140},
         }))
         raise SystemExit()
@@ -361,10 +362,11 @@ if ("-p" in args or "--print" in args) and "plugin" not in args:
       (arg for arg in args if "EVALUATION_INPUT_AUTHOR_OPERATION" in arg), None
     )
     if author_prompt is not None:
+        requested_model = args[args.index("--model") + 1]
         payload = input_author_payload(author_prompt)
         if vendor == "copilot":
             print(json.dumps({"events": [
-              {"type": "session.start", "data": {"model": "default"}},
+              {"type": "session.start", "data": {"model": requested_model}},
               {"type": "result", "data": payload},
               {"type": "session.usage_checkpoint",
                "usage": {"input_tokens": 100, "output_tokens": 40,
@@ -372,7 +374,7 @@ if ("-p" in args or "--print" in args) and "plugin" not in args:
             ]}))
         else:
             print(json.dumps({
-              "type": "system", "model": "default", "result": payload,
+              "type": "system", "model": requested_model, "result": payload,
               "usage": {"input_tokens": 100, "output_tokens": 40,
                         "total_tokens": 140},
             }))
@@ -836,7 +838,7 @@ print(json.dumps({"ok": True}))
             unvalidated_result,
             "--draft-output",
             unvalidated_draft,
-            model="default",
+            model="fixture-author-model",
             check=False,
         )
         self.assertEqual(unvalidated["error"]["code"], "missing-argument")
@@ -874,7 +876,7 @@ print(json.dumps({"ok": True}))
                 packet=str(packet),
                 result=str(result_path),
                 draft_output=str(draft_path),
-                model="default",
+                model="fixture-author-model",
                 binary=self.env["DREAMING_COPILOT_BIN"],
                 timeout=60,
                 output_bytes=100_000,
@@ -888,6 +890,41 @@ print(json.dumps({"ok": True}))
                 harness="validated-by-test-double",
                 catalog="validated-by-test-double",
             )
+        alias_root = self.case / "adapter-alias"
+        alias_root.mkdir()
+        adapter_alias = alias_root / "dreaming-vendor-adapter.py"
+        adapter_alias.symlink_to(adapter)
+        (alias_root / "skill-evaluation.py").write_text(
+            "raise SystemExit('decoy evaluator must not run')\n"
+        )
+        validator_commands = []
+        validator_work = self.case / "validator-work"
+        validator_work.mkdir()
+
+        def validate_packet(command, *args, **kwargs):
+            validator_commands.append(command)
+            output = Path(command[command.index("--output") + 1])
+            output.write_bytes(packet.read_bytes())
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with mock.patch.object(
+            vendor_module, "__file__", str(adapter_alias)
+        ), mock.patch.object(
+            vendor_module, "run_process_bounded", side_effect=validate_packet
+        ):
+            vendor_module.validate_evaluation_input_packet(
+                author_args(
+                    140,
+                    self.case / "anchor-result.json",
+                    self.case / "anchor-draft.json",
+                ),
+                json.loads(packet.read_text()),
+                validator_work,
+            )
+        self.assertEqual(
+            Path(validator_commands[0][1]),
+            adapter.resolve().with_name("skill-evaluation.py"),
+        )
         result_path = self.case / "copilot-author-result.json"
         draft_path = self.case / "copilot-draft.json"
         with mock.patch.dict(os.environ, self.env, clear=False), mock.patch.object(
@@ -935,7 +972,7 @@ print(json.dumps({"ok": True}))
                 self.case / f"{vendor}-author-result.json",
                 "--draft-output",
                 self.case / f"{vendor}-author-draft.json",
-                model="default",
+                model="fixture-author-model",
                 check=False,
             )
             self.assertEqual(

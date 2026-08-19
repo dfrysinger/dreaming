@@ -7,6 +7,7 @@ import argparse
 import fcntl
 import hashlib
 import json
+import math
 import os
 import re
 import shutil
@@ -92,6 +93,8 @@ INPUT_REGISTRY_OPTIONAL_ROLES = {
     "authoring_packet",
     "authoring_draft",
     "authoring_receipt",
+    "authoring_operation",
+    "authoring_adapter",
 }
 INPUT_READINESS_STATES = {
     "input_missing",
@@ -333,9 +336,16 @@ def sha256_file(path: Path) -> str:
 
 
 def trusted_harness_path() -> Path:
-    path = Path(__file__).with_name("skill-evaluation-harness.py").resolve()
+    path = Path(__file__).resolve().with_name("skill-evaluation-harness.py")
     if not path.is_file() or path.is_symlink():
         raise EvaluationError("reviewed Dreaming harness executable is unavailable")
+    return path
+
+
+def trusted_authoring_adapter_path() -> Path:
+    path = Path(__file__).resolve().with_name("dreaming-vendor-adapter.py")
+    if not path.is_file() or path.is_symlink():
+        raise EvaluationError("trusted authoring adapter is unavailable")
     return path
 
 
@@ -1671,6 +1681,10 @@ def validate_input_manifest(
         receipt = load_registry_json_object(
             manifest_role(objects, "authoring_receipt"), "authoring receipt"
         )
+        operation = load_registry_json_object(
+            manifest_role(objects, "authoring_operation"), "authoring operation"
+        )
+        authoring_adapter_entry = manifest_role(objects, "authoring_adapter")
         fixture_inventory = sorted(
             [
                 {
@@ -1695,7 +1709,7 @@ def validate_input_manifest(
             ],
             key=lambda item: item["path"],
         )
-        packet, draft_value, _ = validate_authoring_provenance(
+        packet, draft_value, _, operation = validate_authoring_provenance(
             skill_dir,
             candidate,
             files,
@@ -1709,6 +1723,8 @@ def validate_input_manifest(
             packet,
             draft_value,
             receipt,
+            operation,
+            authoring_adapter_entry["sha256"],
             fixture_inventory,
             grader_inventory,
         )
@@ -1716,6 +1732,7 @@ def validate_input_manifest(
             packet["packet_id"],
             f"sha256:{digest(canonical(draft_value))}",
             packet["source_catalog_id"],
+            operation["operation_id"],
         }:
             raise EvaluationError(
                 "bounded-safe-author manifest source identities are incomplete"
@@ -2321,6 +2338,120 @@ def v2_input_author_materialize(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def validate_authoring_operation(
+    operation: dict[str, Any],
+    packet: dict[str, Any],
+    draft_id: str,
+    adapter_sha256: str,
+) -> dict[str, Any]:
+    require_exact_keys(
+        operation,
+        "authoring operation",
+        {
+            "schema_version",
+            "kind",
+            "operation",
+            "status",
+            "vendor",
+            "model",
+            "adapter_executable_sha256",
+            "packet_id",
+            "candidate_id",
+            "outcome",
+            "summary",
+            "reason",
+            "draft_id",
+            "usage",
+            "billing",
+            "elapsed_ms",
+            "operation_id",
+        },
+    )
+    model = require_text(operation.get("model"), "authoring operation.model")
+    if (
+        operation.get("schema_version") != AUTHORING_PACKET_SCHEMA_VERSION
+        or operation.get("kind") != "evaluation_input_model_operation"
+        or operation.get("operation") != "author"
+        or operation.get("status") != "completed"
+        or operation.get("vendor") != "copilot"
+        or model == "default"
+        or operation.get("adapter_executable_sha256") != adapter_sha256
+        or operation.get("packet_id") != packet["packet_id"]
+        or operation.get("candidate_id") != packet["candidate_id"]
+        or operation.get("outcome") != "draft"
+        or operation.get("reason") is not None
+        or operation.get("draft_id") != draft_id
+    ):
+        raise EvaluationError(
+            "authoring operation identity, outcome, or draft binding is invalid"
+        )
+    require_authoring_safe_text(
+        operation.get("summary"),
+        "authoring operation.summary",
+        maximum=AUTHORING_MAX_DESCRIPTION_BYTES,
+    )
+    usage = operation.get("usage")
+    if not isinstance(usage, dict):
+        raise EvaluationError("authoring operation.usage must be an object")
+    require_exact_keys(
+        usage,
+        "authoring operation.usage",
+        {"normalized_tokens", "input_tokens", "output_tokens"},
+    )
+    normalized_tokens = require_positive_int(
+        usage.get("normalized_tokens"),
+        "authoring operation.usage.normalized_tokens",
+    )
+    if normalized_tokens > 112_000:
+        raise EvaluationError("authoring operation exceeds the normalized-token budget")
+    detailed: list[int] = []
+    for field in ("input_tokens", "output_tokens"):
+        value = usage.get(field)
+        if value is not None:
+            detailed.append(
+                require_nonnegative_int(value, f"authoring operation.usage.{field}")
+            )
+    if detailed and (
+        len(detailed) != 2 or sum(detailed) != normalized_tokens
+    ):
+        raise EvaluationError(
+            "authoring operation detailed usage does not match normalized tokens"
+        )
+    billing = operation.get("billing")
+    if not isinstance(billing, dict):
+        raise EvaluationError("authoring operation.billing must be an object")
+    require_exact_keys(
+        billing, "authoring operation.billing", {"status", "cost_usd"}
+    )
+    billing_status = billing.get("status")
+    billing_cost = billing.get("cost_usd")
+    if (
+        billing_status == "unavailable"
+        and billing_cost is not None
+    ) or (
+        billing_status == "available"
+        and (
+            not isinstance(billing_cost, (int, float))
+            or isinstance(billing_cost, bool)
+            or not math.isfinite(billing_cost)
+            or billing_cost < 0
+        )
+    ) or billing_status not in {"available", "unavailable"}:
+        raise EvaluationError("authoring operation billing telemetry is invalid")
+    elapsed_ms = require_nonnegative_int(
+        operation.get("elapsed_ms"), "authoring operation.elapsed_ms"
+    )
+    if elapsed_ms > 25 * 60 * 1000:
+        raise EvaluationError("authoring operation exceeds the elapsed-time budget")
+    operation_without_id = {
+        key: value for key, value in operation.items() if key != "operation_id"
+    }
+    expected_id = f"sha256:{digest(shadow_canonical(operation_without_id))}"
+    if operation.get("operation_id") != expected_id:
+        raise EvaluationError("authoring operation content identity is invalid")
+    return operation
+
+
 def validate_authoring_provenance(
     skill_dir: Path,
     candidate: str,
@@ -2335,9 +2466,11 @@ def validate_authoring_provenance(
     packet: dict[str, Any],
     draft_value: dict[str, Any],
     receipt: dict[str, Any],
+    operation: dict[str, Any],
+    adapter_sha256: str,
     fixture_inventory: list[dict[str, Any]],
     grader_inventory: list[dict[str, Any]],
-) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any], dict[str, Any]]:
     require_exact_keys(
         packet,
         "retained authoring packet",
@@ -2612,7 +2745,10 @@ def validate_authoring_provenance(
         raise EvaluationError(
             "authoring materialization receipt does not bind the registered inputs"
         )
-    return packet, draft, receipt
+    operation = validate_authoring_operation(
+        operation, packet, draft_id, adapter_sha256
+    )
+    return packet, draft, receipt, operation
 
 
 def v2_input_register(args: argparse.Namespace) -> dict[str, Any]:
@@ -2635,10 +2771,11 @@ def v2_input_register(args: argparse.Namespace) -> dict[str, Any]:
         args.authoring_packet,
         args.authoring_draft,
         args.authoring_receipt,
+        args.authoring_operation,
     )
     if any(authoring_paths) != all(authoring_paths):
         raise EvaluationError(
-            "authoring packet, draft, and receipt must be supplied together"
+            "authoring packet, draft, receipt, and operation must be supplied together"
         )
     if (authoring_method == "bounded-safe-author") != all(authoring_paths):
         raise EvaluationError(
@@ -2653,7 +2790,12 @@ def v2_input_register(args: argparse.Namespace) -> dict[str, Any]:
         receipt = load_json(
             resolve_path(Path(args.authoring_receipt), "authoring receipt")
         )
-        packet, draft_value, receipt = validate_authoring_provenance(
+        operation = load_json(
+            resolve_path(Path(args.authoring_operation), "authoring operation")
+        )
+        authoring_adapter = trusted_authoring_adapter_path()
+        authoring_adapter_sha = sha256_file(authoring_adapter)
+        packet, draft_value, receipt, operation = validate_authoring_provenance(
             skill_dir,
             candidate,
             files,
@@ -2667,6 +2809,8 @@ def v2_input_register(args: argparse.Namespace) -> dict[str, Any]:
             packet,
             draft_value,
             receipt,
+            operation,
+            authoring_adapter_sha,
             canonical_file_inventory(config_path.parent / "fixtures"),
             canonical_file_inventory(config_path.parent / "graders"),
         )
@@ -2678,8 +2822,17 @@ def v2_input_register(args: argparse.Namespace) -> dict[str, Any]:
                 (packet, "authoring_packet", "packet"),
                 (draft_value, "authoring_draft", "draft"),
                 (receipt, "authoring_receipt", "materialization"),
+                (operation, "authoring_operation", "operation"),
             )
         ]
+        provenance_objects.append(
+            publish_registry_object(
+                authoring_adapter.read_bytes(),
+                "authoring_adapter",
+                "authoring/dreaming-vendor-adapter.py",
+                "text/x-python",
+            )
+        )
     objects = [
         publish_registry_object(
             canonical(suite), "suite", "suite.json", "application/json"
@@ -6734,6 +6887,7 @@ def build_parser() -> argparse.ArgumentParser:
     input_register_parser.add_argument("--authoring-packet")
     input_register_parser.add_argument("--authoring-draft")
     input_register_parser.add_argument("--authoring-receipt")
+    input_register_parser.add_argument("--authoring-operation")
     input_register_parser.add_argument(
         "--source-id", action="append", required=True
     )

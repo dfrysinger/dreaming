@@ -2156,16 +2156,15 @@ def validate_evaluation_input_packet(
     work_path: Path,
 ) -> None:
     sources = evaluation_input_source_paths(args)
-    evaluator_path = Path(__file__).with_name("skill-evaluation.py")
+    evaluator_path = Path(__file__).resolve().with_name("skill-evaluation.py")
     if evaluator_path.is_symlink() or not evaluator_path.is_file():
         raise AdapterError(
             "authoring-boundary-unavailable", "trusted packet validator missing"
         )
-    evaluator = evaluator_path.resolve()
     output = work_path / "validated-authoring-packet.json"
     command = [
         sys.executable,
-        str(evaluator),
+        str(evaluator_path),
         "v2-input-author-packet",
         sources[0],
         "--suite",
@@ -2260,6 +2259,8 @@ def evaluation_input_author_run(args: argparse.Namespace) -> None:
         )
     if args.operation != "author" or not args.packet or not args.result:
         raise AdapterError("missing-argument", "evaluation input author run")
+    if not isinstance(args.model, str) or not args.model.strip() or args.model == "default":
+        raise AdapterError("exact-model-unproved", "explicit author model is required")
     if not args.draft_output:
         raise AdapterError("missing-argument", "author draft output")
     packet_path = Path(args.packet)
