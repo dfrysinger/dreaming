@@ -70,6 +70,8 @@ run_signal_responsive() {
 }
 run_isolated_test() {
   run_signal_responsive env -u DREAMING_ADAPTER_CONFIG \
+    -u DREAMING_ADAPTER_CONFIG_MANAGED \
+    -u DREAMING_ADAPTER_CONFIG_SHA256 \
     -u DREAMING_ADAPTER_ALLOWED_ROOT \
     -u DREAMING_CONFIG_FILE \
     -u DREAMING_CONFIG_POINTER \

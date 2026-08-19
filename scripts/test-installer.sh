@@ -470,6 +470,23 @@ chmod +x "$FAKE_LOCAL_PUBLISHER"
   export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
   run_native install >/dev/null
 )
+python3 - \
+  "$NATIVE_DEST/com.fixture.native.dreaming.plist" \
+  "$NATIVE/dreaming-state/adapters.json" <<'PY'
+import hashlib
+import plistlib
+import sys
+
+plist_path, config_path = sys.argv[1:]
+with open(plist_path, "rb") as handle:
+    environment = plistlib.load(handle)["EnvironmentVariables"]
+with open(config_path, "rb") as handle:
+    digest = hashlib.sha256(handle.read()).hexdigest()
+if environment.get("DREAMING_ADAPTER_CONFIG_MANAGED") != "1":
+    raise SystemExit("managed adapter authority was not installed")
+if environment.get("DREAMING_ADAPTER_CONFIG_SHA256") != digest:
+    raise SystemExit("installed adapter digest does not bind the managed config")
+PY
 python3 - "$NATIVE/dreaming-state/adapters.json" "$FAKE_LOCAL_PUBLISHER" <<'PY'
 import json
 import sys

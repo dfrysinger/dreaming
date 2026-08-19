@@ -13,6 +13,7 @@ exec /usr/bin/env python3 - "$SCRIPT_DIR" <<'PY'
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import os
@@ -21,6 +22,7 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from unittest import mock
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -305,6 +307,173 @@ class RuntimeTest(unittest.TestCase):
             ],
             newer_usage["snapshot_sha256"],
         )
+
+    def test_evaluation_owner_configuration_is_installation_sealed(self) -> None:
+        config_path = self.paths.state / "adapters.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        content_root = self.paths.state / "evaluation-input-owner"
+        config = {
+            "contract_version": 1,
+            "evaluation_input_owner": {
+                "enabled": False,
+                "author_model": "author-model",
+                "reviewer_a_model": "reviewer-a-model",
+                "reviewer_b_model": "reviewer-b-model",
+                "content_root": str(content_root),
+            },
+        }
+        config_path.write_text(json.dumps(config))
+        config_digest = hashlib.sha256(config_path.read_bytes()).hexdigest()
+        with mock.patch.dict(os.environ, {}, clear=True):
+            with self.assertRaisesRegex(RuntimeFailure, "installation-managed"):
+                runtime_module.configured_evaluation_input_owner(
+                    config, config_path, self.paths
+                )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DREAMING_ADAPTER_CONFIG_MANAGED": "1",
+                "DREAMING_ADAPTER_CONFIG_SHA256": config_digest,
+            },
+            clear=True,
+        ):
+            owner = runtime_module.configured_evaluation_input_owner(
+                config, config_path, self.paths
+            )
+        self.assertFalse(owner["enabled"])
+        self.assertEqual(owner["content_root"], str(content_root.resolve()))
+        self.assertEqual(
+            owner["config_sha256"],
+            "sha256:" + hashlib.sha256(config_path.read_bytes()).hexdigest(),
+        )
+        external = self.case / "external-adapters.json"
+        external.write_text(json.dumps(config))
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DREAMING_ADAPTER_CONFIG_MANAGED": "1",
+                "DREAMING_ADAPTER_CONFIG_SHA256": config_digest,
+            },
+            clear=True,
+        ), self.assertRaisesRegex(RuntimeFailure, "canonical managed"):
+            runtime_module.configured_evaluation_input_owner(
+                config, external, self.paths
+            )
+        with mock.patch.dict(
+            os.environ,
+            {
+                "DREAMING_ADAPTER_CONFIG_MANAGED": "1",
+                "DREAMING_ADAPTER_CONFIG_SHA256": "0" * 64,
+            },
+            clear=True,
+        ), self.assertRaisesRegex(RuntimeFailure, "installed digest"):
+            runtime_module.configured_evaluation_input_owner(
+                config, config_path, self.paths
+            )
+
+    def test_disabled_evaluation_owner_recovers_before_census(self) -> None:
+        adapters = {
+            "session-source": {},
+            "review-executor": {},
+            "skill-publisher": {},
+        }
+        owner = {
+            "enabled": False,
+            "config_sha256": "sha256:" + "1" * 64,
+            "evaluator": str(RUNTIME_PATH.with_name("skill-evaluation.py")),
+        }
+        recovery = {
+            "status": "reconciled",
+            "terminal_publications": [],
+        }
+        with (
+            mock.patch.object(runtime_module, "default_paths", return_value=self.paths),
+            mock.patch.object(
+                runtime_module,
+                "load_adapter_config",
+                return_value={"sources": {}, "executors": {}},
+            ),
+            mock.patch.object(
+                runtime_module, "validated_routing", return_value=(set(), [])
+            ),
+            mock.patch.object(
+                runtime_module,
+                "configured_adapters_tolerant",
+                return_value=(adapters, [], []),
+            ),
+            mock.patch.object(
+                runtime_module,
+                "configured_role_tolerant",
+                return_value=({}, [], []),
+            ),
+            mock.patch.object(
+                runtime_module,
+                "configured_evaluation_input_owner",
+                return_value=owner,
+            ),
+            mock.patch.object(
+                runtime_module,
+                "reconcile_evaluation_input_owner",
+                return_value=recovery,
+            ) as reconcile,
+            mock.patch.object(
+                runtime_module,
+                "collect_estate_census",
+                side_effect=RuntimeFailure("census-stop", "fixture"),
+            ) as census,
+        ):
+            report = runtime_module.scheduled_run()
+        self.assertEqual(report["evaluation_input"]["mode"], "reconcile_only")
+        self.assertEqual(report["evaluation_input"]["recovery"], recovery)
+        self.assertEqual(reconcile.call_count, 1)
+        self.assertEqual(census.call_count, 1)
+        self.assertEqual(
+            report["errors"][0],
+            {"phase": "estate-census", "code": "census-stop"},
+        )
+        with (
+            mock.patch.object(runtime_module, "default_paths", return_value=self.paths),
+            mock.patch.object(
+                runtime_module,
+                "load_adapter_config",
+                return_value={"sources": {}, "executors": {}},
+            ),
+            mock.patch.object(
+                runtime_module, "validated_routing", return_value=(set(), [])
+            ),
+            mock.patch.object(
+                runtime_module,
+                "configured_adapters_tolerant",
+                return_value=(adapters, [], []),
+            ),
+            mock.patch.object(
+                runtime_module,
+                "configured_role_tolerant",
+                return_value=({}, [], []),
+            ),
+            mock.patch.object(
+                runtime_module,
+                "configured_evaluation_input_owner",
+                return_value=owner,
+            ),
+            mock.patch.object(
+                runtime_module,
+                "reconcile_evaluation_input_owner",
+                side_effect=RuntimeFailure(
+                    "evaluation-input-recovery-failed", "fixture"
+                ),
+            ),
+            mock.patch.object(
+                runtime_module, "collect_estate_census"
+            ) as blocked_census,
+        ):
+            blocked = runtime_module.scheduled_run()
+        self.assertFalse(blocked["ok"])
+        self.assertEqual(
+            blocked["evaluation_input"]["mode"], "reconcile_only"
+        )
+        self.assertEqual(blocked["evaluation_input"]["recovery"], "failed")
+        self.assertEqual(blocked_census.call_count, 0)
 
     def initialize_git_repo(self) -> None:
         subprocess.run(

@@ -186,6 +186,7 @@ DREAMING_SKILLS_ROOT="${REQUESTED_SKILLS_ROOT:-${DREAMING_SKILLS_ROOT:-$DREAMING
 DREAMING_DEPS_DIR="${REQUESTED_DEPS_DIR:-${DREAMING_DEPS_DIR:-$DREAMING_DATA_DIR/deps}}"
 DREAMING_ADAPTER_CONFIG="${REQUESTED_ADAPTER_CONFIG:-${DREAMING_ADAPTER_CONFIG:-}}"
 DREAMING_ADAPTER_CONFIG_MANAGED="${DREAMING_ADAPTER_CONFIG_MANAGED:-}"
+DREAMING_ADAPTER_CONFIG_SHA256=""
 if [[ -n "$REQUESTED_ADAPTER_CONFIG" ]]; then
   DREAMING_ADAPTER_CONFIG_MANAGED=0
 fi
@@ -246,6 +247,7 @@ export_runtime_env() {
   export DREAMING_REPO_ROOT DREAMING_SHARED_SKILLS_ROOT DREAMING_DATA_DIR
   export DREAMING_STATE_DIR DREAMING_SKILLS_ROOT DREAMING_DEPS_DIR
   export DREAMING_ADAPTER_CONFIG DREAMING_ADAPTER_CONFIG_MANAGED
+  export DREAMING_ADAPTER_CONFIG_SHA256
   export DREAMING_ENABLE_COPILOT_COMPAT
   export DREAMING_CONFIG_FILE DREAMING_CONFIG_POINTER DREAMING_RECEIPT_FILE
   export DREAMING_SHARED_BUNDLE_ID DREAMING_SHARED_SOURCE_KIND
@@ -461,7 +463,8 @@ render() {
     "$DREAMING_REPO_ROOT" "$DREAMING_SHARED_SKILLS_ROOT" \
     "${SKILLS_REPO_ROOT:-}" "$STATE_DIR" "$LOCAL_ROOT" "$COPILOT_ROOT" \
     "$DREAMING_DATA_DIR" "$DREAMING_STATE_DIR" "$DREAMING_SKILLS_ROOT" \
-    "$DREAMING_ADAPTER_CONFIG" "$DREAMING_ENABLE_COPILOT_COMPAT" \
+    "$DREAMING_ADAPTER_CONFIG" "$DREAMING_ADAPTER_CONFIG_MANAGED" \
+    "$DREAMING_ADAPTER_CONFIG_SHA256" "$DREAMING_ENABLE_COPILOT_COMPAT" \
     "$DREAMING_ORCHESTRATOR_STATE_DIR" "$DREAMING_RECEIPT_FILE" \
     "$DREAMING_DASHBOARD_HOST" "$DREAMING_DASHBOARD_PORT" \
     "$DREAMING_DASHBOARD_TAILNET_HOST" \
@@ -484,6 +487,8 @@ import sys
     dreaming_state,
     dreaming_skills,
     adapter_config,
+    adapter_config_managed,
+    adapter_config_sha256,
     copilot_compat,
     orchestrator_state,
     receipt_file,
@@ -537,6 +542,12 @@ if adapter_config:
     adapter_env = (
         "    <key>DREAMING_ADAPTER_CONFIG</key><string>"
         + html.escape(adapter_config)
+        + "</string>\n"
+        + "    <key>DREAMING_ADAPTER_CONFIG_MANAGED</key><string>"
+        + html.escape(adapter_config_managed)
+        + "</string>\n"
+        + "    <key>DREAMING_ADAPTER_CONFIG_SHA256</key><string>"
+        + html.escape(adapter_config_sha256)
         + "</string>\n"
     )
 text = text.replace("__DREAMING_ADAPTER_CONFIG_ENV__", adapter_env)
@@ -619,6 +630,7 @@ configure_native_adapters() {
   local generated="$DREAMING_STATE_DIR/adapters.json" candidate status
   if [[ -n "$REQUESTED_ADAPTER_CONFIG" ]]; then
     DREAMING_ADAPTER_CONFIG_MANAGED=0
+    DREAMING_ADAPTER_CONFIG_SHA256=
     return 0
   fi
   if [[ "$REQUESTED_ADAPTER_DESIRED_STATE" == "1" ]]; then
@@ -626,11 +638,13 @@ configure_native_adapters() {
     DREAMING_ADAPTER_CONFIG_MANAGED=1
   elif [[ -n "$DREAMING_ADAPTER_CONFIG" ]]; then
     if [[ "$DREAMING_ADAPTER_CONFIG_MANAGED" == "0" ]]; then
+      DREAMING_ADAPTER_CONFIG_SHA256=
       return 0
     fi
     if [[ "$DREAMING_ADAPTER_CONFIG_MANAGED" != "1" ]]; then
       if [[ "$DREAMING_ADAPTER_CONFIG" != "$generated" ]]; then
         DREAMING_ADAPTER_CONFIG_MANAGED=0
+        DREAMING_ADAPTER_CONFIG_SHA256=
         return 0
       fi
       if native_adapter_is_managed "$DREAMING_ADAPTER_CONFIG"; then
@@ -639,6 +653,7 @@ configure_native_adapters() {
         status=$?
         if [[ "$status" == "1" ]]; then
           DREAMING_ADAPTER_CONFIG_MANAGED=0
+          DREAMING_ADAPTER_CONFIG_SHA256=
           return 0
         fi
         return "$status"
@@ -669,6 +684,10 @@ configure_native_adapters() {
     return 1
   fi
   mv "$candidate" "$DREAMING_ADAPTER_CONFIG"
+  DREAMING_ADAPTER_CONFIG_SHA256="$(
+    /usr/bin/shasum -a 256 "$DREAMING_ADAPTER_CONFIG" |
+      /usr/bin/awk '{print $1}'
+  )"
 }
 
 run_core() {

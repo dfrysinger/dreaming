@@ -82,6 +82,13 @@ REVIEW_DESTINATIONS = {
 ARTIFACT_OPERATIONS = {"create", "patch", "support_file"}
 SKILL_NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
 RESERVED_SKILL_FILES = {"skill.md", ".agent-created", ".agent-created.json"}
+EVALUATION_INPUT_OWNER_KEYS = {
+    "enabled",
+    "author_model",
+    "reviewer_a_model",
+    "reviewer_b_model",
+    "content_root",
+}
 
 
 class RuntimeFailure(RuntimeError):
@@ -2407,6 +2414,133 @@ def load_adapter_config(path: Path) -> dict[str, Any]:
     return config
 
 
+def configured_evaluation_input_owner(
+    config: dict[str, Any], config_path: Path, paths: RuntimePaths
+) -> dict[str, Any] | None:
+    entry = config.get("evaluation_input_owner")
+    if entry is None:
+        return None
+    if (
+        not isinstance(entry, dict)
+        or set(entry) != EVALUATION_INPUT_OWNER_KEYS
+        or not isinstance(entry.get("enabled"), bool)
+    ):
+        raise RuntimeFailure(
+            "invalid-adapter-config", "evaluation_input_owner is malformed"
+        )
+    models = [
+        entry.get("author_model"),
+        entry.get("reviewer_a_model"),
+        entry.get("reviewer_b_model"),
+    ]
+    if (
+        not all(
+            isinstance(model, str) and model and model == model.strip()
+            for model in models
+        )
+        or len(set(models)) != 3
+    ):
+        raise RuntimeFailure(
+            "invalid-adapter-config",
+            "evaluation_input_owner models must be three distinct identities",
+        )
+    if os.environ.get("DREAMING_ADAPTER_CONFIG_MANAGED") != "1":
+        raise RuntimeFailure(
+            "evaluation-input-owner-unsealed",
+            "automatic evaluation requires installation-managed configuration",
+        )
+    expected_digest = os.environ.get("DREAMING_ADAPTER_CONFIG_SHA256", "")
+    if not re.fullmatch(r"[0-9a-f]{64}", expected_digest):
+        raise RuntimeFailure(
+            "evaluation-input-owner-unsealed",
+            "automatic evaluation requires an installation-sealed config digest",
+        )
+    expected_config = (paths.state / "adapters.json").resolve()
+    if (
+        config_path.is_symlink()
+        or not config_path.is_file()
+        or config_path.resolve() != expected_config
+    ):
+        raise RuntimeFailure(
+            "evaluation-input-owner-unsealed",
+            "automatic evaluation requires the canonical managed configuration",
+        )
+    expected_root = (paths.state / "evaluation-input-owner").resolve()
+    configured_root = Path(str(entry.get("content_root")))
+    if configured_root.is_symlink() or configured_root.resolve() != expected_root:
+        raise RuntimeFailure(
+            "invalid-adapter-config",
+            "evaluation_input_owner content_root is not the fixed owner root",
+        )
+    evaluator = Path(__file__).with_name("skill-evaluation.py")
+    if evaluator.is_symlink() or not evaluator.is_file():
+        raise RuntimeFailure(
+            "evaluation-input-owner-unsealed",
+            "fixed evaluation-input owner executable is unavailable",
+        )
+    try:
+        config_bytes = config_path.read_bytes()
+        persisted_config = json.loads(config_bytes)
+    except (OSError, json.JSONDecodeError) as error:
+        raise RuntimeFailure(
+            "evaluation-input-owner-unsealed",
+            f"managed adapter config cannot be verified: {error}",
+        ) from error
+    if persisted_config != config:
+        raise RuntimeFailure(
+            "evaluation-input-owner-unsealed",
+            "managed adapter config changed while it was being loaded",
+        )
+    config_digest = hashlib.sha256(config_bytes).hexdigest()
+    if config_digest != expected_digest:
+        raise RuntimeFailure(
+            "evaluation-input-owner-unsealed",
+            "managed adapter config does not match its installed digest",
+        )
+    return {
+        **entry,
+        "content_root": str(expected_root),
+        "config_sha256": "sha256:" + config_digest,
+        "evaluator": str(evaluator),
+    }
+
+
+def reconcile_evaluation_input_owner(owner: dict[str, Any]) -> dict[str, Any]:
+    try:
+        process = subprocess.run(
+            [sys.executable, owner["evaluator"], "v2-input-owner-reconcile"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeFailure(
+            "evaluation-input-recovery-failed", str(error)
+        ) from error
+    try:
+        values = [
+            json.loads(line)
+            for line in process.stdout.splitlines()
+            if line.strip()
+        ]
+    except json.JSONDecodeError as error:
+        raise RuntimeFailure(
+            "evaluation-input-recovery-malformed", str(error)
+        ) from error
+    if (
+        process.returncode != 0
+        or len(values) != 1
+        or not isinstance(values[0], dict)
+        or values[0].get("status") != "reconciled"
+    ):
+        raise RuntimeFailure(
+            "evaluation-input-recovery-failed",
+            process.stderr.strip() or "owner recovery refused",
+        )
+    return values[0]
+
+
 def configured_adapters(
     config: dict[str, Any],
 ) -> tuple[dict[str, dict[str, ExecutableAdapter]], list[dict[str, Any]]]:
@@ -2828,7 +2962,9 @@ def selftest(require_config: bool) -> dict[str, Any]:
     adapters: list[dict[str, Any]] = []
     if config_path.exists():
         adapters = validate_adapter_config(config_path)
-        configured_estate_census(load_adapter_config(config_path))
+        config = load_adapter_config(config_path)
+        configured_estate_census(config)
+        configured_evaluation_input_owner(config, config_path, paths)
     elif require_config:
         raise RuntimeFailure("adapter-config-missing", str(config_path))
     return {
@@ -2904,6 +3040,54 @@ def scheduled_run() -> dict[str, Any]:
         "errors": adapter_errors,
         "legacy_records_imported": imported_legacy,
     }
+    try:
+        evaluation_owner = configured_evaluation_input_owner(
+            config, config_path, paths
+        )
+    except RuntimeFailure as error:
+        report["evaluation_input"] = {
+            "configured": True,
+            "recovery": "refused",
+            "code": error.code,
+        }
+        report["errors"].append(
+            {"phase": "evaluation-input-config", "code": error.code}
+        )
+        report["ok"] = False
+        return report
+    if evaluation_owner is None:
+        report["evaluation_input"] = {
+            "configured": False,
+            "enabled": False,
+            "recovery": "not_configured",
+        }
+    else:
+        try:
+            recovery = reconcile_evaluation_input_owner(evaluation_owner)
+        except RuntimeFailure as error:
+            report["evaluation_input"] = {
+                "configured": True,
+                "enabled": evaluation_owner["enabled"],
+                "mode": (
+                    "authoring" if evaluation_owner["enabled"] else "reconcile_only"
+                ),
+                "recovery": "failed",
+                "code": error.code,
+            }
+            report["errors"].append(
+                {"phase": "evaluation-input-recovery", "code": error.code}
+            )
+            report["ok"] = False
+            return report
+        report["evaluation_input"] = {
+            "configured": True,
+            "enabled": evaluation_owner["enabled"],
+            "mode": (
+                "authoring" if evaluation_owner["enabled"] else "reconcile_only"
+            ),
+            "config_sha256": evaluation_owner["config_sha256"],
+            "recovery": recovery,
+        }
     try:
         report["estate_census"] = collect_estate_census(core, config)
     except RuntimeFailure as error:
