@@ -102,7 +102,7 @@ expect_refusal() {
 
 make_fixture() {
   local root="$1" profile="${2:-gate}" kind="${3:-capability_uplift}" fixture="${4:-correct}"
-  mkdir -p "$root/skill" "$root/config"
+  mkdir -p "$root/skill" "$root/config/fixtures" "$root/config/graders"
   python3 - "$root" "$profile" "$kind" "$fixture" "$HARNESS" "$ADAPTER" <<'PY'
 import hashlib, json, os, sys
 from pathlib import Path
@@ -193,36 +193,142 @@ config={"schema_version":1,"kind":"dreaming_evaluation_compilation",
  "case_runtime":runtime,"rubric":rubric,"executors":compiled_executors,
  "comparator":comparator}
 config_root.joinpath("compilation.json").write_bytes(canonical(config)+b"\n")
+config_root.joinpath("fixtures/default.json").write_bytes(
+ canonical({"schema_version":1,"kind":"synthetic_fixture","fixture":fixture})+b"\n")
+config_root.joinpath("graders/contracts.json").write_bytes(
+ canonical({"schema_version":1,"kind":"deterministic_grader_contracts","graders":graders})+b"\n")
+PY
+}
+
+publish_fixture() {
+  local root="$1"
+  local registration manifest validation review_one review_two ready
+  registration="$(
+    "$EVAL" v2-input-register "$root/skill" \
+      --suite "$root/skill/.skill-evaluation-cases.json" \
+      --policy "$root/skill/.skill-evaluation-policy.json" \
+      --config "$root/config/compilation.json" \
+      --routing "$root/config/routing.json" \
+      --harness "$HARNESS" \
+      --authoring-method deterministic-fixture \
+      --source-id synthetic:certification-fixture
+  )"
+  manifest="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["input_manifest_sha256"])' <<<"$registration")"
+  validation="$(
+    "$EVAL" v2-input-validate "$root/skill" --manifest "$manifest"
+  )"
+  review_one="$(
+    "$EVAL" v2-input-review "$root/skill" --manifest "$manifest" \
+      --reviewer fixture-reviewer-one --decision accept
+  )"
+  review_two="$(
+    "$EVAL" v2-input-review "$root/skill" --manifest "$manifest" \
+      --reviewer fixture-reviewer-two --decision accept
+  )"
+  ready="$(
+    "$EVAL" v2-input-ready "$root/skill" --manifest "$manifest" \
+      --validation "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' <<<"$validation")" \
+      --review "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' <<<"$review_one")" \
+      --review "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' <<<"$review_two")" \
+      --created-at 2026-01-01T00:00:00Z
+  )"
+  python3 - "$root/input-registry.json" \
+    "$registration" "$validation" "$review_one" "$review_two" "$ready" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+names = ("registration", "validation", "review_one", "review_two", "ready")
+path.write_text(
+    json.dumps(
+        {name: json.loads(value) for name, value in zip(names, sys.argv[2:])},
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    + "\n"
+)
 PY
 }
 
 run_fixture() {
   local root="$1" nonce="$2"
+  publish_fixture "$root"
   mkdir -p "$root/run" "$root/result" "$root/run-scratch" "$root/verify-scratch"
+  mv "$root/config/compilation.json" "$root/compilation.authoring"
+  mv "$root/config/routing.json" "$root/routing.authoring"
   "$EVAL" v2-run-compile "$root/skill" --run-dir "$root/run" \
-    --config "$root/config/compilation.json" --routing "$root/config/routing.json" \
     --nonce "$nonce" --harness "$HARNESS" >/dev/null
   "$EVAL" v2-run-execute --run-dir "$root/run" --result-dir "$root/result" \
-    --routing "$root/config/routing.json" --scratch "$root/run-scratch" \
-    --harness "$HARNESS" >/dev/null
-  "$EVAL" v2-result-certify "$root/skill" --run-dir "$root/run" \
-    --result-dir "$root/result" --routing "$root/config/routing.json" \
-    --scratch "$root/verify-scratch" --nonce "$nonce" --harness "$HARNESS"
+    --scratch "$root/run-scratch" --harness "$HARNESS" >/dev/null
+  local certification
+  certification="$(
+    "$EVAL" v2-result-certify "$root/skill" --run-dir "$root/run" \
+      --result-dir "$root/result" --scratch "$root/verify-scratch" \
+      --nonce "$nonce" --harness "$HARNESS"
+  )"
+  mv "$root/compilation.authoring" "$root/config/compilation.json"
+  mv "$root/routing.authoring" "$root/config/routing.json"
+  printf '%s\n' "$certification"
 }
+
+skill_tree_digest() {
+  python3 - "$1" <<'PY'
+import hashlib
+import os
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+digest = hashlib.sha256()
+for path in sorted(root.rglob("*")):
+    relative = path.relative_to(root).as_posix().encode()
+    digest.update(relative + b"\0")
+    if path.is_symlink():
+        digest.update(b"link\0" + os.readlink(path).encode())
+    elif path.is_file():
+        digest.update(b"file\0" + path.read_bytes())
+    elif path.is_dir():
+        digest.update(b"dir\0")
+print(digest.hexdigest())
+PY
+}
+
+LOCAL_DEV="$TMP/local-development"
+make_fixture "$LOCAL_DEV"
+local_prepare="$("$EVAL" v2-prepare "$LOCAL_DEV/skill")"
+python3 - "$local_prepare" <<'PY'
+import json
+import sys
+value = json.loads(sys.argv[1])
+assert value["input_manifest_sha256"] is None
+assert value["cross_executor_authority"] is True
+PY
+mkdir "$LOCAL_DEV/run"
+"$EVAL" v2-run-compile "$LOCAL_DEV/skill" --run-dir "$LOCAL_DEV/run" \
+  --config "$LOCAL_DEV/config/compilation.json" \
+  --routing "$LOCAL_DEV/config/routing.json" \
+  --nonce local-development --harness "$HARNESS" >/dev/null
+python3 - "$LOCAL_DEV/run/dreaming-input.json" <<'PY'
+import json
+import sys
+assert json.load(open(sys.argv[1]))["input_manifest_sha256"] is None
+PY
+pass "root-local prepare and compile remain explicitly non-certifiable development inputs"
 
 BASE="$TMP/base"
 make_fixture "$BASE"
+base_skill_before="$(skill_tree_digest "$BASE/skill")"
 certification="$(run_fixture "$BASE" fixture-nonce)"
 [[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$certification")" == "pass" ]] ||
   fail "valid gate result did not certify"
 mkdir "$BASE/replay-scratch"
 replayed="$("$EVAL" v2-result-certify "$BASE/skill" --run-dir "$BASE/run" \
   --result-dir "$BASE/result" --routing "$BASE/config/routing.json" \
-  --scratch "$BASE/replay-scratch" --nonce fixture-nonce --harness "$HARNESS" \
-  --suite "$BASE/run/source-suite.json" --policy "$BASE/run/source-policy.json")"
+  --scratch "$BASE/replay-scratch" --nonce fixture-nonce --harness "$HARNESS")"
 [[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$replayed")" == "pass" ]] ||
   fail "retained normalized suite did not replay through certification"
-pass "retained normalized suite replays through certification"
+pass "retained run evidence replays through the ready external input manifest"
 python3 - "$BASE/run/source-suite.json" "$BASE/run/source-policy.json" "$BASE" <<'PY'
 import json, sys
 from pathlib import Path
@@ -326,9 +432,228 @@ assert value["status"] == "pass"
 assert value["current"] is True
 assert value["receipt_sha256"]
 assert value["transition_id"].startswith("sha256:")
+assert value["input_manifest_sha256"].startswith("sha256:")
 assert value["cases"]
 PY
 pass "portfolio inventory validates a current passing evaluation"
+aggregate_sha="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["aggregate_receipt_sha256"])' <<<"$certification")"
+portfolio_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["portfolio_receipt_sha256"])' "$transition_path")"
+python3 - \
+  "$BASE/input-registry.json" \
+  "$BASE/run/dreaming-input.json" \
+  "$aggregate" \
+  "$SKILLS_STATE_DIR/skill-review/evaluations/v2/certifications/$aggregate_sha.json" \
+  "$authority_path" \
+  "$SKILLS_STATE_DIR/skill-review/evaluations/v2/dashboard-v1/portfolio/$portfolio_sha.json" \
+  "$transition_path" \
+  "$portfolio_current" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+registry = json.load(open(sys.argv[1]))
+manifest = registry["registration"]["input_manifest_sha256"]
+documents = [json.load(open(path)) for path in sys.argv[2:8]]
+portfolio_current = json.loads(sys.argv[8])
+assert all(document["input_manifest_sha256"] == manifest for document in documents)
+assert portfolio_current["input_manifest_sha256"] == manifest
+PY
+[[ "$(skill_tree_digest "$BASE/skill")" == "$base_skill_before" ]] ||
+  fail "external evaluation authority changed the installed skill root"
+pass "external compile, certification, authority, currentness, and portfolio bind one manifest without changing the skill root"
+
+materialized_run="$TMP/materialized-substitution-run"
+cp -R "$BASE/run" "$materialized_run"
+python3 - "$materialized_run" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+grader = root / "graders/contracts.json"
+grader.write_text('{"forged":true}\n')
+manifest = json.load(open(root / "manifest.json"))
+inventory = []
+for path in sorted(root.rglob("*")):
+    relative = path.relative_to(root).as_posix()
+    if path.is_dir() or relative == "manifest.json":
+        continue
+    content = path.read_bytes()
+    inventory.append(
+        {
+            "path": relative,
+            "sha256": "sha256:" + hashlib.sha256(content).hexdigest(),
+            "size": len(content),
+        }
+    )
+manifest["file_inventory"] = inventory
+fields = (
+    "schema_version", "kind", "candidate_id", "suite_id", "profile",
+    "trials_per_arm", "executors", "comparator",
+    "harness_executable_sha256", "tool_policy_id", "grader_set_id",
+    "retention_policy_id", "limits", "file_inventory",
+)
+raw = json.dumps(
+    {key: manifest[key] for key in fields},
+    sort_keys=True,
+    separators=(",", ":"),
+).encode()
+manifest["run_id"] = "sha256:" + hashlib.sha256(raw).hexdigest()
+(root / "manifest.json").write_text(
+    json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
+)
+PY
+mkdir "$TMP/materialized-substitution-result" "$TMP/materialized-substitution-scratch"
+expect_refusal materialized-grader-substitution "fixture or grader objects differ" \
+  "$EVAL" v2-run-execute --run-dir "$materialized_run" \
+    --result-dir "$TMP/materialized-substitution-result" \
+    --scratch "$TMP/materialized-substitution-scratch" --harness "$HARNESS"
+pass "self-consistent run rewrites cannot substitute manifest fixtures or graders"
+
+read -r input_manifest_path registry_object_path validation_receipt_path \
+  review_receipt_path readiness_path input_current_path < <(
+  python3 - "$BASE/input-registry.json" "$SKILLS_STATE_DIR" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+registry = json.load(open(sys.argv[1]))
+state = Path(sys.argv[2]) / "skill-review/evaluations/v2/input-registry"
+manifest_sha = registry["registration"]["input_manifest_sha256"]
+manifest_path = state / "manifests" / f"{manifest_sha.removeprefix('sha256:')}.json"
+manifest = json.load(open(manifest_path))
+fixture = next(item for item in manifest["objects"] if item["role"] == "fixture")
+validation_sha = registry["validation"]["receipt_sha256"]
+review_sha = registry["review_one"]["receipt_sha256"]
+print(
+    manifest_path,
+    state / "objects" / fixture["sha256"].removeprefix("sha256:"),
+    state / "reviews" / f"{validation_sha.removeprefix('sha256:')}.json",
+    state / "reviews" / f"{review_sha.removeprefix('sha256:')}.json",
+    registry["ready"]["transition"],
+    registry["ready"]["current"],
+)
+PY
+)
+
+cp "$registry_object_path" "$BASE/registry-object.saved"
+rm "$registry_object_path"
+expect_refusal registry-object-missing "regular non-symlink file" \
+  "$EVAL" v2-prepare "$BASE/skill"
+mv "$BASE/registry-object.saved" "$registry_object_path"
+
+cp "$registry_object_path" "$BASE/registry-object.saved"
+printf 'tampered\n' >"$registry_object_path"
+expect_refusal registry-object-tampered "digest, size, or path is invalid" \
+  "$EVAL" v2-prepare "$BASE/skill"
+expect_refusal registry-object-collision "input registry object collision" \
+  "$EVAL" v2-input-register "$BASE/skill" \
+    --suite "$BASE/skill/.skill-evaluation-cases.json" \
+    --policy "$BASE/skill/.skill-evaluation-policy.json" \
+    --config "$BASE/config/compilation.json" \
+    --routing "$BASE/config/routing.json" --harness "$HARNESS" \
+    --authoring-method deterministic-fixture \
+    --source-id synthetic:certification-fixture
+mv "$BASE/registry-object.saved" "$registry_object_path"
+
+for registry_pair in \
+  "object:$registry_object_path" \
+  "manifest:$input_manifest_path" \
+  "validation:$validation_receipt_path" \
+  "review:$review_receipt_path" \
+  "readiness:$readiness_path" \
+  "current:$input_current_path"; do
+  registry_name="${registry_pair%%:*}"
+  registry_path="${registry_pair#*:}"
+  saved="$BASE/registry-$registry_name.saved"
+  cp "$registry_path" "$saved"
+  rm "$registry_path"
+  ln -s "$saved" "$registry_path"
+  expect_refusal "registry-$registry_name-symlink" "non-symlink\\|cannot be a symlink" \
+    "$EVAL" v2-prepare "$BASE/skill"
+  rm "$registry_path"
+  mv "$saved" "$registry_path"
+done
+readiness_skill_root="$(dirname "$(dirname "$readiness_path")")"
+mv "$readiness_skill_root" "$BASE/readiness-root.saved"
+ln -s "$BASE/readiness-root.saved" "$readiness_skill_root"
+expect_refusal registry-readiness-parent-symlink "cannot traverse a symlink" \
+  "$EVAL" v2-prepare "$BASE/skill"
+rm "$readiness_skill_root"
+mv "$BASE/readiness-root.saved" "$readiness_skill_root"
+registry_root="$SKILLS_STATE_DIR/skill-review/evaluations/v2/input-registry"
+mv "$registry_root" "$BASE/input-registry-root.saved"
+ln -s "$BASE/input-registry-root.saved" "$registry_root"
+expect_refusal registry-root-symlink "input registry root must be a real directory" \
+  "$EVAL" v2-prepare "$BASE/skill"
+rm "$registry_root"
+mv "$BASE/input-registry-root.saved" "$registry_root"
+pass "registry objects, manifests, receipts, transitions, and current pointers reject missing, tampered, colliding, or symlinked state"
+
+cp "$input_current_path" "$BASE/input-current.saved"
+python3 - "$input_current_path" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path))
+value["transition_id"] = "sha256:" + "9" * 64
+open(path, "w").write(json.dumps(value, sort_keys=True, separators=(",", ":")))
+PY
+expect_refusal input-pointer-mismatch "regular non-symlink file" \
+  "$EVAL" v2-prepare "$BASE/skill"
+mv "$BASE/input-current.saved" "$input_current_path"
+
+cp "$input_current_path" "$BASE/input-current.saved"
+python3 - "$input_current_path" "$BASE/input-registry.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path))
+registry = json.load(open(sys.argv[2]))
+value["input_manifest_sha256"] = registry["registration"]["input_manifest_sha256"]
+open(path, "w").write(json.dumps(value, sort_keys=True, separators=(",", ":")))
+PY
+expect_refusal input-pointer-manifest-supply "unknown keys.*input_manifest_sha256" \
+  "$EVAL" v2-prepare "$BASE/skill"
+mv "$BASE/input-current.saved" "$input_current_path"
+
+mv "$input_current_path" "$BASE/input-current.saved"
+missing_registry_inventory="$(
+  "$EVAL" portfolio-inventory "$BASE/skill" --now "$current_at"
+)"
+python3 - "$missing_registry_inventory" <<'PY'
+import json
+import sys
+value = json.loads(sys.argv[1])
+assert value["evaluations"][0]["evaluation"]["state"] == "invalid"
+PY
+mkdir "$BASE/no-fallback-scratch"
+expect_refusal no-sidecar-fallback "current pointer is missing" \
+  "$EVAL" v2-result-certify "$BASE/skill" --run-dir "$BASE/run" \
+    --result-dir "$BASE/result" --routing "$BASE/config/routing.json" \
+    --scratch "$BASE/no-fallback-scratch" --nonce fixture-nonce \
+    --harness "$HARNESS"
+mv "$BASE/input-current.saved" "$input_current_path"
+pass "missing established readiness is invalid and never falls back to root sidecars"
+
+POINTER_DOWNGRADE="$TMP/pointer-downgrade"
+make_fixture "$POINTER_DOWNGRADE"
+publish_fixture "$POINTER_DOWNGRADE"
+pointer_downgrade_current="$(
+  python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["ready"]["current"])' \
+    "$POINTER_DOWNGRADE/input-registry.json"
+)"
+mv "$pointer_downgrade_current" "$POINTER_DOWNGRADE/current.saved"
+mv "$POINTER_DOWNGRADE/skill/.skill-evaluation-policy.json" \
+  "$POINTER_DOWNGRADE/policy.saved"
+expect_refusal current-gate-pointer-downgrade "current pointer is missing" \
+  "$EVAL" current-gate "$POINTER_DOWNGRADE/skill"
+mv "$POINTER_DOWNGRADE/policy.saved" \
+  "$POINTER_DOWNGRADE/skill/.skill-evaluation-policy.json"
+mv "$POINTER_DOWNGRADE/current.saved" "$pointer_downgrade_current"
+pass "current gate cannot downgrade established readiness to a legacy gate"
+
 portfolio_stale="$("$EVAL" portfolio-current "$BASE/skill" --now "$stale_at")"
 python3 - "$portfolio_stale" <<'PY'
 import json, sys
@@ -397,22 +722,67 @@ pass "compile, execute, independent verify, certificates, aggregate, and canonic
 
 policy_before="$("$EVAL" v2-policy-validate "$BASE/skill/.skill-evaluation-policy.json")"
 cp "$BASE/skill/.skill-evaluation-policy.json" "$BASE/policy.advisory-saved"
-python3 - "$BASE/skill/.skill-evaluation-policy.json" <<'PY'
+cp "$BASE/config/compilation.json" "$BASE/compilation.advisory-saved"
+python3 - "$BASE/skill/.skill-evaluation-policy.json" "$BASE/config/compilation.json" <<'PY'
 import json, sys
-p=sys.argv[1]; d=json.load(open(p))
-d["advisory_executors"][0]["model"]="claude-observation-model-2"
-open(p,"w").write(json.dumps(d,sort_keys=True,separators=(",",":"))+"\n")
+policy_path, compilation_path = sys.argv[1:]
+policy = json.load(open(policy_path))
+policy["advisory_executors"][0]["model"] = "claude-observation-model-2"
+open(policy_path, "w").write(json.dumps(policy, sort_keys=True, separators=(",", ":")) + "\n")
+compilation = json.load(open(compilation_path))
+compilation["executors"][1]["model"] = "claude-observation-model-2"
+open(compilation_path, "w").write(
+    json.dumps(compilation, sort_keys=True, separators=(",", ":")) + "\n"
+)
 PY
 policy_after="$("$EVAL" v2-policy-validate "$BASE/skill/.skill-evaluation-policy.json")"
-python3 - "$policy_before" "$policy_after" <<'PY'
+unreviewed_registration="$(
+  "$EVAL" v2-input-register "$BASE/skill" \
+    --suite "$BASE/skill/.skill-evaluation-cases.json" \
+    --policy "$BASE/skill/.skill-evaluation-policy.json" \
+    --config "$BASE/config/compilation.json" \
+    --routing "$BASE/config/routing.json" \
+    --harness "$HARNESS" \
+    --authoring-method deterministic-fixture \
+    --source-id synthetic:advisory-variant
+)"
+unreviewed_manifest="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["input_manifest_sha256"])' <<<"$unreviewed_registration")"
+unreviewed_validation="$(
+  "$EVAL" v2-input-validate "$BASE/skill" --manifest "$unreviewed_manifest"
+)"
+python3 - "$policy_before" "$policy_after" "$BASE/input-registry.json" \
+  "$unreviewed_registration" "$SKILLS_STATE_DIR" <<'PY'
 import json, sys
-before, after = (json.loads(item) for item in sys.argv[1:])
+before, after = (json.loads(item) for item in sys.argv[1:3])
+registry = json.load(open(sys.argv[3]))
+unreviewed = json.loads(sys.argv[4])
+state = sys.argv[5]
+reviewed_sha = registry["registration"]["input_manifest_sha256"]
+unreviewed_sha = unreviewed["input_manifest_sha256"]
+reviewed = json.load(open(
+    f"{state}/skill-review/evaluations/v2/input-registry/manifests/"
+    f"{reviewed_sha.removeprefix('sha256:')}.json"
+))
+variant = json.load(open(
+    f"{state}/skill-review/evaluations/v2/input-registry/manifests/"
+    f"{unreviewed_sha.removeprefix('sha256:')}.json"
+))
 assert before["policy_id"] == after["policy_id"]
 assert before["observation_plan_id"] != after["observation_plan_id"]
+assert reviewed_sha != unreviewed_sha
+assert reviewed["complete_policy_sha256"] != variant["complete_policy_sha256"]
 PY
-"$EVAL" current-gate "$BASE/skill" >/dev/null
 mv "$BASE/policy.advisory-saved" "$BASE/skill/.skill-evaluation-policy.json"
-pass "advisory-only policy changes supersede observations without staling required authority"
+mv "$BASE/compilation.advisory-saved" "$BASE/config/compilation.json"
+first_validation="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["validation"]["receipt_sha256"])' "$BASE/input-registry.json")"
+first_review_one="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["review_one"]["receipt_sha256"])' "$BASE/input-registry.json")"
+first_review_two="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["review_two"]["receipt_sha256"])' "$BASE/input-registry.json")"
+expect_refusal unreviewed-manifest-swap "does not bind the exact manifest" \
+  "$EVAL" v2-input-ready "$BASE/skill" --manifest "$unreviewed_manifest" \
+    --validation "$first_validation" --review "$first_review_one" \
+    --review "$first_review_two" --created-at 2026-01-02T00:00:00Z
+"$EVAL" current-gate "$BASE/skill" >/dev/null
+pass "complete advisory policy identity is distinct and cannot borrow readiness from a reviewed manifest"
 
 trace_path="$(find "$BASE/result/trials" -name trace.json | head -1)"
 cp "$trace_path" "$BASE/trace.saved"
@@ -425,12 +795,28 @@ mv "$BASE/trace.saved" "$trace_path"
 pass "current authority re-verifies bound result evidence instead of trusting stored hashes"
 
 cp "$BASE/skill/.skill-evaluation-policy.json" "$BASE/policy.saved"
+cp "$BASE/skill/.agent-created.json" "$BASE/envelope.saved"
 printf '{"schema_version":1,"fixture":"downgrade"}\n' > "$BASE/skill/.skill-evaluation-policy.json"
-if "$EVAL" current-gate "$BASE/skill" >/dev/null 2>&1; then
-  fail "current gate downgraded to legacy after v2 authority existed"
-fi
+python3 - "$BASE/skill/.agent-created.json" <<'PY'
+import json
+import sys
+path = sys.argv[1]
+value = json.load(open(path))
+value["evaluation_v3_sha256"] = "0" * 64
+open(path, "w").write(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+"$EVAL" v2-authority-validate "$BASE/skill" >/dev/null
+"$EVAL" current-gate "$BASE/skill" >/dev/null
+"$EVAL" portfolio-current "$BASE/skill" --now "$current_at" >/dev/null
 mv "$BASE/policy.saved" "$BASE/skill/.skill-evaluation-policy.json"
-pass "current authority cannot be downgraded to a legacy gate by mutable sidecars"
+mv "$BASE/envelope.saved" "$BASE/skill/.agent-created.json"
+pass "external authority ignores root-local policy and stale evaluation_v3 pointers"
+
+mv "$BASE/config" "$BASE/config.removed"
+"$EVAL" v2-authority-validate "$BASE/skill" >/dev/null
+"$EVAL" current-gate "$BASE/skill" >/dev/null
+mv "$BASE/config.removed" "$BASE/config"
+pass "external authority replay uses retained registry routing instead of authoring paths"
 
 python3 - "$aggregate" <<'PY'
 import json, sys
@@ -554,6 +940,7 @@ pass "advisory behavioral regression remains visible without changing the requir
 
 UNAVAILABLE="$TMP/unavailable"
 make_fixture "$UNAVAILABLE"
+publish_fixture "$UNAVAILABLE"
 unavailable="$("$EVAL" v2-unavailable-aggregate "$UNAVAILABLE/skill" \
   --unavailable copilot=missing --unavailable claude=missing --unavailable codex=missing)"
 [[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$unavailable")" == "inconclusive" ]] ||
