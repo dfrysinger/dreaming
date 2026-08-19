@@ -271,9 +271,30 @@
   remain fixed and every started failure remains spent. Bounded Opus/Terra
   design review closed registry-schema, substitution, observed-model,
   repair-lineage, billing-provenance, and author-receipt findings with no
-  unresolved material defect. Reviewer packet/operation implementation,
-  aggregate authoring budgets, and real zero-use cohort progression remain
-  outstanding.
+  unresolved material defect.
+- Independent evaluation-input review is implemented and committed locally on
+  the isolated preview branch as `9d47f41`. Trusted code rebuilds a
+  privacy-scanned review packet from the exact current manifest and
+  deterministic-validation receipt; packets contain normalized prompts,
+  contract, safe metadata, projected execution contracts, and
+  content-addressed identities but no fixture bytes, grader implementations,
+  transcript text, home state, or caller-authored context. The evaluator, not
+  the caller, owns each Copilot review call through the canonical adapter,
+  private temporary result, explicit model, no-tools sandbox, and hard
+  process bounds. Provider streams with absent, mismatched, or conflicting
+  model identities refuse. Immutable review receipts retain and replay the
+  exact packet, adapter, operation, manifest, validation, usage, explicit
+  unavailable billing, elapsed time, decision, and observed model. Readiness
+  refuses author-equal or duplicate reviewer identities; manual deterministic
+  review remains separate. The fake-provider seam is physically confined to
+  this checkout's disposable `.test-work` state, candidate, binary, and fixed
+  sandbox root, with all caller test/fake variables scrubbed. Validation passes
+  37 certification checks, 26 vendor-adapter tests, and 23 evaluator checks.
+  Bounded Opus/Terra implementation review closed caller-forged operations,
+  conflicting provider models, authoritative test-binary substitution, and
+  sandbox-root widening with no unresolved material finding. Aggregate
+  six-operation budgeting, repair/re-review lineage, trusted author
+  orchestration, and real zero-use cohort progression remain outstanding.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
