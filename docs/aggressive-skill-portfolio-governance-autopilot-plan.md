@@ -181,6 +181,20 @@
   findings with no unresolved material finding. The retained live-proof
   receipt is
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/governance-readiness-live-proof.md`.
+- The model-facing safe-authoring boundary is committed locally on the isolated
+  preview branch as `6c26d79`. It emits a candidate-bound packet containing
+  exact inventory and the `SKILL.md` contract, declared public or synthetic
+  fixture metadata, objective grader and rubric templates, and sanitized
+  executor, comparator, harness, policy, and runtime identities. It rejects
+  unknown catalog keys, undeclared or changed fixture trees, subjective
+  graders, transcript, home-state, credential, oversized, symlinked, and
+  candidate-root output inputs before a model-facing packet exists. Fixture,
+  grader-tree, suite, policy, and full compilation source content are scanned
+  even when only a smaller identity projection enters the packet. Validation
+  passes 36 certification checks. Paired Opus/Terra review closed unrestricted
+  compilation projection and bare-token detection findings with no unresolved
+  material finding. Trusted draft materialization, bounded author/reviewer
+  operations, and real zero-use cohort progression remain outstanding.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
