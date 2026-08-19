@@ -163,8 +163,27 @@
   registry, certification, and authority slices is closed with no unresolved
   material finding. The retained live-proof receipt is
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/evaluation-input-registry-live-proof.md`.
-- Governance work remaining: implement safe case authoring and readiness
-  projection, then execute the evaluation queue under explicit daily
+- The readiness lifecycle and truthful portfolio projection are committed
+  locally on the isolated preview branch as `1c78147`. The registry now retains
+  content-addressed `input_missing`, `drafting`, `review_required`, `invalid`,
+  `insufficient_information`, and `ready` transitions; validates the complete
+  transition graph rather than trusting the mutable pointer; rejects missing,
+  rolled-back, branched, disconnected, terminal-state, same-candidate, and
+  cross-candidate pointer degradation; and reserves `evaluated_at` for actual
+  evaluation transitions. Estate and dashboard projection now use the reviewed
+  lifecycle labels, including `Needs test cases` instead of generic `Needs
+  evaluation`. The real private preview reports 109 physical instances and 95
+  enabled capabilities, all 95 explicitly `input_missing`, with no enabled
+  action, accepted write, browser error, or desktop/390-pixel overflow. Final
+  validation passes 35 certification checks, 62 estate tests, and 154
+  dashboard checks. Paired Opus/Terra review closed missing-state,
+  false-evaluation-time, same-candidate rollback, and cross-candidate rollback
+  findings with no unresolved material finding. The retained live-proof
+  receipt is
+  `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/governance-readiness-live-proof.md`.
+- Governance work remaining: implement safe case authoring and progress the
+  real zero-use cohort through reviewed readiness, then execute the evaluation
+  queue under explicit daily
   operation, normalized-token, and elapsed-time budgets. After that, prove
   governed user intents, reversible personal withdrawal/archive/restore, and qualified whole-plugin
   disable/restore under `PORT-CHK-01` through `PORT-CHK-14`. Individual plugin
