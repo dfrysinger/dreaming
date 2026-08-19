@@ -421,6 +421,25 @@
   Run-start publication recovery, sealed owner configuration, the derived
   in-memory queue, process-group monitoring, and one-claim owner orchestration
   remain.
+- Pending terminal readiness recovery is implemented and committed locally on
+  the isolated preview branch as `713d8d0`. The fixed evaluator sibling now
+  publishes or exactly replays pending `ready`, `invalid`, and
+  `insufficient_information` transitions, repairs an interrupted current
+  pointer only when the retained transition is the unique chain tip, and
+  acknowledges only the content-addressed transition that matches the claim
+  ledger. Repair-path insufficient-information outcomes retain no manifest or
+  receipt authority. Recovery requires inherited orchestration, the live
+  process-mode writer lease with exact PID and process identity, and an absent
+  halt switch; authority is rechecked immediately before transition creation,
+  pointer publication, and ledger acknowledgement. Interrupted file, pointer,
+  and acknowledgement boundaries remain idempotently recoverable, while a
+  non-tip or forked history refuses before pointer mutation. Focused
+  claim-ledger, certification, vendor-adapter, and evaluator validation passes
+  28, 41, 26, and 23 checks respectively. Paired implementation review closed
+  process-lease, repair-insufficient, history-tip, and halt/lease race findings
+  with no unresolved material defect. Core run-start invocation, open-claim
+  liveness recovery, sealed owner configuration, the derived in-memory queue,
+  and one-claim authoring orchestration remain.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
