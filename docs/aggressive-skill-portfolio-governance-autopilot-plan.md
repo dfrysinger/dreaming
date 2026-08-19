@@ -138,9 +138,35 @@
   positions and reasons, no horizontal overflow or browser error, and no
   enabled action. Authenticated writes return HTTP 405. Paired fix verification
   reports no unresolved material finding.
-- Governance work remaining: execute the evaluation queue under explicit daily
-  case and AI-credit budgets, then prove governed user intents, reversible
-  personal withdrawal/archive/restore, and qualified whole-plugin
+- The evaluation-input bootstrap design is reviewed and committed locally on
+  the isolated preview branch as `dbc39bd`, with the acyclic
+  manifest-to-receipts-to-readiness clarification at `3c7371b`. It defines an
+  external content-addressed input registry, explicit readiness lifecycle,
+  safe authoring boundary, one-skill-per-four-hour-run and four-skills-per-day
+  ceilings, hard operation/token/time budgets, rollback,
+  `PORT-CHK-EVAL-INPUT-01` through `PORT-CHK-EVAL-INPUT-06`, and its own
+  Definition of Done. Paired Opus/Terra design review has no unresolved
+  finding.
+- The authoritative input-registry foundation is implemented and committed
+  locally on the isolated preview branch as `77fe62a`. It stores immutable
+  suites, complete policies, compilation, routing, fixtures, graders, harness
+  identity, validation and review receipts, chained readiness transitions, and
+  a transition-only current pointer outside installed skill roots.
+  Authoritative compile, execute, certify, unavailable evidence, authority,
+  current gate, and portfolio currentness bind one ready manifest; root-local
+  inputs remain non-certifiable development inputs. External replay survives
+  removal of authoring config and routing files, ignores stale in-root
+  authority pointers, rejects materialized fixture or grader substitution, and
+  cannot downgrade to a legacy gate after readiness corruption. The
+  certification suite passes 33 checks, the estate suite passes 62 tests, and
+  the dashboard suite passes 153 checks. Paired implementation review across
+  registry, certification, and authority slices is closed with no unresolved
+  material finding. The retained live-proof receipt is
+  `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/evaluation-input-registry-live-proof.md`.
+- Governance work remaining: implement safe case authoring and readiness
+  projection, then execute the evaluation queue under explicit daily
+  operation, normalized-token, and elapsed-time budgets. After that, prove
+  governed user intents, reversible personal withdrawal/archive/restore, and qualified whole-plugin
   disable/restore under `PORT-CHK-01` through `PORT-CHK-14`. Individual plugin
   skill disablement remains recommendation-only unless native CLI support is
   qualified. Report-only behavior remains mandatory until every capability
