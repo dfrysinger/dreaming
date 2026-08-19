@@ -209,7 +209,21 @@
   external manifest without changing the candidate root. Validation passes 37
   certification checks. Paired Opus/Terra review closed a source-tree race and
   a non-registerable legacy-suite path with no unresolved material finding.
-  Bounded author/reviewer operations and real zero-use cohort progression
+- Safe-authoring provenance retention is committed locally on the isolated
+  preview branch as `61ea5ac`. A `bounded-safe-author` manifest must retain
+  exactly one content-addressed authoring packet, normalized draft, and
+  materialization receipt; other authoring methods may not carry those roles.
+  Registration and every later manifest resolution reconstruct the final suite
+  and re-prove the current candidate and `SKILL.md`, template, policy, full and
+  projected compilation, routing, harness, public/synthetic fixture catalog,
+  objective grader catalog, complete fixture and grader trees, rubric,
+  materialization receipt, and exact packet/draft/catalog source identities.
+  Retained free text is re-scanned. Self-consistent forged rubric metadata or
+  private fixture provenance refuses. Existing deterministic/manual registry
+  flows remain valid without authoring roles. Validation passes 37
+  certification checks. Paired Opus/Terra review closed a circular
+  catalog/rubric trust path with no unresolved material finding.
+  Bounded author/reviewer model operations and real zero-use cohort progression
   remain outstanding.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
