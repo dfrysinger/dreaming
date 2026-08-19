@@ -485,6 +485,40 @@ operation with the same fields. The repair's requested and observed model must
 equal the original retained author model; substitution refuses before a model
 call.
 
+The trusted evaluator owns the causal handoff for author, repair, review, and
+re-review operations. It rebuilds the exact packet, invokes the canonical
+qualified adapter itself, keeps the adapter result in an evaluator-owned
+temporary directory, validates it immediately, and only then publishes the
+operation or a receipt. Registry commands do not accept a caller-supplied
+operation report, adapter digest, provider event, usage record, elapsed time,
+decision, or model observation as evidence that a model call occurred.
+Content hashes prove retained-byte integrity only; they are never treated as
+proof that a caller-authored operation happened.
+
+The canonical qualified adapter is the regular, non-symlink sibling selected
+from the resolved evaluator executable. Before a call, the evaluator requires
+that exact path and bytes to match the adapter identity sealed by the reviewed
+owner or installation authority; a caller cannot supply a path or expected
+digest, and any path, byte, or authority mismatch refuses before launch.
+Recording the bytes that happened to execute is descriptive provenance, not
+adapter authorization.
+
+For every authoritative call, the evaluator constructs the adapter environment
+from a versioned allowlist rather than copying the caller's environment.
+Process-runtime paths, locale, synthetic home and temporary roots, registry
+root, and any provider authentication handle are fixed constants or come from
+validated evaluator/owner authority. Provider selection, executable
+resolution, model selection, sandbox allowances, custom instructions, plugin
+state, test controls, and fake-process controls never come from the inherited
+caller environment. An unrecognized variable is absent, not forwarded.
+
+Deterministic tests may substitute a provider executable only when the
+candidate, registry state, executable, and sandbox allow root all resolve
+beneath the checkout's fixed disposable `.test-work` root. The evaluator
+uses the same allowlist-built environment, then adds only the
+evaluator-derived fixed test root and validated test executable. This seam
+cannot produce evidence for an installed skill or authoritative state.
+
 Every readiness transition is canonical content-addressed JSON. It binds the
 exact skill path, candidate ID, manifest digest or explicit null, prior
 transition ID, state, reason, creation time, and transition ID. A `ready`
@@ -789,9 +823,12 @@ inventory and dashboard projection remain available.
 - **Setup:** Exercise valid cases, unsafe transcript-derived input, secret and
   home-path fixtures, subjective graders, missing case classes, substituted
   review packets, repeated or author-equal reviewer models, missing or
-  mismatched retained author operations, shared review state, disagreement,
-  one repair, stale pre-repair reviews, author or reviewer substitution, and
-  an untestable contract.
+  mismatched retained author operations, caller-authored author, repair,
+  review, and re-review reports, provider-test overrides aimed at installed
+  state or live paths, an unrecognized inherited variable that redirects a
+  provider, a caller-selected or byte-substituted adapter, shared review state,
+  disagreement, one repair, stale pre-repair reviews, author or reviewer
+  substitution, and an untestable contract.
 - **Pass:** Only the exact validated and twice-accepted manifest becomes
   `ready`; both review receipts bind the exact packet, manifest, distinct
   provider-observed models, retained adapter, usage, billing provenance, and
@@ -799,13 +836,20 @@ inventory and dashboard projection remain available.
   repaired readiness binds its initial manifest and review set and uses two
   re-reviews by the original reviewer model identities; repair uses the
   original author model; author or reviewer substitution refuses before a
-  model call and leaves the claim invalid; unsafe input never reaches a
-  reviewer or executor; the untestable contract becomes explicit
-  `insufficient_information`.
+  model call and leaves the claim invalid; caller-authored operation reports
+  and authoritative provider-test overrides have no ingress; authoritative
+  adapter environments contain only allowlisted evaluator-derived values; the
+  adapter matches its pre-authorized path, bytes, and authority identity;
+  unsafe input never reaches a reviewer or executor; the untestable contract
+  becomes explicit `insufficient_information`.
 - **Failure:** A draft executes, model opinion becomes a grader, private input
   leaves the boundary, labels or repeated models satisfy independence, an old
   review authorizes a repaired manifest, a substituted author or reviewer
-  completes a claim, or inability to test becomes pass.
+  completes a claim, caller-authored operation JSON grants readiness, a test
+  provider writes authoritative evidence or receives a live-path sandbox
+  allowance, an inherited unrecognized variable redirects an authoritative
+  provider, a non-canonical or byte-substituted adapter runs, or inability to
+  test becomes pass.
 - **Why:** It prevents evaluation bootstrap from manufacturing evidence.
 
 #### PORT-CHK-EVAL-INPUT-04: Bounded single-owner execution
@@ -1671,6 +1715,13 @@ Fail-closed rollback proof requires:
       repair-lineage, and elapsed-time provenance, and records untestable
       skills as
       `insufficient_information`.
+- [ ] Every model-backed authoring operation is launched and consumed by the
+      trusted evaluator; no caller-supplied operation report can create a
+      manifest, review receipt, or ready transition, and deterministic provider
+      substitution is confined to disposable non-authoritative test roots.
+      Authoritative adapter launch uses a versioned allowlist-built environment
+      and a pre-authorized evaluator-owned adapter path and byte identity, so
+      inherited environment or adapter substitution refuses before a call.
 - [ ] The dashboard distinguishes Needs test cases, Test design in progress,
       Test design rejected, Cannot test safely, Ready to test, Testing now,
       current evaluation, and stale evaluation.
