@@ -4100,7 +4100,25 @@ class DashboardData:
                     for item in portfolio_decisions
                 ),
                 "missing": sum(
-                    item["evaluation"].get("state") == "missing"
+                    item["evaluation"].get("state")
+                    in {"missing", "input_missing"}
+                    for item in portfolio_decisions
+                ),
+                "drafting": sum(
+                    item["evaluation"].get("state") == "drafting"
+                    for item in portfolio_decisions
+                ),
+                "review_required": sum(
+                    item["evaluation"].get("state") == "review_required"
+                    for item in portfolio_decisions
+                ),
+                "insufficient_information": sum(
+                    item["evaluation"].get("state")
+                    == "insufficient_information"
+                    for item in portfolio_decisions
+                ),
+                "ready": sum(
+                    item["evaluation"].get("state") == "ready"
                     for item in portfolio_decisions
                 ),
                 "stale": sum(
@@ -4344,6 +4362,7 @@ class DashboardData:
     ) -> dict[str, Any]:
         receipt_sha256 = None
         transition_id = None
+        input_manifest_sha256 = None
         evaluated_at = None
         cases: list[dict[str, Any]] = []
         current = not isinstance(value, dict)
@@ -4362,6 +4381,13 @@ class DashboardData:
                 and SHA256_RE.fullmatch(transition.removeprefix("sha256:"))
             ):
                 transition_id = transition
+            manifest = value.get("input_manifest_sha256")
+            if (
+                isinstance(manifest, str)
+                and manifest.startswith("sha256:")
+                and SHA256_RE.fullmatch(manifest.removeprefix("sha256:"))
+            ):
+                input_manifest_sha256 = manifest
             raw_cases = value.get("cases")
             if not isinstance(raw_cases, list) or len(raw_cases) > 100:
                 complete = False
@@ -4375,10 +4401,40 @@ class DashboardData:
                     cases.append(projected)
             value = value.get("state") or value.get("status")
         normalized = safe_text(value, 80).casefold().replace("-", "_").replace(" ", "_")
-        if complete is False or normalized in {"invalid", "incomplete"}:
+        invalid_readiness_reasons = {
+            "deterministic_validation_failed",
+            "independent_review_rejected",
+            "authoring_budget_exhausted",
+        }
+        if complete is False or normalized == "incomplete":
             state, label, current = "invalid", "Evaluation data invalid", False
-        elif normalized in {"missing", "not_evaluated", ""}:
-            state, label, current = "missing", "Needs evaluation", False
+        elif normalized in {"input_missing", "missing", "not_evaluated", ""}:
+            state, label, current = "input_missing", "Needs test cases", False
+        elif normalized == "drafting":
+            state, label, current = "drafting", "Test design in progress", False
+        elif normalized == "review_required":
+            state, label, current = (
+                "review_required",
+                "Test design in progress",
+                False,
+            )
+        elif normalized == "insufficient_information":
+            state, label, current = (
+                "insufficient_information",
+                "Cannot test safely",
+                False,
+            )
+        elif normalized == "ready":
+            state, label, current = "ready", "Ready to test", False
+        elif normalized in {"executing", "running"}:
+            state, label, current = "executing", "Testing now", False
+        elif normalized == "invalid":
+            state, current = "invalid", False
+            label = (
+                "Test design rejected"
+                if historical_status in invalid_readiness_reasons
+                else "Evaluation data invalid"
+            )
         elif normalized in {"stale", "expired", "revoked"} or not current:
             state, label, current = "stale", "Stale evaluation", False
         elif normalized in {
@@ -4390,7 +4446,7 @@ class DashboardData:
             state, label = "regression", "Current regression"
         elif normalized in {"pass", "passed", "current_pass", "waived"}:
             state, label = "pass", "Current pass"
-        elif normalized in {"inconclusive", "queued", "running"}:
+        elif normalized in {"inconclusive", "queued"}:
             state = normalized
             label = normalized.replace("_", " ").title()
         else:
@@ -4403,6 +4459,7 @@ class DashboardData:
             "evaluated_at": evaluated_at,
             "receipt_sha256": receipt_sha256,
             "transition_id": transition_id,
+            "input_manifest_sha256": input_manifest_sha256,
             "cases": cases,
         }
 
@@ -4415,7 +4472,17 @@ class DashboardData:
         if usage_state in {"complete_zero_30d", "settled_zero_30d"}:
             return (1, "No successful use in 30 days")
         state = evaluation.get("state")
-        if state in {"missing", "inconclusive", "invalid"}:
+        if state in {
+            "missing",
+            "input_missing",
+            "drafting",
+            "review_required",
+            "insufficient_information",
+            "ready",
+            "executing",
+            "inconclusive",
+            "invalid",
+        }:
             return (2, "No current conclusive evaluation")
         if state == "regression":
             return (4, "Current evaluation found a regression")

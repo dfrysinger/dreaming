@@ -779,6 +779,7 @@ class EstateCensusTest(unittest.TestCase):
             "evaluated_at": "2026-08-17T00:00:00+00:00",
             "receipt_sha256": "1" * 64,
             "transition_id": "sha256:" + "2" * 64,
+            "input_manifest_sha256": "sha256:" + "4" * 64,
             "cases": [{
                 "executor": "copilot",
                 "case_id": "intended",
@@ -792,12 +793,13 @@ class EstateCensusTest(unittest.TestCase):
             }],
         }
         missing_evaluation = {
-            "state": "missing",
-            "status": "missing",
+            "state": "input_missing",
+            "status": "input_missing",
             "current": False,
             "evaluated_at": None,
             "receipt_sha256": None,
             "transition_id": None,
+            "input_manifest_sha256": None,
             "cases": [],
         }
         inventory = {
@@ -820,7 +822,9 @@ class EstateCensusTest(unittest.TestCase):
         }
         self.assertEqual(instances["evaluated"]["evaluation"]["state"], "pass")
         self.assertTrue(instances["evaluated"]["evaluation_complete"])
-        self.assertEqual(instances["missing"]["evaluation"]["state"], "missing")
+        self.assertEqual(
+            instances["missing"]["evaluation"]["state"], "input_missing"
+        )
         self.assertEqual(
             census["evidence"]["evaluation_inventory"]["state_counts"]["pass"],
             1,

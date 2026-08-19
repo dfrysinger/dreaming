@@ -363,7 +363,7 @@ function bindPortfolioQueue(queue) {
     if (!filter.value) return true;
     if (filter.value === "needs-decision") return item.who_may_change === "Your decision";
     if (filter.value === "failed") return item.evaluation?.state === "regression";
-    if (filter.value === "needs-evaluation") return ["missing", "stale", "inconclusive", "invalid"].includes(item.evaluation?.state);
+    if (filter.value === "needs-evaluation") return ["input_missing", "drafting", "review_required", "insufficient_information", "ready", "executing", "stale", "inconclusive", "invalid"].includes(item.evaluation?.state);
     if (filter.value === "unused-30") return ["complete_zero_30d", "settled_zero_30d"].includes(item.usage_state) && item.uses_30d === 0;
     if (filter.value === "unused-90") return item.usage_state === "complete_zero_30d" && item.uses_90d === 0;
     if (filter.value === "plugin") return item.who_may_change === "Plugin package only";

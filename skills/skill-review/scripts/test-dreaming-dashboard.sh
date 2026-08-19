@@ -110,6 +110,54 @@ check(
     and "@media (max-width: 700px)" in stylesheet,
     "portfolio decisions disclose settled-use exclusions and stack labeled fields on narrow screens",
 )
+readiness_labels = {
+    state: dashboard.DashboardData._portfolio_evaluation(
+        {
+            "state": state,
+            "status": status,
+            "current": False,
+            "evaluated_at": "2026-08-19T00:00:00+00:00",
+            "receipt_sha256": None,
+            "transition_id": "sha256:" + "1" * 64,
+            "input_manifest_sha256": (
+                None
+                if state
+                in {
+                    "input_missing",
+                    "drafting",
+                    "insufficient_information",
+                }
+                else "sha256:" + "2" * 64
+            ),
+            "cases": [],
+        },
+        True,
+    )["label"]
+    for state, status in {
+        "input_missing": "input_missing",
+        "drafting": "authoring_claimed",
+        "review_required": "validation_passed",
+        "invalid": "independent_review_rejected",
+        "insufficient_information": "objective_grader_unavailable",
+        "ready": "ready",
+        "executing": "executing",
+        "stale": "pass",
+    }.items()
+}
+check(
+    readiness_labels
+    == {
+        "input_missing": "Needs test cases",
+        "drafting": "Test design in progress",
+        "review_required": "Test design in progress",
+        "invalid": "Test design rejected",
+        "insufficient_information": "Cannot test safely",
+        "ready": "Ready to test",
+        "executing": "Testing now",
+        "stale": "Stale evaluation",
+    },
+    "portfolio evaluation labels expose every readiness lifecycle state",
+)
 legacy_dependencies = dashboard.DashboardData._portfolio_dependencies(
     ["/private/dependency/evidence"],
     True,
@@ -1470,6 +1518,10 @@ try:
             "queued": 1,
             "current": 2,
             "missing": 0,
+            "drafting": 0,
+            "review_required": 0,
+            "insufficient_information": 0,
+            "ready": 0,
             "stale": 0,
             "invalid": 0,
         }

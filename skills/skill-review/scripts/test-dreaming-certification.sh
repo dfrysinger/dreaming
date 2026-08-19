@@ -600,7 +600,7 @@ value = json.load(open(path))
 value["transition_id"] = "sha256:" + "9" * 64
 open(path, "w").write(json.dumps(value, sort_keys=True, separators=(",", ":")))
 PY
-expect_refusal input-pointer-mismatch "regular non-symlink file" \
+expect_refusal input-pointer-mismatch "does not name the unique chain tip" \
   "$EVAL" v2-prepare "$BASE/skill"
 mv "$BASE/input-current.saved" "$input_current_path"
 
@@ -649,6 +649,8 @@ mv "$POINTER_DOWNGRADE/skill/.skill-evaluation-policy.json" \
   "$POINTER_DOWNGRADE/policy.saved"
 expect_refusal current-gate-pointer-downgrade "current pointer is missing" \
   "$EVAL" current-gate "$POINTER_DOWNGRADE/skill"
+expect_refusal portfolio-pointer-downgrade "current pointer is missing" \
+  "$EVAL" portfolio-current "$POINTER_DOWNGRADE/skill"
 mv "$POINTER_DOWNGRADE/policy.saved" \
   "$POINTER_DOWNGRADE/skill/.skill-evaluation-policy.json"
 mv "$POINTER_DOWNGRADE/current.saved" "$pointer_downgrade_current"
@@ -700,9 +702,195 @@ value = json.loads(sys.argv[1])
 rows = {item["skill_path"]: item["evaluation"] for item in value["evaluations"]}
 assert len(value["evaluations"]) == 2
 assert rows[sys.argv[2]]["state"] == "pass"
-assert rows[sys.argv[3]]["state"] == "missing"
+assert rows[sys.argv[3]]["state"] == "input_missing"
 PY
 pass "bounded portfolio inventory deduplicates paths and retains missing evaluations"
+
+READINESS="$TMP/readiness-lifecycle"
+make_fixture "$READINESS"
+readiness_root_before="$(
+  python3 - "$READINESS/skill" <<'PY'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+value = hashlib.sha256()
+for path in sorted(root.rglob("*")):
+    if path.is_file():
+        value.update(path.relative_to(root).as_posix().encode())
+        value.update(path.read_bytes())
+print(value.hexdigest())
+PY
+)"
+drafting="$(
+  "$EVAL" v2-input-state "$READINESS/skill" \
+    --state drafting --reason authoring_claimed \
+    --created-at 2026-01-01T00:00:00Z
+)"
+drafting_projection="$(
+  "$EVAL" portfolio-current "$READINESS/skill" --now "$current_at"
+)"
+registration="$(
+  "$EVAL" v2-input-register "$READINESS/skill" \
+    --suite "$READINESS/skill/.skill-evaluation-cases.json" \
+    --policy "$READINESS/skill/.skill-evaluation-policy.json" \
+    --config "$READINESS/config/compilation.json" \
+    --routing "$READINESS/config/routing.json" \
+    --harness "$HARNESS" \
+    --authoring-method deterministic-fixture \
+    --source-id synthetic:readiness-lifecycle
+)"
+manifest="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["input_manifest_sha256"])' <<<"$registration")"
+validation="$("$EVAL" v2-input-validate "$READINESS/skill" --manifest "$manifest")"
+validation_sha="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' <<<"$validation")"
+review_one="$(
+  "$EVAL" v2-input-review "$READINESS/skill" --manifest "$manifest" \
+    --reviewer readiness-reviewer-one --decision accept
+)"
+review_one_sha="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' <<<"$review_one")"
+"$EVAL" v2-input-state "$READINESS/skill" \
+  --state review_required --reason validation_passed \
+  --manifest "$manifest" --validation "$validation_sha" \
+  --review "$review_one_sha" --created-at 2026-01-01T00:01:00Z >/dev/null
+review_projection="$(
+  "$EVAL" portfolio-current "$READINESS/skill" --now "$current_at"
+)"
+review_reject="$(
+  "$EVAL" v2-input-review "$READINESS/skill" --manifest "$manifest" \
+    --reviewer readiness-reviewer-two --decision reject
+)"
+review_reject_sha="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' <<<"$review_reject")"
+"$EVAL" v2-input-state "$READINESS/skill" \
+  --state invalid --reason independent_review_rejected \
+  --manifest "$manifest" --validation "$validation_sha" \
+  --review "$review_one_sha" --review "$review_reject_sha" \
+  --created-at 2026-01-01T00:02:00Z >/dev/null
+invalid_projection="$(
+  "$EVAL" portfolio-current "$READINESS/skill" --now "$current_at"
+)"
+"$EVAL" v2-input-state "$READINESS/skill" \
+  --state drafting --reason authoring_claimed \
+  --created-at 2026-01-01T00:03:00Z >/dev/null
+"$EVAL" v2-input-state "$READINESS/skill" \
+  --state review_required --reason validation_passed \
+  --manifest "$manifest" --validation "$validation_sha" \
+  --review "$review_one_sha" --created-at 2026-01-01T00:04:00Z >/dev/null
+
+INSUFFICIENT="$TMP/readiness-insufficient"
+make_fixture "$INSUFFICIENT"
+"$EVAL" v2-input-state "$READINESS/skill" \
+  --state ready --reason validated_and_reviewed 2>/dev/null && \
+  fail "generic input-state command accepted ready"
+"$EVAL" v2-input-state "$INSUFFICIENT/skill" \
+  --state insufficient_information --reason objective_grader_unavailable \
+  --created-at 2026-01-01T00:00:00Z >/dev/null
+insufficient_projection="$(
+  "$EVAL" portfolio-current "$INSUFFICIENT/skill" --now "$current_at"
+)"
+expect_refusal readiness-private-authority \
+  "insufficient_information readiness cannot bind input receipts" \
+  "$EVAL" v2-input-state "$INSUFFICIENT/skill" \
+    --state insufficient_information --reason objective_grader_unavailable \
+    --manifest "$manifest"
+expect_refusal readiness-terminal "cannot transition from insufficient_information" \
+  "$EVAL" v2-input-state "$INSUFFICIENT/skill" \
+    --state drafting --reason authoring_claimed
+review_two="$(
+  "$EVAL" v2-input-review "$READINESS/skill" --manifest "$manifest" \
+    --reviewer readiness-reviewer-two --decision accept
+)"
+review_two_sha="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' <<<"$review_two")"
+ready="$(
+  "$EVAL" v2-input-ready "$READINESS/skill" --manifest "$manifest" \
+    --validation "$validation_sha" --review "$review_one_sha" \
+    --review "$review_two_sha" --created-at 2026-01-01T00:05:00Z
+)"
+python3 - "$EVAL" "$READINESS/skill" "$current_at" \
+  "$drafting" "$manifest" "$ready" "$drafting_projection" \
+  "$review_projection" "$invalid_projection" "$insufficient_projection" <<'PY'
+import json, subprocess, sys
+(
+    evaluator, skill, observed_at, drafting_raw, manifest, ready_raw,
+    drafting_projection, review_projection, invalid_projection,
+    insufficient_projection,
+) = sys.argv[1:]
+drafting = json.loads(drafting_raw)
+ready = json.loads(ready_raw)
+assert drafting["state"] == "drafting"
+assert ready["state"] == "ready"
+assert ready["input_manifest_sha256"] == manifest
+assert json.loads(drafting_projection)["state"] == "drafting"
+assert json.loads(review_projection)["state"] == "review_required"
+assert json.loads(invalid_projection)["state"] == "invalid"
+assert json.loads(insufficient_projection)["state"] == "insufficient_information"
+assert all(
+    json.loads(item)["evaluated_at"] is None
+    for item in (
+        drafting_projection,
+        review_projection,
+        invalid_projection,
+        insufficient_projection,
+    )
+)
+value = json.loads(subprocess.check_output(
+    [evaluator, "portfolio-current", skill, "--now", observed_at],
+    text=True,
+))
+assert value["state"] == "ready"
+assert value["status"] == "ready"
+assert value["current"] is False
+assert value["evaluated_at"] is None
+assert value["input_manifest_sha256"] == manifest
+PY
+readiness_current="$(
+  python3 - "$ready" <<'PY'
+import json, sys
+print(json.loads(sys.argv[1])["current"])
+PY
+)"
+cp "$readiness_current" "$READINESS/current.saved"
+python3 - "$readiness_current" "$drafting" <<'PY'
+import json, pathlib, sys
+path = pathlib.Path(sys.argv[1])
+pointer = json.loads(path.read_text())
+pointer["transition_id"] = json.loads(sys.argv[2])["transition_id"]
+path.write_text(json.dumps(pointer, sort_keys=True) + "\n")
+PY
+expect_refusal readiness-pointer-rollback "does not name the unique chain tip" \
+  "$EVAL" portfolio-current "$READINESS/skill" --now "$current_at"
+mv "$READINESS/current.saved" "$readiness_current"
+readiness_root_after="$(
+  python3 - "$READINESS/skill" <<'PY'
+import hashlib, pathlib, sys
+root = pathlib.Path(sys.argv[1])
+value = hashlib.sha256()
+for path in sorted(root.rglob("*")):
+    if path.is_file():
+        value.update(path.relative_to(root).as_posix().encode())
+        value.update(path.read_bytes())
+print(value.hexdigest())
+PY
+)"
+[[ "$readiness_root_before" == "$readiness_root_after" ]] ||
+  fail "readiness lifecycle changed the installed skill root"
+pass "readiness lifecycle is append-only, fail-closed, projected, and external to the skill root"
+
+CROSS_CANDIDATE="$TMP/readiness-cross-candidate"
+make_fixture "$CROSS_CANDIDATE"
+publish_fixture "$CROSS_CANDIDATE"
+cross_current="$(
+  python3 - "$CROSS_CANDIDATE/input-registry.json" <<'PY'
+import json, sys
+print(json.load(open(sys.argv[1]))["ready"]["current"])
+PY
+)"
+cp "$cross_current" "$CROSS_CANDIDATE/old-current.json"
+printf '%s\n' 'Changed candidate contract.' >> "$CROSS_CANDIDATE/skill/SKILL.md"
+publish_fixture "$CROSS_CANDIDATE"
+cp "$CROSS_CANDIDATE/old-current.json" "$cross_current"
+expect_refusal readiness-cross-candidate-rollback \
+  "readiness pointer candidate is stale" \
+  "$EVAL" portfolio-current "$CROSS_CANDIDATE/skill" --now "$current_at"
+pass "an older candidate pointer cannot hide established current-candidate readiness"
+
 ln -s "$TMP/unresolvable-loop" "$TMP/unresolvable-loop"
 unresolvable_inventory="$(
   "$EVAL" portfolio-inventory "$BASE/skill" "$TMP/unresolvable-loop" \

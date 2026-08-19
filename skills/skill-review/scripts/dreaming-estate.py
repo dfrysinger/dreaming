@@ -54,6 +54,11 @@ EVALUATION_STATES = {
     "inconclusive",
     "stale",
     "missing",
+    "input_missing",
+    "drafting",
+    "review_required",
+    "insufficient_information",
+    "ready",
     "invalid",
 }
 MAX_EVALUATION_CASES = 100
@@ -3624,6 +3629,7 @@ def incomplete_evaluation() -> dict[str, Any]:
         "evaluated_at": None,
         "receipt_sha256": None,
         "transition_id": None,
+        "input_manifest_sha256": None,
         "cases": [],
     }
 
@@ -3868,6 +3874,7 @@ def apply_evaluation_inventory(
                     "evaluated_at",
                     "receipt_sha256",
                     "transition_id",
+                    "input_manifest_sha256",
                     "cases",
                 }
                 or not isinstance(evaluation["state"], str)
@@ -3899,6 +3906,18 @@ def apply_evaluation_inventory(
                         not isinstance(evaluation["transition_id"], str)
                         or SHA256_ID_RE.fullmatch(
                             evaluation["transition_id"]
+                        )
+                        is None
+                    )
+                )
+                or (
+                    evaluation["input_manifest_sha256"] is not None
+                    and (
+                        not isinstance(
+                            evaluation["input_manifest_sha256"], str
+                        )
+                        or SHA256_ID_RE.fullmatch(
+                            evaluation["input_manifest_sha256"]
                         )
                         is None
                     )

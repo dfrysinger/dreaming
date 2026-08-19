@@ -58,6 +58,42 @@ INPUT_REGISTRY_REQUIRED_ROLES = {
     "routing",
     "harness",
 }
+INPUT_READINESS_STATES = {
+    "input_missing",
+    "drafting",
+    "review_required",
+    "invalid",
+    "insufficient_information",
+    "ready",
+}
+INPUT_READINESS_REASONS = {
+    "input_missing": {"no_external_manifest"},
+    "drafting": {"authoring_claimed"},
+    "review_required": {"validation_passed"},
+    "invalid": {
+        "deterministic_validation_failed",
+        "independent_review_rejected",
+        "authoring_budget_exhausted",
+    },
+    "insufficient_information": {
+        "evaluation_case_unavailable",
+        "safe_fixture_unavailable",
+        "objective_grader_unavailable",
+    },
+    "ready": {"validated_and_reviewed"},
+}
+INPUT_READINESS_TRANSITIONS = {
+    "input_missing": {"drafting"},
+    "drafting": {
+        "review_required",
+        "invalid",
+        "insufficient_information",
+    },
+    "review_required": {"review_required", "invalid", "ready"},
+    "invalid": {"drafting", "invalid"},
+    "insufficient_information": set(),
+    "ready": {"ready"},
+}
 RESULT_MANIFEST_KEYS = {
     "schema_version",
     "kind",
@@ -1721,6 +1757,17 @@ def validate_input_receipts(
     validation_sha256: str,
     review_sha256s: list[str],
 ) -> None:
+    validate_input_validation_receipt(resolved, validation_sha256)
+    decisions = validate_input_review_receipts(resolved, review_sha256s)
+    if len(decisions) != 2 or any(decision != "accept" for decision in decisions):
+        raise EvaluationError(
+            "ready input requires exactly two independent accepting reviews"
+        )
+
+
+def validate_input_validation_receipt(
+    resolved: dict[str, Any], validation_sha256: str
+) -> None:
     expected = input_receipt_binding(resolved, "evaluation_input_validation")
     validation = load_input_registry_receipt(validation_sha256)
     require_exact_keys(
@@ -1740,9 +1787,15 @@ def validate_input_receipts(
         raise EvaluationError(
             "input validation receipt does not bind the exact manifest"
         )
-    if len(review_sha256s) != 2 or len(set(review_sha256s)) != 2:
-        raise EvaluationError("ready input requires exactly two distinct reviews")
+
+
+def validate_input_review_receipts(
+    resolved: dict[str, Any], review_sha256s: list[str]
+) -> list[str]:
+    if len(review_sha256s) != len(set(review_sha256s)):
+        raise EvaluationError("input review receipts must be distinct")
     reviewers: set[str] = set()
+    decisions: list[str] = []
     review_expected = input_receipt_binding(
         resolved, "evaluation_input_review"
     )
@@ -1756,15 +1809,18 @@ def validate_input_receipts(
         reviewer = require_text(
             receipt.get("reviewer"), f"input review receipt {index}.reviewer"
         )
+        decision = receipt.get("decision")
         if (
             any(receipt.get(key) != value for key, value in review_expected.items())
-            or receipt.get("decision") != "accept"
+            or decision not in {"accept", "reject"}
             or reviewer in reviewers
         ):
             raise EvaluationError(
-                "input reviews must independently accept the exact manifest"
+                "input reviews must independently review the exact manifest"
             )
         reviewers.add(reviewer)
+        decisions.append(decision)
+    return decisions
 
 
 def parse_registry_timestamp(value: str) -> str:
@@ -1847,33 +1903,29 @@ def load_input_transition(
             "transition_id",
         },
     )
+    state = transition.get("state")
+    reason = transition.get("reason")
     if (
         transition.get("schema_version") != INPUT_REGISTRY_SCHEMA_VERSION
         or transition.get("kind") != "evaluation_input_readiness_transition"
         or transition.get("skill_path") != str(skill_dir)
         or transition.get("skill_key") != latest_key(str(skill_dir))
         or transition.get("candidate_id") != current_candidate_id
-        or transition.get("state") != "ready"
-        or transition.get("reason") != "validated_and_reviewed"
+        or state not in INPUT_READINESS_STATES
+        or reason not in INPUT_READINESS_REASONS.get(state, set())
         or transition.get("transition_id")
         != identity_with("transition_id", transition)
         or transition.get("transition_id") != transition_id
         or path.name != f"{transition_id.removeprefix('sha256:')}.json"
     ):
         raise EvaluationError("input readiness transition identity is malformed")
-    require_sha256(
-        transition.get("input_manifest_sha256"),
-        "input readiness manifest digest",
-    )
     prior = transition.get("prior_transition_id")
     if prior is not None:
         require_sha256(prior, "input readiness prior transition")
     require_text(transition.get("created_at"), "input readiness created_at")
     parse_registry_timestamp(transition["created_at"])
-    require_sha256(
-        transition.get("validation_receipt_sha256"),
-        "input readiness validation receipt",
-    )
+    manifest_sha256 = transition.get("input_manifest_sha256")
+    validation_sha256 = transition.get("validation_receipt_sha256")
     reviews = transition.get("review_receipt_sha256s")
     if not isinstance(reviews, list):
         raise EvaluationError("input readiness reviews must be a list")
@@ -1881,7 +1933,167 @@ def load_input_transition(
         require_sha256(
             receipt_sha256, f"input readiness review receipt {index}"
         )
+    if state in {"input_missing", "drafting", "insufficient_information"}:
+        if manifest_sha256 is not None or validation_sha256 is not None or reviews:
+            raise EvaluationError(
+                f"{state} readiness cannot retain manifest or review authority"
+            )
+        return transition
+    require_sha256(manifest_sha256, "input readiness manifest digest")
+    resolved = validate_input_manifest(skill_dir, manifest_sha256)
+    if validation_sha256 is not None:
+        require_sha256(
+            validation_sha256, "input readiness validation receipt"
+        )
+        validate_input_validation_receipt(resolved, validation_sha256)
+    decisions = validate_input_review_receipts(resolved, reviews)
+    if state == "review_required":
+        if validation_sha256 is None or len(reviews) >= 2 or any(
+            decision != "accept" for decision in decisions
+        ):
+            raise EvaluationError(
+                "review-required input needs validation and fewer than two accepting reviews"
+            )
+    elif state == "invalid":
+        if reason == "independent_review_rejected" and "reject" not in decisions:
+            raise EvaluationError("rejected input must bind a rejecting review")
+        if reason == "deterministic_validation_failed" and (
+            validation_sha256 is not None or reviews
+        ):
+            raise EvaluationError(
+                "deterministic validation failure cannot retain passing receipts"
+            )
+    elif state == "ready":
+        if validation_sha256 is None:
+            raise EvaluationError("ready input requires validation")
+        validate_input_receipts(resolved, validation_sha256, reviews)
     return transition
+
+
+def write_input_transition(
+    skill_dir: Path,
+    *,
+    state: str,
+    reason: str,
+    input_manifest_sha256: str | None,
+    validation_receipt_sha256: str | None,
+    review_receipt_sha256s: list[str],
+    created_at: str,
+) -> dict[str, Any]:
+    candidate, _ = candidate_id(skill_dir)
+    current = load_input_current_pointer(skill_dir)
+    prior_state = None
+    if current is not None and current["candidate_id"] == candidate:
+        prior = resolve_input_readiness(skill_dir)
+        prior_state = prior["state"]
+        if state not in INPUT_READINESS_TRANSITIONS[prior_state]:
+            raise EvaluationError(
+                f"readiness cannot transition from {prior_state} to {state}"
+            )
+    prior_transition_id = (
+        current["transition_id"]
+        if current is not None and current["candidate_id"] == candidate
+        else None
+    )
+    transition = {
+        "schema_version": INPUT_REGISTRY_SCHEMA_VERSION,
+        "kind": "evaluation_input_readiness_transition",
+        "skill_path": str(skill_dir),
+        "skill_key": latest_key(str(skill_dir)),
+        "candidate_id": candidate,
+        "input_manifest_sha256": input_manifest_sha256,
+        "prior_transition_id": prior_transition_id,
+        "state": state,
+        "reason": reason,
+        "created_at": parse_registry_timestamp(created_at),
+        "validation_receipt_sha256": validation_receipt_sha256,
+        "review_receipt_sha256s": sorted(review_receipt_sha256s),
+    }
+    transition["transition_id"] = identity_with("transition_id", transition)
+    path = input_transition_path(skill_dir, candidate, transition["transition_id"])
+    create_only_bytes(path, canonical(transition), "input readiness transition")
+    pointer = {
+        "schema_version": INPUT_REGISTRY_SCHEMA_VERSION,
+        "kind": "evaluation_input_current",
+        "skill_path": str(skill_dir),
+        "skill_key": latest_key(str(skill_dir)),
+        "candidate_id": candidate,
+        "transition_id": transition["transition_id"],
+    }
+    pointer_path = input_current_path(skill_dir)
+    if pointer_path.is_symlink():
+        raise EvaluationError("input current pointer cannot be a symlink")
+    atomic_write(pointer_path, pointer)
+    resolve_input_readiness(skill_dir)
+    return {
+        "state": state,
+        "reason": reason,
+        "input_manifest_sha256": input_manifest_sha256,
+        "transition": str(path),
+        "transition_id": transition["transition_id"],
+        "current": str(pointer_path),
+    }
+
+
+def v2_input_state(args: argparse.Namespace) -> dict[str, Any]:
+    skill_dir = resolve_path(Path(args.skill_dir), "skill directory")
+    state = args.state
+    reason = args.reason
+    if reason not in INPUT_READINESS_REASONS[state]:
+        raise EvaluationError(f"{reason} is not valid for readiness state {state}")
+    manifest_sha256 = (
+        require_sha256(args.manifest, "input manifest digest")
+        if args.manifest is not None
+        else None
+    )
+    validation_sha256 = (
+        require_sha256(args.validation, "input validation receipt")
+        if args.validation is not None
+        else None
+    )
+    reviews = [
+        require_sha256(item, "input review receipt") for item in args.review
+    ]
+    if state in {"review_required", "invalid"} and manifest_sha256 is None:
+        raise EvaluationError(f"{state} readiness requires an input manifest")
+    if state not in {"review_required", "invalid"} and (
+        manifest_sha256 is not None or validation_sha256 is not None or reviews
+    ):
+        raise EvaluationError(f"{state} readiness cannot bind input receipts")
+    if manifest_sha256 is not None:
+        resolved = validate_input_manifest(skill_dir, manifest_sha256)
+        if validation_sha256 is not None:
+            validate_input_validation_receipt(resolved, validation_sha256)
+        decisions = validate_input_review_receipts(resolved, reviews)
+        if state == "review_required" and (
+            validation_sha256 is None
+            or len(reviews) >= 2
+            or any(decision != "accept" for decision in decisions)
+        ):
+            raise EvaluationError(
+                "review-required input needs validation and fewer than two accepting reviews"
+            )
+        if state == "invalid":
+            if (
+                reason == "independent_review_rejected"
+                and "reject" not in decisions
+            ):
+                raise EvaluationError("rejected input must bind a rejecting review")
+            if reason == "deterministic_validation_failed" and (
+                validation_sha256 is not None or reviews
+            ):
+                raise EvaluationError(
+                    "deterministic validation failure cannot retain passing receipts"
+                )
+    return write_input_transition(
+        skill_dir,
+        state=state,
+        reason=reason,
+        input_manifest_sha256=manifest_sha256,
+        validation_receipt_sha256=validation_sha256,
+        review_receipt_sha256s=reviews,
+        created_at=args.created_at or now_iso(),
+    )
 
 
 def v2_input_ready(args: argparse.Namespace) -> dict[str, Any]:
@@ -1898,52 +2110,128 @@ def v2_input_ready(args: argparse.Namespace) -> dict[str, Any]:
     validate_input_receipts(
         resolved, validation_sha256, review_sha256s
     )
-    current = load_input_current_pointer(skill_dir)
-    prior_transition_id = (
-        current["transition_id"]
-        if current is not None
-        and current["candidate_id"] == resolved["candidate_id"]
-        else None
+    result = write_input_transition(
+        skill_dir,
+        state="ready",
+        reason="validated_and_reviewed",
+        input_manifest_sha256=resolved["input_manifest_sha256"],
+        validation_receipt_sha256=validation_sha256,
+        review_receipt_sha256s=review_sha256s,
+        created_at=args.created_at or now_iso(),
     )
-    transition = {
-        "schema_version": INPUT_REGISTRY_SCHEMA_VERSION,
-        "kind": "evaluation_input_readiness_transition",
-        "skill_path": str(skill_dir),
-        "skill_key": latest_key(str(skill_dir)),
-        "candidate_id": resolved["candidate_id"],
-        "input_manifest_sha256": resolved["input_manifest_sha256"],
-        "prior_transition_id": prior_transition_id,
-        "state": "ready",
-        "reason": "validated_and_reviewed",
-        "created_at": parse_registry_timestamp(args.created_at or now_iso()),
-        "validation_receipt_sha256": validation_sha256,
-        "review_receipt_sha256s": review_sha256s,
-    }
-    transition["transition_id"] = identity_with("transition_id", transition)
-    path = input_transition_path(
-        skill_dir, resolved["candidate_id"], transition["transition_id"]
-    )
-    create_only_bytes(path, canonical(transition), "input readiness transition")
-    pointer = {
-        "schema_version": INPUT_REGISTRY_SCHEMA_VERSION,
-        "kind": "evaluation_input_current",
-        "skill_path": str(skill_dir),
-        "skill_key": latest_key(str(skill_dir)),
-        "candidate_id": resolved["candidate_id"],
-        "transition_id": transition["transition_id"],
-    }
-    pointer_path = input_current_path(skill_dir)
-    if pointer_path.is_symlink():
-        raise EvaluationError("input current pointer cannot be a symlink")
-    atomic_write(pointer_path, pointer)
     resolve_ready_input(skill_dir)
-    return {
-        "state": "ready",
-        "input_manifest_sha256": resolved["input_manifest_sha256"],
-        "transition": str(path),
-        "transition_id": transition["transition_id"],
-        "current": str(pointer_path),
-    }
+    return result
+
+
+def resolve_input_readiness(
+    skill_dir: Path, *, missing_ok: bool = False
+) -> dict[str, Any] | None:
+    skill_dir = resolve_path(skill_dir, "skill directory")
+    candidate, _ = candidate_id(skill_dir)
+    pointer = load_input_current_pointer(skill_dir)
+    if pointer is None:
+        readiness = input_readiness_dir(skill_dir, candidate)
+        if readiness.is_symlink() or (
+            readiness.exists() and any(readiness.iterdir())
+        ) or established_evaluation_state_exists(skill_dir, candidate):
+            raise EvaluationError(
+                "external evaluation input readiness current pointer is missing"
+            )
+        if missing_ok:
+            return None
+        raise EvaluationError("external evaluation input readiness is missing")
+    if pointer["candidate_id"] != candidate:
+        readiness = input_readiness_dir(skill_dir, candidate)
+        if (
+            readiness.is_symlink()
+            or (readiness.exists() and any(readiness.iterdir()))
+            or established_evaluation_state_exists(skill_dir, candidate)
+        ):
+            raise EvaluationError(
+                "external evaluation input readiness pointer candidate is stale"
+            )
+        if missing_ok:
+            return None
+        raise EvaluationError("external evaluation input readiness is missing")
+    readiness = input_readiness_dir(skill_dir, candidate)
+    if readiness.is_symlink() or not readiness.is_dir():
+        raise EvaluationError("input readiness transition root must be a real directory")
+    transitions: dict[str, dict[str, Any]] = {}
+    for path in sorted(readiness.iterdir()):
+        if path.suffix != ".json":
+            raise EvaluationError("input readiness transition root has an unknown entry")
+        transition_id = f"sha256:{path.stem}"
+        transition = load_input_transition(skill_dir, candidate, transition_id)
+        transitions[transition_id] = transition
+    if not transitions:
+        raise EvaluationError("input readiness transition chain is empty")
+    referenced: set[str] = set()
+    for transition in transitions.values():
+        prior_id = transition["prior_transition_id"]
+        if prior_id is None:
+            continue
+        if prior_id not in transitions:
+            raise EvaluationError(
+                "input readiness transition chain has a missing predecessor"
+            )
+        prior_state = transitions[prior_id]["state"]
+        if transition["state"] not in INPUT_READINESS_TRANSITIONS[prior_state]:
+            raise EvaluationError(
+                f"readiness cannot transition from {prior_state} "
+                f"to {transition['state']}"
+            )
+        referenced.add(prior_id)
+    tips = set(transitions) - referenced
+    if tips != {pointer["transition_id"]}:
+        raise EvaluationError(
+            "input readiness current pointer does not name the unique chain tip"
+        )
+    seen: set[str] = set()
+    transition_id: str | None = pointer["transition_id"]
+    while transition_id is not None:
+        if transition_id in seen:
+            raise EvaluationError("input readiness transition chain contains a cycle")
+        seen.add(transition_id)
+        transition_id = transitions[transition_id]["prior_transition_id"]
+    if seen != set(transitions):
+        raise EvaluationError("input readiness transition history is disconnected")
+    return transitions[pointer["transition_id"]]
+
+
+def established_evaluation_state_exists(
+    skill_dir: Path, candidate: str
+) -> bool:
+    skill_key = latest_key(str(skill_dir))
+    authority_path = v2_authority_path(skill_dir, candidate)
+    if authority_path.exists() or authority_path.is_symlink():
+        return True
+    latest_path = (
+        v2_evaluation_dir()
+        / "latest"
+        / f"{skill_key}.json"
+    )
+    if latest_path.exists() or latest_path.is_symlink():
+        try:
+            latest = load_json(latest_path)
+        except EvaluationError:
+            return True
+        if latest.get("candidate_id") == candidate:
+            return True
+    transition_root = v2_transition_dir(skill_dir)
+    if transition_root.is_symlink():
+        return True
+    if not transition_root.exists():
+        return False
+    if not transition_root.is_dir():
+        return True
+    for path in transition_root.iterdir():
+        try:
+            transition, _ = portfolio_transition(path, skill_key)
+        except (EvaluationError, OSError):
+            return True
+        if transition["candidate_id"] == candidate:
+            return True
+    return False
 
 
 def resolve_ready_input(
@@ -1954,19 +2242,10 @@ def resolve_ready_input(
     pointer = load_input_current_pointer(skill_dir)
     if pointer is None:
         readiness = input_readiness_dir(skill_dir, candidate)
-        has_authority_state = (
-            v2_authority_path(skill_dir, candidate).exists()
-            or (
-                v2_evaluation_dir()
-                / "latest"
-                / f"{latest_key(str(skill_dir))}.json"
-            ).exists()
-            or v2_transition_dir(skill_dir).exists()
-        )
         if (
             readiness.is_symlink()
             or (readiness.exists() and any(readiness.iterdir()))
-            or has_authority_state
+            or established_evaluation_state_exists(skill_dir, candidate)
         ):
             raise EvaluationError(
                 "ready external evaluation input current pointer is missing"
@@ -1975,36 +2254,34 @@ def resolve_ready_input(
             return None
         raise EvaluationError("ready external evaluation input is missing")
     if pointer["candidate_id"] != candidate:
+        readiness = input_readiness_dir(skill_dir, candidate)
+        if (
+            readiness.is_symlink()
+            or (readiness.exists() and any(readiness.iterdir()))
+            or established_evaluation_state_exists(skill_dir, candidate)
+        ):
+            raise EvaluationError(
+                "ready external evaluation input pointer candidate is stale"
+            )
         if missing_ok:
             return None
         raise EvaluationError("ready external evaluation input is missing")
-    transition_id = pointer["transition_id"]
-    seen: set[str] = set()
-    selected: dict[str, Any] | None = None
-    while transition_id is not None:
-        if transition_id in seen:
-            raise EvaluationError("input readiness transition chain contains a cycle")
-        seen.add(transition_id)
-        transition = load_input_transition(
-            skill_dir, candidate, transition_id
+    transition = resolve_input_readiness(skill_dir)
+    if transition["state"] != "ready":
+        if missing_ok:
+            return None
+        raise EvaluationError(
+            f"external evaluation input is {transition['state']}, not ready"
         )
-        resolved = validate_input_manifest(
-            skill_dir, transition["input_manifest_sha256"]
-        )
-        validate_input_receipts(
-            resolved,
-            transition["validation_receipt_sha256"],
-            transition["review_receipt_sha256s"],
-        )
-        if selected is None:
-            selected = {
-                **resolved,
-                "transition_id": transition["transition_id"],
-            }
-        transition_id = transition["prior_transition_id"]
-    if selected is None:
-        raise EvaluationError("input readiness transition chain is empty")
-    return selected
+    resolved = validate_input_manifest(
+        skill_dir, transition["input_manifest_sha256"]
+    )
+    validate_input_receipts(
+        resolved,
+        transition["validation_receipt_sha256"],
+        transition["review_receipt_sha256s"],
+    )
+    return {**resolved, "transition_id": transition["transition_id"]}
 
 
 def identity_with(field: str, value: dict[str, Any]) -> str:
@@ -4591,11 +4868,11 @@ def portfolio_current_value(
 ) -> dict[str, Any]:
     skill_dir = resolve_path(skill_dir, "skill directory")
     candidate, _ = candidate_id(skill_dir)
-    resolved_input = resolve_ready_input(skill_dir, missing_ok=True)
-    if resolved_input is None:
+    readiness = resolve_input_readiness(skill_dir, missing_ok=True)
+    if readiness is None:
         return {
-            "state": "missing",
-            "status": "missing",
+            "state": "input_missing",
+            "status": "input_missing",
             "current": False,
             "evaluated_at": None,
             "receipt_sha256": None,
@@ -4603,16 +4880,28 @@ def portfolio_current_value(
             "input_manifest_sha256": None,
             "cases": [],
         }
+    if readiness["state"] != "ready":
+        return {
+            "state": readiness["state"],
+            "status": readiness["reason"],
+            "current": False,
+            "evaluated_at": None,
+            "receipt_sha256": None,
+            "transition_id": readiness["transition_id"],
+            "input_manifest_sha256": readiness["input_manifest_sha256"],
+            "cases": [],
+        }
+    resolved_input = resolve_ready_input(skill_dir)
     skill_key = latest_key(str(skill_dir))
     transition_root = v2_transition_dir(skill_dir)
     if not transition_root.exists():
         return {
-            "state": "missing",
-            "status": "missing",
+            "state": "ready",
+            "status": "ready",
             "current": False,
             "evaluated_at": None,
             "receipt_sha256": None,
-            "transition_id": None,
+            "transition_id": readiness["transition_id"],
             "input_manifest_sha256": resolved_input["input_manifest_sha256"],
             "cases": [],
         }
@@ -4633,12 +4922,12 @@ def portfolio_current_value(
             matching.append((effective_at, transition))
     if not historical:
         return {
-            "state": "missing",
-            "status": "missing",
+            "state": "ready",
+            "status": "ready",
             "current": False,
             "evaluated_at": None,
             "receipt_sha256": None,
-            "transition_id": None,
+            "transition_id": readiness["transition_id"],
             "input_manifest_sha256": resolved_input["input_manifest_sha256"],
             "cases": [],
         }
@@ -4767,6 +5056,7 @@ def portfolio_inventory(args: argparse.Namespace) -> dict[str, Any]:
                 "evaluated_at": None,
                 "receipt_sha256": None,
                 "transition_id": None,
+                "input_manifest_sha256": None,
                 "cases": [],
             }
         if skill_path in seen:
@@ -5362,6 +5652,18 @@ def build_parser() -> argparse.ArgumentParser:
     input_review_parser.add_argument(
         "--decision", choices=("accept", "reject"), required=True
     )
+    input_state_parser = commands.add_parser("v2-input-state")
+    input_state_parser.add_argument("skill_dir")
+    input_state_parser.add_argument(
+        "--state",
+        choices=sorted(INPUT_READINESS_STATES - {"ready"}),
+        required=True,
+    )
+    input_state_parser.add_argument("--reason", required=True)
+    input_state_parser.add_argument("--manifest")
+    input_state_parser.add_argument("--validation")
+    input_state_parser.add_argument("--review", action="append", default=[])
+    input_state_parser.add_argument("--created-at")
     input_ready_parser = commands.add_parser("v2-input-ready")
     input_ready_parser.add_argument("skill_dir")
     input_ready_parser.add_argument("--manifest", required=True)
@@ -5470,6 +5772,7 @@ def main() -> int:
             "v2-input-register": v2_input_register,
             "v2-input-validate": v2_input_validate,
             "v2-input-review": v2_input_review,
+            "v2-input-state": v2_input_state,
             "v2-input-ready": v2_input_ready,
             "v2-prepare": v2_prepare,
             "v2-run-compile": v2_run_compile,
