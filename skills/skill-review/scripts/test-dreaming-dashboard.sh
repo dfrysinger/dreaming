@@ -98,11 +98,13 @@ check(
     'class="portfolio-table"' in javascript
     and 'data-label="Skill"' in javascript
     and 'data-label="Next action"' in javascript
-    and '`${count}+`' in javascript
-    and '" · partial"' in javascript
+    and "0 · active tails excluded" in javascript
+    and "+ · partial" in javascript
+    and "Unknown · stable backlog" in javascript
+    and "No settled use in 30 days" in javascript
     and ".portfolio-queue .portfolio-table td::before" in stylesheet
     and "@media (max-width: 700px)" in stylesheet,
-    "portfolio decisions use lower-bound wording and stack labeled fields on narrow screens",
+    "portfolio decisions disclose settled-use exclusions and stack labeled fields on narrow screens",
 )
 check(
     not any(
@@ -356,6 +358,8 @@ usage_snapshot = {
         "bytes_parsed_this_run": 4096,
         "max_sessions": 100,
         "max_bytes": 100000,
+        "quiet_seconds": 300,
+        "collection_watermark": estate_snapshot["collected_at"],
         "bound_reached": None,
         "work_budget_stopped_run": False,
         "index_status": "loaded",
@@ -1383,11 +1387,108 @@ try:
     )
     (state / "estate-usage-current.json").write_bytes(original_usage_current)
 
+    usage_variant_paths = []
+
+    def record_usage_variant(snapshot):
+        variant_usage = {
+            **snapshot,
+            "snapshot_sha256": dashboard.sha(snapshot),
+        }
+        variant_receipt = {
+            "schema_version": 1,
+            "snapshot_sha256": variant_usage["snapshot_sha256"],
+            "census_snapshot_sha256": estate_census["snapshot_sha256"],
+            "receiver": estate_receipt["receiver"],
+            "usage": variant_usage,
+        }
+        variant_receipt_sha = dashboard.sha(variant_receipt)
+        variant_path = (
+            usage_receipts
+            / f"{variant_receipt_sha.removeprefix('sha256:')}.json"
+        )
+        variant_path.write_text(json.dumps(variant_receipt), encoding="utf-8")
+        usage_variant_paths.append(variant_path)
+        (state / "estate-usage-current.json").write_text(
+            json.dumps({
+                "schema_version": 1,
+                "receipt_sha256": variant_receipt_sha,
+                "snapshot_sha256": variant_usage["snapshot_sha256"],
+                "census_snapshot_sha256": estate_census["snapshot_sha256"],
+                "usage": variant_usage,
+            }),
+            encoding="utf-8",
+        )
+
+    migrated_usage_snapshot = json.loads(json.dumps(usage_snapshot))
+    migrated_usage_snapshot["coverage"]["index_status"] = "migrated"
+    record_usage_variant(migrated_usage_snapshot)
+    _, _, migrated_usage_body = request("/api/v1/estate")
+    check(
+        json.loads(migrated_usage_body)["data"]["usage"]["status"] == "complete",
+        "a parser-revision migration remains a valid usage receipt",
+    )
+
+    impossible_complete_snapshot = json.loads(json.dumps(usage_snapshot))
+    impossible_coverage = impossible_complete_snapshot["coverage"]
+    impossible_coverage["discovered_sessions"] += 1
+    impossible_coverage["discovered_bytes"] += 128
+    impossible_coverage["pending_sessions"] = 1
+    impossible_coverage["pending_bytes"] = 128
+    impossible_coverage["pending"] = [{
+        "session_id": "sha256:" + "6" * 64,
+        "reason": "events_recently_modified",
+        "modified_at": "2026-08-13T11:59:00+00:00",
+        "bytes": 128,
+        "failure_id": None,
+    }]
+    record_usage_variant(impossible_complete_snapshot)
+    _, _, impossible_complete_body = request("/api/v1/estate")
+    check(
+        json.loads(impossible_complete_body)["data"]["usage"]["status"]
+        == "unavailable",
+        "complete corpus claims with pending sessions fail closed",
+    )
+
+    mismatched_failure_snapshot = json.loads(json.dumps(usage_snapshot))
+    mismatched_coverage = mismatched_failure_snapshot["coverage"]
+    mismatched_coverage["complete"] = False
+    mismatched_coverage["corpus_complete"] = False
+    mismatched_coverage["discovered_sessions"] += 1
+    mismatched_coverage["discovered_bytes"] += 128
+    mismatched_coverage["pending_sessions"] = 1
+    mismatched_coverage["pending_bytes"] = 128
+    mismatched_coverage["pending"] = [{
+        "session_id": "sha256:" + "6" * 64,
+        "reason": "usage_session_malformed_json",
+        "modified_at": "2026-08-13T11:59:00+00:00",
+        "bytes": 128,
+        "failure_id": "sha256:" + "8" * 64,
+    }]
+    mismatched_coverage["failures"] = [{
+        "failure_id": "sha256:" + "8" * 64,
+        "session_id": "sha256:" + "7" * 64,
+        "reason": "usage_session_malformed_json",
+        "modified_at": "2026-08-13T11:59:00+00:00",
+        "bytes": 128,
+        "candidate_capability_ids": [],
+    }]
+    record_usage_variant(mismatched_failure_snapshot)
+    _, _, mismatched_failure_body = request("/api/v1/estate")
+    check(
+        json.loads(mismatched_failure_body)["data"]["usage"]["status"]
+        == "unavailable",
+        "pending failures must match their exact referenced session record",
+    )
+
     incomplete_usage_snapshot = json.loads(json.dumps(usage_snapshot))
     incomplete_usage_snapshot["coverage"]["complete"] = False
     incomplete_usage_snapshot["coverage"]["failures"] = [{
+        "failure_id": "sha256:" + "8" * 64,
         "session_id": "sha256:" + "7" * 64,
         "reason": "usage_session_malformed_json",
+        "modified_at": "2026-08-13T10:00:00+00:00",
+        "bytes": 128,
+        "candidate_capability_ids": [],
     }]
     incomplete_usage = {
         **incomplete_usage_snapshot,
@@ -1433,16 +1534,106 @@ try:
         for item in incomplete_usage_view["portfolio_decisions"]
     }
     check(
-        incomplete_portfolio["fixture-skill"]["usage_state"] == "incomplete"
+        incomplete_portfolio["fixture-skill"]["usage_state"] == "used_30d"
+        and incomplete_portfolio["fixture-skill"]["decision_coverage"][
+            "is_lower_bound"
+        ] is True
         and incomplete_portfolio["fixture-skill"]["uses_30d"] == 5
         and incomplete_portfolio["fixture-skill"]["last_successful_invocation"]
         == "2026-08-13T11:00:00+00:00"
         and incomplete_portfolio["fixture-skill"]["recommendation"]
         == "proven_useful",
-        "incomplete coverage preserves verified positive usage as a lower bound",
+        "incomplete coverage preserves verified positive usage as decisive evidence",
+    )
+    check(
+        incomplete_portfolio["plugin-skill"]["usage_state"]
+        == "blocked_stable_backlog"
+        and incomplete_portfolio["plugin-skill"]["recommendation"]
+        == "disable_candidate",
+        "current regression remains visible while in-window transcript failure blocks non-use authority",
+    )
+    decision_usage = {
+        "available": True,
+        "complete": False,
+        "collected_at": estate_snapshot["collected_at"],
+        "collection_watermark": estate_snapshot["collected_at"],
+        "_receipt_sha256": usage_receipt_sha,
+        "_failures": [],
+        "_unattributed": [],
+        "_pending": [{
+            "session_id": "sha256:" + "9" * 64,
+            "reason": "events_recently_modified",
+            "modified_at": "2026-08-13T11:59:00+00:00",
+            "bytes": 256,
+            "failure_id": None,
+        }],
+    }
+    zero_row = {
+        "uses_7d": 0,
+        "uses_30d": 0,
+        "uses_90d": 0,
+        "uses_total": 0,
+        "last_successful_invocation": None,
+    }
+    settled = dashboard.DashboardData._portfolio_usage_coverage(
+        "sha256:" + "4" * 64,
+        decision_usage,
+        zero_row,
+    )
+    check(
+        settled["state"] == "settled_zero_30d"
+        and settled["excluded_recent"] == {"count": 1, "bytes": 256}
+        and settled["relevant_stable_backlog"]["count"] == 0,
+        "recent active tails produce explicit settled 30-day zero coverage",
+    )
+    stable_usage = json.loads(json.dumps(decision_usage))
+    stable_usage["_pending"][0]["reason"] = "stable_budget_deferred"
+    blocked = dashboard.DashboardData._portfolio_usage_coverage(
+        "sha256:" + "4" * 64,
+        stable_usage,
+        zero_row,
+    )
+    check(
+        blocked["state"] == "blocked_stable_backlog"
+        and blocked["relevant_stable_backlog"]["count"] == 1,
+        "stable unread transcripts inside the decision window block zero-use",
+    )
+    stable_usage["_pending"][0]["modified_at"] = "2026-07-01T00:00:00+00:00"
+    aged_out = dashboard.DashboardData._portfolio_usage_coverage(
+        "sha256:" + "4" * 64,
+        stable_usage,
+        zero_row,
+    )
+    check(
+        aged_out["state"] == "settled_zero_30d"
+        and aged_out["relevant_stable_backlog"]["count"] == 0,
+        "stable unread transcripts older than the decision window do not block it",
+    )
+    identity_usage = json.loads(json.dumps(decision_usage))
+    identity_usage["_pending"] = []
+    identity_usage["_unattributed"] = [{
+        "name": "ambiguous-name",
+        "candidate_capability_ids": ["sha256:" + "4" * 64],
+    }]
+    identity_blocked = dashboard.DashboardData._portfolio_usage_coverage(
+        "sha256:" + "4" * 64,
+        identity_usage,
+        zero_row,
+    )
+    unrelated = dashboard.DashboardData._portfolio_usage_coverage(
+        "sha256:" + "2" * 64,
+        identity_usage,
+        zero_row,
+    )
+    check(
+        identity_blocked["state"] == "blocked_identity"
+        and unrelated["state"] == "settled_zero_30d",
+        "identity ambiguity blocks only candidate capabilities",
     )
     (state / "estate-usage-current.json").write_bytes(original_usage_current)
     incomplete_usage_receipt_path.unlink()
+    for path in usage_variant_paths:
+        path.unlink()
 
     original_estate_current = (
         state / "estate-census-current.json"

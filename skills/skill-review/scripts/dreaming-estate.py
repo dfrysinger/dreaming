@@ -42,6 +42,7 @@ LEGACY_POLICY_VERSION = 1
 LEGACY_PROOF_VERSION = 1
 LEGACY_PROOF_KIND = "legacy_git_creation"
 USAGE_INDEX_SCHEMA_VERSION = 1
+USAGE_PARSER_REVISION = 2
 USAGE_QUIET_SECONDS = 300
 MAX_USAGE_SESSION_ISSUES = 32
 USAGE_ALIASES = {
@@ -1181,7 +1182,7 @@ def opaque_session_id(name: str) -> str:
 def parse_usage_session(
     lines: Any, *, collected_at: datetime
 ) -> tuple[list[tuple[str, datetime]], datetime | None, list[str]]:
-    starts: dict[str, tuple[str, datetime, int]] = {}
+    starts: dict[str, tuple[str | None, datetime, int]] = {}
     completions: dict[str, tuple[bool, datetime, str | None, int]] = {}
     earliest: datetime | None = None
     issues: list[str] = []
@@ -1212,15 +1213,14 @@ def parse_usage_session(
             call_id = data.get("toolCallId")
             arguments = data.get("arguments")
             name = (
-                normalize_skill_name(arguments.get("skill"))
+                normalize_skill_name(
+                    arguments.get("skill", arguments.get("name"))
+                )
                 if isinstance(arguments, dict)
                 else None
             )
             if not isinstance(call_id, str) or not call_id:
                 raise EstateError("usage_session_invalid_skill_start")
-            if name is None:
-                issues.append("usage_session_invalid_skill_name")
-                continue
             if call_id in starts:
                 raise EstateError("usage_session_duplicate_skill_start")
             starts[call_id] = (name, timestamp, event_index)
@@ -1253,6 +1253,9 @@ def parse_usage_session(
     for call_id, (name, started_at, start_index) in starts.items():
         completion = completions.get(call_id)
         if completion is None or not completion[0]:
+            continue
+        if name is None:
+            issues.append("usage_session_invalid_skill_name")
             continue
         _, completed_at, loaded_name, completion_index = completion
         if (
@@ -1352,9 +1355,15 @@ def valid_usage_day(value: Any) -> bool:
 
 
 def validate_usage_index(value: Any) -> dict[str, Any]:
+    parser_revision = (
+        value.get("parser_revision", 1) if isinstance(value, dict) else None
+    )
     if (
         not isinstance(value, dict)
         or value.get("schema_version") != USAGE_INDEX_SCHEMA_VERSION
+        or not isinstance(parser_revision, int)
+        or isinstance(parser_revision, bool)
+        or not 1 <= parser_revision <= USAGE_PARSER_REVISION
         or not isinstance(value.get("sessions"), dict)
     ):
         raise EstateError("usage_index_invalid")
@@ -1423,6 +1432,7 @@ def validate_usage_index(value: Any) -> dict[str, Any]:
         }
     return {
         "schema_version": USAGE_INDEX_SCHEMA_VERSION,
+        "parser_revision": parser_revision,
         "sessions": sessions,
     }
 
@@ -1459,14 +1469,18 @@ def write_usage_index(path: Path, value: dict[str, Any]) -> None:
 def load_usage_index(
     path: Path | None, *, collected_at: datetime
 ) -> tuple[dict[str, Any], str]:
-    empty = {"schema_version": USAGE_INDEX_SCHEMA_VERSION, "sessions": {}}
+    empty = {
+        "schema_version": USAGE_INDEX_SCHEMA_VERSION,
+        "parser_revision": USAGE_PARSER_REVISION,
+        "sessions": {},
+    }
     if path is None or not path.exists():
         return empty, "absent"
     try:
         if path.is_symlink() or not path.is_file():
             raise EstateError("usage_index_invalid")
         raw = path.read_bytes()
-        return validate_usage_index(json.loads(raw)), "loaded"
+        index = validate_usage_index(json.loads(raw))
     except (OSError, json.JSONDecodeError, EstateError):
         stamp = collected_at.strftime("%Y%m%dT%H%M%SZ")
         suffix = hashlib.sha256(
@@ -1478,6 +1492,16 @@ def load_usage_index(
         except OSError as error:
             raise EstateError("usage_index_reject_failed") from error
         return empty, "rebuilt"
+    if index["parser_revision"] < USAGE_PARSER_REVISION:
+        index["sessions"] = {
+            session_id: entry
+            for session_id, entry in index["sessions"].items()
+            if not entry["issues"]
+        }
+        index["parser_revision"] = USAGE_PARSER_REVISION
+        write_usage_index(path, index)
+        return index, "migrated"
+    return index, "loaded"
 
 
 def usage_session_summary(
@@ -1529,8 +1553,8 @@ def collect_usage(
 ) -> dict[str, Any]:
     mappings, canonical_ids, mapping_issues = usage_name_mappings(census)
     aliases = validate_usage_aliases(USAGE_ALIASES)
-    failures: list[dict[str, str]] = []
-    pending_reasons: dict[str, str] = {}
+    failures: list[dict[str, Any]] = []
+    pending_records: dict[str, dict[str, Any]] = {}
     sessions_parsed = 0
     bytes_parsed = 0
     bound_reached: str | None = None
@@ -1538,15 +1562,58 @@ def collect_usage(
     index, index_status = load_usage_index(index_path, collected_at=collected_at)
     indexed_summaries = index["sessions"]
 
-    def fail(session: str, reason: str, *, corpus: bool = False) -> None:
+    def fail(
+        session_id: str,
+        reason: str,
+        *,
+        corpus: bool = False,
+        candidate: dict[str, Any] | None = None,
+        candidate_capability_ids: tuple[str, ...] = (),
+    ) -> str:
         nonlocal corpus_failed
         corpus_failed = corpus_failed or corpus
-        failures.append({"session_id": opaque_session_id(session), "reason": reason})
+        payload = {
+            "session_id": session_id,
+            "reason": reason,
+            "modified_at": (
+                datetime.fromtimestamp(
+                    candidate["mtime_ns"] / 1_000_000_000,
+                    timezone.utc,
+                ).isoformat()
+                if candidate is not None
+                else None
+            ),
+            "bytes": candidate["size"] if candidate is not None else None,
+            "candidate_capability_ids": list(candidate_capability_ids),
+        }
+        failure_id = digest(payload)
+        failures.append({"failure_id": failure_id, **payload})
+        return failure_id
+
+    def record_pending(
+        candidate: dict[str, Any],
+        reason: str,
+        failure_id: str | None = None,
+    ) -> None:
+        pending_records[candidate["session_id"]] = {
+            "session_id": candidate["session_id"],
+            "reason": reason,
+            "modified_at": datetime.fromtimestamp(
+                candidate["mtime_ns"] / 1_000_000_000,
+                timezone.utc,
+            ).isoformat(),
+            "bytes": candidate["size"],
+            "failure_id": failure_id,
+        }
 
     if census.get("scope", {}).get("complete") is not True:
-        fail("census", "usage_census_incomplete")
+        fail(opaque_session_id("census"), "usage_census_incomplete")
     for capability_id, reason in mapping_issues:
-        fail(f"census:{capability_id}", reason)
+        fail(
+            opaque_session_id(f"census:{capability_id}"),
+            reason,
+            candidate_capability_ids=(capability_id,),
+        )
 
     try:
         if session_root.is_symlink() or not session_root.is_dir():
@@ -1567,17 +1634,17 @@ def collect_usage(
     for session in children:
         session_id = opaque_session_id(session.name)
         if session.is_symlink():
-            fail(session.name, "session_symlink", corpus=True)
+            fail(session_id, "session_symlink", corpus=True)
             continue
         try:
             if not session.is_dir():
                 continue
         except OSError:
-            fail(session.name, "session_unreadable", corpus=True)
+            fail(session_id, "session_unreadable", corpus=True)
             continue
         events = session / "events.jsonl"
         if events.is_symlink():
-            fail(session.name, "events_symlink", corpus=True)
+            fail(session_id, "events_symlink", corpus=True)
             continue
         try:
             before = events.stat()
@@ -1589,10 +1656,10 @@ def collect_usage(
                     write_usage_index(index_path, index)
             continue
         except OSError:
-            fail(session.name, "events_unreadable", corpus=True)
+            fail(session_id, "events_unreadable", corpus=True)
             continue
         if not stat.S_ISREG(before.st_mode):
-            fail(session.name, "events_not_regular", corpus=True)
+            fail(session_id, "events_not_regular", corpus=True)
             continue
         fingerprint = usage_fingerprint(before)
         candidates.append(
@@ -1606,29 +1673,36 @@ def collect_usage(
             }
         )
 
-    pending = [
+    pending_candidates = [
         candidate
         for candidate in candidates
         if indexed_summaries.get(candidate["session_id"], {}).get("fingerprint")
         != candidate["fingerprint"]
     ]
-    pending.sort(key=lambda item: (item["mtime_ns"], item["session_id"]))
-    for candidate in pending:
-        session_name = candidate["name"]
-        session_id = candidate["session_id"]
-        before_fingerprint = candidate["fingerprint"]
+    pending_candidates.sort(key=lambda item: (item["mtime_ns"], item["session_id"]))
+    stable_pending: list[dict[str, Any]] = []
+    for candidate in pending_candidates:
         age_seconds = collected_at.timestamp() - (
             candidate["mtime_ns"] / 1_000_000_000
         )
         if quiet_seconds > 0 and age_seconds < quiet_seconds:
-            pending_reasons[session_id] = "events_recently_modified"
-            continue
+            record_pending(candidate, "events_recently_modified")
+        else:
+            stable_pending.append(candidate)
+
+    for position, candidate in enumerate(stable_pending):
+        session_id = candidate["session_id"]
+        before_fingerprint = candidate["fingerprint"]
         if sessions_parsed >= max_sessions:
             bound_reached = "max_sessions"
+            for deferred in stable_pending[position:]:
+                record_pending(deferred, "stable_budget_deferred")
             break
         oversized = candidate["size"] > max_bytes and sessions_parsed == 0
         if bytes_parsed + candidate["size"] > max_bytes and not oversized:
             bound_reached = "max_bytes"
+            for deferred in stable_pending[position:]:
+                record_pending(deferred, "stable_budget_deferred")
             break
         flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
@@ -1653,17 +1727,33 @@ def collect_usage(
             finally:
                 os.close(descriptor)
         except EstateError as error:
-            fail(session_name, str(error), corpus=True)
-            pending_reasons[session_id] = str(error)
+            reason = str(error)
+            failure_id = fail(
+                session_id,
+                reason,
+                corpus=True,
+                candidate=candidate,
+            )
+            record_pending(candidate, reason, failure_id)
             if oversized:
                 bound_reached = "max_bytes"
+                for deferred in stable_pending[position + 1 :]:
+                    record_pending(deferred, "stable_budget_deferred")
                 break
             continue
         except OSError:
-            fail(session_name, "events_changed_or_unreadable", corpus=True)
-            pending_reasons[session_id] = "events_changed_or_unreadable"
+            reason = "events_changed_or_unreadable"
+            failure_id = fail(
+                session_id,
+                reason,
+                corpus=True,
+                candidate=candidate,
+            )
+            record_pending(candidate, reason, failure_id)
             if oversized:
                 bound_reached = "max_bytes"
+                for deferred in stable_pending[position + 1 :]:
+                    record_pending(deferred, "stable_budget_deferred")
                 break
             continue
         indexed_summaries[session_id] = usage_session_summary(
@@ -1673,10 +1763,13 @@ def collect_usage(
             before_fingerprint,
             collected_at,
         )
+        pending_records.pop(session_id, None)
         if index_path is not None:
             write_usage_index(index_path, index)
         if oversized:
             bound_reached = "max_bytes"
+            for deferred in stable_pending[position + 1 :]:
+                record_pending(deferred, "stable_budget_deferred")
             break
 
     exact_indexed = {
@@ -1697,10 +1790,16 @@ def collect_usage(
     pending_bytes = discovered_bytes - indexed_bytes
     if pending_sessions == 0:
         bound_reached = None
+    for candidate in candidates:
+        if (
+            candidate["session_id"] not in exact_indexed
+            and candidate["session_id"] not in pending_records
+        ):
+            record_pending(candidate, "stable_budget_deferred")
 
     counts: dict[str, Counter[str]] = {}
     last_used: dict[str, datetime] = {}
-    unattributed: dict[tuple[str, str], Counter[str]] = {}
+    unattributed: dict[tuple[str, str, tuple[str, ...]], Counter[str]] = {}
     earliest_retained: datetime | None = None
     for session_id, summary in indexed_summaries.items():
         if session_id not in present_sessions:
@@ -1713,7 +1812,15 @@ def collect_usage(
                 else min(earliest_retained, earliest)
             )
         for reason in summary.get("issues", []):
-            failures.append({"session_id": session_id, "reason": reason})
+            candidate = next(
+                (
+                    item
+                    for item in candidates
+                    if item["session_id"] == session_id
+                ),
+                None,
+            )
+            fail(session_id, reason, corpus=True, candidate=candidate)
         for name, usage in summary.get("usage", {}).items():
             capability_ids = mappings.get(name, set())
             attribution_reason = "direct"
@@ -1751,7 +1858,10 @@ def collect_usage(
                     if attribution_reason.startswith("alias_target_")
                     else ("unmapped" if not capability_ids else "conflicting_mapping")
                 )
-                unattributed.setdefault((name, reason), Counter()).update(windows)
+                unattributed.setdefault(
+                    (name, reason, tuple(sorted(capability_ids))),
+                    Counter(),
+                ).update(windows)
 
     corpus_complete = pending_sessions == 0 and not corpus_failed
     attribution_complete = (
@@ -1802,14 +1912,23 @@ def collect_usage(
             "bytes_parsed_this_run": bytes_parsed,
             "max_sessions": max_sessions,
             "max_bytes": max_bytes,
+            "quiet_seconds": quiet_seconds,
+            "collection_watermark": collected_at.isoformat(),
             "bound_reached": bound_reached,
             "work_budget_stopped_run": bound_reached is not None,
             "index_status": index_status,
             "pending": [
-                {"session_id": session_id, "reason": reason}
-                for session_id, reason in sorted(pending_reasons.items())
+                pending_records[session_id]
+                for session_id in sorted(pending_records)
             ],
-            "failures": failures,
+            "failures": sorted(
+                failures,
+                key=lambda item: (
+                    item["session_id"],
+                    item["reason"],
+                    item["failure_id"],
+                ),
+            ),
         },
         "canonical_usage": usage_rows,
         "unattributed": [
@@ -1820,8 +1939,11 @@ def collect_usage(
                 "uses_30d": value["uses_30d"],
                 "uses_90d": value["uses_90d"],
                 "uses_total": value["uses_total"],
+                "candidate_capability_ids": list(candidate_capability_ids),
             }
-            for (name, reason), value in sorted(unattributed.items())
+            for (name, reason, candidate_capability_ids), value in sorted(
+                unattributed.items()
+            )
         ],
     }
     return {**snapshot, "snapshot_sha256": digest(snapshot)}

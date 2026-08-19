@@ -317,15 +317,22 @@ function bindPortfolioQueue(queue) {
   const rows = document.getElementById("portfolio-rows");
   const usage30d = item => {
     if (item.usage_state === "unknown") return "Unknown";
-    const count = number(item.uses_30d);
-    return item.usage_state === "incomplete" ? `${count}+` : count;
+    if (item.usage_state === "blocked_stable_backlog") return "Unknown · stable backlog";
+    if (item.usage_state === "blocked_identity") return "Unknown · identity";
+    if (item.usage_state === "settled_zero_30d") return "0 · active tails excluded";
+    if (item.decision_coverage?.is_lower_bound) return `${number(item.uses_30d)}+ · partial`;
+    return number(item.uses_30d);
   };
   const portfolioLastUse = item => {
     if (item.usage_state === "unknown") return "Unknown";
+    if (item.usage_state === "blocked_stable_backlog") return "Stable transcripts still pending";
+    if (item.usage_state === "blocked_identity") return "Usage identity unresolved";
     if (item.last_successful_invocation) {
-      return `${relative(item.last_successful_invocation)}${item.usage_state === "incomplete" ? " · partial" : ""}`;
+      return relative(item.last_successful_invocation);
     }
-    return item.usage_state === "incomplete" ? "No verified use yet · partial" : "Never observed";
+    return item.usage_state === "settled_zero_30d"
+      ? "No settled use in 30 days"
+      : "No use in retained history";
   };
   const matches = item => {
     const textMatch = `${item.skill_name} ${item.why} ${item.installed_from}`.toLowerCase().includes(query.value.toLowerCase());
@@ -334,8 +341,8 @@ function bindPortfolioQueue(queue) {
     if (filter.value === "needs-decision") return item.who_may_change === "Your decision";
     if (filter.value === "failed") return item.evaluation?.state === "regression";
     if (filter.value === "needs-evaluation") return ["missing", "stale"].includes(item.evaluation?.state);
-    if (filter.value === "unused-30") return item.usage_state === "complete" && item.uses_30d === 0;
-    if (filter.value === "unused-90") return item.usage_state === "complete" && item.uses_90d === 0;
+    if (filter.value === "unused-30") return ["complete_zero_30d", "settled_zero_30d"].includes(item.usage_state) && item.uses_30d === 0;
+    if (filter.value === "unused-90") return item.usage_state === "complete_zero_30d" && item.uses_90d === 0;
     if (filter.value === "plugin") return item.who_may_change === "Plugin package only";
     if (filter.value === "protected") return item.dependencies?.state === "protected";
     return item.recommendation === "insufficient_information";

@@ -4063,7 +4063,14 @@ class DashboardData:
             "usage": {
                 key: value
                 for key, value in usage.items()
-                if key not in {"canonical_usage"}
+                if key
+                not in {
+                    "canonical_usage",
+                    "_receipt_sha256",
+                    "_pending",
+                    "_failures",
+                    "_unattributed",
+                }
             },
             "authority_counts": dict(sorted(authority.items())),
             "root_class_counts": dict(sorted(root_classes.items())),
@@ -4118,14 +4125,12 @@ class DashboardData:
             )
             usage_row = usage_by_capability.get(capability_id)
             usage_available = usage.get("available") is True and usage_row is not None
-            usage_complete = usage.get("complete") is True and usage_available
-            usage_state = (
-                "complete"
-                if usage_complete
-                else "incomplete"
-                if usage_available
-                else "unknown"
+            decision_coverage = self._portfolio_usage_coverage(
+                capability_id,
+                usage,
+                usage_row,
             )
+            usage_state = decision_coverage["state"]
             uses_7d = usage_row.get("uses_7d") if usage_available else None
             uses_30d = usage_row.get("uses_30d") if usage_available else None
             uses_90d = usage_row.get("uses_90d") if usage_available else None
@@ -4179,6 +4184,7 @@ class DashboardData:
                     "uses_90d": uses_90d,
                     "last_successful_invocation": last_used,
                     "usage_state": usage_state,
+                    "decision_coverage": decision_coverage,
                     "dependencies": dependencies,
                     "who_may_change": who_may_change,
                     "next_action": {
@@ -4271,9 +4277,177 @@ class DashboardData:
             return "proven_useful", "Current evaluation passed and verified recent use exists."
         if verified_recent_use:
             return "used_evaluation_missing", "Verified recent use exists, but no current passing evaluation is retained."
-        if usage_state == "complete" and uses_30d == 0 and evaluation != "pass":
+        if (
+            usage_state in {"complete_zero_30d", "settled_zero_30d"}
+            and uses_30d == 0
+            and evaluation != "pass"
+        ):
+            if usage_state == "settled_zero_30d":
+                return (
+                    "evaluate_now",
+                    "Settled transcripts show no successful load in 30 days; recent active tails are excluded.",
+                )
             return "evaluate_now", "Complete retained usage shows no successful load in 30 days."
         return "insufficient_information", "Primary evaluation or verified usage evidence is missing or incomplete."
+
+    @staticmethod
+    def _portfolio_usage_coverage(
+        capability_id: str,
+        usage: dict[str, Any],
+        usage_row: dict[str, Any] | None,
+        *,
+        window_days: int = 30,
+    ) -> dict[str, Any]:
+        unavailable = {
+            "window_days": window_days,
+            "window_start": None,
+            "window_end": None,
+            "state": "unknown",
+            "is_lower_bound": False,
+            "usage_receipt_sha256": None,
+            "collection_watermark": None,
+            "excluded_recent": {"count": 0, "bytes": 0},
+            "relevant_stable_backlog": {
+                "count": 0,
+                "bytes": 0,
+                "oldest_modified_at": None,
+            },
+            "pending_failure_ids": [],
+            "identity_blockers": [],
+            "candidate_capability_ids": [],
+        }
+        if usage.get("available") is not True or usage_row is None:
+            return unavailable
+        window_end = parse_time(usage.get("collected_at"))
+        if window_end is None:
+            return unavailable
+        window_start = window_end - window_days * 24 * 60 * 60
+        uses = usage_row.get(f"uses_{window_days}d")
+        if isinstance(uses, int) and not isinstance(uses, bool) and uses > 0:
+            state = f"used_{window_days}d"
+        else:
+            state = ""
+
+        def intersects(item: dict[str, Any]) -> bool:
+            modified_at = parse_time(item.get("modified_at"))
+            return modified_at is None or modified_at >= window_start
+
+        pending = [
+            item
+            for item in usage.get("_pending", [])
+            if isinstance(item, dict) and intersects(item)
+        ]
+        excluded = [
+            item
+            for item in pending
+            if item.get("reason") == "events_recently_modified"
+        ]
+        stable = [
+            item
+            for item in pending
+            if item.get("reason") != "events_recently_modified"
+        ]
+        relevant_failures = [
+            item
+            for item in usage.get("_failures", [])
+            if isinstance(item, dict)
+            and intersects(item)
+            and (
+                not item.get("candidate_capability_ids")
+                or capability_id in item["candidate_capability_ids"]
+            )
+        ]
+        identity_blockers = sorted(
+            {
+                item["name"]
+                for item in usage.get("_unattributed", [])
+                if isinstance(item, dict)
+                and capability_id in item.get("candidate_capability_ids", [])
+            }
+        )
+        identity_blockers.extend(
+            sorted(
+                {
+                    item["reason"]
+                    for item in relevant_failures
+                    if item.get("candidate_capability_ids")
+                }
+            )
+        )
+        identity_blockers = sorted(set(identity_blockers))
+        failure_ids = sorted(
+            {
+                item["failure_id"]
+                for item in relevant_failures
+                if isinstance(item.get("failure_id"), str)
+            }
+        )
+        stable_session_ids = {
+            item.get("session_id")
+            for item in stable
+            if isinstance(item.get("session_id"), str)
+        }
+        for failure in relevant_failures:
+            if failure.get("candidate_capability_ids"):
+                continue
+            if failure.get("session_id") not in stable_session_ids:
+                stable.append(failure)
+                stable_session_ids.add(failure.get("session_id"))
+
+        if not state:
+            if usage.get("complete") is True:
+                state = f"complete_zero_{window_days}d"
+            elif identity_blockers:
+                state = "blocked_identity"
+            elif stable:
+                state = "blocked_stable_backlog"
+            else:
+                state = f"settled_zero_{window_days}d"
+        stable_times = [
+            parse_time(item.get("modified_at"))
+            for item in stable
+            if parse_time(item.get("modified_at")) is not None
+        ]
+        return {
+            "window_days": window_days,
+            "window_start": datetime.fromtimestamp(
+                window_start, timezone.utc
+            ).isoformat(),
+            "window_end": datetime.fromtimestamp(
+                window_end, timezone.utc
+            ).isoformat(),
+            "state": state,
+            "is_lower_bound": (
+                state == f"used_{window_days}d"
+                and usage.get("complete") is not True
+            ),
+            "usage_receipt_sha256": usage.get("_receipt_sha256"),
+            "collection_watermark": usage.get("collection_watermark"),
+            "excluded_recent": {
+                "count": len(excluded),
+                "bytes": sum(item.get("bytes", 0) for item in excluded),
+            },
+            "relevant_stable_backlog": {
+                "count": len(stable),
+                "bytes": sum(
+                    item.get("bytes") or 0
+                    for item in stable
+                    if isinstance(item.get("bytes"), int)
+                ),
+                "oldest_modified_at": (
+                    datetime.fromtimestamp(
+                        min(stable_times), timezone.utc
+                    ).isoformat()
+                    if stable_times
+                    else None
+                ),
+            },
+            "pending_failure_ids": failure_ids,
+            "identity_blockers": identity_blockers,
+            "candidate_capability_ids": (
+                [capability_id] if identity_blockers else []
+            ),
+        }
 
     @staticmethod
     def _portfolio_authority(authority: Any) -> str:
@@ -4307,11 +4481,16 @@ class DashboardData:
             "sessions_parsed_this_run": None,
             "bytes_parsed_this_run": None,
             "bound_reached": None,
+            "collection_watermark": None,
             "work_budget_stopped_run": None,
             "index_status": None,
             "failure_count": None,
             "unattributed_count": None,
             "canonical_usage": [],
+            "_receipt_sha256": None,
+            "_pending": [],
+            "_failures": [],
+            "_unattributed": [],
         }
         current_path = self.paths.state / "estate-usage-current.json"
         if not current_path.is_file() or current_path.is_symlink():
@@ -4419,6 +4598,8 @@ class DashboardData:
                     "bytes_parsed_this_run",
                     "max_sessions",
                     "max_bytes",
+                    "quiet_seconds",
+                    "collection_watermark",
                     "bound_reached",
                     "work_budget_stopped_run",
                     "index_status",
@@ -4446,6 +4627,7 @@ class DashboardData:
                         "bytes_parsed_this_run",
                         "max_sessions",
                         "max_bytes",
+                        "quiet_seconds",
                     )
                 )
                 or coverage["indexed_sessions"] + coverage["pending_sessions"]
@@ -4459,7 +4641,10 @@ class DashboardData:
                 not in {None, "max_sessions", "max_bytes"}
                 or coverage["work_budget_stopped_run"]
                 != (coverage["bound_reached"] is not None)
-                or coverage.get("index_status") not in {"absent", "loaded", "rebuilt"}
+                or coverage.get("index_status")
+                not in {"absent", "loaded", "migrated", "rebuilt"}
+                or parse_time(coverage.get("collection_watermark")) is None
+                or coverage.get("collection_watermark") != usage.get("collected_at")
                 or not isinstance(coverage.get("pending"), list)
                 or not isinstance(coverage.get("failures"), list)
             ):
@@ -4471,13 +4656,21 @@ class DashboardData:
             for pending in coverage["pending"]:
                 if (
                     not isinstance(pending, dict)
-                    or set(pending) != {"session_id", "reason"}
+                    or set(pending)
+                    != {
+                        "session_id",
+                        "reason",
+                        "modified_at",
+                        "bytes",
+                        "failure_id",
+                    }
                     or not CANDIDATE_ID_RE.fullmatch(
                         str(pending.get("session_id", ""))
                     )
                     or pending.get("reason")
                     not in {
                         "events_recently_modified",
+                        "stable_budget_deferred",
                         "events_changed_or_unreadable",
                         "usage_session_invalid_utf8",
                         "usage_session_malformed_json",
@@ -4488,20 +4681,93 @@ class DashboardData:
                         "usage_session_duplicate_skill_start",
                         "usage_session_duplicate_completion",
                     }
+                    or parse_time(pending.get("modified_at")) is None
+                    or not isinstance(pending.get("bytes"), int)
+                    or isinstance(pending.get("bytes"), bool)
+                    or pending["bytes"] < 0
+                    or (
+                        pending.get("failure_id") is not None
+                        and not CANDIDATE_ID_RE.fullmatch(
+                            str(pending.get("failure_id", ""))
+                        )
+                    )
                 ):
                     return unavailable
             for failure in coverage["failures"]:
                 if (
                     not isinstance(failure, dict)
-                    or set(failure) != {"session_id", "reason"}
+                    or set(failure)
+                    != {
+                        "failure_id",
+                        "session_id",
+                        "reason",
+                        "modified_at",
+                        "bytes",
+                        "candidate_capability_ids",
+                    }
+                    or not CANDIDATE_ID_RE.fullmatch(
+                        str(failure.get("failure_id", ""))
+                    )
                     or not CANDIDATE_ID_RE.fullmatch(
                         str(failure.get("session_id", ""))
                     )
                     or not re.fullmatch(
                         r"[a-z0-9_]{3,100}", str(failure.get("reason", ""))
                     )
+                    or (
+                        failure.get("modified_at") is not None
+                        and parse_time(failure.get("modified_at")) is None
+                    )
+                    or (
+                        failure.get("bytes") is not None
+                        and (
+                            not isinstance(failure.get("bytes"), int)
+                            or isinstance(failure.get("bytes"), bool)
+                            or failure["bytes"] < 0
+                        )
+                    )
+                    or not isinstance(
+                        failure.get("candidate_capability_ids"), list
+                    )
+                    or not all(
+                        CANDIDATE_ID_RE.fullmatch(str(value))
+                        for value in failure["candidate_capability_ids"]
+                    )
                 ):
                     return unavailable
+            pending_ids = [item["session_id"] for item in coverage["pending"]]
+            failures_by_id = {
+                item["failure_id"]: item for item in coverage["failures"]
+            }
+            if (
+                len(pending_ids) != len(set(pending_ids))
+                or len(pending_ids) != coverage["pending_sessions"]
+                or len(failures_by_id) != len(coverage["failures"])
+                or sum(item["bytes"] for item in coverage["pending"])
+                != coverage["pending_bytes"]
+                or any(
+                    item["failure_id"] is not None
+                    and (
+                        item["failure_id"] not in failures_by_id
+                        or any(
+                            failures_by_id[item["failure_id"]][field]
+                            != item[field]
+                            for field in (
+                                "session_id",
+                                "reason",
+                                "modified_at",
+                                "bytes",
+                            )
+                        )
+                    )
+                    for item in coverage["pending"]
+                )
+                or (
+                    coverage["corpus_complete"]
+                    and coverage["pending_sessions"] != 0
+                )
+            ):
+                return unavailable
             enabled_ids = {
                 item.get("canonical_capability_id")
                 for item in census.get("enabled_instances", [])
@@ -4568,6 +4834,7 @@ class DashboardData:
                         "uses_30d",
                         "uses_90d",
                         "uses_total",
+                        "candidate_capability_ids",
                     }
                     or not OBSERVED_SKILL_RE.fullmatch(str(item.get("name", "")))
                     or item.get("reason")
@@ -4577,8 +4844,22 @@ class DashboardData:
                         "alias_target_missing",
                         "alias_target_conflicting",
                     }
+                    or not isinstance(
+                        item.get("candidate_capability_ids"), list
+                    )
+                    or not all(
+                        CANDIDATE_ID_RE.fullmatch(str(value))
+                        for value in item["candidate_capability_ids"]
+                    )
                 ):
                     return unavailable
+                if not set(item["candidate_capability_ids"]).issubset(enabled_ids):
+                    return unavailable
+            if any(
+                not set(item["candidate_capability_ids"]).issubset(enabled_ids)
+                for item in coverage["failures"]
+            ):
+                return unavailable
             complete = coverage["complete"]
             if complete and (
                 seen_ids != enabled_ids
@@ -4609,11 +4890,16 @@ class DashboardData:
                 "sessions_parsed_this_run": coverage["sessions_parsed_this_run"],
                 "bytes_parsed_this_run": coverage["bytes_parsed_this_run"],
                 "bound_reached": coverage["bound_reached"],
+                "collection_watermark": coverage["collection_watermark"],
                 "work_budget_stopped_run": coverage["work_budget_stopped_run"],
                 "index_status": coverage["index_status"],
                 "failure_count": len(coverage["failures"]),
                 "unattributed_count": len(unattributed),
                 "canonical_usage": canonical_usage,
+                "_receipt_sha256": current["receipt_sha256"],
+                "_pending": coverage["pending"],
+                "_failures": coverage["failures"],
+                "_unattributed": unattributed,
             }
         except (DashboardError, OSError, TypeError, ValueError):
             return unavailable

@@ -998,10 +998,13 @@ class EstateCensusTest(unittest.TestCase):
         call_id: str = "call-1",
         name: str = "fixture-skill",
         success: bool = True,
+        argument_key: str = "skill",
     ) -> dict:
         data = {"toolCallId": call_id}
         if event_type == "tool.execution_start":
-            data.update({"toolName": "skill", "arguments": {"skill": name}})
+            data.update(
+                {"toolName": "skill", "arguments": {argument_key: name}}
+            )
         elif event_type == "tool.execution_complete":
             data["success"] = success
             if success:
@@ -1046,6 +1049,29 @@ class EstateCensusTest(unittest.TestCase):
                     "2026-08-17T11:00:01+00:00",
                     call_id="success-2",
                 ),
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T12:00:00+00:00",
+                    call_id="legacy-success",
+                    argument_key="name",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T12:00:01+00:00",
+                    call_id="legacy-success",
+                ),
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T13:00:00+00:00",
+                    call_id="invalid-failed",
+                    argument_key="unknown",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T13:00:01+00:00",
+                    call_id="invalid-failed",
+                    success=False,
+                ),
             ],
         )
         usage = module.collect_usage(
@@ -1063,11 +1089,11 @@ class EstateCensusTest(unittest.TestCase):
             [
                 {
                     "canonical_capability_id": capability_id,
-                    "uses_7d": 2,
-                    "uses_30d": 2,
-                    "uses_90d": 2,
-                    "uses_total": 2,
-                    "last_successful_invocation": "2026-08-17T11:00:01+00:00",
+                    "uses_7d": 3,
+                    "uses_30d": 3,
+                    "uses_90d": 3,
+                    "uses_total": 3,
+                    "last_successful_invocation": "2026-08-17T12:00:01+00:00",
                 }
             ],
         )
@@ -1330,6 +1356,17 @@ class EstateCensusTest(unittest.TestCase):
         self.assertFalse(usage["coverage"]["complete"])
         self.assertEqual(usage["coverage"]["bound_reached"], "max_sessions")
         self.assertEqual(usage["canonical_usage"][0]["uses_total"], 1)
+        self.assertEqual(len(usage["coverage"]["pending"]), 1)
+        deferred = usage["coverage"]["pending"][0]
+        self.assertEqual(deferred["reason"], "stable_budget_deferred")
+        self.assertRegex(deferred["session_id"], r"^sha256:[0-9a-f]{64}$")
+        self.assertIsNotNone(module.parse_usage_time(deferred["modified_at"]))
+        self.assertGreater(deferred["bytes"], 0)
+        self.assertIsNone(deferred["failure_id"])
+        self.assertEqual(
+            usage["coverage"]["collection_watermark"],
+            usage["collected_at"],
+        )
 
     def test_usage_index_advances_reuses_and_replaces_changed_sessions(self) -> None:
         capability_id = "sha256:" + "9" * 64
@@ -1415,6 +1452,95 @@ class EstateCensusTest(unittest.TestCase):
         self.assertEqual(changed["coverage"]["indexed_sessions"], 3)
         self.assertEqual(changed["coverage"]["sessions_parsed_this_run"], 1)
         self.assertEqual(changed["canonical_usage"][0]["uses_total"], 4)
+
+    def test_usage_index_migration_reparses_only_sessions_with_issues(self) -> None:
+        capability_id = "sha256:" + "8" * 64
+        collected_at = datetime(2026, 8, 18, 12, tzinfo=timezone.utc)
+        root = self.case / "sessions"
+        index = self.case / "state" / "usage-index.json"
+        clean = self.write_usage_events(
+            "clean",
+            [
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T09:00:00+00:00",
+                    call_id="clean",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T09:00:01+00:00",
+                    call_id="clean",
+                ),
+            ],
+        )
+        legacy = self.write_usage_events(
+            "legacy",
+            [
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T10:00:00+00:00",
+                    call_id="legacy",
+                    argument_key="name",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T10:00:01+00:00",
+                    call_id="legacy",
+                ),
+            ],
+        )
+        for path in (clean, legacy):
+            stamp = collected_at.timestamp() - 3600
+            os.utime(path, (stamp, stamp))
+        initial = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            root,
+            collected_at=collected_at,
+            max_sessions=10,
+            max_bytes=100_000,
+            index_path=index,
+        )
+        self.assertEqual(initial["canonical_usage"][0]["uses_total"], 2)
+
+        stale = json.loads(index.read_text(encoding="utf-8"))
+        stale.pop("parser_revision")
+        legacy_entry = stale["sessions"][module.opaque_session_id("legacy")]
+        legacy_entry["usage"] = {}
+        legacy_entry["issues"] = [
+            "usage_session_invalid_skill_name",
+            "usage_session_unmatched_skill_completion",
+        ]
+        index.write_text(json.dumps(stale), encoding="utf-8")
+        stale_bytes = index.read_bytes()
+        with mock.patch.object(
+            module,
+            "write_usage_index",
+            side_effect=module.EstateError("usage_index_unwritable"),
+        ):
+            with self.assertRaisesRegex(
+                module.EstateError, "usage_index_unwritable"
+            ):
+                module.load_usage_index(index, collected_at=collected_at)
+        self.assertEqual(index.read_bytes(), stale_bytes)
+        self.assertEqual(
+            list(index.parent.glob("usage-index.json.rejected-*")), []
+        )
+
+        migrated = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            root,
+            collected_at=collected_at,
+            max_sessions=10,
+            max_bytes=100_000,
+            index_path=index,
+        )
+        self.assertEqual(migrated["coverage"]["index_status"], "migrated")
+        self.assertEqual(migrated["coverage"]["sessions_parsed_this_run"], 1)
+        self.assertEqual(migrated["canonical_usage"][0]["uses_total"], 2)
+        stored = json.loads(index.read_text(encoding="utf-8"))
+        self.assertEqual(
+            stored["parser_revision"], module.USAGE_PARSER_REVISION
+        )
 
     def test_usage_index_streams_oversized_session_then_moves_beyond_it(self) -> None:
         capability_id = "sha256:" + "a" * 64
@@ -1561,6 +1687,12 @@ class EstateCensusTest(unittest.TestCase):
         self.assertEqual(
             first["coverage"]["pending"][0]["reason"],
             "events_recently_modified",
+        )
+        self.assertGreater(first["coverage"]["pending"][0]["bytes"], 0)
+        self.assertIsNotNone(
+            module.parse_usage_time(
+                first["coverage"]["pending"][0]["modified_at"]
+            )
         )
         index_text = index.read_text(encoding="utf-8")
         self.assertNotIn(sentinel, index_text)
