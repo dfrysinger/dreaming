@@ -638,6 +638,9 @@ The dashboard uses these terms directly. It says `Needs test cases` for
 for `insufficient_information`, `Ready to test` for `ready`, `Testing now` for
 `executing`, and the existing passing, regression, inconclusive, or stale
 evaluation language after execution.
+Lane-scoped `evaluation_input_recovery_required` is shown separately as
+`Evaluation recovery required`; it is an owner-recovery condition, not a
+readiness state or an estate-wide mutation fence.
 
 #### Safe case authoring
 
@@ -737,6 +740,197 @@ does not finish. No deferred row disappears from the derived queue. Recovery
 reconciles an `executing` transition before a new claim and never assumes
 success from process exit alone.
 
+#### Existing-owner integration contract
+
+Evaluation-input work is an optional extension of the existing standalone
+`dreaming-core.py run` pass. It is disabled unless the reviewed adapter
+configuration contains an `evaluation_input_owner` object with
+`enabled: true`. The object names three distinct explicit Copilot model
+identities and an evaluator-owned content root containing a sealed root index.
+The index contains zero or one entry for each supported canonical capability.
+Each indexed capability directory contains the trusted suite template,
+complete evaluation policy, compilation, routing, authoring catalog, and
+harness executable required by the existing evaluator. The owner derives the
+skill path from the current estate census. Configuration cannot substitute a
+different candidate path.
+
+The installed owner accepts this object only from the canonical adapter
+configuration selected and hashed by installation authority. An inherited or
+caller-selected adapter configuration cannot enable automatic work. The run
+and claim retain the exact configuration digest. Each capability directory
+contains a canonical input manifest that binds the relative path, size, media
+type, and SHA-256 identity of every required file and executable. The owner
+opens and hashes the declared regular files beneath the resolved content root
+before every consuming evaluator command. The evaluator then independently
+rebuilds and binds those same sources. Any byte or identity change refuses
+rather than switching the work order after authorization.
+
+The installed root index binds every allowed capability-directory name and
+manifest digest. An unknown entry, index mismatch, unreadable root, or root
+outside the fixed evaluator-owned state location is a whole-root failure and
+starts no work. A capability absent from an otherwise valid index, or a
+capability whose indexed files fail their recorded path, size, media-type,
+digest, regular-file, ownership, permissions, installed-root exclusion, or
+allowed-content checks, is a per-row `input_not_ready` deferral. The owner
+continues deterministic scanning for the next runnable row.
+
+The integration uses the fixed regular non-symlink
+`skill-evaluation.py` sibling of `dreaming-core.py`; configuration cannot
+select another evaluator. The content root, every capability directory, and
+every required file must be real non-symlink paths beneath the fixed root and
+outside every installed skill root. The harness executable uses the same
+installation-sealed path-and-byte authorization as the evaluator and adapter.
+
+The owner derives candidates in memory from the exact current census,
+decision-grade usage, readiness transitions, evaluation inventory,
+dependencies, and enabled state collected or resolved by the same run. It
+persists no second queue. Census and usage receipts must bind the same snapshot
+and receiver, evaluation inventory must be complete, and each enabled
+canonical capability must resolve to exactly one real physical skill path or
+receive a per-row deferral. Queue ordering follows the six-tier initial
+execution order in `Existing owner and derived queue` and is deterministic by
+canonical capability identity within each priority. Rows that cannot be
+resolved remain visible with an exact deferral reason.
+
+Automatic work requires `DREAMING_ORCHESTRATED=1`,
+`SKILLS_LOCK_HELD_BY_PARENT=1`, the parent run ID, lock token, owner PID, and
+owner process identity supplied by `dreaming-run.sh`. Before recovery, claim
+reservation, every model-backed command, and every readiness transition, the
+core rechecks the halt file and asserts the inherited token through the
+existing `daemon-lock.py` authority. Missing or mismatched ownership refuses.
+The claim ledger stores the token digest, parent run ID, owner PID, owner
+process identity, owned process-group identity, exact host boot identity, and
+configuration digest as a fence, never the token.
+
+At run start, the newly fenced owner completes recovery before reserving a new
+claim, including when `evaluation_input_owner.enabled` is false. Disabled mode
+is reconcile-only and starts no new claim or model operation. Recovery first
+replays any terminal claim whose exact `ready`, `invalid`, or
+`insufficient_information` transition or current pointer was interrupted, then
+reconciles every earlier open claim. Pending terminal replay is permitted in
+reconcile-only mode because it starts no claim or model operation.
+
+For an open claim, the successor probes the recorded prior owner identity and
+owned evaluator process group. If the prior owner remains live, recovery waits
+up to ten seconds for normal teardown. Exit within that bound continues
+recovery. An owner still live at the bound records lane-scoped
+`evaluation_input_recovery_required` and starts no new work. If the prior owner
+is gone and the exact recorded evaluator group remains live, the successor's
+valid lease authorizes termination of only that group, followed by a bounded
+ten-second proof that it no longer exists. A PID occupied by a process whose
+exact identity differs from the recorded identity proves that the recorded
+owner is gone; the unrelated occupant is never signaled. A genuinely
+unreadable, permission-denied, or still-live recorded identity is never
+signaled and records the same lane-scoped reason.
+
+This reason does not set or borrow the estate-wide publication
+`recovery-required` state and cannot block unrelated estate writers. The
+dashboard labels it `Evaluation recovery required` and stops only this
+evaluation-input lane. Recovery uses
+`skill-evaluation.py v2-input-owner-recover --claim-id <id>
+--expected-owner-run-id <run> --confirm-owner-dead`. The command requires the
+halt file, a valid inherited writer lease, exact recorded owner and process
+identities, and fresh proof that no recorded process remains live. A same-boot
+unreadable identity cannot be overridden. The operator must either restore
+process-inspection authority and re-run the proof, or restart the host. After
+restart the command verifies that the current boot identity differs from the
+claim's recorded boot identity, which proves every recorded prior-boot process
+is gone. It cannot edit any other claim. After operator inspection it
+terminalizes the exact claim through the normal pending terminal protocol; no
+state file may be hand-edited and no unverified death attestation is accepted.
+
+After liveness is resolved, a dispatching slot becomes failed with unknown
+usage and the claim becomes invalid. An open claim with no dispatching slot is
+also terminalized as `owner_interrupted`; it is not resumed from process-exit
+inference. Reconciliation appends readiness `invalid` with reason
+`owner_interrupted` when the interrupted lifecycle was still `drafting` or
+`review_required`. The daily claim remains spent. The candidate is eligible
+for a wholly new claim on a later local day only after this claim and readiness
+reconciliation is durably recorded.
+
+One owner run may reserve at most one claim. The authoring sequence is fixed:
+
+1. reserve the claim and append `drafting`;
+2. author the initial suite;
+3. if authoring returns `insufficient_information`, validate that terminal
+   result, append `insufficient_information`, close the claim, and leave all
+   review and repair slots unstarted;
+4. if authoring fails, refuses, times out, or returns malformed output, close
+   the claim and append `invalid` with that exact failure reason; otherwise
+   validate the authored manifest;
+5. if initial deterministic validation fails, close the claim and append
+   `invalid` with the exact validation reason; otherwise append
+   `review_required`;
+6. run the two original reviews;
+7. if either review fails, refuses, times out, or returns malformed output,
+   close the claim and append `invalid` with that exact failure reason; an
+   indeterminate review does not authorize repair;
+8. if both reviews accept, close the claim and append exactly one `ready`;
+9. if either well-formed review rejects, run the single repair, validate the
+   repaired manifest, retain `review_required`, and run the two fixed-identity
+   re-reviews;
+10. on the repair path, any repair, validation, or re-review failure closes the
+    claim and appends `invalid` with the exact failure reason; otherwise close
+    the claim and append exactly one `ready`, `invalid`, or
+    `insufficient_information` from the retained receipts and claim terminal
+    reason.
+
+Exactly one terminal readiness transition is appended for a claim. Duplicate
+terminal publication refuses except for exact idempotent replay of the pending
+transition recorded by the claim, for any terminal outcome. Every bounded
+terminal publication uses one serialized protocol under
+the readiness lock. The claim-closing transaction first records the terminal
+claim reason and the exact pending readiness state, reason, manifest, and
+receipt identities. The owner then writes and publishes only that transition
+and acknowledges the pending marker. If the process stops between stores,
+run-start recovery revalidates the terminal claim, retained identities, and
+unique exact transition, then publishes or acknowledges only that transition
+before open claims are reconciled or new work is considered. If the transition
+store lacks the exact pending transition, recovery publishes it. If the exact
+transition already exists, recovery validates it and acknowledges the marker
+without attempting a different publication. This protocol applies equally to
+`ready`, `invalid`, `insufficient_information`, and `halted` claim outcomes.
+An open claim therefore cannot own an already-published terminal transition,
+and a terminal claim cannot leave `drafting` or `review_required` stranded
+after recovery.
+
+Each fixed model-operation slot uses the existing claim-ledger dispatch
+protocol. The evaluator durably records `dispatching` before spawning the
+provider adapter, then records exactly one completed or failed outcome. Every
+nonterminal dispatch is recovered as unknown-but-spent. Deterministic crash
+checks cover the boundary before dispatch, after dispatch but before spawn,
+after spawn but before a receipt, and after a receipt but before terminal
+recording for author, review, repair, and re-review slots.
+
+The halt and lease checks occur immediately before each numbered persistent
+step and each model-backed operation within a step. Losing either fence
+starts no further operation. A lease monitor remains active while every owned
+evaluator process group runs; halt or lease loss terminates and reaps that
+group before the losing process exits. Lease loss is non-mutating for the
+losing process: it reports `lock_lost` only in its local run result, and the
+next valid lease holder performs durable claim reconciliation. If halt appears
+while the lease remains valid, the halt check permits exactly one
+terminalization protocol: the owner must close the open claim as `halted`,
+record the pending readiness `invalid` with reason `halted`, publish that exact
+transition, and acknowledge it; it performs no other write or operation. A
+crash within this protocol is completed by run-start pending-terminal recovery.
+If the lease is also lost, it performs no persistent write and later
+reconciliation uses `owner_interrupted`. The owner returns one structured
+`evaluation_input` result with separate `claim_status`,
+`claim_terminal_reason`, `readiness_state`, and `readiness_reason` fields, plus
+the candidate, claim, started-operation count, normalized-token status,
+elapsed time, and billing availability.
+
+This authoring sequence may make one manifest `ready`, but it does not enter
+the `executing` state until the executor and comparator portions of the
+42-operation budget are integrated. A ready capability therefore remains in
+the derived queue with reason `ready_for_execution`; it cannot be mistaken for
+a current evaluation. Queue visibility, priority, and runnable phase are
+separate derived fields. During the authoring-only rollout,
+`ready_for_execution` is visible but non-runnable, consumes no claim or run
+budget, and cannot block deterministic scanning to the next authorable
+candidate.
+
 #### Hard execution budget
 
 Per claimed skill, the maximum is:
@@ -770,8 +964,13 @@ required slot remains spent. The aggregate ledger binds all six ordered
 operation slots to one daily claim, candidate, initial manifest, optional
 repaired manifest, author model, two reviewer models, review set ID, actual
 usage, elapsed time, and billing provenance. Crossing any skill, process, or
-daily bound terminates the owned process group, records the incomplete state,
-spends the claim, and leaves the capability queued without mutation authority.
+daily bound terminates the owned process group, spends the claim, and closes it
+through the pending terminal protocol with readiness `invalid` and the exact
+reason `skill_operation_budget_exhausted`,
+`skill_token_budget_exhausted`, `skill_elapsed_budget_exhausted`,
+`daily_operation_budget_exhausted`, `daily_token_budget_exhausted`,
+`daily_elapsed_budget_exhausted`, or the exact lower process-bound reason. The
+capability remains queued without mutation authority.
 
 #### Evaluation-input rollback
 
@@ -855,13 +1054,39 @@ inventory and dashboard projection remain available.
 #### PORT-CHK-EVAL-INPUT-04: Bounded single-owner execution
 
 - **Protects:** Catch-up cannot create a second owner or unbounded spend.
-- **Setup:** Seed more than four ready skills, timeouts, crashes, halt, lease
-  loss, malformed output, and an unfinished `executing` transition.
+- **Setup:** Seed more than four authorable skills, higher-priority
+  ready-but-not-executable rows, a lower-priority authorable row, per-row
+  missing or digest-mismatched inputs, a malformed sealed root, timeouts,
+  crashes at every model-slot dispatch boundary, halt, lease loss during an
+  in-flight model call, a prior owner that exits within the ten-second bound, a
+  prior owner still live at the bound, an exact orphaned evaluator group, an
+  ambiguous or permission-denied prior identity, a recorded PID occupied by an
+  unrelated process with a different exact identity, an interrupted claim from
+  a prior boot identity, each terminal claim close before transition
+  publication and before pending-marker acknowledgement, malformed output,
+  initial validation failure, and an unfinished `executing` transition.
 - **Pass:** One skill runs at a time, no run claims more than one, no local day
-  claims more than four, claims survive failure, recovery reconciles before
-  new work, and every unfinished row remains queued with an exact reason.
+  claims more than four, visible non-runnable rows do not block the next
+  authorable row, per-row input failure skips without a claim, whole-root
+  failure starts no work, claims survive failure, the losing owner performs no
+  post-lease write, its model group is terminated and reaped, recovery proves
+  the prior group dead and reconciles before new work, owner exit within the
+  bound continues recovery, an owner still live at the bound or an ambiguous
+  identity produces visible `evaluation_input_recovery_required` and no new
+  evaluation-input work, unrelated estate writers remain unaffected, the
+  halted owner-recovery command refuses a live or same-boot unreadable
+  identity, treats a mismatched PID identity as proof the recorded owner is
+  gone, and clears an inspected dead identity or a prior-boot claim without
+  hand editing,
+  pending terminal replay occurs before open-claim reconciliation, halt under
+  a valid lease records exactly `halted` and readiness `invalid`, every
+  well-formed rejection alone authorizes repair, every other operation or
+  validation failure records its exact terminal reason, and every unfinished
+  row remains queued with an exact reason.
 - **Failure:** Work overlaps, a failed claim is refunded, a fifth skill starts,
-  an old executing state is ignored, or deferred work disappears.
+  an old executing state is ignored, a ready row is re-authored, one bad row
+  blocks all later rows, a losing owner writes shared state, an old model group
+  survives successor dispatch, or deferred work disappears.
 - **Why:** It preserves the existing ownership and failure boundaries.
 
 #### PORT-CHK-EVAL-INPUT-05: Budget enforcement and accounting
@@ -875,7 +1100,9 @@ inventory and dashboard projection remain available.
   cost remains unavailable; available cost binds its canonical provider-native
   event or line item; swapped, missing, or mismatched billing provenance
   refuses; all started operations remain charged to the claim; no stopped
-  result gains current or mutation authority.
+  result gains current or mutation authority; every crossed bound closes the
+  claim through the pending terminal protocol with readiness `invalid` and the
+  exact bound reason.
 - **Failure:** Work exceeds a bound, token counts are labeled billing credits,
   or a stopped result becomes pass.
 - **Why:** It gives the aggressive catch-up lane a finite cost and time box.
@@ -885,10 +1112,14 @@ inventory and dashboard projection remain available.
 - **Protects:** The new lane can be stopped without deleting evidence or
   changing installed skills.
 - **Setup:** Roll back after drafting, ready, executing, current, invalid, and
-  insufficient-information transitions.
-- **Pass:** No new slots are claimed; installed roots and scheduler inventory
-  remain unchanged; all retained state stays readable as inert history; the
-  dashboard remains report-only.
+  insufficient-information transitions, including one interrupted open claim
+  and terminal claims interrupted before transition publication or
+  pending-marker acknowledgement.
+- **Pass:** Reconcile-only mode terminalizes the interrupted claim and
+  readiness state under the existing lease, replays each exact pending
+  terminal transition, but claims no new slot and starts no model operation;
+  installed roots and scheduler inventory remain unchanged; all retained state
+  stays readable as inert history; the dashboard remains report-only.
 - **Failure:** Rollback deletes evidence, changes a runtime root, adds or
   removes a scheduler, or permits new evaluation execution.
 - **Why:** It preserves the current reversible governance boundary.
@@ -1724,7 +1955,8 @@ Fail-closed rollback proof requires:
       inherited environment or adapter substitution refuses before a call.
 - [ ] The dashboard distinguishes Needs test cases, Test design in progress,
       Test design rejected, Cannot test safely, Ready to test, Testing now,
-      current evaluation, and stale evaluation.
+      current evaluation, stale evaluation, and lane-scoped Evaluation recovery
+      required.
 - [ ] The derived queue places the 19 settled 30-day non-use capabilities
       first, keeps every unfinished row visible, and creates no second durable
       queue.
