@@ -5425,6 +5425,69 @@ class DashboardData:
         publication_recovery = (
             self.paths.state / "publication-recovery-required.json"
         )
+        evaluation_recovery_path = (
+            self.paths.control_state
+            / "dreaming/evaluation-input-recovery-required.json"
+        )
+        evaluation_recovery = None
+        evaluation_recovery_invalid = False
+        if evaluation_recovery_path.exists() or evaluation_recovery_path.is_symlink():
+            try:
+                if (
+                    evaluation_recovery_path.is_symlink()
+                    or not evaluation_recovery_path.is_file()
+                    or evaluation_recovery_path.stat().st_size > 64_000
+                ):
+                    raise ValueError("evaluation recovery marker")
+                evaluation_recovery = self._json(
+                    evaluation_recovery_path,
+                    None,
+                    "evaluation-input recovery marker",
+                )
+                if (
+                    not isinstance(evaluation_recovery, dict)
+                    or set(evaluation_recovery)
+                    != {
+                        "schema_version",
+                        "kind",
+                        "claims",
+                        "record_sha256",
+                    }
+                    or evaluation_recovery.get("schema_version") != 1
+                    or evaluation_recovery.get("kind")
+                    != "evaluation_input_recovery_required"
+                    or not isinstance(evaluation_recovery.get("claims"), list)
+                    or not evaluation_recovery["claims"]
+                    or any(
+                        not isinstance(row, dict)
+                        or set(row) != {"claim_id", "reason"}
+                        or CANDIDATE_ID_RE.fullmatch(
+                            str(row.get("claim_id", ""))
+                        )
+                        is None
+                        or re.fullmatch(
+                            r"[a-z][a-z0-9_]{0,127}",
+                            str(row.get("reason", "")),
+                        )
+                        is None
+                        for row in evaluation_recovery["claims"]
+                    )
+                    or len(
+                        {
+                            row["claim_id"]
+                            for row in evaluation_recovery["claims"]
+                        }
+                    )
+                    != len(evaluation_recovery["claims"])
+                ):
+                    raise ValueError("evaluation recovery marker")
+                retained = dict(evaluation_recovery)
+                record_sha256 = retained.pop("record_sha256")
+                if record_sha256 != sha(retained):
+                    raise ValueError("evaluation recovery marker identity")
+            except (DashboardError, OSError, TypeError, ValueError):
+                evaluation_recovery = None
+                evaluation_recovery_invalid = True
         generation_path = self.paths.control_state / "dreaming/activation-generation"
         activation_generation = None
         if (
@@ -5451,6 +5514,10 @@ class DashboardData:
             "status": (
                 "halted"
                 if halt.exists()
+                else "Evaluation recovery state invalid"
+                if evaluation_recovery_invalid
+                else "Evaluation recovery required"
+                if evaluation_recovery is not None
                 else "publication_recovery_required"
                 if publication_recovery.exists()
                 else "healthy"
@@ -5459,6 +5526,15 @@ class DashboardData:
             ),
             "halted": halt.exists(),
             "publication_recovery_required": publication_recovery.exists(),
+            "evaluation_input_recovery_required": (
+                evaluation_recovery is not None
+            ),
+            "evaluation_input_recovery_invalid": evaluation_recovery_invalid,
+            "evaluation_input_recovery_claims": (
+                len(evaluation_recovery["claims"])
+                if evaluation_recovery is not None
+                else 0
+            ),
             "activation_generation": activation_generation,
             "process_id": os.getpid(),
             "latest_run": latest,

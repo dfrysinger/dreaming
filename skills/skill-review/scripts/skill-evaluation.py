@@ -10,11 +10,13 @@ import json
 import os
 import pwd
 import re
+import signal
 import shutil
 import sqlite3
 import subprocess
 import sys
 import tempfile
+import time
 from contextlib import contextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -31,8 +33,11 @@ from evaluation_input_claims import (  # noqa: E402
     complete_slot as complete_claim_slot,
     fail_dispatched_slot,
     inspect_claim,
+    ledger_path as claim_ledger_path,
+    open_scheduled_claims,
     pending_terminal_publications,
     prepare_dispatch as prepare_claim_dispatch,
+    recover_open_scheduled_claim,
     reserve_claim,
     review_set_identity,
 )
@@ -5723,6 +5728,382 @@ def assert_input_owner_authority() -> None:
         raise EvaluationError("evaluation-input owner writer lease is invalid")
 
 
+def boot_identity_from_sysctl(value: str) -> str:
+    matches = re.findall(
+        r"\{\s*sec\s*=\s*([0-9]+),\s*usec\s*=\s*([0-9]+)\s*\}",
+        value,
+    )
+    if len(matches) != 1:
+        raise EvaluationError("host boot identity is unavailable")
+    seconds, microseconds = matches[0]
+    stable = f"{int(seconds)}:{int(microseconds)}"
+    return "sha256:" + hashlib.sha256(stable.encode()).hexdigest()
+
+
+def host_boot_identity() -> str:
+    process = subprocess.run(
+        ["/usr/sbin/sysctl", "-n", "kern.boottime"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if process.returncode != 0:
+        raise EvaluationError("host boot identity is unavailable")
+    return boot_identity_from_sysctl(process.stdout)
+
+
+def inspect_process_identity(pid: int) -> dict[str, Any]:
+    if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+        return {"status": "unreadable", "detail": "invalid recorded PID"}
+    process = subprocess.run(
+        ["/bin/ps", "-o", "lstart=", "-p", str(pid)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    identity = " ".join(process.stdout.split())
+    if process.returncode == 0 and identity:
+        return {"status": "present", "identity": identity}
+    if process.returncode != 0 and not identity and not process.stderr.strip():
+        return {"status": "absent"}
+    return {
+        "status": "unreadable",
+        "detail": process.stderr.strip() or "process identity is unavailable",
+    }
+
+
+def parse_process_group_identity(value: str) -> tuple[int, str]:
+    match = re.fullmatch(r"pgid:([1-9][0-9]*):leader:(.+)", value)
+    if match is None:
+        raise EvaluationError("recorded process-group identity is malformed")
+    return int(match.group(1)), match.group(2)
+
+
+def process_group_identity(pgid: int) -> str:
+    observed = inspect_process_identity(pgid)
+    if observed["status"] != "present":
+        raise EvaluationError("process-group leader identity is unavailable")
+    return f"pgid:{pgid}:leader:{observed['identity']}"
+
+
+def process_group_alive(pgid: int) -> str:
+    try:
+        os.killpg(pgid, 0)
+    except ProcessLookupError:
+        return "absent"
+    except PermissionError:
+        return "unreadable"
+    except OSError:
+        return "unreadable"
+    return "present"
+
+
+def inspect_recorded_process(
+    pid: int, expected_identity: str
+) -> dict[str, Any]:
+    observed = inspect_process_identity(pid)
+    if observed["status"] != "present":
+        return observed
+    if observed["identity"] != expected_identity:
+        return {
+            "status": "reused",
+            "identity": observed["identity"],
+        }
+    return observed
+
+
+def inspect_recorded_process_group(value: str) -> dict[str, Any]:
+    try:
+        pgid, leader_identity = parse_process_group_identity(value)
+    except EvaluationError as error:
+        return {"status": "unreadable", "detail": str(error)}
+    leader = inspect_recorded_process(pgid, leader_identity)
+    if leader["status"] == "reused":
+        return {"status": "reused", "pgid": pgid}
+    if leader["status"] == "unreadable":
+        return {
+            "status": "unreadable",
+            "pgid": pgid,
+            "detail": leader.get("detail", "group leader identity is unreadable"),
+        }
+    group_status = process_group_alive(pgid)
+    if group_status == "unreadable":
+        return {
+            "status": "unreadable",
+            "pgid": pgid,
+            "detail": "process-group liveness is unreadable",
+        }
+    if group_status == "absent":
+        return {"status": "absent", "pgid": pgid}
+    if leader["status"] == "absent":
+        return {
+            "status": "unreadable",
+            "pgid": pgid,
+            "detail": "process-group leader identity is no longer provable",
+        }
+    return {
+        "status": "present",
+        "pgid": pgid,
+        "leader_status": leader["status"],
+    }
+
+
+def wait_for_recorded_process_exit(
+    pid: int,
+    identity: str,
+    *,
+    timeout_seconds: float,
+    authority_check: Any,
+) -> dict[str, Any]:
+    deadline = time.monotonic() + timeout_seconds
+    while True:
+        observed = inspect_recorded_process(pid, identity)
+        if observed["status"] != "present":
+            return observed
+        if time.monotonic() >= deadline:
+            return observed
+        authority_check()
+        time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+
+
+def terminate_recorded_process_group(
+    recorded_identity: str,
+    *,
+    timeout_seconds: float,
+    authority_check: Any,
+) -> bool:
+    group = inspect_recorded_process_group(recorded_identity)
+    if group["status"] in {"absent", "reused"}:
+        return True
+    if group["status"] != "present":
+        return False
+    pgid = group["pgid"]
+    if pgid <= 1 or pgid == os.getpgrp():
+        return False
+    deadline = time.monotonic() + timeout_seconds
+    authority_check()
+    try:
+        os.killpg(pgid, signal.SIGTERM)
+    except ProcessLookupError:
+        return True
+    except (PermissionError, OSError):
+        return False
+    kill_sent = False
+    while True:
+        observed = inspect_recorded_process_group(recorded_identity)
+        if observed["status"] in {"absent", "reused"}:
+            return True
+        if observed["status"] != "present":
+            return False
+        current = time.monotonic()
+        if current >= deadline:
+            return False
+        authority_check()
+        if not kill_sent and current >= deadline - (timeout_seconds / 2):
+            observed = inspect_recorded_process_group(recorded_identity)
+            if observed["status"] in {"absent", "reused"}:
+                return True
+            if observed["status"] != "present":
+                return False
+            try:
+                os.killpg(pgid, signal.SIGKILL)
+            except ProcessLookupError:
+                return True
+            except (PermissionError, OSError):
+                return False
+            kill_sent = True
+        time.sleep(min(0.25, max(0.0, deadline - time.monotonic())))
+
+
+def reconcile_open_owner_claims(
+    *,
+    authority_check: Any,
+    owner_wait_seconds: float = 10.0,
+    group_wait_seconds: float = 10.0,
+) -> dict[str, Any]:
+    recovered = []
+    recovery_required = []
+    open_claims = open_scheduled_claims()
+    if not open_claims:
+        return {
+            "recovered_claims": recovered,
+            "recovery_required": recovery_required,
+        }
+    authority_check()
+    try:
+        current_boot = host_boot_identity()
+    except EvaluationError:
+        for claim in open_claims:
+            authority_check()
+            recovery_required.append(
+                {
+                    "claim_id": claim["claim_id"],
+                    "reason": "host_boot_identity_unreadable",
+                }
+            )
+        return {
+            "recovered_claims": recovered,
+            "recovery_required": recovery_required,
+        }
+    for claim in open_claims:
+        authority_check()
+        if claim["owner_boot_identity"] != current_boot:
+            owner = {"status": "prior_boot"}
+        else:
+            owner = wait_for_recorded_process_exit(
+                claim["owner_pid"],
+                claim["owner_process_identity"],
+                timeout_seconds=owner_wait_seconds,
+                authority_check=authority_check,
+            )
+        if owner["status"] == "present":
+            recovery_required.append(
+                {
+                    "claim_id": claim["claim_id"],
+                    "reason": "prior_owner_live",
+                }
+            )
+            continue
+        if owner["status"] == "unreadable":
+            recovery_required.append(
+                {
+                    "claim_id": claim["claim_id"],
+                    "reason": "prior_owner_identity_unreadable",
+                }
+            )
+            continue
+        if owner["status"] == "prior_boot":
+            group = {"status": "absent"}
+        else:
+            group = inspect_recorded_process_group(
+                claim["owner_process_group_identity"]
+            )
+        if group["status"] == "unreadable":
+            recovery_required.append(
+                {
+                    "claim_id": claim["claim_id"],
+                    "reason": "prior_process_group_unreadable",
+                }
+            )
+            continue
+        if group["status"] == "present" and not terminate_recorded_process_group(
+            claim["owner_process_group_identity"],
+            timeout_seconds=group_wait_seconds,
+            authority_check=authority_check,
+        ):
+            recovery_required.append(
+                {
+                    "claim_id": claim["claim_id"],
+                    "reason": "prior_process_group_live",
+                }
+            )
+            continue
+        try:
+            readiness = resolve_input_readiness(Path(claim["skill_path"]))
+        except (EvaluationError, OSError) as error:
+            recovery_required.append(
+                {
+                    "claim_id": claim["claim_id"],
+                    "reason": "claim_readiness_unreadable",
+                    "detail": str(error),
+                }
+            )
+            continue
+        if (
+            readiness["state"] not in {"drafting", "review_required"}
+            or readiness["candidate_id"] != claim["candidate_id"]
+            or readiness["skill_key"] != claim["skill_key"]
+        ):
+            recovery_required.append(
+                {
+                    "claim_id": claim["claim_id"],
+                    "reason": "claim_readiness_not_recoverable",
+                }
+            )
+            continue
+        authority_check()
+        recovered.append(
+            recover_open_scheduled_claim(
+                claim["claim_id"],
+                expected_owner_run_id=claim["owner_run_id"],
+                expected_owner_pid=claim["owner_pid"],
+                expected_owner_process_identity=claim[
+                    "owner_process_identity"
+                ],
+                expected_owner_process_group_identity=claim[
+                    "owner_process_group_identity"
+                ],
+                expected_owner_boot_identity=claim["owner_boot_identity"],
+            )
+        )
+    return {
+        "recovered_claims": recovered,
+        "recovery_required": recovery_required,
+    }
+
+
+def evaluation_input_recovery_path() -> Path:
+    return claim_ledger_path().with_name(
+        "evaluation-input-recovery-required.json"
+    )
+
+
+def persist_evaluation_input_recovery_required(
+    recovery_required: list[dict[str, Any]],
+    *,
+    authority_check: Any,
+) -> dict[str, Any] | None:
+    path = evaluation_input_recovery_path()
+    if recovery_required:
+        rows = sorted(
+            [
+                {
+                    "claim_id": require_sha256(
+                        row.get("claim_id"), "recovery-required claim"
+                    ),
+                    "reason": require_text(
+                        row.get("reason"), "recovery-required reason"
+                    ),
+                }
+                for row in recovery_required
+            ],
+            key=lambda row: row["claim_id"],
+        )
+        if any(
+            re.fullmatch(r"[a-z][a-z0-9_]{0,127}", row["reason"]) is None
+            for row in rows
+        ):
+            raise EvaluationError("recovery-required reason is malformed")
+        if len({row["claim_id"] for row in rows}) != len(rows):
+            raise EvaluationError("recovery-required claims are duplicated")
+        record = {
+            "schema_version": 1,
+            "kind": "evaluation_input_recovery_required",
+            "claims": rows,
+        }
+        record["record_sha256"] = identity_with("record_sha256", record)
+        authority_check()
+        if path.is_symlink():
+            raise EvaluationError(
+                "evaluation-input recovery marker must not be a symlink"
+            )
+        atomic_write(path, record)
+        return record
+    if path.exists() or path.is_symlink():
+        authority_check()
+        if path.is_symlink() or not path.is_file():
+            raise EvaluationError(
+                "evaluation-input recovery marker is not a regular file"
+            )
+        path.unlink()
+        directory_fd = os.open(path.parent, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    return None
+
+
 def v2_input_owner_reconcile(_args: argparse.Namespace) -> dict[str, Any]:
     assert_input_owner_authority()
     publications = []
@@ -5747,9 +6128,38 @@ def v2_input_owner_reconcile(_args: argparse.Namespace) -> dict[str, Any]:
             "terminal publication recovery incomplete: "
             + json.dumps(failures, sort_keys=True, separators=(",", ":"))
         )
+    claims = reconcile_open_owner_claims(
+        authority_check=assert_input_owner_authority
+    )
+    recovery_marker = persist_evaluation_input_recovery_required(
+        claims["recovery_required"],
+        authority_check=assert_input_owner_authority,
+    )
+    for publication in pending_terminal_publications():
+        try:
+            assert_input_owner_authority()
+            publications.append(
+                publish_pending_terminal(
+                    publication, authority_check=assert_input_owner_authority
+                )
+            )
+        except (ClaimLedgerError, EvaluationError, OSError) as error:
+            failures.append(
+                {
+                    "claim_id": publication["claim_id"],
+                    "error": str(error),
+                }
+            )
+    if failures:
+        raise EvaluationError(
+            "open-claim terminal recovery incomplete: "
+            + json.dumps(failures, sort_keys=True, separators=(",", ":"))
+        )
     return {
         "status": "reconciled",
         "terminal_publications": publications,
+        "recovery_marker": recovery_marker,
+        **claims,
     }
 
 

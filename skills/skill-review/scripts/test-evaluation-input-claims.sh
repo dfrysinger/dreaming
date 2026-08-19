@@ -30,11 +30,18 @@ import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from unittest import mock
 
 module_path, evaluator_path, root_arg = map(Path, sys.argv[1:])
 spec = importlib.util.spec_from_file_location("evaluation_input_claims", module_path)
 claims = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(claims)
+sys.modules["evaluation_input_claims"] = claims
+evaluator_spec = importlib.util.spec_from_file_location(
+    "skill_evaluation", evaluator_path
+)
+evaluator = importlib.util.module_from_spec(evaluator_spec)
+evaluator_spec.loader.exec_module(evaluator)
 root = root_arg.resolve()
 passes = 0
 
@@ -1172,7 +1179,7 @@ owner_fence = {
     "owner_pid": 4242,
     "owner_process_identity": "pid:4242:start:fixture",
     "owner_process_group_identity": "pgid:4242:leader:fixture",
-    "owner_boot_identity": "boot:fixture",
+    "owner_boot_identity": sha("boot-fixture"),
     "owner_config_sha256": sha("owner-config"),
 }
 os.environ["DREAMING_ORCHESTRATED"] = "1"
@@ -1223,7 +1230,403 @@ assert fence["token_sha256"] == "sha256:" + __import__("hashlib").sha256(
     os.environ["SKILLS_LOCK_TOKEN"].encode()
 ).hexdigest()
 del os.environ["SKILLS_LOCK_TOKEN"]
+open_claims = claims.open_scheduled_claims()
+assert len(open_claims) == 1
+assert open_claims[0]["claim_id"] == scheduled["claim_id"]
+assert open_claims[0]["dispatching_slots"] == []
+before_wrong_owner = claims.inspect_claim(scheduled["claim_id"])
+try:
+    claims.recover_open_scheduled_claim(
+        scheduled["claim_id"],
+        expected_owner_run_id="different-owner-run",
+        expected_owner_pid=owner_fence["owner_pid"],
+        expected_owner_process_identity=owner_fence[
+            "owner_process_identity"
+        ],
+        expected_owner_process_group_identity=owner_fence[
+            "owner_process_group_identity"
+        ],
+        expected_owner_boot_identity=owner_fence["owner_boot_identity"],
+    )
+except claims.ClaimLedgerError as error:
+    assert "facts differ" in str(error)
+else:
+    raise AssertionError("open-claim recovery accepted different owner facts")
+assert claims.inspect_claim(scheduled["claim_id"]) == before_wrong_owner
+recovered = claims.recover_open_scheduled_claim(
+    scheduled["claim_id"],
+    expected_owner_run_id="scheduled-owner-run",
+    expected_owner_pid=owner_fence["owner_pid"],
+    expected_owner_process_identity=owner_fence["owner_process_identity"],
+    expected_owner_process_group_identity=owner_fence[
+        "owner_process_group_identity"
+    ],
+    expected_owner_boot_identity=owner_fence["owner_boot_identity"],
+)
+assert recovered["terminal_reason"] == "owner_interrupted"
+assert recovered["dispatching_slots"] == []
+assert claims.open_scheduled_claims() == []
+scheduled_inspection = claims.inspect_claim(scheduled["claim_id"])
+assert scheduled_inspection["status"] == "invalid"
+assert scheduled_inspection["terminal_publication"]["readiness_reason"] == (
+    "owner_interrupted"
+)
 passed("scheduled claims bind writer, process, boot, and configuration fences")
+passed("open scheduled claims require exact owner facts before terminalization")
+
+use_state("scheduled-owner-dispatch-recovery")
+os.environ["SKILLS_LOCK_TOKEN"] = "00000000-0000-4000-8000-000000000003"
+scheduled_dispatch = claims.reserve_claim(
+    skill_path=str(root / "skill"),
+    skill_key="fixture-skill-key",
+    candidate_id=sha("candidate"),
+    owner_run_id="scheduled-dispatch-run",
+    author_model="scheduled-author",
+    reviewer_a_model="scheduled-review-a",
+    reviewer_b_model="scheduled-review-b",
+    owner_fence=owner_fence,
+)
+del os.environ["SKILLS_LOCK_TOKEN"]
+claims.prepare_dispatch(
+    claim_id=scheduled_dispatch["claim_id"],
+    skill_path=str(root / "skill"),
+    skill_key="fixture-skill-key",
+    candidate_id=sha("candidate"),
+    slot_name="author",
+    model="scheduled-author",
+    packet_id=sha("scheduled-author-packet"),
+    manifest_sha256=None,
+    validation_receipt_sha256=None,
+    requested_token_budget=100,
+    requested_timeout_seconds=10,
+    lineage_receipt_sha256s=[],
+)
+assert claims.open_scheduled_claims()[0]["dispatching_slots"] == ["author"]
+dispatch_recovery = claims.recover_open_scheduled_claim(
+    scheduled_dispatch["claim_id"],
+    expected_owner_run_id="scheduled-dispatch-run",
+    expected_owner_pid=owner_fence["owner_pid"],
+    expected_owner_process_identity=owner_fence["owner_process_identity"],
+    expected_owner_process_group_identity=owner_fence[
+        "owner_process_group_identity"
+    ],
+    expected_owner_boot_identity=owner_fence["owner_boot_identity"],
+)
+assert dispatch_recovery["dispatching_slots"] == ["author"]
+dispatch_inspection = claims.inspect_claim(scheduled_dispatch["claim_id"])
+assert dispatch_inspection["slots"][0]["status"] == "failed"
+assert dispatch_inspection["slots"][0]["usage_status"] == "unavailable"
+assert dispatch_inspection["slots"][0]["failure_reason"] == "owner_interrupted"
+passed("interrupted dispatch is retained as unknown-spent before claim closure")
+
+use_state("empty-owner-recovery")
+with mock.patch.object(
+    evaluator, "host_boot_identity", side_effect=AssertionError("not called")
+):
+    assert evaluator.reconcile_open_owner_claims(
+        authority_check=lambda: None,
+        owner_wait_seconds=0,
+        group_wait_seconds=0,
+    ) == {"recovered_claims": [], "recovery_required": []}
+assert claims.pending_terminal_publications() == []
+passed("owner recovery is a read-only no-op before the claim ledger exists")
+
+use_state("owner-liveness-recovery")
+os.environ["SKILLS_LOCK_TOKEN"] = "00000000-0000-4000-8000-000000000004"
+live_claim = claims.reserve_claim(
+    skill_path=str(root / "skill"),
+    skill_key="fixture-skill-key",
+    candidate_id=sha("candidate"),
+    owner_run_id="live-owner-run",
+    author_model="scheduled-author",
+    reviewer_a_model="scheduled-review-a",
+    reviewer_b_model="scheduled-review-b",
+    owner_fence=owner_fence,
+)
+del os.environ["SKILLS_LOCK_TOKEN"]
+with (
+    mock.patch.object(
+        evaluator, "host_boot_identity", return_value=sha("boot-fixture")
+    ),
+    mock.patch.object(
+        evaluator,
+        "wait_for_recorded_process_exit",
+        return_value={"status": "present"},
+    ),
+):
+    live_result = evaluator.reconcile_open_owner_claims(
+        authority_check=lambda: None,
+        owner_wait_seconds=0,
+        group_wait_seconds=0,
+    )
+assert live_result["recovered_claims"] == []
+assert live_result["recovery_required"] == [
+    {"claim_id": live_claim["claim_id"], "reason": "prior_owner_live"}
+]
+assert claims.inspect_claim(live_claim["claim_id"])["status"] == "open"
+marker = evaluator.persist_evaluation_input_recovery_required(
+    live_result["recovery_required"],
+    authority_check=lambda: None,
+)
+assert marker["record_sha256"] == evaluator.identity_with(
+    "record_sha256",
+    {
+        key: value
+        for key, value in marker.items()
+        if key != "record_sha256"
+    },
+)
+assert evaluator.evaluation_input_recovery_path().is_file()
+with (
+    mock.patch.object(
+        evaluator, "host_boot_identity", return_value=sha("boot-fixture")
+    ),
+    mock.patch.object(
+        evaluator,
+        "wait_for_recorded_process_exit",
+        return_value={"status": "reused"},
+    ),
+    mock.patch.object(
+        evaluator,
+        "inspect_recorded_process_group",
+        return_value={"status": "reused", "pgid": 4242},
+    ),
+    mock.patch.object(
+        evaluator,
+        "resolve_input_readiness",
+        return_value={
+            "state": "drafting",
+            "candidate_id": sha("candidate"),
+            "skill_key": "fixture-skill-key",
+        },
+    ),
+):
+    reused_result = evaluator.reconcile_open_owner_claims(
+        authority_check=lambda: None,
+        owner_wait_seconds=0,
+        group_wait_seconds=0,
+    )
+assert reused_result["recovery_required"] == []
+assert reused_result["recovered_claims"][0]["claim_id"] == live_claim["claim_id"]
+assert claims.inspect_claim(live_claim["claim_id"])["status"] == "invalid"
+assert evaluator.persist_evaluation_input_recovery_required(
+    reused_result["recovery_required"],
+    authority_check=lambda: None,
+) is None
+assert not evaluator.evaluation_input_recovery_path().exists()
+passed("live owners block only the lane and reused identities are never signaled")
+passed("lane-scoped recovery requirements persist until their claim clears")
+
+use_state("owner-unreadable-recovery")
+os.environ["SKILLS_LOCK_TOKEN"] = "00000000-0000-4000-8000-000000000005"
+unreadable_claim = claims.reserve_claim(
+    skill_path=str(root / "skill"),
+    skill_key="fixture-skill-key",
+    candidate_id=sha("candidate"),
+    owner_run_id="unreadable-owner-run",
+    author_model="scheduled-author",
+    reviewer_a_model="scheduled-review-a",
+    reviewer_b_model="scheduled-review-b",
+    owner_fence=owner_fence,
+)
+del os.environ["SKILLS_LOCK_TOKEN"]
+with (
+    mock.patch.object(
+        evaluator, "host_boot_identity", return_value=sha("boot-fixture")
+    ),
+    mock.patch.object(
+        evaluator,
+        "wait_for_recorded_process_exit",
+        return_value={"status": "unreadable"},
+    ),
+):
+    unreadable_result = evaluator.reconcile_open_owner_claims(
+        authority_check=lambda: None,
+        owner_wait_seconds=0,
+        group_wait_seconds=0,
+    )
+assert unreadable_result["recovery_required"] == [
+    {
+        "claim_id": unreadable_claim["claim_id"],
+        "reason": "prior_owner_identity_unreadable",
+    }
+]
+assert claims.inspect_claim(unreadable_claim["claim_id"])["status"] == "open"
+passed("unreadable same-boot owner identity remains non-mutating")
+
+use_state("boot-identity-unreadable-recovery")
+os.environ["SKILLS_LOCK_TOKEN"] = "00000000-0000-4000-8000-000000000006"
+boot_unreadable_claim = claims.reserve_claim(
+    skill_path=str(root / "skill"),
+    skill_key="fixture-skill-key",
+    candidate_id=sha("candidate"),
+    owner_run_id="boot-unreadable-owner-run",
+    author_model="scheduled-author",
+    reviewer_a_model="scheduled-review-a",
+    reviewer_b_model="scheduled-review-b",
+    owner_fence=owner_fence,
+)
+del os.environ["SKILLS_LOCK_TOKEN"]
+with mock.patch.object(
+    evaluator,
+    "host_boot_identity",
+    side_effect=evaluator.EvaluationError("host boot identity is unavailable"),
+):
+    boot_unreadable_result = evaluator.reconcile_open_owner_claims(
+        authority_check=lambda: None,
+        owner_wait_seconds=0,
+        group_wait_seconds=0,
+    )
+assert boot_unreadable_result["recovered_claims"] == []
+assert boot_unreadable_result["recovery_required"] == [
+    {
+        "claim_id": boot_unreadable_claim["claim_id"],
+        "reason": "host_boot_identity_unreadable",
+    }
+]
+assert claims.inspect_claim(boot_unreadable_claim["claim_id"])["status"] == "open"
+boot_unreadable_marker = evaluator.persist_evaluation_input_recovery_required(
+    boot_unreadable_result["recovery_required"],
+    authority_check=lambda: None,
+)
+assert boot_unreadable_marker["claims"] == [
+    {
+        "claim_id": boot_unreadable_claim["claim_id"],
+        "reason": "host_boot_identity_unreadable",
+    }
+]
+assert evaluator.evaluation_input_recovery_path().is_file()
+passed("unavailable boot identity durably blocks every open claim")
+
+use_state("prior-boot-recovery")
+os.environ["SKILLS_LOCK_TOKEN"] = "00000000-0000-4000-8000-000000000007"
+prior_boot_claim = claims.reserve_claim(
+    skill_path=str(root / "skill"),
+    skill_key="fixture-skill-key",
+    candidate_id=sha("candidate"),
+    owner_run_id="prior-boot-owner-run",
+    author_model="scheduled-author",
+    reviewer_a_model="scheduled-review-a",
+    reviewer_b_model="scheduled-review-b",
+    owner_fence=owner_fence,
+)
+del os.environ["SKILLS_LOCK_TOKEN"]
+with (
+    mock.patch.object(
+        evaluator, "host_boot_identity", return_value=sha("boot-new")
+    ),
+    mock.patch.object(
+        evaluator,
+        "inspect_recorded_process_group",
+        side_effect=AssertionError("prior-boot group must not be probed"),
+    ),
+    mock.patch.object(
+        evaluator,
+        "resolve_input_readiness",
+        return_value={
+            "state": "review_required",
+            "candidate_id": sha("candidate"),
+            "skill_key": "fixture-skill-key",
+        },
+    ),
+):
+    prior_boot_result = evaluator.reconcile_open_owner_claims(
+        authority_check=lambda: None,
+        owner_wait_seconds=0,
+        group_wait_seconds=0,
+    )
+assert prior_boot_result["recovery_required"] == []
+assert prior_boot_result["recovered_claims"][0]["claim_id"] == (
+    prior_boot_claim["claim_id"]
+)
+assert claims.inspect_claim(prior_boot_claim["claim_id"])["status"] == "invalid"
+with (
+    mock.patch.object(
+        evaluator,
+        "inspect_recorded_process_group",
+        return_value={"status": "reused", "pgid": 4242},
+    ),
+    mock.patch.object(evaluator.os, "killpg") as forbidden_signal,
+):
+    assert evaluator.terminate_recorded_process_group(
+        owner_fence["owner_process_group_identity"],
+        timeout_seconds=0,
+        authority_check=lambda: None,
+    )
+forbidden_signal.assert_not_called()
+passed("prior-boot and reused process groups recover without signaling")
+
+first_boot = (
+    "{ sec = 1786472601, usec = 468071 } "
+    "Tue Aug 11 12:23:21 2026"
+)
+second_boot = (
+    "{ sec = 1786472601, usec = 468071 } "
+    "Wed Aug 12 03:23:21 2026"
+)
+assert evaluator.boot_identity_from_sysctl(first_boot) == (
+    evaluator.boot_identity_from_sysctl(second_boot)
+)
+try:
+    evaluator.boot_identity_from_sysctl("not a boot identity")
+except evaluator.EvaluationError as error:
+    assert "unavailable" in str(error)
+else:
+    raise AssertionError("malformed boot identity was accepted")
+passed("boot identity ignores timezone-rendered sysctl text")
+
+with (
+    mock.patch.object(
+        evaluator,
+        "inspect_recorded_process",
+        return_value={"status": "absent"},
+    ),
+    mock.patch.object(
+        evaluator, "process_group_alive", return_value="present"
+    ),
+):
+    orphan_without_leader = evaluator.inspect_recorded_process_group(
+        owner_fence["owner_process_group_identity"]
+    )
+assert orphan_without_leader["status"] == "unreadable"
+with (
+    mock.patch.object(
+        evaluator,
+        "inspect_recorded_process_group",
+        return_value=orphan_without_leader,
+    ),
+    mock.patch.object(evaluator.os, "killpg") as forbidden_orphan_signal,
+):
+    assert not evaluator.terminate_recorded_process_group(
+        owner_fence["owner_process_group_identity"],
+        timeout_seconds=0,
+        authority_check=lambda: None,
+    )
+forbidden_orphan_signal.assert_not_called()
+passed("leaderless process groups defer rather than risking a reused group")
+
+owned_group = subprocess.Popen(
+    ["/bin/sleep", "30"],
+    start_new_session=True,
+    stdout=subprocess.DEVNULL,
+    stderr=subprocess.DEVNULL,
+)
+try:
+    owned_group_identity = evaluator.process_group_identity(owned_group.pid)
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        reaped = executor.submit(owned_group.wait)
+        assert evaluator.terminate_recorded_process_group(
+            owned_group_identity,
+            timeout_seconds=4,
+            authority_check=lambda: None,
+        )
+        assert reaped.result(timeout=5) != 0
+    assert evaluator.process_group_alive(owned_group.pid) == "absent"
+finally:
+    if owned_group.poll() is None:
+        os.killpg(owned_group.pid, 9)
+        owned_group.wait()
+passed("exact owned process groups are terminated and proved absent")
 
 use_state("ready")
 ledger = claims.ledger_path()
@@ -1320,11 +1723,14 @@ authorized_reconcile = subprocess.run(
 )
 assert authorized_reconcile.returncode == 0, authorized_reconcile.stderr
 assert json.loads(authorized_reconcile.stdout) == {
+    "recovered_claims": [],
+    "recovery_marker": None,
+    "recovery_required": [],
     "status": "reconciled",
     "terminal_publications": [],
 }
 passed("historical inspection is stable and owner reconciliation requires authority")
 
-assert passes == 28
+assert passes == 39
 print(f"PASS  {passes} deterministic evaluation-input claim ledger checks")
 PY

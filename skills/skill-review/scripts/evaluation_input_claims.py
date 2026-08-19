@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import sqlite3
 import time
 from contextlib import contextmanager
@@ -153,6 +154,14 @@ def owner_fence_facts(owner_fence: dict[str, Any] | None) -> dict[str, Any]:
     if token_sha256 is None:
         raise ClaimLedgerError("scheduled owner claim requires a writer lease token")
     owner_pid = require_positive_int(owner_fence.get("owner_pid"), "owner PID")
+    process_group_identity = require_text(
+        owner_fence.get("owner_process_group_identity"),
+        "owner process-group identity",
+    )
+    if re.fullmatch(
+        r"pgid:[1-9][0-9]*:leader:.+", process_group_identity
+    ) is None:
+        raise ClaimLedgerError("owner process-group identity is malformed")
     return {
         "owner_mode": "scheduled",
         "lock_fence_token_sha256": token_sha256,
@@ -160,11 +169,8 @@ def owner_fence_facts(owner_fence: dict[str, Any] | None) -> dict[str, Any]:
         "owner_process_identity": require_text(
             owner_fence.get("owner_process_identity"), "owner process identity"
         ),
-        "owner_process_group_identity": require_text(
-            owner_fence.get("owner_process_group_identity"),
-            "owner process-group identity",
-        ),
-        "owner_boot_identity": require_text(
+        "owner_process_group_identity": process_group_identity,
+        "owner_boot_identity": require_sha256(
             owner_fence.get("owner_boot_identity"), "owner boot identity"
         ),
         "owner_config_sha256": require_sha256(
@@ -895,6 +901,8 @@ def acknowledge_terminal_publication(
 
 
 def pending_terminal_publications() -> list[dict[str, Any]]:
+    if not ledger_path().is_file():
+        return []
     connection = connect(create=False)
     try:
         rows = connection.execute(
@@ -1023,6 +1031,169 @@ def fail_dispatched_slot(claim_id: str, slot_name: str, reason: str) -> None:
                 "only a dispatching slot can be failed; spent slots cannot retry"
             )
         _fail_slot(connection, claim, slot, reason)
+
+
+def open_scheduled_claims() -> list[dict[str, Any]]:
+    if not ledger_path().is_file():
+        return []
+    connection = connect(create=False)
+    try:
+        rows = connection.execute(
+            """
+            SELECT * FROM claims
+            WHERE status='open' AND owner_mode='scheduled'
+            ORDER BY created_epoch, claim_id
+            """
+        ).fetchall()
+        results = []
+        for claim in rows:
+            dispatching = connection.execute(
+                """
+                SELECT slot_name FROM claim_slots
+                WHERE claim_id=? AND status='dispatching'
+                ORDER BY slot_index
+                """,
+                (claim["claim_id"],),
+            ).fetchall()
+            results.append(
+                {
+                    "claim_id": claim["claim_id"],
+                    "created_epoch": claim["created_epoch"],
+                    "owner_run_id": claim["owner_run_id"],
+                    "owner_pid": claim["owner_pid"],
+                    "owner_process_identity": claim[
+                        "owner_process_identity"
+                    ],
+                    "owner_process_group_identity": claim[
+                        "owner_process_group_identity"
+                    ],
+                    "owner_boot_identity": claim["owner_boot_identity"],
+                    "owner_config_sha256": claim["owner_config_sha256"],
+                    "skill_path": claim["skill_path"],
+                    "skill_key": claim["skill_key"],
+                    "candidate_id": claim["candidate_id"],
+                    "dispatching_slots": [
+                        row["slot_name"] for row in dispatching
+                    ],
+                }
+            )
+        return results
+    finally:
+        connection.close()
+
+
+def recover_open_scheduled_claim(
+    claim_id: str,
+    *,
+    expected_owner_run_id: str,
+    expected_owner_pid: int,
+    expected_owner_process_identity: str,
+    expected_owner_process_group_identity: str,
+    expected_owner_boot_identity: str,
+) -> dict[str, Any]:
+    expected = {
+        "owner_run_id": require_text(
+            expected_owner_run_id, "expected owner run ID"
+        ),
+        "owner_pid": require_positive_int(
+            expected_owner_pid, "expected owner PID"
+        ),
+        "owner_process_identity": require_text(
+            expected_owner_process_identity, "expected owner process identity"
+        ),
+        "owner_process_group_identity": require_text(
+            expected_owner_process_group_identity,
+            "expected owner process-group identity",
+        ),
+        "owner_boot_identity": require_text(
+            expected_owner_boot_identity, "expected owner boot identity"
+        ),
+    }
+    with transaction() as connection:
+        claim = _claim(connection, claim_id)
+        if claim["status"] != "open" or claim["owner_mode"] != "scheduled":
+            raise ClaimLedgerError(
+                "only an open scheduled claim can be owner-recovered"
+            )
+        if any(claim[key] != value for key, value in expected.items()):
+            raise ClaimLedgerError(
+                "open claim owner facts differ from the inspected owner"
+            )
+        current = now_epoch()
+        dispatching = connection.execute(
+            """
+            SELECT * FROM claim_slots
+            WHERE claim_id=? AND status='dispatching'
+            ORDER BY slot_index
+            """,
+            (claim["claim_id"],),
+        ).fetchall()
+        for slot in dispatching:
+            connection.execute(
+                """
+                UPDATE claim_slots
+                SET status='failed', terminal_epoch=?,
+                    usage_status='unavailable', normalized_tokens=NULL,
+                    input_tokens=NULL, output_tokens=NULL, elapsed_ms=NULL,
+                    billing_status=NULL, billing_cost_usd=NULL,
+                    billing_provider=NULL, billing_unavailable_reason=NULL,
+                    billing_native_line_item_id=NULL,
+                    billing_native_event_sha256=NULL,
+                    billing_native_event_size=NULL, operation_id=NULL,
+                    observed_model=NULL, review_receipt_sha256=NULL,
+                    decision=NULL, failure_reason='owner_interrupted'
+                WHERE claim_id=? AND slot_name=? AND status='dispatching'
+                """,
+                (current, claim["claim_id"], slot["slot_name"]),
+            )
+            append_event(
+                connection,
+                claim["claim_id"],
+                "slot_failed_unknown_spent",
+                {
+                    "failure_reason": "owner_interrupted",
+                    "usage_status": "unavailable",
+                },
+                slot_name=slot["slot_name"],
+                created_epoch=current,
+            )
+        connection.execute(
+            """
+            UPDATE claims
+            SET status='invalid', terminal_reason='owner_interrupted',
+                terminal_epoch=?
+            WHERE claim_id=? AND status='open'
+            """,
+            (current, claim["claim_id"]),
+        )
+        append_event(
+            connection,
+            claim["claim_id"],
+            "claim_terminal",
+            {
+                "dispatching_slots": [
+                    slot["slot_name"] for slot in dispatching
+                ],
+                "reason": "owner_interrupted",
+                "status": "invalid",
+            },
+            created_epoch=current,
+        )
+        publication = _record_retained_terminal(
+            connection,
+            claim["claim_id"],
+            readiness_state="invalid",
+            readiness_reason="owner_interrupted",
+        )
+        return {
+            "claim_id": claim["claim_id"],
+            "dispatching_slots": [
+                slot["slot_name"] for slot in dispatching
+            ],
+            "status": "invalid",
+            "terminal_reason": "owner_interrupted",
+            "terminal_publication": publication,
+        }
 
 
 def _reconcile_dispatching(

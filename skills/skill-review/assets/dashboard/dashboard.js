@@ -591,6 +591,8 @@ async function renderTranscript(digest) {
 async function renderSystem() {
   const data = await api("/api/v1/system");
   view.innerHTML = `${header("System", "Installed roots, health, measured storage, and limits that actually exist.", badge(data.health.status))}
+    ${data.health.evaluation_input_recovery_required ? `<div class="notice danger">Evaluation recovery required for ${number(data.health.evaluation_input_recovery_claims)} ${data.health.evaluation_input_recovery_claims === 1 ? "claim" : "claims"}. Evaluation-input authoring must not start until the claims are recovered.</div>` : ""}
+    ${data.health.evaluation_input_recovery_invalid ? `<div class="notice danger">Evaluation recovery state is invalid. Evaluation-input authoring must not start until the state is repaired.</div>` : ""}
     <div class="grid split"><article class="panel"><div class="panel-head"><h2>Storage categories</h2></div><div class="list">${data.categories.map(item => `<div class="card"><div class="label">${esc(item.name)}</div><div class="metric">${bytes(item.bytes)}</div><div class="submetric">${number(item.items)} files · no category quota</div></div>`).join("")}</div></article>
     <article class="panel"><div class="panel-head"><h2>Filesystem capacity</h2></div>${data.filesystems.map(item => `<div class="card"><div class="label">${esc(item.path)}</div><div class="metric">${bytes(item.free)} free</div><div class="submetric">${bytes(item.used)} used of ${bytes(item.total)}</div></div>`).join("")}
       <div class="notice mt">Snapshots are limited to ${bytes(data.limits.snapshot_bytes)} each. There is no aggregate retention quota or automatic cleanup.</div>

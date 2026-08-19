@@ -95,6 +95,14 @@ check(
     "portfolio view separates decisions, disabled actions, receipts, and recovery state",
 )
 check(
+    "Evaluation-input authoring must not start until the claims are recovered."
+    in javascript
+    and "Evaluation-input authoring must not start until the state is repaired."
+    in javascript
+    and "New evaluation work is paused." not in javascript,
+    "evaluation recovery notices require action without claiming an unimplemented pause",
+)
+check(
     'class="portfolio-table"' in javascript
     and 'data-label="Skill"' in javascript
     and 'data-label="Next action"' in javascript
@@ -2042,6 +2050,49 @@ try:
         "authenticated health exposes remote publication recovery",
     )
     recovery.unlink()
+    evaluation_recovery = {
+        "schema_version": 1,
+        "kind": "evaluation_input_recovery_required",
+        "claims": [
+            {
+                "claim_id": "sha256:" + "1" * 64,
+                "reason": "prior_owner_live",
+            }
+        ],
+    }
+    evaluation_recovery["record_sha256"] = dashboard.sha(
+        evaluation_recovery
+    )
+    evaluation_recovery_path = (
+        control / "dreaming/evaluation-input-recovery-required.json"
+    )
+    evaluation_recovery_path.parent.mkdir(parents=True, exist_ok=True)
+    evaluation_recovery_path.write_text(
+        json.dumps(evaluation_recovery), encoding="utf-8"
+    )
+    status, _, body = request("/api/v1/health")
+    evaluation_health = json.loads(body)["data"]
+    check(
+        status == 200
+        and evaluation_health["status"] == "Evaluation recovery required"
+        and evaluation_health["evaluation_input_recovery_required"] is True
+        and evaluation_health["evaluation_input_recovery_claims"] == 1,
+        "authenticated health exposes lane-scoped evaluation recovery",
+    )
+    evaluation_recovery_path.write_text("{}", encoding="utf-8")
+    status, _, body = request("/api/v1/health")
+    invalid_evaluation_health = json.loads(body)["data"]
+    check(
+        status == 200
+        and invalid_evaluation_health["status"]
+        == "Evaluation recovery state invalid"
+        and invalid_evaluation_health[
+            "evaluation_input_recovery_invalid"
+        ]
+        is True,
+        "authenticated health fails closed on malformed evaluation recovery",
+    )
+    evaluation_recovery_path.unlink()
 finally:
     server.terminate()
     server.wait(timeout=30)
