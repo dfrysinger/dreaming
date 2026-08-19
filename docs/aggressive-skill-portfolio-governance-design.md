@@ -37,6 +37,64 @@ missing or stale.
   weaken restore verification.
 - Do not add another inventory collector, evaluator, archive format, settings
   writer, scheduler, or transaction authority.
+- Do not install preview code into the scheduled Mac mini generation, point a
+  preview at live writable state, or use preview behavior as installed proof.
+
+## Isolated parallel preview
+
+Report-only implementation and browser review may proceed while an installed
+capacity run is waiting for its untouched four-hour launch. This is a
+development boundary, not a second production owner.
+
+The preview uses:
+
+- a separate Git worktree and feature branch created from the reviewed local
+  governance design;
+- a private snapshot of the skill inventory, evaluation, usage, dependency,
+  decision, and receipt inputs needed by the dashboard;
+- preview-specific state and data roots that contain no symlink or configured
+  path back to live writable roots;
+- an ordinary foreground dashboard process on a different port;
+- mutation endpoints disabled at the server boundary, with every action
+  rendered as unavailable and explained;
+- no launchd plist, installer activation, scheduler, self-test generation,
+  publication, plugin settings transaction, archive helper, or estate-action
+  dispatch.
+
+Snapshot capture is a separate, bounded read-only operation. It first verifies
+that no capacity run is active and acquires the live writer lock without
+waiting. If either check shows activity, capture exits without copying
+anything. It holds the lock through source validation, copying, and final
+validation, with a 30-second absolute capture deadline, then releases it only
+after accepting or deleting the snapshot. Capture must begin at least ten
+minutes before the installed owner's next known interval eligibility. The
+capture records the relevant live generation marker before and after copying
+and rejects the snapshot when the marker changes. For inputs without a
+generation marker, it records source identity, size, and digest before and
+after the copy and rejects any mismatch. It never follows a symbolic link.
+
+The resulting manifest records source identities, file sizes, digests, capture
+time, and the stable source generation. The preview verifies the complete
+manifest before loading it, opens snapshot inputs read-only, and verifies the
+identity and digest again before every request that reads snapshot data.
+Missing, malformed, changed, replaced, or unexpectedly linked input makes the
+preview unavailable rather than falling back to live state.
+
+The capacity branch tip and tracked working tree, installed Mac mini
+repository, activation generation, launchd label and plist inventory, timer,
+and dashboard process remain untouched. The linked preview worktree may add
+Git objects, worktree metadata, and its own branch ref to the shared local
+repository. Capacity launchd run counts and retained live state may change
+only through the already-installed capacity owner and are attributed to its
+run records, never to the preview process tree.
+
+Preview work may begin only from a local commit containing this isolation
+contract and PORT-CHK-PREVIEW. The plan baton records that commit before the
+worktree is created, and the preview branch must descend from it. Preview
+commits are reviewed on their own branch. They may be merged into the main
+local branch only after the capacity natural-run and rollback evidence is
+terminal and retained. Installed governance proof starts only after that merge
+passes the normal installer, self-test, halt, enable, and rollback boundaries.
 
 ## User policy
 
@@ -95,6 +153,7 @@ report was generated.
 | Dashboard data | `dreaming-dashboard.py` | Produce portfolio decisions and detail records |
 | Dashboard presentation | `dashboard.js` | Replace governance log terminology and add decision workflows |
 | Halt and recovery | Existing shared halt and recovery fences | Apply to every mutating dashboard action |
+| Isolated browser preview | Existing dashboard server fixtures and explicit data/state-root configuration | Add a fail-closed snapshot input mode and disabled-action presentation; do not add another installed service |
 
 New code is justified for four missing boundaries:
 
@@ -603,6 +662,12 @@ recommendation but never revives or executes a previously authorized action.
 | Dashboard data malformed | Show unavailable and disable actions |
 | User disposition expires | Recompute recommendation; do not execute immediately from stale data |
 | Keep or Pin arrives after automatic authorization | Refuse dispatch as stale; require a new decision and authorization |
+| Snapshot capture sees an active run, held writer lock, or less than ten minutes to known interval eligibility | Exit immediately without waiting or copying |
+| Snapshot capture exceeds 30 seconds | Delete the incomplete snapshot and release the writer lock |
+| Source generation or digest changes during capture | Reject and remove the incomplete snapshot |
+| Preview input resolves outside its snapshot root | Refuse startup; the serving process never reads the live path |
+| Preview input changes after startup verification | Per-request verification refuses the request and requires a new snapshot |
+| Preview receives a mutating request | Reject it before intent creation or transaction dispatch |
 
 ## Hard invariants
 
@@ -628,6 +693,13 @@ recommendation but never revives or executes a previously authorized action.
 15. Halt, pause, recovery-required, stale identity, and incomplete authority
     fail closed.
 16. All action history remains visible after later recommendations change.
+17. The serving preview cannot resolve, read, write, dispatch to, or fall back
+    to live state, skill, settings, transaction, or scheduler paths. The
+    separate capture operation may read live source files only after proving no
+    live run is active and acquiring the writer lock without waiting. It holds
+    that lock for at most 30 seconds, never begins within ten minutes of known
+    interval eligibility, and never writes through the live boundary.
+18. Preview mode never registers or changes a launchd owner.
 
 ## Migration
 
@@ -660,13 +732,19 @@ version passes the native-control qualification.
 
 Rollback is configuration-first:
 
-1. Disable dashboard mutation endpoints.
-2. Disable automatic portfolio actions.
-3. Restore the prior read-only estate presentation.
-4. Continue reading new decision and user-intent records as inert history.
-5. Restore disabled plugins through their ordered settings receipts.
-6. Restore archived skills through their Git-backed retirement records.
-7. Preserve evaluation, usage, recommendation, and action evidence.
+1. Stop any foreground preview process and prove its port is closed.
+2. Remove the preview worktree. Retain its local branch until integration or
+   explicitly delete it after its commits are no longer needed.
+3. Delete the private snapshot and manifest because they are disposable,
+   non-evidentiary copies. Retained browser proof may keep rendered captures
+   but never the copied governance state.
+4. Disable dashboard mutation endpoints.
+5. Disable automatic portfolio actions.
+6. Restore the prior read-only estate presentation.
+7. Continue reading new decision and user-intent records as inert history.
+8. Restore disabled plugins through their ordered settings receipts.
+9. Restore archived skills through their Git-backed retirement records.
+10. Preserve evaluation, usage, recommendation, and action evidence.
 
 Rollback never deletes user dispositions, decisions, receipts, retirement
 history, or recovery state.
@@ -679,6 +757,8 @@ Fail-closed rollback proof requires:
 - plugin restore returns exact effective capabilities;
 - personal restore returns the exact archived package;
 - unrelated settings and Git work remain unchanged.
+- the preview port is closed, its worktree is absent, and its disposable
+  snapshot is absent without deleting retained browser proof or branch commits.
 
 ## Acceptance criteria
 
@@ -707,8 +787,49 @@ Fail-closed rollback proof requires:
 - Every archive and disable is reversible and verified.
 - Halt, pause, stale state, conflicts, incomplete evidence, and recovery state
   block mutation.
+- A preview can render the report-only portfolio from a verified private
+  snapshot while the installed activation, schedule definition, launchd
+  inventory, capacity branch tip, and tracked working tree remain unchanged.
+- Any live-state changes during the preview window are bound to retained run
+  records from the installed capacity owner, with no live path open in the
+  preview process tree.
+- Preview mutation requests fail before user-intent creation or transaction
+  dispatch.
 
 ## Deterministic check contract
+
+### PORT-CHK-PREVIEW: Isolated report-only preview
+
+- **Protects:** Parallel dashboard development cannot disturb capacity proof or
+  create a second mutation or scheduling owner.
+- **Setup:** Record the capacity branch tip and tracked status, complete
+  launchd label and plist inventory, installed plist bytes, and activation
+  generation. Prove capture refuses both an active capacity run and a held
+  writer lock. Prove it holds an acquired lock through final validation,
+  deletes an incomplete snapshot at its 30-second deadline, and refuses to
+  start within ten minutes of known interval eligibility. Then create a stable
+  manifested snapshot in a private root, configure preview state and data
+  roots, and render the portfolio on a non-installed port. After startup, try
+  changing, replacing, and symlinking a snapshot file, a live-root fallback,
+  and every mutating endpoint. If a natural capacity tick occurs during the
+  preview window, bind each run-count and live-state delta to its retained
+  installed-owner run record.
+- **Pass:** Valid snapshot data renders; active or locked capture exits without
+  waiting or copying; source changes reject the capture; post-startup invalid
+  or changed inputs fail closed on the next request; mutation requests create
+  no intent or transaction; capture holds the writer lock through acceptance
+  or deletion but never longer than 30 seconds; the preview process has no
+  live-root path open;
+  capacity branch tip and tracked status, installed plist bytes, activation
+  generation, and the complete launchd label and plist inventory remain
+  unchanged. Every live-state or run-count delta is attributable to a retained
+  run from the already-installed capacity owner.
+- **Failure:** The preview reads or writes live state, accepts an action,
+  starts an installed helper, adds, removes, or changes a launchd label or
+  plist, changes the capacity branch or tracked tree, claims an unattributed
+  live-state delta, or continues after its snapshot identity changes.
+- **Why:** It proves the preview is a separate read-only development surface,
+  not an unreviewed second Dreaming owner.
 
 ### PORT-CHK-01: Complete recommendation coverage
 
@@ -871,6 +992,8 @@ Fail-closed rollback proof requires:
 
 ## Definition of Done: Aggressive skill portfolio governance
 
+- [ ] The isolated preview passes PORT-CHK-PREVIEW and is available for
+      browser review without changing installed capacity state.
 - [ ] Every enabled skill receives a plain-language value recommendation
       independent of mutation authority.
 - [ ] Evaluation and verified usage are the primary keep-or-prune evidence.

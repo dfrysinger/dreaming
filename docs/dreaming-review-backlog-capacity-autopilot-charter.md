@@ -12,6 +12,10 @@
 - Preserve unrelated work. Do not rewrite, discard or hide user changes.
 - Keep the implementation to the reviewed architecture. If evidence requires a
   material redesign, update and review the design before implementing it.
+- A separate report-only governance preview may proceed under
+  `docs/aggressive-skill-portfolio-governance-design.md` without changing this
+  branch tip or tracked working tree, the installed generation, or launchd.
+  Live state may change only through the existing installed capacity owner.
 
 ## Required process skills
 
@@ -68,8 +72,10 @@ with the failed command, retained evidence and smallest safe next action.
 - Run subagents only when a named process skill requires them or a task needs a
   genuinely separate context. Give each a bounded objective and do not
   duplicate their scope in the parent.
-- Do not broaden into review policy, model routing, transcript indexing,
-  learned-skill usage, watchdog presentation or unrelated dashboard work.
+- Do not broaden this branch into review policy, model routing, transcript
+  indexing, learned-skill usage, watchdog presentation or unrelated dashboard
+  work. Governance preview work belongs only in its isolated worktree until
+  capacity proof is terminal and retained.
 
 ## Installation and push policy
 

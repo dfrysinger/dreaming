@@ -2,15 +2,16 @@
 
 ## Order of work
 
-1. Finish the retained proof and cleanup for
-   `docs/dreaming-review-backlog-capacity-design.md` without changing its
-   installed cadence until the natural-tick evidence is adjudicated.
-2. Implement
-   `docs/aggressive-skill-portfolio-governance-design.md` in report-only
-   slices before enabling any mutation.
-3. Add governed user intents, personal withdrawal/archive/restore, and
+1. Leave the installed capacity generation untouched until its fresh natural
+   tick is terminal, then finish rollback and final installed proof.
+2. In parallel, implement the governance report and dashboard in the isolated
+   preview worktree using a private manifested snapshot, separate roots and
+   port, disabled mutation endpoints, and no launchd registration.
+3. After capacity natural-run and rollback evidence are retained, review and
+   merge preview commits into `feature/multi-cli-dreaming`.
+4. Add governed user intents, personal withdrawal/archive/restore, and
    whole-plugin disable/restore only after their report-only checks pass.
-4. Complete installed, browser, rollback, and paired-review proof.
+5. Complete installed, browser, rollback, and paired-review proof.
 
 ## Current baton
 
@@ -50,6 +51,16 @@
   the evidence ledger, and make the local proof commit.
 - Governance work remaining: all implementation and PORT-CHK-01 through
   PORT-CHK-14.
+- Parallel preview boundary: use
+  `/Users/dfrysinger/code/dreaming-governance-preview` on
+  `feature/aggressive-skill-governance-preview`. Before starting its server,
+  record the isolation-contract commit, prove the capture preflight, verify the
+  manifested snapshot, and configure separate roots and port. Pass the full
+  PORT-CHK-PREVIEW before accepting browser review or merging. Do not write the
+  installed Mac mini generation or live state, do not change launchd, and do
+  not merge until capacity natural-run and rollback evidence are retained.
+  Before creating the worktree, commit this isolation contract, record that
+  commit here, and require the preview branch to descend from it.
 
 ## Definition of Done: Capacity closure and aggressive portfolio governance
 

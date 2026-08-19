@@ -2,11 +2,18 @@ Execute
 `docs/aggressive-skill-portfolio-governance-autopilot-plan.md` in
 `/Users/dfrysinger/code/dreaming` on `feature/multi-cli-dreaming`.
 
-First close the remaining installed proof for the already implemented
+Keep closing the remaining installed proof for the already implemented
 four-hour, 25-attempt review-capacity change. Do not disturb the natural-tick
 evidence before adjudication.
 
-Then implement the reviewed critical work order in
+In parallel, implement the report-only preview portion of the reviewed
+critical work order in a separate worktree and private snapshot. Do not merge
+it into the capacity branch, install it, register it with launchd, or enable
+mutation until capacity natural-run and rollback evidence are terminal and
+retained.
+
+Then merge the reviewed preview and complete the installed mutation portions
+of
 `docs/aggressive-skill-portfolio-governance-design.md`: plain-language
 recommendations for every skill, evaluation and verified usage as primary
 evidence, individual plugin-skill and whole-package decisions, aggressive
