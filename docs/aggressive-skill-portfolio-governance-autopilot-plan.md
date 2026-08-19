@@ -223,8 +223,25 @@
   flows remain valid without authoring roles. Validation passes 37
   certification checks. Paired Opus/Terra review closed a circular
   catalog/rubric trust path with no unresolved material finding.
-  Bounded author/reviewer model operations and real zero-use cohort progression
-  remain outstanding.
+- The bounded evaluation-input author adapter is committed locally on the
+  isolated preview branch as `e64f9e8`. It runs exactly one Copilot author
+  operation only after the trusted sibling evaluator rebuilds the supplied
+  packet from the exact current candidate, suite, policy, compilation, routing,
+  harness, and catalog sources. The model process receives the validated packet
+  in a temporary workspace with no tools, a scrubbed environment, synthetic
+  home, real-home and source-path sandbox denies, exact model proof, bounded
+  timeout/output/normalized-token use, and no registry or authority access.
+  Claude and Codex explicitly report unqualified because their current CLI
+  boundaries cannot prove the required isolated no-tools posture. The adapter
+  emits either a trusted-field draft or explicit insufficient-information
+  reason, records actual usage and elapsed time, labels unavailable billing
+  telemetry honestly, writes no result on refusal, and uses the governance
+  canonical encoding for cross-tool draft identity. Validation passes all 26
+  vendor-adapter tests. Paired Opus/Terra review closed unvalidated packet
+  forwarding, real-home/keychain exposure, and non-ASCII identity drift with no
+  unresolved material finding. Author-operation provenance integration,
+  reviewer operations, aggregate authoring budgets, and real zero-use cohort
+  progression remain outstanding.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
