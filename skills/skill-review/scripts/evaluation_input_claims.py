@@ -13,8 +13,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Iterator
 
-SCHEMA_VERSION = 2
-OWNER_INTEGRATION_STATUS = "scheduled_owner_integration_pending"
+SCHEMA_VERSION = 3
+OWNER_INTEGRATION_STATUS = "scheduled_owner_integration_v1"
 MAX_CLAIMS_PER_LOCAL_DAY = 4
 MAX_SLOTS = 6
 MAX_NORMALIZED_TOKENS = 112_000
@@ -123,6 +123,56 @@ def lock_fence_digest() -> str | None:
     return f"{SHA256_PREFIX}{hashlib.sha256(token.encode()).hexdigest()}"
 
 
+def owner_fence_facts(owner_fence: dict[str, Any] | None) -> dict[str, Any]:
+    if owner_fence is None:
+        if (
+            os.environ.get("DREAMING_ORCHESTRATED") == "1"
+            or os.environ.get("SKILLS_LOCK_HELD_BY_PARENT") == "1"
+        ):
+            raise ClaimLedgerError(
+                "orchestrated claim requires a complete scheduled owner fence"
+            )
+        return {
+            "owner_mode": "manual",
+            "lock_fence_token_sha256": lock_fence_digest(),
+            "owner_pid": None,
+            "owner_process_identity": None,
+            "owner_process_group_identity": None,
+            "owner_boot_identity": None,
+            "owner_config_sha256": None,
+        }
+    if not isinstance(owner_fence, dict) or set(owner_fence) != {
+        "owner_pid",
+        "owner_process_identity",
+        "owner_process_group_identity",
+        "owner_boot_identity",
+        "owner_config_sha256",
+    }:
+        raise ClaimLedgerError("scheduled owner fence is malformed")
+    token_sha256 = lock_fence_digest()
+    if token_sha256 is None:
+        raise ClaimLedgerError("scheduled owner claim requires a writer lease token")
+    owner_pid = require_positive_int(owner_fence.get("owner_pid"), "owner PID")
+    return {
+        "owner_mode": "scheduled",
+        "lock_fence_token_sha256": token_sha256,
+        "owner_pid": owner_pid,
+        "owner_process_identity": require_text(
+            owner_fence.get("owner_process_identity"), "owner process identity"
+        ),
+        "owner_process_group_identity": require_text(
+            owner_fence.get("owner_process_group_identity"),
+            "owner process-group identity",
+        ),
+        "owner_boot_identity": require_text(
+            owner_fence.get("owner_boot_identity"), "owner boot identity"
+        ),
+        "owner_config_sha256": require_sha256(
+            owner_fence.get("owner_config_sha256"), "owner configuration"
+        ),
+    }
+
+
 SCHEMA = """
 CREATE TABLE schema_metadata (
   singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
@@ -141,7 +191,13 @@ CREATE TABLE claims (
   skill_key TEXT NOT NULL,
   skill_path TEXT NOT NULL,
   owner_run_id TEXT NOT NULL UNIQUE,
+  owner_mode TEXT NOT NULL CHECK (owner_mode IN ('manual', 'scheduled')),
   lock_fence_token_sha256 TEXT,
+  owner_pid INTEGER,
+  owner_process_identity TEXT,
+  owner_process_group_identity TEXT,
+  owner_boot_identity TEXT,
+  owner_config_sha256 TEXT,
   author_model TEXT NOT NULL,
   reviewer_a_model TEXT NOT NULL,
   reviewer_b_model TEXT NOT NULL,
@@ -198,6 +254,18 @@ CREATE TABLE claim_slots (
   UNIQUE (claim_id, slot_name)
 );
 
+CREATE TABLE claim_terminal_publications (
+  claim_id TEXT PRIMARY KEY REFERENCES claims(claim_id),
+  readiness_state TEXT NOT NULL
+    CHECK (readiness_state IN ('ready', 'invalid', 'insufficient_information')),
+  readiness_reason TEXT NOT NULL,
+  manifest_sha256 TEXT,
+  validation_receipt_sha256 TEXT,
+  review_receipt_sha256s_json TEXT NOT NULL,
+  transition_id TEXT,
+  acknowledged_epoch INTEGER
+);
+
 CREATE TABLE claim_events (
   event_id INTEGER PRIMARY KEY AUTOINCREMENT,
   claim_id TEXT NOT NULL REFERENCES claims(claim_id),
@@ -229,6 +297,12 @@ CREATE TRIGGER claim_slots_never_deleted
 BEFORE DELETE ON claim_slots
 BEGIN
   SELECT RAISE(ABORT, 'claim slots are never deleted or refunded');
+END;
+
+CREATE TRIGGER claim_terminal_publications_never_deleted
+BEFORE DELETE ON claim_terminal_publications
+BEGIN
+  SELECT RAISE(ABORT, 'claim terminal publications are never deleted');
 END;
 """
 
@@ -434,6 +508,7 @@ def reserve_claim(
     author_model: str,
     reviewer_a_model: str,
     reviewer_b_model: str,
+    owner_fence: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     skill_path = str(Path(require_text(skill_path, "skill path")).resolve())
     skill_key = require_text(skill_key, "skill key")
@@ -449,6 +524,7 @@ def reserve_claim(
     if len({author_model, *supplied_reviewers}) != 3:
         raise ClaimLedgerError("claim requires three distinct exact model identities")
     reviewer_a_model, reviewer_b_model = sorted(supplied_reviewers)
+    fence = owner_fence_facts(owner_fence)
     created = now_epoch()
     local_day, timezone_name, timezone_offset = local_time_facts(created)
     claim_id = identity(
@@ -461,6 +537,13 @@ def reserve_claim(
             "skill_key": skill_key,
             "candidate_id": candidate_id,
             "owner_run_id": owner_run_id,
+            "owner_mode": fence["owner_mode"],
+            "owner_process_identity": fence["owner_process_identity"],
+            "owner_process_group_identity": fence[
+                "owner_process_group_identity"
+            ],
+            "owner_boot_identity": fence["owner_boot_identity"],
+            "owner_config_sha256": fence["owner_config_sha256"],
             "author_model": author_model,
             "reviewer_models": [reviewer_a_model, reviewer_b_model],
         }
@@ -484,13 +567,16 @@ def reserve_claim(
             INSERT INTO claims (
               claim_id, local_day, created_epoch, terminal_epoch,
               timezone_name, timezone_offset_minutes, candidate_id,
-              skill_key, skill_path, owner_run_id, lock_fence_token_sha256,
+              skill_key, skill_path, owner_run_id, owner_mode,
+              lock_fence_token_sha256, owner_pid, owner_process_identity,
+              owner_process_group_identity, owner_boot_identity,
+              owner_config_sha256,
               author_model, reviewer_a_model, reviewer_b_model,
               status, terminal_reason, initial_manifest_sha256,
               repaired_manifest_sha256, review_set_id,
               max_slots, max_normalized_tokens, max_elapsed_ms
             ) VALUES (
-              ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+              ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
               'open', NULL, NULL, NULL, NULL, ?, ?, ?
             )
             """,
@@ -504,7 +590,13 @@ def reserve_claim(
                 skill_key,
                 skill_path,
                 owner_run_id,
-                lock_fence_digest(),
+                fence["owner_mode"],
+                fence["lock_fence_token_sha256"],
+                fence["owner_pid"],
+                fence["owner_process_identity"],
+                fence["owner_process_group_identity"],
+                fence["owner_boot_identity"],
+                fence["owner_config_sha256"],
                 author_model,
                 reviewer_a_model,
                 reviewer_b_model,
@@ -546,7 +638,8 @@ def reserve_claim(
                 "max_elapsed_ms": MAX_ELAPSED_MS,
                 "max_normalized_tokens": MAX_NORMALIZED_TOKENS,
                 "max_slots": MAX_SLOTS,
-                "owner_integration": "scheduled_owner_integration_pending",
+                "owner_integration": OWNER_INTEGRATION_STATUS,
+                "owner_mode": fence["owner_mode"],
                 "owner_run_id": owner_run_id,
                 "reviewer_order": [reviewer_a_model, reviewer_b_model],
                 "skill_key": skill_key,
@@ -578,6 +671,253 @@ def _slot(
     return row
 
 
+def _record_pending_terminal(
+    connection: sqlite3.Connection,
+    claim_id: str,
+    *,
+    readiness_state: str,
+    readiness_reason: str,
+    manifest_sha256: str | None,
+    validation_receipt_sha256: str | None,
+    review_receipt_sha256s: list[str],
+) -> dict[str, Any]:
+    if readiness_state not in {"ready", "invalid", "insufficient_information"}:
+        raise ClaimLedgerError("pending readiness state is unsupported")
+    readiness_reason = require_text(readiness_reason, "pending readiness reason")
+    manifest = (
+        require_sha256(manifest_sha256, "pending readiness manifest")
+        if manifest_sha256 is not None
+        else None
+    )
+    validation = (
+        require_sha256(
+            validation_receipt_sha256, "pending readiness validation receipt"
+        )
+        if validation_receipt_sha256 is not None
+        else None
+    )
+    reviews = sorted(
+        require_sha256(value, "pending readiness review receipt")
+        for value in review_receipt_sha256s
+    )
+    if len(reviews) != len(set(reviews)):
+        raise ClaimLedgerError("pending readiness reviews must be distinct")
+    expected = {
+        "readiness_state": readiness_state,
+        "readiness_reason": readiness_reason,
+        "manifest_sha256": manifest,
+        "validation_receipt_sha256": validation,
+        "review_receipt_sha256s_json": json.dumps(reviews, separators=(",", ":")),
+    }
+    existing = connection.execute(
+        """
+        SELECT * FROM claim_terminal_publications WHERE claim_id=?
+        """,
+        (claim_id,),
+    ).fetchone()
+    if existing is not None:
+        if any(existing[key] != value for key, value in expected.items()):
+            raise ClaimLedgerError(
+                "claim terminal publication differs from its retained pending state"
+            )
+        return {
+            **expected,
+            "review_receipt_sha256s": reviews,
+            "transition_id": existing["transition_id"],
+            "acknowledged_epoch": existing["acknowledged_epoch"],
+        }
+    connection.execute(
+        """
+        INSERT INTO claim_terminal_publications (
+          claim_id, readiness_state, readiness_reason, manifest_sha256,
+          validation_receipt_sha256, review_receipt_sha256s_json,
+          transition_id, acknowledged_epoch
+        ) VALUES (?, ?, ?, ?, ?, ?, NULL, NULL)
+        """,
+        (
+            claim_id,
+            readiness_state,
+            readiness_reason,
+            manifest,
+            validation,
+            expected["review_receipt_sha256s_json"],
+        ),
+    )
+    append_event(
+        connection,
+        claim_id,
+        "terminal_publication_pending",
+        {
+            "manifest_sha256": manifest,
+            "readiness_reason": readiness_reason,
+            "readiness_state": readiness_state,
+            "review_receipt_sha256s": reviews,
+            "validation_receipt_sha256": validation,
+        },
+    )
+    return {
+        **expected,
+        "review_receipt_sha256s": reviews,
+        "transition_id": None,
+        "acknowledged_epoch": None,
+    }
+
+
+def _record_retained_terminal(
+    connection: sqlite3.Connection,
+    claim_id: str,
+    *,
+    readiness_state: str,
+    readiness_reason: str,
+) -> dict[str, Any]:
+    retained = _claim(connection, claim_id)
+    manifest_sha256 = (
+        retained["repaired_manifest_sha256"]
+        or retained["initial_manifest_sha256"]
+    )
+    review_rows = connection.execute(
+        """
+        SELECT review_receipt_sha256
+        FROM claim_slots
+        WHERE claim_id=?
+          AND manifest_sha256=?
+          AND status='completed'
+          AND review_receipt_sha256 IS NOT NULL
+        ORDER BY review_receipt_sha256
+        """,
+        (claim_id, manifest_sha256),
+    ).fetchall()
+    validation_rows = connection.execute(
+        """
+        SELECT DISTINCT validation_receipt_sha256
+        FROM claim_slots
+        WHERE claim_id=?
+          AND manifest_sha256=?
+          AND slot_name IN ('review_a', 'review_b', 'rereview_a', 'rereview_b')
+          AND validation_receipt_sha256 IS NOT NULL
+        """,
+        (claim_id, manifest_sha256),
+    ).fetchall()
+    if len(validation_rows) > 1:
+        raise ClaimLedgerError(
+            "terminal claim retains conflicting validation receipts"
+        )
+    return _record_pending_terminal(
+        connection,
+        claim_id,
+        readiness_state=readiness_state,
+        readiness_reason=readiness_reason,
+        manifest_sha256=manifest_sha256,
+        validation_receipt_sha256=(
+            validation_rows[0]["validation_receipt_sha256"]
+            if validation_rows
+            else None
+        ),
+        review_receipt_sha256s=[
+            row["review_receipt_sha256"] for row in review_rows
+        ],
+    )
+
+
+def acknowledge_terminal_publication(
+    claim_id: str, transition: dict[str, Any]
+) -> dict[str, Any]:
+    if not isinstance(transition, dict):
+        raise ClaimLedgerError("terminal transition must be an in-memory object")
+    retained_transition = dict(transition)
+    transition_id = require_sha256(
+        retained_transition.pop("transition_id", None), "terminal transition"
+    )
+    if identity(retained_transition) != transition_id:
+        raise ClaimLedgerError("terminal transition content identity is invalid")
+    current = now_epoch()
+    with transaction() as connection:
+        claim = _claim(connection, claim_id)
+        if claim["status"] == "open":
+            raise ClaimLedgerError("open claim cannot acknowledge a terminal transition")
+        publication = connection.execute(
+            """
+            SELECT * FROM claim_terminal_publications WHERE claim_id=?
+            """,
+            (claim["claim_id"],),
+        ).fetchone()
+        if publication is None:
+            raise ClaimLedgerError("claim has no pending terminal publication")
+        if (
+            transition.get("claim_id") != claim["claim_id"]
+            or transition.get("state") != publication["readiness_state"]
+            or transition.get("reason") != publication["readiness_reason"]
+            or transition.get("input_manifest_sha256")
+            != publication["manifest_sha256"]
+            or transition.get("validation_receipt_sha256")
+            != publication["validation_receipt_sha256"]
+            or sorted(transition.get("review_receipt_sha256s") or [])
+            != json.loads(publication["review_receipt_sha256s_json"])
+        ):
+            raise ClaimLedgerError(
+                "terminal transition facts differ from the retained publication"
+            )
+        if publication["transition_id"] not in {None, transition_id}:
+            raise ClaimLedgerError(
+                "terminal transition differs from the retained publication"
+            )
+        if publication["acknowledged_epoch"] is None:
+            connection.execute(
+                """
+                UPDATE claim_terminal_publications
+                SET transition_id=?, acknowledged_epoch=?
+                WHERE claim_id=? AND acknowledged_epoch IS NULL
+                """,
+                (transition_id, current, claim["claim_id"]),
+            )
+            append_event(
+                connection,
+                claim["claim_id"],
+                "terminal_publication_acknowledged",
+                {"transition_id": transition_id},
+                created_epoch=current,
+            )
+        return {
+            "claim_id": claim["claim_id"],
+            "transition_id": transition_id,
+            "acknowledged": True,
+        }
+
+
+def pending_terminal_publications() -> list[dict[str, Any]]:
+    connection = connect(create=False)
+    try:
+        rows = connection.execute(
+            """
+            SELECT p.*, c.owner_run_id, c.owner_mode
+            FROM claim_terminal_publications p
+            JOIN claims c ON c.claim_id=p.claim_id
+            WHERE p.acknowledged_epoch IS NULL
+            ORDER BY c.created_epoch, p.claim_id
+            """
+        ).fetchall()
+        return [
+            {
+                "claim_id": row["claim_id"],
+                "owner_run_id": row["owner_run_id"],
+                "owner_mode": row["owner_mode"],
+                "readiness_state": row["readiness_state"],
+                "readiness_reason": row["readiness_reason"],
+                "manifest_sha256": row["manifest_sha256"],
+                "validation_receipt_sha256": row[
+                    "validation_receipt_sha256"
+                ],
+                "review_receipt_sha256s": json.loads(
+                    row["review_receipt_sha256s_json"]
+                ),
+                "transition_id": row["transition_id"],
+            }
+            for row in rows
+        ]
+    finally:
+        connection.close()
+
+
 def _invalidate(
     connection: sqlite3.Connection,
     claim: sqlite3.Row,
@@ -603,6 +943,12 @@ def _invalidate(
         event_type,
         {"reason": reason, **details},
         slot_name=slot_name,
+    )
+    _record_retained_terminal(
+        connection,
+        claim["claim_id"],
+        readiness_state="invalid",
+        readiness_reason=reason,
     )
 
 
@@ -641,6 +987,12 @@ def _fail_slot(
         "slot_failed_unknown_spent",
         {"failure_reason": reason, "usage_status": "unavailable"},
         slot_name=slot["slot_name"],
+    )
+    _record_retained_terminal(
+        connection,
+        claim["claim_id"],
+        readiness_state="invalid",
+        readiness_reason="budget_unknown",
     )
 
 
@@ -832,6 +1184,20 @@ def prepare_dispatch(
                                     validation_receipt_sha256,
                                     "validation receipt",
                                 )
+                                if slot_name == "review_b":
+                                    prior_validation = _slot(
+                                        connection,
+                                        claim["claim_id"],
+                                        "review_a",
+                                    )["validation_receipt_sha256"]
+                                    if (
+                                        prior_validation
+                                        != validation_receipt_sha256
+                                    ):
+                                        error = (
+                                            "initial reviews require one "
+                                            "validation receipt"
+                                        )
                                 expected_review_set = review_set_identity(
                                     claim["claim_id"],
                                     claim["candidate_id"],
@@ -842,7 +1208,7 @@ def prepare_dispatch(
                                         claim["reviewer_b_model"],
                                     ],
                                 )
-                                if (
+                                if error is None and (
                                     review_set_id is not None
                                     and review_set_id != expected_review_set
                                 ):
@@ -855,7 +1221,7 @@ def prepare_dispatch(
                                         slot_name=slot_name,
                                     )
                                     error = "claim review set identity is invalid"
-                                else:
+                                elif error is None:
                                     review_set_id = expected_review_set
                                     connection.execute(
                                         """
@@ -959,6 +1325,19 @@ def prepare_dispatch(
                                 validation_receipt_sha256,
                                 "re-review validation receipt",
                             )
+                            if slot_name == "rereview_b":
+                                prior_validation = _slot(
+                                    connection,
+                                    claim["claim_id"],
+                                    "rereview_a",
+                                )["validation_receipt_sha256"]
+                                if (
+                                    prior_validation
+                                    != validation_receipt_sha256
+                                ):
+                                    error = (
+                                        "re-reviews require one validation receipt"
+                                    )
                         repair_slot = _slot(
                             connection, claim["claim_id"], "repair"
                         )
@@ -1391,6 +1770,12 @@ def complete_slot(
                         {"reason": terminal_reason, "status": "completed"},
                         created_epoch=current,
                     )
+                    _record_retained_terminal(
+                        connection,
+                        claim["claim_id"],
+                        readiness_state="insufficient_information",
+                        readiness_reason=terminal_reason,
+                    )
                 elif slot_name == "rereview_b":
                     rereviews = connection.execute(
                         """
@@ -1420,6 +1805,12 @@ def complete_slot(
                                 "status": "invalid",
                             },
                             created_epoch=current,
+                        )
+                        _record_retained_terminal(
+                            connection,
+                            claim["claim_id"],
+                            readiness_state="invalid",
+                            readiness_reason="independent_rereview_rejected",
                         )
     if error is not None:
         raise ClaimLedgerError(error)
@@ -1595,7 +1986,16 @@ def complete_claim_ready(
                 },
                 created_epoch=current,
             )
-        return facts
+        publication = _record_pending_terminal(
+            connection,
+            claim["claim_id"],
+            readiness_state="ready",
+            readiness_reason="validated_and_reviewed",
+            manifest_sha256=manifest_sha256,
+            validation_receipt_sha256=validation_receipt_sha256,
+            review_receipt_sha256s=review_receipt_sha256s,
+        )
+        return {**facts, "terminal_publication": publication}
 
 
 def inspect_claim(claim_id: str) -> dict[str, Any]:
@@ -1618,6 +2018,12 @@ def inspect_claim(claim_id: str) -> dict[str, Any]:
             """,
             (claim["claim_id"],),
         ).fetchall()
+        terminal_publication = connection.execute(
+            """
+            SELECT * FROM claim_terminal_publications WHERE claim_id=?
+            """,
+            (claim["claim_id"],),
+        ).fetchone()
         pending_usage = any(
             slot["status"] == "dispatching" for slot in slots
         )
@@ -1653,7 +2059,15 @@ def inspect_claim(claim_id: str) -> dict[str, Any]:
             "owner_run_id": claim["owner_run_id"],
             "lock_fence": {
                 "token_sha256": claim["lock_fence_token_sha256"],
-                "scheduled_owner_integration": "pending",
+                "owner_mode": claim["owner_mode"],
+                "scheduled_owner_integration": OWNER_INTEGRATION_STATUS,
+                "owner_pid": claim["owner_pid"],
+                "owner_process_identity": claim["owner_process_identity"],
+                "owner_process_group_identity": claim[
+                    "owner_process_group_identity"
+                ],
+                "owner_boot_identity": claim["owner_boot_identity"],
+                "owner_config_sha256": claim["owner_config_sha256"],
             },
             "models": {
                 "author": claim["author_model"],
@@ -1665,6 +2079,25 @@ def inspect_claim(claim_id: str) -> dict[str, Any]:
             "initial_manifest_sha256": claim["initial_manifest_sha256"],
             "repaired_manifest_sha256": claim["repaired_manifest_sha256"],
             "review_set_id": claim["review_set_id"],
+            "terminal_publication": (
+                {
+                    "readiness_state": terminal_publication["readiness_state"],
+                    "readiness_reason": terminal_publication["readiness_reason"],
+                    "manifest_sha256": terminal_publication["manifest_sha256"],
+                    "validation_receipt_sha256": terminal_publication[
+                        "validation_receipt_sha256"
+                    ],
+                    "review_receipt_sha256s": json.loads(
+                        terminal_publication["review_receipt_sha256s_json"]
+                    ),
+                    "transition_id": terminal_publication["transition_id"],
+                    "acknowledged_epoch": terminal_publication[
+                        "acknowledged_epoch"
+                    ],
+                }
+                if terminal_publication is not None
+                else None
+            ),
             "limits": {
                 "slots": claim["max_slots"],
                 "normalized_tokens": claim["max_normalized_tokens"],

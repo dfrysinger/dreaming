@@ -342,6 +342,10 @@ else:
 wrong_state = claims.inspect_claim(wrong["claim_id"])
 assert wrong_state["status"] == "invalid"
 assert wrong_state["slots"][0]["status"] == "unstarted"
+assert wrong_state["terminal_publication"]["readiness_state"] == "invalid"
+assert wrong_state["terminal_publication"]["readiness_reason"] == wrong_state[
+    "terminal_reason"
+]
 assert not any(event["event_type"] == "slot_dispatching" for event in wrong_state["events"])
 passed("pre-call model substitution invalidates without spending a slot")
 
@@ -569,11 +573,80 @@ assert completion_mismatch_state["terminal_reason"] == "budget_unknown"
 assert failed_review["status"] == "failed"
 assert failed_review["usage_status"] == "unavailable"
 assert failed_review["failure_reason"] == "review_manifest_invalid"
-assert completion_mismatch_state["events"][-1]["details"] == {
+failed_event = next(
+    event
+    for event in completion_mismatch_state["events"]
+    if event["event_type"] == "slot_failed_unknown_spent"
+)
+assert failed_event["details"] == {
     "failure_reason": "review_manifest_invalid",
     "usage_status": "unavailable",
 }
 passed("review manifest failure survives malformed trailing completion fields")
+
+use_state("validation-divergence")
+validation_claim = reserve("run-validation-divergence")
+validation_claim_id = validation_claim["claim_id"]
+validation_manifest = sha("validation-divergence-manifest")
+validation_author_packet = sha("validation-divergence-author-packet")
+dispatch(
+    validation_claim_id,
+    "author",
+    "model-author",
+    validation_author_packet,
+)
+claims.complete_slot(
+    claim_id=validation_claim_id,
+    slot_name="author",
+    operation=operation(
+        "author", "model-author", validation_author_packet, 100
+    ),
+    manifest_sha256=validation_manifest,
+)
+validation_one = sha("validation-divergence-one")
+validation_review_packet = sha("validation-divergence-review-a-packet")
+dispatch(
+    validation_claim_id,
+    "review_a",
+    "model-review-a",
+    validation_review_packet,
+    manifest=validation_manifest,
+    validation=validation_one,
+)
+validation_review_receipt = sha("validation-divergence-review-a-receipt")
+claims.complete_slot(
+    claim_id=validation_claim_id,
+    slot_name="review_a",
+    operation=operation(
+        "review", "model-review-a", validation_review_packet, 100
+    ),
+    manifest_sha256=validation_manifest,
+    review_receipt_sha256=validation_review_receipt,
+    decision="accept",
+)
+try:
+    dispatch(
+        validation_claim_id,
+        "review_b",
+        "model-review-b",
+        sha("validation-divergence-review-b-packet"),
+        manifest=validation_manifest,
+        validation=sha("validation-divergence-two"),
+    )
+except claims.ClaimLedgerError as error:
+    assert "one validation receipt" in str(error)
+else:
+    raise AssertionError("initial reviews accepted divergent validation receipts")
+validation_state = claims.inspect_claim(validation_claim_id)
+assert validation_state["status"] == "invalid"
+assert validation_state["slots"][2]["status"] == "unstarted"
+assert validation_state["terminal_publication"]["validation_receipt_sha256"] == (
+    validation_one
+)
+assert validation_state["terminal_publication"]["review_receipt_sha256s"] == [
+    validation_review_receipt
+]
+passed("divergent review validation refuses before dispatch and still closes")
 
 use_state("repair-ready")
 repair_claim = reserve("run-repair-ready")
@@ -945,6 +1018,12 @@ insufficient_state = claims.inspect_claim(insufficient["claim_id"])
 assert insufficient_state["status"] == "completed"
 assert insufficient_state["terminal_reason"] == "insufficient_information"
 assert insufficient_state["slots"][0]["usage_status"] == "available"
+assert insufficient_state["terminal_publication"]["readiness_state"] == (
+    "insufficient_information"
+)
+assert insufficient_state["terminal_publication"]["readiness_reason"] == (
+    "insufficient_information"
+)
 passed("insufficient information is terminal with actual author usage")
 
 use_state("ready")
@@ -1025,9 +1104,125 @@ claims.complete_claim_ready(
     validation_receipt_sha256=ready_validation,
     review_receipt_sha256s=review_receipts,
 )
-assert claims.inspect_claim(ready_claim)["terminal_reason"] == "ready"
+ready_state = claims.inspect_claim(ready_claim)
+assert ready_state["terminal_reason"] == "ready"
+assert ready_state["terminal_publication"] == {
+    "readiness_state": "ready",
+    "readiness_reason": "validated_and_reviewed",
+    "manifest_sha256": ready_manifest,
+    "validation_receipt_sha256": ready_validation,
+    "review_receipt_sha256s": sorted(review_receipts),
+    "transition_id": None,
+    "acknowledged_epoch": None,
+}
+assert claims.pending_terminal_publications()[0]["claim_id"] == ready_claim
+terminal_transition = {
+    "schema_version": 1,
+    "kind": "evaluation_input_readiness_transition",
+    "claim_id": ready_claim,
+    "state": "ready",
+    "reason": "validated_and_reviewed",
+    "input_manifest_sha256": ready_manifest,
+    "validation_receipt_sha256": ready_validation,
+    "review_receipt_sha256s": sorted(review_receipts),
+}
+terminal_transition["transition_id"] = claims.identity(terminal_transition)
+wrong_transition = dict(terminal_transition)
+wrong_transition["claim_id"] = sha("wrong-terminal-claim")
+wrong_transition["transition_id"] = claims.identity(
+    {key: value for key, value in wrong_transition.items() if key != "transition_id"}
+)
+try:
+    claims.acknowledge_terminal_publication(ready_claim, wrong_transition)
+except claims.ClaimLedgerError as error:
+    assert "facts differ" in str(error)
+else:
+    raise AssertionError("terminal publication acknowledged another claim")
+claims.acknowledge_terminal_publication(ready_claim, terminal_transition)
+claims.acknowledge_terminal_publication(ready_claim, terminal_transition)
+acknowledged = claims.inspect_claim(ready_claim)["terminal_publication"]
+assert acknowledged["transition_id"] == terminal_transition["transition_id"]
+assert acknowledged["acknowledged_epoch"] is not None
+assert claims.pending_terminal_publications() == []
+different_transition = dict(terminal_transition)
+different_transition["created_at"] = "later"
+different_transition["transition_id"] = claims.identity(
+    {
+        key: value
+        for key, value in different_transition.items()
+        if key != "transition_id"
+    }
+)
+try:
+    claims.acknowledge_terminal_publication(
+        ready_claim, different_transition
+    )
+except claims.ClaimLedgerError as error:
+    assert "differs" in str(error)
+else:
+    raise AssertionError("terminal publication accepted another transition")
 passed("author and ordered reviews bind one canonical accepting review set")
+passed("terminal readiness publication is retained and exactly acknowledged")
 
+use_state("scheduled-owner-fence")
+owner_fence = {
+    "owner_pid": 4242,
+    "owner_process_identity": "pid:4242:start:fixture",
+    "owner_process_group_identity": "pgid:4242:leader:fixture",
+    "owner_boot_identity": "boot:fixture",
+    "owner_config_sha256": sha("owner-config"),
+}
+os.environ["DREAMING_ORCHESTRATED"] = "1"
+try:
+    reserve("orchestrated-owner-without-fence")
+except claims.ClaimLedgerError as error:
+    assert "complete scheduled owner fence" in str(error)
+else:
+    raise AssertionError("orchestrated claim silently fell back to manual mode")
+del os.environ["DREAMING_ORCHESTRATED"]
+try:
+    claims.reserve_claim(
+        skill_path=str(root / "skill"),
+        skill_key="fixture-skill-key",
+        candidate_id=sha("candidate"),
+        owner_run_id="scheduled-owner-without-token",
+        author_model="scheduled-author",
+        reviewer_a_model="scheduled-review-a",
+        reviewer_b_model="scheduled-review-b",
+        owner_fence=owner_fence,
+    )
+except claims.ClaimLedgerError as error:
+    assert "writer lease token" in str(error)
+else:
+    raise AssertionError("scheduled owner claim did not require a lease token")
+os.environ["SKILLS_LOCK_TOKEN"] = "00000000-0000-4000-8000-000000000001"
+scheduled = claims.reserve_claim(
+    skill_path=str(root / "skill"),
+    skill_key="fixture-skill-key",
+    candidate_id=sha("candidate"),
+    owner_run_id="scheduled-owner-run",
+    author_model="scheduled-author",
+    reviewer_a_model="scheduled-review-a",
+    reviewer_b_model="scheduled-review-b",
+    owner_fence=owner_fence,
+)
+fence = scheduled["lock_fence"]
+assert fence["owner_mode"] == "scheduled"
+assert fence["scheduled_owner_integration"] == claims.OWNER_INTEGRATION_STATUS
+assert fence["owner_pid"] == 4242
+assert fence["owner_process_identity"] == owner_fence["owner_process_identity"]
+assert fence["owner_process_group_identity"] == owner_fence[
+    "owner_process_group_identity"
+]
+assert fence["owner_boot_identity"] == owner_fence["owner_boot_identity"]
+assert fence["owner_config_sha256"] == owner_fence["owner_config_sha256"]
+assert fence["token_sha256"] == "sha256:" + __import__("hashlib").sha256(
+    os.environ["SKILLS_LOCK_TOKEN"].encode()
+).hexdigest()
+del os.environ["SKILLS_LOCK_TOKEN"]
+passed("scheduled claims bind writer, process, boot, and configuration fences")
+
+use_state("ready")
 ledger = claims.ledger_path()
 with sqlite3.connect(ledger) as connection:
     event_id = connection.execute(
@@ -1063,6 +1258,6 @@ assert unknown.returncode != 0
 assert "invalid choice" in unknown.stderr
 passed("historical inspection ignores live adapter bytes and no completion CLI exists")
 
-assert passes == 25
+assert passes == 28
 print(f"PASS  {passes} deterministic evaluation-input claim ledger checks")
 PY

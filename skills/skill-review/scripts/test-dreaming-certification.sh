@@ -1084,13 +1084,21 @@ reject_claim_state="$(
   env SKILLS_STATE_DIR="$AUTHORING/reject-state" \
     "$EVAL" v2-input-claim-inspect --claim-id "$repair_claim_id"
 )"
-python3 - "$reject_claim_state" <<'PY'
+python3 - "$reject_claim_state" "$repaired_manifest" \
+  "$repaired_validation_id" "$reject_rereview_a" "$reject_rereview_b" <<'PY'
 import json
 import sys
 
 claim = json.loads(sys.argv[1])
 assert claim["status"] == "invalid"
 assert claim["terminal_reason"] == "independent_rereview_rejected"
+terminal = claim["terminal_publication"]
+assert terminal["readiness_state"] == "invalid"
+assert terminal["manifest_sha256"] == sys.argv[2]
+assert terminal["validation_receipt_sha256"] == sys.argv[3]
+assert terminal["review_receipt_sha256s"] == sorted(
+    json.loads(value)["receipt_sha256"] for value in sys.argv[4:]
+)
 PY
 rereview_a="$(
   env DREAMING_EXECUTOR_TEST_ALLOW_ROOT="$TEST_ROOT" \

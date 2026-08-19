@@ -25,6 +25,7 @@ sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 from evaluation_input_claims import (  # noqa: E402
     SLOT_DEFINITIONS as CLAIM_SLOT_DEFINITIONS,
     ClaimLedgerError,
+    acknowledge_terminal_publication,
     assert_ready as assert_claim_ready,
     complete_claim_ready,
     complete_slot as complete_claim_slot,
@@ -5485,6 +5486,10 @@ def v2_input_ready(args: argparse.Namespace) -> dict[str, Any]:
                             else None
                         )
                         resolve_ready_input(skill_dir)
+                        if bounded:
+                            acknowledge_terminal_publication(
+                                claim_id, current
+                            )
                         return ready_result(skill_dir, current, claim_facts)
             else:
                 recoverable = [
@@ -5530,6 +5535,10 @@ def v2_input_ready(args: argparse.Namespace) -> dict[str, Any]:
                     recovered["transition_id"],
                 )
                 resolve_ready_input(skill_dir)
+                if bounded:
+                    acknowledge_terminal_publication(
+                        claim_id, recovered
+                    )
                 return ready_result(skill_dir, recovered, claim_facts)
         claim_facts = (
             complete_claim_ready(
@@ -5558,6 +5567,13 @@ def v2_input_ready(args: argparse.Namespace) -> dict[str, Any]:
             ),
         )
         resolve_ready_input(skill_dir)
+        if bounded:
+            published = load_input_transition(
+                skill_dir, resolved["candidate_id"], result["transition_id"]
+            )
+            acknowledge_terminal_publication(
+                claim_id, published
+            )
         return {
             **result,
             **(
