@@ -256,8 +256,24 @@
   Validation passes 37 certification checks and all 26 vendor-adapter tests.
   Paired Opus/Terra review closed both trust-anchor findings and withdrew the
   inapplicable preview-only migration concern with no unresolved material
-  finding. Reviewer operations, aggregate authoring budgets, and real zero-use
-  cohort progression remain outstanding.
+  finding.
+- The independent input-review work order is committed locally on the isolated
+  preview branch as `a2b60b1`. While Copilot remains the sole qualified
+  isolated no-tools vendor, the author and two reviewers must expose three
+  distinct requested-and-provider-observed model identities through fresh
+  isolated operations. Initial and repaired readiness must retain and
+  revalidate exact author, repair, review-packet, manifest, adapter, usage,
+  billing, elapsed-time, review-set, and repair-lineage provenance. Repaired
+  input reuses the original author and reviewer models; substitution refuses
+  before a model call and a later daily claim starts a wholly new lifecycle.
+  Available billing facts bind canonical provider-native event or line-item
+  evidence; unavailable billing remains explicit. The six operation slots
+  remain fixed and every started failure remains spent. Bounded Opus/Terra
+  design review closed registry-schema, substitution, observed-model,
+  repair-lineage, billing-provenance, and author-receipt findings with no
+  unresolved material defect. Reviewer packet/operation implementation,
+  aggregate authoring budgets, and real zero-use cohort progression remain
+  outstanding.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
