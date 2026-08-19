@@ -453,7 +453,6 @@ canonical JSON whose filename is the SHA-256 of its canonical bytes. It binds:
 - compilation configuration, routing, fixture, grader, rubric, and harness
   identities required to reproduce the run;
 - the authoring method and safe source identities;
-- independent review receipt identities;
 - the registry schema and tool version.
 
 The complete normalized policy object is addressed separately from
@@ -475,7 +474,10 @@ transition additionally binds the deterministic-validation receipt and two
 independent accepting review receipt digests for that same manifest. Review
 receipts bind their reviewer, decision, candidate ID, manifest digest, and
 reviewed object inventory. A readiness transition cannot borrow validation or
-review from another manifest.
+review from another manifest. The manifest does not contain validation or
+review receipt identities: those receipts are created only after the immutable
+manifest exists, and the later readiness transition binds all of them without
+a circular content address.
 
 The mutable current pointer is only a discovery aid. It names the exact skill
 path, candidate ID, and latest readiness transition ID. The transition, not
