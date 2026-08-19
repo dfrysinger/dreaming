@@ -330,6 +330,33 @@
   test-control forwarding, and vacuous no-tools assertions with no unresolved
   material finding. The aggregate six-operation ledger is now the next
   prerequisite.
+- The aggregate evaluation-input authoring claim foundation is implemented and
+  committed locally on the isolated preview branch as `62f3336`. A durable
+  schema-versioned SQLite ledger under the existing Dreaming state root uses
+  `BEGIN IMMEDIATE`, immutable events, crash-safe idempotent bootstrap, and
+  `0600` repair on every writable open. Reservation atomically enforces one
+  claim per owner run, four claims per captured local day, three distinct model
+  identities, and exactly six fixed author/reviewer/repair/re-review slots.
+  Trusted author and initial-review commands require the claim, persist
+  `dispatching` before a model call, pass the lower per-call or remaining
+  aggregate token/time bound, and record validated operation, usage, elapsed,
+  billing, packet, manifest, validation, receipt, model, and review-set facts.
+  Started timeout, malformed output, crash, unknown usage, or any cap breach is
+  permanently spent and blocks continuation; pre-call substitution invalidates
+  without dispatch. Repair/re-review slots exist but explicitly refuse until
+  their reviewed lineage implementation lands. Bounded readiness requires the
+  same completed claim, manifest, validation, two independent accepts, and
+  canonical review set. Ready publication is serialized, exact replay is
+  idempotent, interrupted pointer publication recovers, and a different valid
+  lifecycle may append the declared `ready -> ready` transition without
+  creating sibling tips. Validation passes 20 focused ledger checks, 39
+  certification checks, 26 vendor-adapter tests, and 23 evaluator regressions.
+  Three split Opus/Terra reviews closed schema bootstrap, per-call cap,
+  unsupported future-slot, transactional failure, vacuous test, concurrent
+  readiness, ready-republication, and crash-safe file-mode findings with no
+  unresolved material defect. The ledger truthfully records scheduled-owner
+  lease integration as `pending`; repair/re-review lineage and existing-owner
+  orchestration remain the next prerequisites.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
