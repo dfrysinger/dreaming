@@ -17,7 +17,7 @@ import subprocess
 import sys
 import tempfile
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -5564,6 +5564,7 @@ def publish_pending_terminal(
     publication: dict[str, Any],
     *,
     authority_check: Callable[[], None] | None = None,
+    readiness_lock_held: bool = False,
 ) -> dict[str, Any]:
     skill_dir = resolve_path(
         Path(publication["skill_path"]), "pending terminal skill directory"
@@ -5577,7 +5578,8 @@ def publish_pending_terminal(
             "pending terminal candidate identity differs from the current skill"
         )
     validate_pending_terminal_facts(skill_dir, publication)
-    with input_readiness_state_lock():
+    lock = nullcontext() if readiness_lock_held else input_readiness_state_lock()
+    with lock:
         readiness_root = input_readiness_dir(skill_dir, candidate)
         if readiness_root.exists() or readiness_root.is_symlink():
             transitions, tips = load_input_transition_history(
@@ -5683,19 +5685,8 @@ def publish_pending_terminal(
         }
 
 
-def assert_input_owner_authority() -> None:
-    if (
-        os.environ.get("DREAMING_ORCHESTRATED") != "1"
-        or os.environ.get("SKILLS_LOCK_HELD_BY_PARENT") != "1"
-        or not os.environ.get("DREAMING_PARENT_RUN_ID")
-        or not os.environ.get("SKILLS_LOCK_TOKEN")
-        or not os.environ.get("SKILLS_LOCK_OWNER_PID")
-        or not os.environ.get("SKILLS_LOCK_OWNER_IDENTITY")
-    ):
-        raise EvaluationError(
-            "evaluation-input owner recovery requires inherited orchestration"
-        )
-    halt_file = Path(
+def input_owner_halt_file() -> Path:
+    return Path(
         os.environ.get(
             "DREAMING_HALT_FILE",
             Path(
@@ -5707,8 +5698,20 @@ def assert_input_owner_authority() -> None:
             / "disable-daemon",
         )
     )
-    if halt_file.exists():
-        raise EvaluationError("evaluation-input owner recovery is halted")
+
+
+def assert_input_owner_lease() -> None:
+    if (
+        os.environ.get("DREAMING_ORCHESTRATED") != "1"
+        or os.environ.get("SKILLS_LOCK_HELD_BY_PARENT") != "1"
+        or not os.environ.get("DREAMING_PARENT_RUN_ID")
+        or not os.environ.get("SKILLS_LOCK_TOKEN")
+        or not os.environ.get("SKILLS_LOCK_OWNER_PID")
+        or not os.environ.get("SKILLS_LOCK_OWNER_IDENTITY")
+    ):
+        raise EvaluationError(
+            "evaluation-input owner recovery requires inherited orchestration"
+        )
     lock_assert = subprocess.run(
         [
             sys.executable,
@@ -5726,6 +5729,20 @@ def assert_input_owner_authority() -> None:
     )
     if lock_assert.returncode != 0:
         raise EvaluationError("evaluation-input owner writer lease is invalid")
+
+
+def assert_input_owner_authority() -> None:
+    assert_input_owner_lease()
+    if input_owner_halt_file().exists():
+        raise EvaluationError("evaluation-input owner recovery is halted")
+
+
+def assert_input_owner_operator_authority() -> None:
+    assert_input_owner_lease()
+    if not input_owner_halt_file().exists():
+        raise EvaluationError(
+            "operator owner recovery requires the Dreaming halt file"
+        )
 
 
 def boot_identity_from_sysctl(value: str) -> str:
@@ -6042,6 +6059,61 @@ def reconcile_open_owner_claims(
     }
 
 
+def recoverable_claim_readiness(claim: dict[str, Any]) -> dict[str, Any]:
+    readiness = resolve_input_readiness(Path(claim["skill_path"]))
+    if (
+        readiness["state"] not in {"drafting", "review_required"}
+        or readiness["candidate_id"] != claim["candidate_id"]
+        or readiness["skill_key"] != claim["skill_key"]
+    ):
+        raise EvaluationError(
+            "open claim readiness is not recoverable for the recorded candidate"
+        )
+    return readiness
+
+
+def inspect_operator_owner_death(
+    claim: dict[str, Any], *, authority_check: Any
+) -> dict[str, Any]:
+    authority_check()
+    current_boot = host_boot_identity()
+    if claim["owner_boot_identity"] != current_boot:
+        return {
+            "owner_status": "prior_boot",
+            "process_group_status": "prior_boot",
+        }
+
+    def inspect_same_boot() -> dict[str, Any]:
+        authority_check()
+        owner = inspect_recorded_process(
+            claim["owner_pid"], claim["owner_process_identity"]
+        )
+        if owner["status"] == "present":
+            raise EvaluationError("recorded evaluation-input owner is still live")
+        if owner["status"] == "unreadable":
+            raise EvaluationError(
+                "same-boot evaluation-input owner identity is unreadable"
+            )
+        group = inspect_recorded_process_group(
+            claim["owner_process_group_identity"]
+        )
+        if group["status"] == "present":
+            raise EvaluationError(
+                "recorded evaluation-input process group is still live"
+            )
+        if group["status"] == "unreadable":
+            raise EvaluationError(
+                "same-boot evaluation-input process group is unreadable"
+            )
+        return {
+            "owner_status": owner["status"],
+            "process_group_status": group["status"],
+        }
+
+    inspect_same_boot()
+    return inspect_same_boot()
+
+
 def evaluation_input_recovery_path() -> Path:
     return claim_ledger_path().with_name(
         "evaluation-input-recovery-required.json"
@@ -6160,6 +6232,131 @@ def v2_input_owner_reconcile(_args: argparse.Namespace) -> dict[str, Any]:
         "terminal_publications": publications,
         "recovery_marker": recovery_marker,
         **claims,
+    }
+
+
+def v2_input_owner_recover(args: argparse.Namespace) -> dict[str, Any]:
+    if args.confirm_owner_dead is not True:
+        raise EvaluationError(
+            "operator owner recovery requires --confirm-owner-dead"
+        )
+    assert_input_owner_operator_authority()
+    claim_id = require_sha256(args.claim_id, "claim ID")
+    expected_owner_run_id = require_text(
+        args.expected_owner_run_id, "expected owner run ID"
+    )
+    open_matches = [
+        claim
+        for claim in open_scheduled_claims()
+        if claim["claim_id"] == claim_id
+    ]
+    if len(open_matches) > 1:
+        raise EvaluationError(
+            "operator owner recovery requires one exact open scheduled claim"
+        )
+    if not open_matches:
+        pending_matches = [
+            publication
+            for publication in pending_terminal_publications()
+            if publication["claim_id"] == claim_id
+            and publication["owner_run_id"] == expected_owner_run_id
+            and publication["owner_mode"] == "scheduled"
+            and publication["readiness_state"] == "invalid"
+            and publication["readiness_reason"] == "owner_interrupted"
+        ]
+        if len(pending_matches) != 1:
+            raise EvaluationError(
+                "operator owner recovery requires one exact open or pending "
+                "owner-interrupted scheduled claim"
+            )
+        with input_readiness_state_lock():
+            published = publish_pending_terminal(
+                pending_matches[0],
+                authority_check=assert_input_owner_operator_authority,
+                readiness_lock_held=True,
+            )
+        remaining = [
+            {
+                "claim_id": row["claim_id"],
+                "reason": "operator_inspection_required",
+            }
+            for row in open_scheduled_claims()
+        ]
+        marker = persist_evaluation_input_recovery_required(
+            remaining,
+            authority_check=assert_input_owner_operator_authority,
+        )
+        return {
+            "status": "replayed",
+            "claim_id": claim_id,
+            "owner_run_id": expected_owner_run_id,
+            "death_proof": {
+                "owner_status": "retained_owner_recovery",
+                "process_group_status": "retained_owner_recovery",
+            },
+            "claim": None,
+            "terminal_publication": published,
+            "recovery_marker": marker,
+        }
+    claim = open_matches[0]
+    if claim["owner_run_id"] != expected_owner_run_id:
+        raise EvaluationError(
+            "open claim owner run differs from --expected-owner-run-id"
+        )
+    proof = inspect_operator_owner_death(
+        claim, authority_check=assert_input_owner_operator_authority
+    )
+    with input_readiness_state_lock():
+        recoverable_claim_readiness(claim)
+        proof = inspect_operator_owner_death(
+            claim, authority_check=assert_input_owner_operator_authority
+        )
+        assert_input_owner_operator_authority()
+        recovered = recover_open_scheduled_claim(
+            claim["claim_id"],
+            expected_owner_run_id=claim["owner_run_id"],
+            expected_owner_pid=claim["owner_pid"],
+            expected_owner_process_identity=claim[
+                "owner_process_identity"
+            ],
+            expected_owner_process_group_identity=claim[
+                "owner_process_group_identity"
+            ],
+            expected_owner_boot_identity=claim["owner_boot_identity"],
+        )
+        pending = [
+            publication
+            for publication in pending_terminal_publications()
+            if publication["claim_id"] == claim["claim_id"]
+        ]
+        if len(pending) != 1:
+            raise EvaluationError(
+                "recovered claim lacks one exact pending terminal publication"
+            )
+        published = publish_pending_terminal(
+            pending[0],
+            authority_check=assert_input_owner_operator_authority,
+            readiness_lock_held=True,
+        )
+    remaining = [
+        {
+            "claim_id": row["claim_id"],
+            "reason": "operator_inspection_required",
+        }
+        for row in open_scheduled_claims()
+    ]
+    marker = persist_evaluation_input_recovery_required(
+        remaining,
+        authority_check=assert_input_owner_operator_authority,
+    )
+    return {
+        "status": "recovered",
+        "claim_id": claim["claim_id"],
+        "owner_run_id": claim["owner_run_id"],
+        "death_proof": proof,
+        "claim": recovered,
+        "terminal_publication": published,
+        "recovery_marker": marker,
     }
 
 
@@ -10032,6 +10229,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     input_ready_parser.add_argument("--created-at")
     commands.add_parser("v2-input-owner-reconcile")
+    input_owner_recover_parser = commands.add_parser(
+        "v2-input-owner-recover"
+    )
+    input_owner_recover_parser.add_argument("--claim-id", required=True)
+    input_owner_recover_parser.add_argument(
+        "--expected-owner-run-id", required=True
+    )
+    input_owner_recover_parser.add_argument(
+        "--confirm-owner-dead", action="store_true", required=True
+    )
     input_claim_assert_parser = commands.add_parser(
         "v2-input-claim-assert-ready"
     )
@@ -10153,6 +10360,7 @@ def main() -> int:
             "v2-input-state": v2_input_state,
             "v2-input-ready": v2_input_ready,
             "v2-input-owner-reconcile": v2_input_owner_reconcile,
+            "v2-input-owner-recover": v2_input_owner_recover,
             "v2-input-claim-assert-ready": v2_input_claim_assert_ready,
             "v2-prepare": v2_prepare,
             "v2-run-compile": v2_run_compile,

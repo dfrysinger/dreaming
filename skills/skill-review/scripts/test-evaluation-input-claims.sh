@@ -1498,6 +1498,349 @@ assert boot_unreadable_marker["claims"] == [
 assert evaluator.evaluation_input_recovery_path().is_file()
 passed("unavailable boot identity durably blocks every open claim")
 
+operator_claim = {
+    "claim_id": sha("operator-claim"),
+    "owner_run_id": "operator-owner-run",
+    "owner_pid": 4242,
+    "owner_process_identity": "pid:4242:start:fixture",
+    "owner_process_group_identity": "pgid:4242:leader:fixture",
+    "owner_boot_identity": sha("operator-boot"),
+    "skill_path": str(root / "skill"),
+    "skill_key": "fixture-skill-key",
+    "candidate_id": sha("candidate"),
+}
+with (
+    mock.patch.object(
+        evaluator, "host_boot_identity", return_value=sha("operator-boot")
+    ),
+    mock.patch.object(
+        evaluator,
+        "inspect_recorded_process",
+        return_value={"status": "present"},
+    ),
+):
+    try:
+        evaluator.inspect_operator_owner_death(
+            operator_claim, authority_check=lambda: None
+        )
+    except evaluator.EvaluationError as error:
+        assert "still live" in str(error)
+    else:
+        raise AssertionError("operator recovery accepted a live owner")
+with (
+    mock.patch.object(
+        evaluator, "host_boot_identity", return_value=sha("operator-boot")
+    ),
+    mock.patch.object(
+        evaluator,
+        "inspect_recorded_process",
+        return_value={"status": "unreadable"},
+    ),
+):
+    try:
+        evaluator.inspect_operator_owner_death(
+            operator_claim, authority_check=lambda: None
+        )
+    except evaluator.EvaluationError as error:
+        assert "same-boot" in str(error)
+    else:
+        raise AssertionError("operator recovery overrode an unreadable owner")
+for group_status in ("present", "unreadable"):
+    with (
+        mock.patch.object(
+            evaluator, "host_boot_identity", return_value=sha("operator-boot")
+        ),
+        mock.patch.object(
+            evaluator,
+            "inspect_recorded_process",
+            return_value={"status": "absent"},
+        ),
+        mock.patch.object(
+            evaluator,
+            "inspect_recorded_process_group",
+            return_value={"status": group_status, "pgid": 4242},
+        ),
+    ):
+        try:
+            evaluator.inspect_operator_owner_death(
+                operator_claim, authority_check=lambda: None
+            )
+        except evaluator.EvaluationError as error:
+            assert "process group" in str(error)
+        else:
+            raise AssertionError(
+                f"operator recovery accepted a {group_status} process group"
+            )
+with (
+    mock.patch.object(
+        evaluator, "host_boot_identity", return_value=sha("operator-boot")
+    ),
+    mock.patch.object(
+        evaluator,
+        "inspect_recorded_process",
+        return_value={"status": "reused"},
+    ),
+    mock.patch.object(
+        evaluator,
+        "inspect_recorded_process_group",
+        return_value={"status": "reused", "pgid": 4242},
+    ),
+):
+    assert evaluator.inspect_operator_owner_death(
+        operator_claim, authority_check=lambda: None
+    ) == {
+        "owner_status": "reused",
+        "process_group_status": "reused",
+    }
+with (
+    mock.patch.object(
+        evaluator, "host_boot_identity", return_value=sha("new-operator-boot")
+    ),
+    mock.patch.object(
+        evaluator,
+        "inspect_recorded_process",
+        side_effect=AssertionError("prior-boot owner must not be probed"),
+    ),
+):
+    assert evaluator.inspect_operator_owner_death(
+        operator_claim, authority_check=lambda: None
+    ) == {
+        "owner_status": "prior_boot",
+        "process_group_status": "prior_boot",
+    }
+passed("operator death proof refuses live ambiguity and accepts proven absence")
+
+other_operator_claim = {
+    **operator_claim,
+    "claim_id": sha("other-operator-claim"),
+    "owner_run_id": "other-operator-owner-run",
+}
+terminal_publication = {"claim_id": operator_claim["claim_id"]}
+recovered_operator_claim = {
+    "claim_id": operator_claim["claim_id"],
+    "terminal_publication": terminal_publication,
+}
+published_operator_claim = {
+    "claim_id": operator_claim["claim_id"],
+    "publication": "published",
+}
+operator_marker = {
+    "claims": [
+        {
+            "claim_id": other_operator_claim["claim_id"],
+            "reason": "operator_inspection_required",
+        }
+    ]
+}
+operator_args = evaluator.argparse.Namespace(
+    claim_id=operator_claim["claim_id"],
+    expected_owner_run_id=operator_claim["owner_run_id"],
+    confirm_owner_dead=True,
+)
+with (
+    mock.patch.object(
+        evaluator, "assert_input_owner_operator_authority"
+    ) as operator_authority,
+    mock.patch.object(
+        evaluator,
+        "open_scheduled_claims",
+        side_effect=[
+            [operator_claim, other_operator_claim],
+            [other_operator_claim],
+        ],
+    ),
+    mock.patch.object(
+        evaluator,
+        "inspect_operator_owner_death",
+        return_value={
+            "owner_status": "reused",
+            "process_group_status": "reused",
+        },
+    ) as operator_inspection,
+    mock.patch.object(evaluator, "recoverable_claim_readiness"),
+    mock.patch.object(
+        evaluator,
+        "recover_open_scheduled_claim",
+        return_value=recovered_operator_claim,
+    ) as operator_recovery,
+    mock.patch.object(
+        evaluator,
+        "pending_terminal_publications",
+        return_value=[terminal_publication],
+    ),
+    mock.patch.object(
+        evaluator,
+        "publish_pending_terminal",
+        return_value=published_operator_claim,
+    ) as operator_publication,
+    mock.patch.object(
+        evaluator,
+        "persist_evaluation_input_recovery_required",
+        return_value=operator_marker,
+    ) as marker_persistence,
+):
+    operator_result = evaluator.v2_input_owner_recover(operator_args)
+assert operator_result["status"] == "recovered"
+assert operator_result["claim_id"] == operator_claim["claim_id"]
+assert operator_result["recovery_marker"] == operator_marker
+assert operator_inspection.call_count == 2
+operator_recovery.assert_called_once_with(
+    operator_claim["claim_id"],
+    expected_owner_run_id=operator_claim["owner_run_id"],
+    expected_owner_pid=operator_claim["owner_pid"],
+    expected_owner_process_identity=operator_claim["owner_process_identity"],
+    expected_owner_process_group_identity=operator_claim[
+        "owner_process_group_identity"
+    ],
+    expected_owner_boot_identity=operator_claim["owner_boot_identity"],
+)
+marker_persistence.assert_called_once_with(
+    [
+        {
+            "claim_id": other_operator_claim["claim_id"],
+            "reason": "operator_inspection_required",
+        }
+    ],
+    authority_check=operator_authority,
+)
+operator_publication.assert_called_once_with(
+    terminal_publication,
+    authority_check=operator_authority,
+    readiness_lock_held=True,
+)
+with (
+    mock.patch.object(
+        evaluator, "assert_input_owner_operator_authority"
+    ),
+    mock.patch.object(
+        evaluator, "open_scheduled_claims", return_value=[operator_claim]
+    ),
+    mock.patch.object(evaluator, "inspect_operator_owner_death") as inspection,
+):
+    wrong_run_args = evaluator.argparse.Namespace(
+        claim_id=operator_claim["claim_id"],
+        expected_owner_run_id="different-owner-run",
+        confirm_owner_dead=True,
+    )
+    try:
+        evaluator.v2_input_owner_recover(wrong_run_args)
+    except evaluator.EvaluationError as error:
+        assert "differs" in str(error)
+    else:
+        raise AssertionError("operator recovery accepted another owner run")
+    inspection.assert_not_called()
+passed("operator recovery fences one exact claim and preserves other warnings")
+
+use_state("operator-recovery-end-to-end")
+operator_skill = root / "operator-recovery-skill"
+operator_skill.mkdir()
+(operator_skill / "SKILL.md").write_text(
+    "---\nname: operator-recovery-skill\ndescription: fixture\n---\n# Fixture\n",
+    encoding="utf-8",
+)
+operator_candidate, _ = evaluator.candidate_id(operator_skill)
+operator_skill_key = evaluator.latest_key(str(operator_skill))
+operator_e2e_fence = {
+    **owner_fence,
+    "owner_boot_identity": sha("operator-prior-boot"),
+}
+os.environ["SKILLS_LOCK_TOKEN"] = "00000000-0000-4000-8000-000000000008"
+operator_e2e_claim = claims.reserve_claim(
+    skill_path=str(operator_skill),
+    skill_key=operator_skill_key,
+    candidate_id=operator_candidate,
+    owner_run_id="operator-e2e-owner-run",
+    author_model="scheduled-author",
+    reviewer_a_model="scheduled-review-a",
+    reviewer_b_model="scheduled-review-b",
+    owner_fence=operator_e2e_fence,
+)
+del os.environ["SKILLS_LOCK_TOKEN"]
+evaluator.write_input_transition(
+    operator_skill,
+    state="drafting",
+    reason="authoring_claimed",
+    input_manifest_sha256=None,
+    validation_receipt_sha256=None,
+    review_receipt_sha256s=[],
+    created_at="2026-08-18T12:00:00+00:00",
+)
+with (
+    mock.patch.object(
+        evaluator, "assert_input_owner_operator_authority"
+    ),
+    mock.patch.object(
+        evaluator, "host_boot_identity", return_value=sha("operator-new-boot")
+    ),
+):
+    operator_e2e_result = evaluator.v2_input_owner_recover(
+        evaluator.argparse.Namespace(
+            claim_id=operator_e2e_claim["claim_id"],
+            expected_owner_run_id="operator-e2e-owner-run",
+            confirm_owner_dead=True,
+        )
+    )
+assert operator_e2e_result["status"] == "recovered"
+assert operator_e2e_result["terminal_publication"]["state"] == "invalid"
+assert operator_e2e_result["terminal_publication"]["reason"] == (
+    "owner_interrupted"
+)
+assert claims.inspect_claim(operator_e2e_claim["claim_id"])["status"] == "invalid"
+assert claims.pending_terminal_publications() == []
+assert evaluator.resolve_input_readiness(operator_skill)["state"] == "invalid"
+assert not evaluator.evaluation_input_recovery_path().exists()
+passed("operator recovery publishes the real retained terminal contract")
+
+os.environ["SKILLS_LOCK_TOKEN"] = "00000000-0000-4000-8000-000000000009"
+operator_replay_claim = claims.reserve_claim(
+    skill_path=str(operator_skill),
+    skill_key=operator_skill_key,
+    candidate_id=operator_candidate,
+    owner_run_id="operator-replay-owner-run",
+    author_model="scheduled-author",
+    reviewer_a_model="scheduled-review-a",
+    reviewer_b_model="scheduled-review-b",
+    owner_fence=operator_e2e_fence,
+)
+del os.environ["SKILLS_LOCK_TOKEN"]
+evaluator.write_input_transition(
+    operator_skill,
+    state="drafting",
+    reason="authoring_claimed",
+    input_manifest_sha256=None,
+    validation_receipt_sha256=None,
+    review_receipt_sha256s=[],
+    created_at="2026-08-18T12:01:00+00:00",
+)
+claims.recover_open_scheduled_claim(
+    operator_replay_claim["claim_id"],
+    expected_owner_run_id="operator-replay-owner-run",
+    expected_owner_pid=operator_e2e_fence["owner_pid"],
+    expected_owner_process_identity=operator_e2e_fence[
+        "owner_process_identity"
+    ],
+    expected_owner_process_group_identity=operator_e2e_fence[
+        "owner_process_group_identity"
+    ],
+    expected_owner_boot_identity=operator_e2e_fence["owner_boot_identity"],
+)
+assert len(claims.pending_terminal_publications()) == 1
+with mock.patch.object(
+    evaluator, "assert_input_owner_operator_authority"
+):
+    replay_result = evaluator.v2_input_owner_recover(
+        evaluator.argparse.Namespace(
+            claim_id=operator_replay_claim["claim_id"],
+            expected_owner_run_id="operator-replay-owner-run",
+            confirm_owner_dead=True,
+        )
+    )
+assert replay_result["status"] == "replayed"
+assert replay_result["claim"] is None
+assert claims.pending_terminal_publications() == []
+assert evaluator.resolve_input_readiness(operator_skill)["state"] == "invalid"
+passed("operator recovery replays its exact interrupted terminal publication")
+
 use_state("prior-boot-recovery")
 os.environ["SKILLS_LOCK_TOKEN"] = "00000000-0000-4000-8000-000000000007"
 prior_boot_claim = claims.reserve_claim(
@@ -1729,8 +2072,52 @@ assert json.loads(authorized_reconcile.stdout) == {
     "status": "reconciled",
     "terminal_publications": [],
 }
+operator_without_halt = subprocess.run(
+    [
+        sys.executable,
+        str(evaluator_path),
+        "v2-input-owner-recover",
+        "--claim-id",
+        sha("missing-operator-claim"),
+        "--expected-owner-run-id",
+        "missing-operator-run",
+        "--confirm-owner-dead",
+    ],
+    env=authorized_environment,
+    text=True,
+    capture_output=True,
+    check=False,
+)
+assert operator_without_halt.returncode != 0
+assert "requires the Dreaming halt file" in operator_without_halt.stderr
+halt_file = (
+    Path(authorized_environment["SKILLS_STATE_DIR"])
+    / "skill-review"
+    / "disable-daemon"
+)
+halt_file.parent.mkdir(parents=True, exist_ok=True)
+halt_file.touch()
+operator_with_halt = subprocess.run(
+    [
+        sys.executable,
+        str(evaluator_path),
+        "v2-input-owner-recover",
+        "--claim-id",
+        sha("missing-operator-claim"),
+        "--expected-owner-run-id",
+        "missing-operator-run",
+        "--confirm-owner-dead",
+    ],
+    env=authorized_environment,
+    text=True,
+    capture_output=True,
+    check=False,
+)
+assert operator_with_halt.returncode != 0
+assert "one exact open or pending" in operator_with_halt.stderr
+passed("operator recovery requires both halt and the inherited writer lease")
 passed("historical inspection is stable and owner reconciliation requires authority")
 
-assert passes == 39
+assert passes == 44
 print(f"PASS  {passes} deterministic evaluation-input claim ledger checks")
 PY
