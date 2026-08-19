@@ -402,6 +402,25 @@
   cross-store publication, budget termination, and recovery-escape findings
   with no unresolved material defect. Implementation of this reviewed contract
   is the next prerequisite.
+- The owner-ledger and terminal-publication foundation is implemented and
+  committed locally on the isolated preview branch as `7a172df`. Claim-ledger
+  schema version 3 records scheduled-owner mode, writer-fence digest, owner
+  process and process-group identities, host boot identity, and sealed
+  configuration digest. Orchestrated callers cannot silently reserve a manual
+  claim when the complete scheduled fence is absent. Every ready, invalid, or
+  insufficient-information terminal claim now closes in the same transaction
+  that records an immutable pending readiness publication. Retained validation
+  and review lineage comes only from the exact retained manifest; a second
+  review cannot dispatch with a different validation receipt. Ready
+  publication validates the content-addressed transition against the retained
+  claim facts and acknowledges it idempotently. Focused claim-ledger,
+  certification, vendor-adapter, and evaluator validation passes 28, 41, 26,
+  and 23 checks respectively. Paired implementation review closed scheduled
+  manual fallback, cross-manifest lineage, weak acknowledgement binding, and
+  terminal-recovery liveness findings with no unresolved material defect.
+  Run-start publication recovery, sealed owner configuration, the derived
+  in-memory queue, process-group monitoring, and one-claim owner orchestration
+  remain.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
