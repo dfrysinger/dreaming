@@ -334,6 +334,16 @@ function bindPortfolioQueue(queue) {
       ? "No settled use in 30 days"
       : "No use in retained history";
   };
+  const dependencySummary = item => {
+    const requiredBy = item.dependencies?.required_by || [];
+    const filesUsedBy = item.dependencies?.files_used_by || [];
+    const details = [];
+    if (requiredBy.length) details.push(`Required by ${requiredBy.join(", ")}`);
+    if (filesUsedBy.length) {
+      details.push(`Files used by ${filesUsedBy.join(", ")}; enablement is not required`);
+    }
+    return `${badge(item.dependencies?.label)}${details.map(detail => `<div class="submetric">${esc(detail)}</div>`).join("")}`;
+  };
   const matches = item => {
     const textMatch = `${item.skill_name} ${item.why} ${item.installed_from}`.toLowerCase().includes(query.value.toLowerCase());
     if (!textMatch) return false;
@@ -349,7 +359,7 @@ function bindPortfolioQueue(queue) {
   };
   const render = () => {
     const visible = queue.filter(matches);
-    rows.innerHTML = visible.map(item => `<tr><td data-label="Skill">${esc(item.skill_name)}</td><td data-label="Installed from">${esc(item.installed_from)}</td><td data-label="Recommendation">${badge(item.recommendation_label)}</td><td data-label="Why">${esc(item.why)}</td><td data-label="Evaluation">${badge(item.evaluation?.label)}</td><td data-label="Use 30d">${usage30d(item)}</td><td data-label="Last used">${portfolioLastUse(item)}</td><td data-label="Dependencies">${badge(item.dependencies?.label)}</td><td data-label="Who may change it">${esc(item.who_may_change)}</td><td data-label="Next action"><button class="control" disabled title="${esc(item.next_action?.reason)}">${esc(item.next_action?.label)}</button><div class="submetric">${esc(item.next_action?.reason)}</div></td></tr>`).join("") || `<tr><td colspan="10">No decisions match this filter.</td></tr>`;
+    rows.innerHTML = visible.map(item => `<tr><td data-label="Skill">${esc(item.skill_name)}</td><td data-label="Installed from">${esc(item.installed_from)}</td><td data-label="Recommendation">${badge(item.recommendation_label)}</td><td data-label="Why">${esc(item.why)}</td><td data-label="Evaluation">${badge(item.evaluation?.label)}</td><td data-label="Use 30d">${usage30d(item)}</td><td data-label="Last used">${portfolioLastUse(item)}</td><td data-label="Dependencies">${dependencySummary(item)}</td><td data-label="Who may change it">${esc(item.who_may_change)}</td><td data-label="Next action"><button class="control" disabled title="${esc(item.next_action?.reason)}">${esc(item.next_action?.label)}</button><div class="submetric">${esc(item.next_action?.reason)}</div></td></tr>`).join("") || `<tr><td colspan="10">No decisions match this filter.</td></tr>`;
   };
   query.addEventListener("input", render);
   filter.addEventListener("change", render);

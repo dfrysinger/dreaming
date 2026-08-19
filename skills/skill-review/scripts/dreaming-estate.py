@@ -266,6 +266,26 @@ PLUGIN_DEPENDENCY_CLASSES = (
     "lsp_configurations",
     "ambiguous",
 )
+DEPENDENCY_BINARY_SUFFIXES = {
+    ".gif",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".pdf",
+    ".png",
+    ".pyc",
+    ".webp",
+    ".zip",
+}
+RUNTIME_DEPENDENCY_WORDS_RE = re.compile(
+    r"\b(?:call|calls|delegate|delegates|invoke|invokes|launch|launches|"
+    r"own|owns|require|requires|route|routes|run|runs|use|uses)\b",
+    re.IGNORECASE,
+)
+NEGATED_DEPENDENCY_RE = re.compile(
+    r"\b(?:do\s+not|does\s+not|not(?:\s+the|\s+a|\s+an)?|without)\b",
+    re.IGNORECASE,
+)
 
 
 class EstateError(RuntimeError):
@@ -990,6 +1010,306 @@ def scan_root(host_id: str, root: dict[str, Any]) -> list[dict[str, Any]]:
     return instances
 
 
+def _dependency_reference_lines(
+    source: dict[str, Any],
+    target_names: set[str],
+) -> tuple[list[dict[str, str]], list[str]]:
+    skill_root = Path(source["absolute_path"])
+    references: list[dict[str, str]] = []
+    unscanned: list[str] = []
+    for inventory_item in source["files"]:
+        relative = inventory_item["path"]
+        path = skill_root / relative
+        try:
+            raw = path.read_bytes()
+        except OSError as error:
+            raise EstateError(f"cannot read dependency source: {path}") from error
+        if hashlib.sha256(raw).hexdigest() != inventory_item["sha256"]:
+            raise EstateError(f"dependency source changed during collection: {path}")
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            if path.suffix.casefold() in DEPENDENCY_BINARY_SUFFIXES or b"\0" in raw:
+                continue
+            unscanned.append(relative)
+            continue
+        for line_number, line in enumerate(content.splitlines(), start=1):
+            for target_name in target_names:
+                if target_name == source["skill_name"]:
+                    continue
+                escaped = re.escape(target_name)
+                if re.search(
+                    rf"(?<![A-Za-z0-9._-])/"
+                    rf"(?:[A-Za-z0-9._-]+:)?{escaped}"
+                    rf"(?![A-Za-z0-9._-])",
+                    line,
+                ):
+                    references.append(
+                        {
+                            "target": target_name,
+                            "kind": "runtime_capability",
+                            "source_file": relative,
+                            "source_line": str(line_number),
+                        }
+                    )
+                if re.search(rf"\.\./{escaped}(?:/|\b)", line):
+                    references.append(
+                        {
+                            "target": target_name,
+                            "kind": "installed_content",
+                            "source_file": relative,
+                            "source_line": str(line_number),
+                        }
+                    )
+        for target_name in target_names:
+            if target_name == source["skill_name"]:
+                continue
+            token_re = re.compile(
+                rf"(?<![A-Za-z0-9._-])`{re.escape(target_name)}`"
+                rf"(?![A-Za-z0-9._-])"
+            )
+            for match in token_re.finditer(content):
+                context_start = max(0, match.start() - 180)
+                context_end = min(len(content), match.end() + 100)
+                context = " ".join(content[context_start:context_end].split())
+                before = " ".join(
+                    content[max(0, match.start() - 55) : match.start()].split()
+                )
+                if (
+                    RUNTIME_DEPENDENCY_WORDS_RE.search(context)
+                    and not NEGATED_DEPENDENCY_RE.search(before)
+                ):
+                    references.append(
+                        {
+                            "target": target_name,
+                            "kind": "runtime_capability",
+                            "source_file": relative,
+                            "source_line": str(
+                                content.count("\n", 0, match.start()) + 1
+                            ),
+                        }
+                    )
+    unique = {
+        (
+            item["target"],
+            item["kind"],
+            item["source_file"],
+            item["source_line"],
+        ): item
+        for item in references
+    }
+    return [unique[key] for key in sorted(unique)], sorted(unscanned)
+
+
+def apply_dependency_inventory(
+    physical: list[dict[str, Any]],
+    enabled_instances: list[dict[str, Any]],
+    durable_inventory: dict[str, Any] | None,
+    *,
+    source_population_complete: bool,
+) -> dict[str, Any]:
+    by_instance = {item["instance_id"]: item for item in physical}
+    enabled_by_capability: dict[str, list[dict[str, Any]]] = {}
+    names_to_capabilities: dict[str, set[str]] = {}
+    for mapping in enabled_instances:
+        if mapping.get("runtime_enabled") is not True:
+            continue
+        capability_id = mapping["canonical_capability_id"]
+        enabled_by_capability.setdefault(capability_id, []).append(mapping)
+        name = normalize_skill_name(mapping.get("runtime_name"))
+        if name is not None:
+            names_to_capabilities.setdefault(name, set()).add(capability_id)
+
+    representatives: dict[str, dict[str, Any]] = {}
+    for capability_id, mappings in enabled_by_capability.items():
+        representative = next(
+            (
+                by_instance.get(mapping["instance_id"])
+                for mapping in mappings
+                if mapping["instance_id"] in by_instance
+            ),
+            None,
+        )
+        if representative is not None:
+            representatives[capability_id] = representative
+
+    target_names = set(names_to_capabilities)
+    source_references: list[dict[str, Any]] = []
+    unscanned_source_files: list[str] = []
+    for source_capability_id, source in sorted(representatives.items()):
+        references, unscanned = _dependency_reference_lines(source, target_names)
+        unscanned_source_files.extend(
+            f"{source['skill_name']}/{relative}" for relative in unscanned
+        )
+        for reference in references:
+            for target_capability_id in sorted(
+                names_to_capabilities.get(reference["target"], set())
+            ):
+                source_references.append(
+                    {
+                        **reference,
+                        "source_capability_id": source_capability_id,
+                        "source_skill": source["skill_name"],
+                        "target_capability_id": target_capability_id,
+                    }
+                )
+
+    durable_complete = (
+        isinstance(durable_inventory, dict)
+        and durable_inventory.get("complete") is True
+        and isinstance(durable_inventory.get("dependencies"), list)
+        and isinstance(durable_inventory.get("skills"), list)
+    )
+    durable_targets: dict[str, list[str]] = {}
+    pinned_names: set[str] = set()
+    if durable_complete:
+        durable_skill_names: set[str] = set()
+        for item in durable_inventory["skills"]:
+            if not isinstance(item, dict):
+                durable_complete = False
+                break
+            name = normalize_skill_name(item.get("name"))
+            if (
+                name is None
+                or name in durable_skill_names
+                or not isinstance(item.get("pinned"), bool)
+            ):
+                durable_complete = False
+                break
+            durable_skill_names.add(name)
+            if item["pinned"]:
+                pinned_names.add(name)
+        seen_durable_targets: set[str] = set()
+        for item in durable_inventory["dependencies"]:
+            normalized = (
+                normalize_skill_name(item.get("skill"))
+                if isinstance(item, dict)
+                else None
+            )
+            sources = item.get("sources") if isinstance(item, dict) else None
+            if (
+                normalized is None
+                or normalized not in durable_skill_names
+                or normalized not in names_to_capabilities
+                or normalized in seen_durable_targets
+                or not isinstance(sources, list)
+                or not sources
+                or not all(isinstance(source, str) and source for source in sources)
+            ):
+                durable_complete = False
+                break
+            seen_durable_targets.add(normalized)
+            durable_targets[normalized] = sorted(set(sources))
+
+    blockers_by_capability: dict[str, list[dict[str, str]]] = {}
+    installed_by_capability: dict[str, list[dict[str, str]]] = {}
+    for reference in source_references:
+        row = {
+            "kind": reference["kind"],
+            "source_skill": reference["source_skill"],
+            "source_capability_id": reference["source_capability_id"],
+            "source_file": reference["source_file"],
+            "source_line": reference["source_line"],
+        }
+        destination = (
+            blockers_by_capability
+            if reference["kind"] == "runtime_capability"
+            else installed_by_capability
+        )
+        destination.setdefault(reference["target_capability_id"], []).append(row)
+
+    for target_name, sources in durable_targets.items():
+        for capability_id in names_to_capabilities.get(target_name, set()):
+            for source in sorted(set(sources)):
+                blockers_by_capability.setdefault(capability_id, []).append(
+                    {
+                        "kind": "durable_owner",
+                        "source_skill": "Scheduled or durable configuration",
+                        "source_capability_id": "",
+                        "source_file": source,
+                        "source_line": "",
+                    }
+                )
+    for target_name in pinned_names:
+        for capability_id in names_to_capabilities.get(target_name, set()):
+            blockers_by_capability.setdefault(capability_id, []).append(
+                {
+                    "kind": "explicit_pin",
+                    "source_skill": "Explicit user pin",
+                    "source_capability_id": "",
+                    "source_file": ".pinned",
+                    "source_line": "",
+                }
+            )
+    for capability_id, representative in representatives.items():
+        if representative.get("authority") == "user_protected":
+            blockers_by_capability.setdefault(capability_id, []).append(
+                {
+                    "kind": "explicit_pin",
+                    "source_skill": "Explicit user pin",
+                    "source_capability_id": "",
+                    "source_file": ".pinned",
+                    "source_line": "",
+                }
+            )
+
+    source_graph_complete = (
+        source_population_complete and not unscanned_source_files
+    )
+    inventory_complete = durable_complete and source_graph_complete
+    for capability_id, representative in representatives.items():
+        blockers = sorted(
+            blockers_by_capability.get(capability_id, []),
+            key=lambda item: (
+                item["kind"],
+                item["source_skill"],
+                item["source_file"],
+                item["source_line"],
+            ),
+        )
+        installed_dependencies = sorted(
+            installed_by_capability.get(capability_id, []),
+            key=lambda item: (
+                item["source_skill"],
+                item["source_file"],
+                item["source_line"],
+            ),
+        )
+        dependency = {
+            "state": (
+                "protected"
+                if blockers
+                else "clear"
+                if inventory_complete
+                else "incomplete"
+            ),
+            "complete": inventory_complete,
+            "blockers": blockers,
+            "installed_content_consumers": installed_dependencies,
+        }
+        for mapping in enabled_by_capability[capability_id]:
+            instance = by_instance.get(mapping["instance_id"])
+            if instance is not None:
+                instance["dependencies"] = dependency
+                instance["dependencies_complete"] = inventory_complete
+
+    return {
+        "schema_version": 1,
+        "complete": inventory_complete,
+        "durable_inventory_complete": durable_complete,
+        "source_graph_complete": source_graph_complete,
+        "unscanned_source_file_count": len(unscanned_source_files),
+        "runtime_dependency_count": sum(
+            len(items) for items in blockers_by_capability.values()
+        ),
+        "installed_content_dependency_count": sum(
+            len(items) for items in installed_by_capability.values()
+        ),
+        "protected_capability_count": len(blockers_by_capability),
+        "inventory_sha256": digest(durable_inventory),
+    }
+
+
 def validate_context(context: dict[str, Any]) -> None:
     required = {"id", "kind", "registered", "runtime_skills"}
     if not required.issubset(context):
@@ -1011,6 +1331,7 @@ def reconcile(
     contexts: list[dict[str, Any]],
     collected_at: str,
     evidence: dict[str, Any] | None = None,
+    durable_dependency_inventory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not host_id:
         raise EstateError("host_id is required")
@@ -1101,6 +1422,12 @@ def reconcile(
         if context["inside_completeness_claim"]
     ]
     complete = bool(claimed) and all(context["complete"] for context in claimed)
+    dependency_summary = apply_dependency_inventory(
+        physical,
+        enabled_instances,
+        durable_dependency_inventory,
+        source_population_complete=complete,
+    )
     canonical_ids = {
         instance["canonical_capability_id"] for instance in enabled_instances
     }
@@ -1147,7 +1474,10 @@ def reconcile(
         "physical_instances": physical,
         "enabled_instances": enabled_instances,
         "unresolved_mappings": unresolved,
-        "evidence": evidence or {},
+        "evidence": {
+            **(evidence or {}),
+            "dependency_inventory": dependency_summary,
+        },
     }
     return {**snapshot, "snapshot_sha256": digest(snapshot)}
 
@@ -3204,6 +3534,73 @@ def discover_roots(
     return list(deduplicated.values()), plugins
 
 
+def collect_durable_dependency_inventory(config: dict[str, Any]) -> dict[str, Any]:
+    inline = config.get("durable_dependency_inventory")
+    if inline is not None:
+        if not isinstance(inline, dict):
+            return {
+                "complete": False,
+                "dependencies": [],
+                "skills": [],
+                "error": "configured durable dependency inventory is not an object",
+            }
+        return inline
+    scanner = Path(
+        config.get(
+            "dependency_scanner",
+            Path(__file__).resolve().parents[2]
+            / "skill-curator/scripts/scheduled-skill-deps.py",
+        )
+    ).expanduser().resolve()
+    if not scanner.is_file():
+        return {
+            "complete": False,
+            "dependencies": [],
+            "skills": [],
+            "error": f"durable dependency scanner is unavailable: {scanner}",
+        }
+    try:
+        completed = subprocess.run(
+            [str(scanner), "--inventory"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return {
+            "complete": False,
+            "dependencies": [],
+            "skills": [],
+            "error": f"durable dependency scan failed: {error}",
+        }
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"exit {completed.returncode}"
+        return {
+            "complete": False,
+            "dependencies": [],
+            "skills": [],
+            "error": f"durable dependency scan refused: {detail}",
+        }
+    try:
+        inventory = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        return {
+            "complete": False,
+            "dependencies": [],
+            "skills": [],
+            "error": f"durable dependency scan returned invalid JSON: {error}",
+        }
+    if not isinstance(inventory, dict):
+        return {
+            "complete": False,
+            "dependencies": [],
+            "skills": [],
+            "error": "durable dependency scan returned a non-object",
+        }
+    return inventory
+
+
 def collect(config: dict[str, Any]) -> dict[str, Any]:
     host_id = config.get("host_id")
     binary = config.get("copilot_binary", "copilot")
@@ -3263,6 +3660,7 @@ def collect(config: dict[str, Any]) -> dict[str, Any]:
         version,
         enabled_plugin_names,
     )
+    durable_dependency_inventory = collect_durable_dependency_inventory(config)
     census = reconcile(
         host_id=host_id,
         roots=roots,
@@ -3273,6 +3671,7 @@ def collect(config: dict[str, Any]) -> dict[str, Any]:
             "settings_path": str(settings),
             "settings_sha256": settings_sha256,
         },
+        durable_dependency_inventory=durable_dependency_inventory,
     )
     census["plugins"] = plugins
     census["totals"]["plugin_packages"] = len(plugins)
@@ -3328,6 +3727,9 @@ def main() -> None:
                 contexts=source["contexts"],
                 collected_at=source.get("collected_at", "fixture"),
                 evidence=source.get("evidence"),
+                durable_dependency_inventory=source.get(
+                    "durable_dependency_inventory"
+                ),
             )
     except (EstateError, KeyError, TypeError) as error:
         print(json.dumps({"ok": False, "error": str(error)}, sort_keys=True))

@@ -102,9 +102,52 @@ check(
     and "+ · partial" in javascript
     and "Unknown · stable backlog" in javascript
     and "No settled use in 30 days" in javascript
+    and "enablement is not required" in javascript
+    and 'filesUsedBy.join(", ")' in javascript
     and ".portfolio-queue .portfolio-table td::before" in stylesheet
     and "@media (max-width: 700px)" in stylesheet,
     "portfolio decisions disclose settled-use exclusions and stack labeled fields on narrow screens",
+)
+legacy_dependencies = dashboard.DashboardData._portfolio_dependencies(
+    ["/private/dependency/evidence"],
+    True,
+)
+check(
+    legacy_dependencies == {
+        "state": "protected",
+        "label": "Protected",
+        "complete": False,
+        "required_by": [],
+        "files_used_by": [],
+    },
+    "legacy dependency lists remain protective without disclosing their values",
+)
+malformed_dependencies = dashboard.DashboardData._portfolio_dependencies(
+    {
+        "state": "protected",
+        "complete": True,
+        "blockers": ["/private/dependency/evidence"],
+    },
+    True,
+)
+check(
+    malformed_dependencies["complete"] is False
+    and malformed_dependencies["required_by"] == []
+    and malformed_dependencies["files_used_by"] == [],
+    "malformed dependency dictionaries cannot claim completeness or disclose values",
+)
+missing_kind_dependencies = dashboard.DashboardData._portfolio_dependencies(
+    {
+        "state": "protected",
+        "complete": True,
+        "blockers": [{"source_skill": "consumer"}],
+    },
+    True,
+)
+check(
+    missing_kind_dependencies["complete"] is False
+    and missing_kind_dependencies["required_by"] == [],
+    "dependency members missing their kind cannot claim completeness or labels",
 )
 check(
     not any(
@@ -236,6 +279,25 @@ estate_snapshot = {
             "private_evidence_path": "/private/provenance/path",
         },
         "evaluation_state": "pass",
+        "dependencies_complete": True,
+        "dependencies": {
+            "state": "protected",
+            "complete": True,
+            "blockers": [{
+                "kind": "runtime_capability",
+                "source_skill": "plugin-skill",
+                "source_capability_id": "sha256:" + "4" * 64,
+                "source_file": "SKILL.md",
+                "source_line": "12",
+            }],
+            "installed_content_consumers": [{
+                "kind": "installed_content",
+                "source_skill": "script-consumer",
+                "source_capability_id": "sha256:" + "7" * 64,
+                "source_file": "scripts/run.py",
+                "source_line": "4",
+            }],
+        },
     }, {
         "skill_name": "plugin-skill",
         "root_class": "plugin",
@@ -252,6 +314,10 @@ estate_snapshot = {
             "basis": "exact_plugin_identity",
         },
         "evaluation_state": "regression",
+        "dependencies_complete": True,
+        "dependencies": {
+            "complete": True,
+        },
         "instance_id": "sha256:" + "3" * 64,
         "canonical_capability_id": "sha256:" + "4" * 64,
     }, {
@@ -266,6 +332,7 @@ estate_snapshot = {
             "status": "insufficient",
             "basis": "no_evidence",
         },
+        "dependencies": ["/private/dependency/evidence"],
     }],
     "enabled_instances": [{
         "context_id": "user",
@@ -1339,6 +1406,12 @@ try:
         and portfolio["fixture-skill"]["recommendation"] == "proven_useful"
         and portfolio["plugin-skill"]["recommendation"] == "disable_candidate"
         and portfolio["plugin-skill"]["who_may_change"] == "Plugin package only"
+        and portfolio["plugin-skill"]["dependencies"]["state"] == "incomplete"
+        and portfolio["plugin-skill"]["dependencies"]["complete"] is False
+        and portfolio["fixture-skill"]["dependencies"]["required_by"]
+        == ["plugin-skill"]
+        and portfolio["fixture-skill"]["dependencies"]["files_used_by"]
+        == ["script-consumer"]
         and all(item["next_action"]["enabled"] is False for item in portfolio.values()),
         "portfolio decisions cover each enabled capability and separate value from authority",
     )
@@ -1354,6 +1427,7 @@ try:
                 "/private/plugin/path",
                 "/private/skill/path",
                 "/private/provenance/path",
+                "/private/dependency/evidence",
                 "private-provenance-sentinel",
             )
         ),

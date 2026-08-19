@@ -3818,6 +3818,9 @@ class DashboardData:
                         )
                         else None
                     ),
+                    "dependencies": self._portfolio_dependency_fact(
+                        item.get("dependencies")
+                    ),
                     "latest_decision": (
                         {
                             "decision": decision["decision"],
@@ -4245,25 +4248,185 @@ class DashboardData:
         return {"state": "missing", "label": "Needs evaluation"}
 
     @staticmethod
-    def _portfolio_dependencies(value: Any, complete: Any) -> dict[str, str]:
+    def _portfolio_dependency_fact(value: Any) -> Any:
+        if not isinstance(value, dict):
+            return {
+                "state": "incomplete",
+                "complete": False,
+                "blockers": [],
+                "installed_content_consumers": [],
+            }
+        blockers = value.get("blockers")
+        installed_consumers = value.get("installed_content_consumers")
+        blockers_valid = isinstance(blockers, list) and all(
+            isinstance(item, dict)
+            and isinstance(item.get("kind"), str)
+            and item.get("kind")
+            and isinstance(item.get("source_skill"), str)
+            and item.get("source_skill")
+            for item in blockers
+        )
+        consumers_valid = isinstance(installed_consumers, list) and all(
+            isinstance(item, dict)
+            and isinstance(item.get("kind"), str)
+            and item.get("kind")
+            and isinstance(item.get("source_skill"), str)
+            and item.get("source_skill")
+            for item in installed_consumers
+        )
+        state = safe_text(value.get("state"), 80).casefold()
+        valid_state = state in {"protected", "clear", "incomplete"}
+        complete = (
+            value.get("complete") is True
+            and blockers_valid
+            and consumers_valid
+            and valid_state
+        )
+        return {
+            "state": state if valid_state else "incomplete",
+            "complete": complete,
+            "blockers": [
+                {
+                    "kind": safe_text(item.get("kind"), 80),
+                    "source_skill": safe_text(item.get("source_skill"), 200),
+                }
+                for item in blockers[:100]
+                if isinstance(item, dict) and item.get("source_skill")
+            ] if blockers_valid else [],
+            "installed_content_consumers": [
+                {
+                    "kind": safe_text(item.get("kind"), 80),
+                    "source_skill": safe_text(item.get("source_skill"), 200),
+                }
+                for item in installed_consumers[:100]
+                if isinstance(item, dict) and item.get("source_skill")
+            ] if consumers_valid else [],
+        }
+
+    @staticmethod
+    def _portfolio_dependencies(value: Any, complete: Any) -> dict[str, Any]:
         if isinstance(value, dict):
             state = safe_text(value.get("state") or value.get("status"), 80).casefold()
             blockers = value.get("blockers") or value.get("dependencies")
+            installed_consumers = value.get("installed_content_consumers")
+            blockers_valid = blockers is None or (
+                isinstance(blockers, list)
+                and all(
+                    isinstance(item, dict)
+                    and isinstance(item.get("kind"), str)
+                    and item.get("kind")
+                    and isinstance(item.get("source_skill"), str)
+                    and item.get("source_skill")
+                    for item in blockers
+                )
+            )
+            consumers_valid = installed_consumers is None or (
+                isinstance(installed_consumers, list)
+                and all(
+                    isinstance(item, dict)
+                    and isinstance(item.get("kind"), str)
+                    and item.get("kind")
+                    and isinstance(item.get("source_skill"), str)
+                    and item.get("source_skill")
+                    for item in installed_consumers
+                )
+            )
+            evidence_complete = (
+                value.get("complete") is True
+                and blockers_valid
+                and consumers_valid
+            )
+            required_by = sorted(
+                {
+                    safe_text(item.get("source_skill"), 200)
+                    for item in blockers
+                    if isinstance(item, dict)
+                    and isinstance(item.get("kind"), str)
+                    and item.get("kind")
+                    and isinstance(item.get("source_skill"), str)
+                    and item.get("source_skill")
+                }
+            ) if isinstance(blockers, list) else []
+            files_used_by = sorted(
+                {
+                    safe_text(item.get("source_skill"), 200)
+                    for item in installed_consumers
+                    if isinstance(item, dict)
+                    and isinstance(item.get("kind"), str)
+                    and item.get("kind")
+                    and isinstance(item.get("source_skill"), str)
+                    and item.get("source_skill")
+                }
+            ) if isinstance(installed_consumers, list) else []
             if isinstance(blockers, list) and blockers:
-                return {"state": "protected", "label": "Protected"}
+                return {
+                    "state": "protected",
+                    "label": "Protected",
+                    "complete": evidence_complete,
+                    "required_by": required_by,
+                    "files_used_by": files_used_by,
+                }
             if state in {"protected", "required", "blocked"}:
-                return {"state": "protected", "label": "Protected"}
-            if state in {"clear", "none"} and value.get("complete") is True:
-                return {"state": "clear", "label": "Clear"}
-        if isinstance(value, list) and value:
-            return {"state": "protected", "label": "Protected"}
-        if value in {"protected", "required", "blocked"}:
-            return {"state": "protected", "label": "Protected"}
-        if value in {"clear", "none"} and complete is True:
-            return {"state": "clear", "label": "Clear"}
+                return {
+                    "state": "protected",
+                    "label": "Protected",
+                    "complete": evidence_complete,
+                    "required_by": required_by,
+                    "files_used_by": files_used_by,
+                }
+            if state in {"clear", "none"} and evidence_complete:
+                return {
+                    "state": "clear",
+                    "label": "Clear",
+                    "complete": True,
+                    "required_by": [],
+                    "files_used_by": files_used_by,
+                }
+            if state == "incomplete" or value.get("complete") is False:
+                return {
+                    "state": "incomplete",
+                    "label": "Incomplete",
+                    "complete": False,
+                    "required_by": required_by,
+                    "files_used_by": files_used_by,
+                }
+            return {
+                "state": "incomplete",
+                "label": "Incomplete",
+                "complete": False,
+                "required_by": [],
+                "files_used_by": files_used_by,
+            }
+        if isinstance(value, list):
+            return {
+                "state": "protected" if value else "incomplete",
+                "label": "Protected" if value else "Incomplete",
+                "complete": False,
+                "required_by": [],
+                "files_used_by": [],
+            }
+        if isinstance(value, str) and value in {"protected", "required", "blocked"}:
+            return {
+                "state": "protected",
+                "label": "Protected",
+                "complete": complete is True,
+                "required_by": [],
+                "files_used_by": [],
+            }
+        if isinstance(value, str) and value in {"clear", "none"} and complete is True:
+            return {
+                "state": "clear",
+                "label": "Clear",
+                "complete": True,
+                "required_by": [],
+                "files_used_by": [],
+            }
         return {
             "state": "incomplete" if complete is False else "unknown",
             "label": "Incomplete" if complete is False else "Unknown",
+            "complete": False,
+            "required_by": [],
+            "files_used_by": [],
         }
 
     @staticmethod

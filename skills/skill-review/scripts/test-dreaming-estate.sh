@@ -538,6 +538,207 @@ class EstateCensusTest(unittest.TestCase):
         )
         self.assertEqual(builtin_instance["authority"], "cli_builtin")
 
+    def test_chk03_distinguishes_runtime_dependencies_from_file_consumers(self) -> None:
+        root = self.case / "skills"
+        root.mkdir()
+        orchestrator = self.skill(root, "orchestrator")
+        worker = self.skill(root, "worker")
+        consumer = self.skill(root, "consumer")
+        reporter = self.skill(root, "reporter")
+        pinned = self.skill(root, "pinned-helper")
+        (orchestrator / "SKILL.md").write_text(
+            "---\nname: orchestrator\ndescription: Run `worker` for every task.\n---\n",
+            encoding="utf-8",
+        )
+        (orchestrator / "runner.js").write_text(
+            "export const worker = () => invoke('/worker');\n",
+            encoding="utf-8",
+        )
+        (consumer / "SKILL.md").write_text(
+            "---\nname: consumer\ndescription: Fixture.\n---\n"
+            "Call ../reporter/scripts/post.py directly, not the `reporter` skill.\n",
+            encoding="utf-8",
+        )
+        durable = {
+            "complete": True,
+            "dependencies": [],
+            "skills": [
+                {"name": name, "pinned": name == "pinned-helper"}
+                for name in (
+                    "consumer",
+                    "orchestrator",
+                    "pinned-helper",
+                    "reporter",
+                    "worker",
+                )
+            ],
+        }
+        contexts = [{
+            "id": "user",
+            "kind": "user",
+            "registered": True,
+            "runtime_skills": [
+                {
+                    "name": skill.name,
+                    "source": "fixture",
+                    "path": str(skill),
+                    "enabled": True,
+                }
+                for skill in (orchestrator, worker, consumer, reporter, pinned)
+            ],
+        }]
+        census = module.reconcile(
+            host_id="macbook",
+            roots=[self.root("fixture", "custom", root, "unknown_provenance")],
+            contexts=contexts,
+            collected_at="2026-08-18T00:00:00+00:00",
+            durable_dependency_inventory=durable,
+        )
+        instances = {
+            item["skill_name"]: item for item in census["physical_instances"]
+        }
+        worker_dependencies = instances["worker"]["dependencies"]
+        self.assertEqual(worker_dependencies["state"], "protected")
+        self.assertEqual(
+            {item["source_skill"] for item in worker_dependencies["blockers"]},
+            {"orchestrator"},
+        )
+        self.assertIn(
+            "runner.js",
+            {item["source_file"] for item in worker_dependencies["blockers"]},
+        )
+        reporter_dependencies = instances["reporter"]["dependencies"]
+        self.assertEqual(reporter_dependencies["state"], "clear")
+        self.assertEqual(
+            {
+                item["source_skill"]
+                for item in reporter_dependencies["installed_content_consumers"]
+            },
+            {"consumer"},
+        )
+        self.assertEqual(
+            instances["pinned-helper"]["dependencies"]["state"], "protected"
+        )
+        self.assertTrue(
+            census["evidence"]["dependency_inventory"]["source_graph_complete"]
+        )
+        self.assertTrue(census["evidence"]["dependency_inventory"]["complete"])
+
+    def test_chk03_incomplete_source_population_never_clears(self) -> None:
+        root = self.case / "skills"
+        root.mkdir()
+        target = self.skill(root, "target")
+        durable = {
+            "complete": True,
+            "dependencies": [],
+            "skills": [{"name": "target", "pinned": False}],
+        }
+        census = module.reconcile(
+            host_id="macbook",
+            roots=[self.root("fixture", "custom", root, "unknown_provenance")],
+            contexts=[{
+                "id": "user",
+                "kind": "user",
+                "registered": True,
+                "runtime_skills": [{
+                    "name": "target",
+                    "source": "fixture",
+                    "path": str(target),
+                    "enabled": True,
+                }, {
+                    "name": "unmapped-dependent",
+                    "source": "fixture",
+                    "path": str(self.case / "missing-dependent"),
+                    "enabled": True,
+                }],
+            }],
+            collected_at="2026-08-18T00:00:00+00:00",
+            durable_dependency_inventory=durable,
+        )
+        target_instance = next(
+            item for item in census["physical_instances"]
+            if item["skill_name"] == "target"
+        )
+        self.assertEqual(target_instance["dependencies"]["state"], "incomplete")
+        self.assertFalse(target_instance["dependencies_complete"])
+        self.assertFalse(
+            census["evidence"]["dependency_inventory"]["source_graph_complete"]
+        )
+
+    def test_chk03_normalizes_durable_targets_and_rejects_empty_sources(self) -> None:
+        root = self.case / "skills"
+        root.mkdir()
+        worker = self.skill(root, "worker")
+        contexts = [{
+            "id": "user",
+            "kind": "user",
+            "registered": True,
+            "runtime_skills": [{
+                "name": "worker",
+                "source": "fixture",
+                "path": str(worker),
+                "enabled": True,
+            }],
+        }]
+        root_record = self.root("fixture", "custom", root, "unknown_provenance")
+        durable = {
+            "complete": True,
+            "dependencies": [{
+                "skill": "WORKER",
+                "sources": ["/durable/owner"],
+            }],
+            "skills": [{"name": "worker", "pinned": False}],
+        }
+        protected = module.reconcile(
+            host_id="macbook",
+            roots=[root_record],
+            contexts=contexts,
+            collected_at="2026-08-18T00:00:00+00:00",
+            durable_dependency_inventory=durable,
+        )
+        self.assertEqual(
+            protected["physical_instances"][0]["dependencies"]["state"],
+            "protected",
+        )
+        durable["dependencies"][0]["sources"] = []
+        incomplete = module.reconcile(
+            host_id="macbook",
+            roots=[root_record],
+            contexts=contexts,
+            collected_at="2026-08-18T00:00:00+00:00",
+            durable_dependency_inventory=durable,
+        )
+        self.assertEqual(
+            incomplete["physical_instances"][0]["dependencies"]["state"],
+            "incomplete",
+        )
+        self.assertFalse(
+            incomplete["evidence"]["dependency_inventory"][
+                "durable_inventory_complete"
+            ]
+        )
+        durable["dependencies"] = [{
+            "skill": "stale-helper",
+            "sources": ["/durable/owner"],
+        }]
+        durable["skills"].append({"name": "stale-helper", "pinned": False})
+        stale = module.reconcile(
+            host_id="macbook",
+            roots=[root_record],
+            contexts=contexts,
+            collected_at="2026-08-18T00:00:00+00:00",
+            durable_dependency_inventory=durable,
+        )
+        self.assertEqual(
+            stale["physical_instances"][0]["dependencies"]["state"],
+            "incomplete",
+        )
+        self.assertFalse(
+            stale["evidence"]["dependency_inventory"][
+                "durable_inventory_complete"
+            ]
+        )
+
     def test_chk02_classifies_the_full_provenance_authority_matrix(self) -> None:
         personal = self.case / "personal"
         personal.mkdir()
