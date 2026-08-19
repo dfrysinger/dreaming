@@ -409,21 +409,28 @@ The boundary is proved fail-closed when deterministic and live checks show:
 
 ## Definition of Done: Dreaming review backlog capacity
 
-- [ ] CHK-C1 through CHK-C5 pass on deterministic fixtures.
-- [ ] The installed launchd plist uses one 14,400-second interval, the
+Closure evidence is retained under
+`files/behavior-validation-review-capacity-f2b4fcb/` in Copilot session
+`c7947aa7-3025-4b4e-977d-294626e8e949`. The fresh natural-run judgment is
+`judgments/SC-C6-FRESH.json`; rollback preservation is
+`judgments/SC-025.json`; the final installed-generation trace is
+`traces/SC-025/08-final-selftest-enable.txt`.
+
+- [x] CHK-C1 through CHK-C5 pass on deterministic fixtures.
+- [x] The installed launchd plist uses one 14,400-second interval, the
       standalone pass is forcibly bounded at 1,800 seconds, and
       `max_reviews_per_run` remains 25.
-- [ ] The Overview API and browser show honest queue age, arrivals,
+- [x] The Overview API and browser show honest queue age, arrivals,
       completions, recovery-required count, observed net throughput and
       burn-down state.
-- [ ] CHK-C6 observes the reviewed generation complete one canary and one
+- [x] CHK-C6 observes the reviewed generation complete one canary and one
       natural four-hour tick without overlap or timeout.
-- [ ] The bounded installed interval demonstrates positive net throughput or
+- [x] The bounded installed interval demonstrates positive net throughput or
       presents `not_burning_down` without an estimated completion date.
-- [ ] CHK-C7 proves rollback preserves all retained queue and review evidence.
-- [ ] Installed self-test and the existing core, orchestrator, dashboard,
+- [x] CHK-C7 proves rollback preserves all retained queue and review evidence.
+- [x] Installed self-test and the existing core, orchestrator, dashboard,
       installer and watchdog suites pass.
-- [ ] Dual implementation review has no unresolved in-scope must-fix finding.
-- [ ] Final installed proof passes on the reviewed tree.
-- [ ] The design, implementation and proof references are committed locally;
+- [x] Dual implementation review has no unresolved in-scope must-fix finding.
+- [x] Final installed proof passes on the reviewed tree.
+- [x] The design, implementation and proof references are committed locally;
       nothing is pushed.

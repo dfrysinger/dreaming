@@ -46,7 +46,7 @@
   operator signals. Targeted process and daemon checks pass, and both Opus and
   Terra fix-verification reviews report the finding resolved with no new
   findings. The correction is committed locally as `1a10787`.
-- Rollback preservation is in progress under `SC-025`. Before rollback, 426
+- Rollback preservation is complete under `SC-025`. Before rollback, 426
   retained review-evidence files were hashed. The explicit backup
   `20260818T165513Z-41055` restored the daily 09:15 schedule behind halt with
   `RunAtLoad=false` and no `StartInterval`; the adapter digest and all 426
@@ -66,18 +66,25 @@
   self-test ended with zero failures; only then was the daily generation
   enabled. The adapter and all 426 evidence hashes remained identical after
   enable.
-- Final activation generation `20260819T053804Z-install-81411` was installed
+- Final activation generation `20260819T053804Z-install-81411` is installed
   from reviewed Mac mini commit `6d27fff` behind halt. The commit descends from
   hard-timeout fix `1a10787`, its sole Dreaming plist has
   `StartInterval=14400` and `RunAtLoad=false` with no daily trigger, managed
   instructions verify, the adapter and all 426 evidence hashes remain
-  identical, and enable rejects before self-test. Its full final-candidate
-  self-test is currently running. Retained traces are under
+  identical, and enable rejected before self-test. Its full final-candidate
+  self-test passed with zero failures; the generation was then enabled. The
+  sole Dreaming owner reports `StartInterval=14400`, `RunAtLoad=false`, no
+  calendar trigger, a healthy dashboard response, and the same adapter and
+  426-file evidence manifest. Retained traces are under
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/behavior-validation-review-capacity-f2b4fcb/traces/SC-025/`.
-- Capacity work remaining: let the final self-test finish without disturbance,
-  enable only on zero failures, verify final ownership, cadence, dashboard and
-  preserved evidence, adjudicate `SC-025`, regenerate the evidence ledger, and
-  make the local proof commit.
+- The independent `SC-025` judge ruled `SUPPORTED`: explicit rollback restored
+  hour 9 with no interval while the nonempty 426-file evidence manifest
+  remained byte-identical. The regenerated behavior ledger contains two
+  supported selected scenarios, one retained flaky browser pass, and the
+  historical `SC-010` failure; `SC-C6-FRESH` separately proves the corrected
+  natural four-hour run without relabeling that history.
+- Capacity work remaining: commit these final proof references locally. The
+  capacity Definition of Done is otherwise closed.
 - The isolated governance preview is implemented and committed locally as
   `60fb7ce` on `feature/aggressive-skill-governance-preview`. Its manifested
   private snapshot contains one decision for each of 93 enabled canonical
@@ -89,6 +96,13 @@
   capacity closure, merge `60fb7ce` locally only after rollback evidence is
   retained, then implement and prove the governed mutation phases and
   `PORT-CHK-01` through `PORT-CHK-14`.
+- The reviewed settled-use amendment is committed in the isolated preview as
+  `1dcf2a9`. It permits per-capability 30-day settled zero only after relevant
+  stable transcript work drains, excludes recent active tails explicitly,
+  scopes historical identity ambiguity to plausible targets, preserves
+  dependency overrides, and requires a fresh decision before any future
+  automatic removal. Its first report-only collector/dashboard slice is in
+  progress; mutation routes remain disabled.
 - Parallel preview boundary: use
   `/Users/dfrysinger/code/dreaming-governance-preview` on
   `feature/aggressive-skill-governance-preview`. Before starting its server,
