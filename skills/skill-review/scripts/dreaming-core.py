@@ -101,6 +101,19 @@ EVALUATION_INPUT_INDEX_NAME = "root-index.json"
 EVALUATION_INPUT_MANIFEST_NAME = "input-manifest.json"
 EVALUATION_INPUT_MAX_CONTROL_BYTES = 64_000
 EVALUATION_INPUT_MAX_FILE_BYTES = 1_048_576
+EVALUATION_INPUT_QUEUE_STATES = {
+    "pass",
+    "regression",
+    "inconclusive",
+    "stale",
+    "missing",
+    "input_missing",
+    "drafting",
+    "review_required",
+    "insufficient_information",
+    "ready",
+    "invalid",
+}
 
 
 class RuntimeFailure(RuntimeError):
@@ -2576,7 +2589,13 @@ def load_evaluation_input_root(owner: dict[str, Any]) -> dict[str, dict[str, Any
         raise RuntimeFailure(
             "evaluation-input-root-invalid", "evaluation-input content root is unavailable"
         )
-    metadata = root.stat()
+    try:
+        metadata = root.stat()
+    except OSError as error:
+        raise RuntimeFailure(
+            "evaluation-input-root-invalid",
+            f"evaluation-input content root is unreadable: {error}",
+        ) from error
     if (
         metadata.st_uid != os.getuid()
         or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
@@ -2695,7 +2714,13 @@ def validate_evaluation_input_capability(
         raise RuntimeFailure(
             "evaluation-input-not-ready", "evaluation-input capability directory is unavailable"
         )
-    directory_metadata = capability_dir.stat()
+    try:
+        directory_metadata = capability_dir.stat()
+    except OSError as error:
+        raise RuntimeFailure(
+            "evaluation-input-not-ready",
+            f"evaluation-input capability directory is unreadable: {error}",
+        ) from error
     if (
         directory_metadata.st_uid != os.getuid()
         or directory_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
@@ -2869,6 +2894,499 @@ def validate_evaluation_input_capability(
         "manifest_sha256": entry["manifest_sha256"],
         "directory": str(capability_dir.resolve()),
         "files": {role: str(path) for role, path in sorted(files.items())},
+    }
+
+
+def evaluation_input_usage_state(
+    capability_id: str, usage: dict[str, Any], usage_row: dict[str, Any]
+) -> str:
+    uses_30d = usage_row.get("uses_30d")
+    if isinstance(uses_30d, bool) or not isinstance(uses_30d, int) or uses_30d < 0:
+        raise RuntimeFailure(
+            "evaluation-input-evidence-invalid",
+            "evaluation-input usage count is malformed",
+        )
+    if uses_30d > 0:
+        return "used_30d"
+    collected_at = parse_time(usage.get("collected_at"))
+    if collected_at is None or collected_at.tzinfo is None:
+        raise RuntimeFailure(
+            "evaluation-input-evidence-invalid",
+            "evaluation-input usage collection time is malformed",
+        )
+    coverage = usage.get("coverage")
+    pending = coverage.get("pending") if isinstance(coverage, dict) else None
+    failures = coverage.get("failures") if isinstance(coverage, dict) else None
+    unattributed = usage.get("unattributed")
+    if (
+        not isinstance(coverage, dict)
+        or not isinstance(coverage.get("complete"), bool)
+        or not isinstance(pending, list)
+        or not isinstance(failures, list)
+        or not isinstance(unattributed, list)
+    ):
+        raise RuntimeFailure(
+            "evaluation-input-evidence-invalid",
+            "evaluation-input usage coverage is malformed",
+        )
+    window_start = collected_at - timedelta(days=30)
+
+    def intersects_window(item: dict[str, Any]) -> bool:
+        modified_at = parse_time(item.get("modified_at"))
+        return modified_at is None or modified_at >= window_start
+
+    stable_backlog = [
+        item
+        for item in pending
+        if isinstance(item, dict)
+        and intersects_window(item)
+        and item.get("reason") != "events_recently_modified"
+    ]
+    relevant_failures = [
+        item
+        for item in failures
+        if isinstance(item, dict)
+        and intersects_window(item)
+        and (
+            not item.get("candidate_capability_ids")
+            or capability_id in item.get("candidate_capability_ids", [])
+        )
+    ]
+    identity_blocked = any(
+        isinstance(item, dict)
+        and capability_id in item.get("candidate_capability_ids", [])
+        for item in unattributed
+    ) or any(item.get("candidate_capability_ids") for item in relevant_failures)
+    stable_session_ids = {
+        item.get("session_id")
+        for item in stable_backlog
+        if isinstance(item.get("session_id"), str)
+    }
+    stable_failure = any(
+        not item.get("candidate_capability_ids")
+        and item.get("session_id") not in stable_session_ids
+        for item in relevant_failures
+    )
+    if coverage["complete"]:
+        return "complete_zero_30d"
+    if identity_blocked:
+        return "blocked_identity"
+    if stable_backlog or stable_failure:
+        return "blocked_stable_backlog"
+    return "settled_zero_30d"
+
+
+def evaluation_input_queue_priority(
+    evaluation: dict[str, Any],
+    usage_state: str,
+    *,
+    routing_conflict: bool,
+    root_class: str,
+    plugin_complete: bool,
+) -> tuple[int, str] | None:
+    if usage_state in {"complete_zero_30d", "settled_zero_30d"}:
+        return 1, "unused_30d"
+    state = evaluation["state"]
+    if state in {
+        "missing",
+        "input_missing",
+        "drafting",
+        "review_required",
+        "insufficient_information",
+        "inconclusive",
+        "invalid",
+        "ready",
+    }:
+        return 2, "evaluation_missing_or_invalid"
+    if state == "regression" or routing_conflict:
+        return 3, "regression_or_routing_conflict"
+    if any(
+        isinstance(item, dict)
+        and item.get("evaluation_class") == "overlap"
+        and item.get("comparable") is True
+        for item in evaluation.get("cases", [])
+    ):
+        return 4, "overlapping_capability"
+    if root_class == "plugin" and plugin_complete:
+        return 5, "complete_plugin_package"
+    if state == "stale" and evaluation.get("status") == "pass":
+        return 6, "stale_passing_evaluation"
+    return None
+
+
+def derive_evaluation_input_queue(
+    owner: dict[str, Any],
+    census: dict[str, Any],
+    usage: dict[str, Any],
+    receiver: dict[str, Any],
+    *,
+    census_receipt_sha256: str,
+    usage_receipt_sha256: str,
+) -> dict[str, Any]:
+    census_snapshot = {
+        key: value for key, value in census.items() if key != "snapshot_sha256"
+    }
+    usage_snapshot = {
+        key: value for key, value in usage.items() if key != "snapshot_sha256"
+    }
+    receiver_keys = {"receiver_id", "receiver_sha256", "collector_sha256"}
+    if (
+        not isinstance(receiver, dict)
+        or not receiver_keys.issubset(receiver)
+        or not all(
+            isinstance(receiver[key], str) and receiver[key]
+            for key in receiver_keys
+        )
+    ):
+        raise RuntimeFailure(
+            "evaluation-input-evidence-invalid",
+            "evaluation-input receiver identity is malformed",
+        )
+    receipt_receiver = {
+        key: receiver[key] for key in sorted(receiver_keys)
+    }
+    expected_census_receipt = digest(
+        {
+            "schema_version": 1,
+            "snapshot_sha256": census.get("snapshot_sha256"),
+            "receiver": receipt_receiver,
+            "census": census,
+        }
+    )
+    expected_usage_receipt = digest(
+        {
+            "schema_version": 1,
+            "snapshot_sha256": usage.get("snapshot_sha256"),
+            "census_snapshot_sha256": census.get("snapshot_sha256"),
+            "receiver": receipt_receiver,
+            "usage": usage,
+        }
+    )
+    if (
+        digest(census_snapshot) != census.get("snapshot_sha256")
+        or digest(usage_snapshot) != usage.get("snapshot_sha256")
+        or census.get("scope", {}).get("complete") is not True
+        or census.get("evidence", {}).get("evaluation_inventory", {}).get("complete")
+        is not True
+        or usage.get("census_snapshot_sha256") != census.get("snapshot_sha256")
+        or usage.get("host_id") != census.get("host_id")
+        or usage.get("collected_at") != census.get("collected_at")
+        or census_receipt_sha256 != expected_census_receipt
+        or usage_receipt_sha256 != expected_usage_receipt
+    ):
+        raise RuntimeFailure(
+            "evaluation-input-evidence-invalid",
+            "evaluation-input queue evidence is incomplete or cross-run",
+        )
+    physical = census.get("physical_instances")
+    enabled = census.get("enabled_instances")
+    usage_rows = usage.get("canonical_usage")
+    unresolved = census.get("unresolved_mappings")
+    plugins = census.get("plugins")
+    coverage = usage.get("coverage")
+    unattributed = usage.get("unattributed")
+    if (
+        not isinstance(physical, list)
+        or not isinstance(enabled, list)
+        or not isinstance(usage_rows, list)
+        or not isinstance(unresolved, list)
+        or not isinstance(plugins, list)
+        or not isinstance(coverage, dict)
+        or not isinstance(coverage.get("failures"), list)
+        or not isinstance(unattributed, list)
+    ):
+        raise RuntimeFailure(
+            "evaluation-input-evidence-invalid",
+            "evaluation-input queue inventory is malformed",
+        )
+    for item in unattributed:
+        candidate_ids = (
+            item.get("candidate_capability_ids")
+            if isinstance(item, dict)
+            else None
+        )
+        if not isinstance(candidate_ids, list) or not all(
+            isinstance(value, str) for value in candidate_ids
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-evidence-invalid",
+                "evaluation-input usage attribution is malformed",
+            )
+    for item in coverage["failures"]:
+        candidate_ids = (
+            item.get("candidate_capability_ids")
+            if isinstance(item, dict)
+            else None
+        )
+        if not isinstance(candidate_ids, list) or not all(
+            isinstance(value, str) for value in candidate_ids
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-evidence-invalid",
+                "evaluation-input usage failure attribution is malformed",
+            )
+    for item in unresolved:
+        if not isinstance(item, dict):
+            raise RuntimeFailure(
+                "evaluation-input-evidence-invalid",
+                "evaluation-input unresolved mapping is malformed",
+            )
+        if item.get("reason") == "multiply_mapped":
+            candidate_ids = item.get("candidate_instance_ids")
+            if not isinstance(candidate_ids, list) or not all(
+                isinstance(value, str) for value in candidate_ids
+            ):
+                raise RuntimeFailure(
+                    "evaluation-input-evidence-invalid",
+                    "evaluation-input routing conflict is malformed",
+                )
+    indexed_content = load_evaluation_input_root(owner)
+    physical_by_instance: dict[str, dict[str, Any]] = {}
+    physical_by_path: dict[str, set[str]] = {}
+    physical_capability_ids: set[str] = set()
+    all_skill_paths: list[Path] = []
+    for item in physical:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("instance_id"), str)
+            or item["instance_id"] in physical_by_instance
+            or not isinstance(item.get("canonical_capability_id"), str)
+            or not isinstance(item.get("absolute_path"), str)
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-evidence-invalid",
+                "evaluation-input physical inventory is ambiguous",
+            )
+        physical_by_instance[item["instance_id"]] = item
+        physical_capability_ids.add(item["canonical_capability_id"])
+        physical_by_path.setdefault(item["absolute_path"], set()).add(
+            item["canonical_capability_id"]
+        )
+        all_skill_paths.append(Path(item["absolute_path"]))
+    if not set(indexed_content).issubset(physical_capability_ids):
+        raise RuntimeFailure(
+            "evaluation-input-root-invalid",
+            "evaluation-input root index contains an unknown capability",
+        )
+    enabled_by_capability: dict[str, set[str]] = {}
+    runtime_names: dict[str, set[str]] = {}
+    for item in enabled:
+        if not isinstance(item, dict) or item.get("runtime_enabled") is not True:
+            continue
+        capability_id = item.get("canonical_capability_id")
+        instance_id = item.get("instance_id")
+        runtime_name = item.get("runtime_name")
+        if (
+            not isinstance(capability_id, str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", capability_id) is None
+            or not isinstance(instance_id, str)
+            or instance_id not in physical_by_instance
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-evidence-invalid",
+                "evaluation-input enabled inventory is malformed",
+            )
+        enabled_by_capability.setdefault(capability_id, set()).add(instance_id)
+        if isinstance(runtime_name, str) and runtime_name:
+            runtime_names.setdefault(runtime_name.casefold(), set()).add(capability_id)
+    usage_by_capability: dict[str, dict[str, Any]] = {}
+    for item in usage_rows:
+        capability_id = (
+            item.get("canonical_capability_id") if isinstance(item, dict) else None
+        )
+        if (
+            not isinstance(capability_id, str)
+            or capability_id in usage_by_capability
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-evidence-invalid",
+                "evaluation-input usage inventory is ambiguous",
+            )
+        usage_by_capability[capability_id] = item
+    if set(usage_by_capability) != set(enabled_by_capability):
+        raise RuntimeFailure(
+            "evaluation-input-evidence-invalid",
+            "evaluation-input usage inventory does not cover the enabled estate",
+        )
+    routing_conflict_instances = {
+        instance_id
+        for item in unresolved
+        if isinstance(item, dict) and item.get("reason") == "multiply_mapped"
+        for instance_id in item.get("candidate_instance_ids", [])
+        if isinstance(instance_id, str)
+    }
+    routing_conflict_capabilities = {
+        item["canonical_capability_id"]
+        for instance_id in routing_conflict_instances
+        if (item := physical_by_instance.get(instance_id)) is not None
+    }
+    routing_conflict_capabilities.update(
+        capability_id
+        for capability_ids in runtime_names.values()
+        if len(capability_ids) > 1
+        for capability_id in capability_ids
+    )
+    complete_plugins = set()
+    for item in plugins:
+        if (
+            isinstance(item, dict)
+            and item.get("enabled") is True
+            and isinstance(item.get("capabilities"), dict)
+            and item["capabilities"].get("complete") is True
+        ):
+            plugin_id = item.get("plugin_id")
+            if not isinstance(plugin_id, str) or not plugin_id:
+                raise RuntimeFailure(
+                    "evaluation-input-evidence-invalid",
+                    "evaluation-input complete plugin identity is malformed",
+                )
+            complete_plugins.add(plugin_id)
+    rows = []
+    for capability_id in sorted(enabled_by_capability):
+        instance_ids = enabled_by_capability[capability_id]
+        representative = (
+            physical_by_instance[next(iter(instance_ids))]
+            if len(instance_ids) == 1
+            else None
+        )
+        evaluation = (
+            representative.get("evaluation")
+            if isinstance(representative, dict)
+            else None
+        )
+        if (
+            representative is not None
+            and (
+                representative.get("canonical_capability_id") != capability_id
+                or representative.get("evaluation_complete") is not True
+                or not isinstance(evaluation, dict)
+                or evaluation.get("state") not in EVALUATION_INPUT_QUEUE_STATES
+                or not isinstance(evaluation.get("status"), str)
+                or not isinstance(evaluation.get("current"), bool)
+                or not isinstance(evaluation.get("cases"), list)
+            )
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-evidence-invalid",
+                "evaluation-input evaluation inventory is malformed",
+            )
+        if representative is None:
+            evaluation = {
+                "state": "missing",
+                "status": "missing",
+                "current": False,
+                "cases": [],
+            }
+        usage_state = evaluation_input_usage_state(
+            capability_id, usage, usage_by_capability[capability_id]
+        )
+        root_class = (
+            representative.get("root_class")
+            if isinstance(representative, dict)
+            and isinstance(representative.get("root_class"), str)
+            else "unknown"
+        )
+        owner_id = (
+            representative.get("owner")
+            if isinstance(representative, dict)
+            else None
+        )
+        priority = (
+            (2, "evaluation_missing_or_invalid")
+            if representative is None
+            else evaluation_input_queue_priority(
+                evaluation,
+                usage_state,
+                routing_conflict=capability_id in routing_conflict_capabilities,
+                root_class=root_class,
+                plugin_complete=(
+                    isinstance(owner_id, str) and owner_id in complete_plugins
+                ),
+            )
+        )
+        if priority is None:
+            continue
+        deferral_reason = None
+        skill_path: Path | None = None
+        content = None
+        if representative is None:
+            deferral_reason = "capability_path_ambiguous"
+        else:
+            skill_path = Path(representative["absolute_path"])
+            try:
+                resolved_skill = skill_path.resolve(strict=True)
+            except OSError:
+                resolved_skill = None
+            if (
+                skill_path.is_symlink()
+                or resolved_skill is None
+                or resolved_skill != skill_path
+                or not skill_path.is_dir()
+                or not (skill_path / "SKILL.md").is_file()
+            ):
+                deferral_reason = "capability_path_unavailable"
+            elif len(physical_by_path.get(str(skill_path), set())) != 1:
+                deferral_reason = "capability_path_ambiguous"
+            elif representative.get("dependencies_complete") is not True:
+                deferral_reason = "dependency_evidence_incomplete"
+            elif capability_id not in indexed_content:
+                deferral_reason = "input_not_ready"
+            else:
+                try:
+                    content = validate_evaluation_input_capability(
+                        owner,
+                        indexed_content[capability_id],
+                        installed_skill_roots=all_skill_paths,
+                    )
+                except RuntimeFailure as error:
+                    if error.code != "evaluation-input-not-ready":
+                        raise
+                    deferral_reason = "input_not_ready"
+        required_phase = (
+            "authoring"
+            if evaluation["state"]
+            in {
+                "missing",
+                "input_missing",
+                "drafting",
+                "review_required",
+                "insufficient_information",
+                "invalid",
+            }
+            else "execution"
+        )
+        rows.append(
+            {
+                "capability_id": capability_id,
+                "skill_path": str(skill_path) if skill_path is not None else None,
+                "priority": priority[0],
+                "queue_reason": priority[1],
+                "usage_state": usage_state,
+                "evaluation_state": evaluation["state"],
+                "required_phase": required_phase,
+                "runnable_phase": (
+                    "authoring"
+                    if deferral_reason is None and required_phase == "authoring"
+                    else None
+                ),
+                "deferral_reason": (
+                    "ready_for_execution"
+                    if deferral_reason is None and evaluation["state"] == "ready"
+                    else deferral_reason
+                ),
+                "input_manifest_sha256": (
+                    content["manifest_sha256"] if content is not None else None
+                ),
+            }
+        )
+    rows.sort(key=lambda item: (item["priority"], item["capability_id"]))
+    return {
+        "schema_version": 1,
+        "census_snapshot_sha256": census["snapshot_sha256"],
+        "census_receipt_sha256": census_receipt_sha256,
+        "usage_snapshot_sha256": usage["snapshot_sha256"],
+        "usage_receipt_sha256": usage_receipt_sha256,
+        "rows": rows,
     }
 
 
@@ -3248,7 +3766,10 @@ def configured_estate_census(config: dict[str, Any]) -> dict[str, Any] | None:
 
 
 def collect_estate_census(
-    core: DreamingRuntime, config: dict[str, Any]
+    core: DreamingRuntime,
+    config: dict[str, Any],
+    *,
+    include_evidence: bool = False,
 ) -> dict[str, Any] | None:
     entry = configured_estate_census(config)
     if entry is None:
@@ -3292,6 +3813,13 @@ def collect_estate_census(
         recorded["usage"] = {
             "status": "unavailable",
             "reason": "collector_generation_has_no_usage",
+        }
+    if include_evidence:
+        return {
+            "summary": recorded,
+            "census": census,
+            "usage": usage,
+            "receiver": receiver,
         }
     return recorded
 
@@ -3455,12 +3983,70 @@ def scheduled_run() -> dict[str, Any]:
             "config_sha256": evaluation_owner["config_sha256"],
             "recovery": recovery,
         }
+    queue_evidence = None
     try:
-        report["estate_census"] = collect_estate_census(core, config)
+        estate_result = collect_estate_census(
+            core,
+            config,
+            include_evidence=bool(
+                evaluation_owner is not None and evaluation_owner["enabled"]
+            ),
+        )
+        if (
+            evaluation_owner is not None
+            and evaluation_owner["enabled"]
+            and isinstance(estate_result, dict)
+            and isinstance(estate_result.get("summary"), dict)
+        ):
+            report["estate_census"] = estate_result["summary"]
+            queue_evidence = estate_result
+        else:
+            report["estate_census"] = estate_result
+            if evaluation_owner is not None and evaluation_owner["enabled"]:
+                report["evaluation_input"]["queue"] = {
+                    "status": "refused",
+                    "code": "evaluation-input-evidence-invalid",
+                }
+                report["errors"].append(
+                    {
+                        "phase": "evaluation-input-queue",
+                        "code": "evaluation-input-evidence-invalid",
+                    }
+                )
     except RuntimeFailure as error:
         report["errors"].append(
             {"phase": "estate-census", "code": error.code}
         )
+        queue_evidence = None
+    if queue_evidence is not None and evaluation_owner is not None:
+        try:
+            usage_summary = queue_evidence["summary"].get("usage")
+            usage = queue_evidence.get("usage")
+            if (
+                not isinstance(usage, dict)
+                or not isinstance(usage_summary, dict)
+                or not isinstance(usage_summary.get("receipt_sha256"), str)
+            ):
+                raise RuntimeFailure(
+                    "evaluation-input-evidence-invalid",
+                    "evaluation-input usage evidence is unavailable",
+                )
+            report["evaluation_input"]["queue"] = derive_evaluation_input_queue(
+                evaluation_owner,
+                queue_evidence["census"],
+                usage,
+                queue_evidence["receiver"],
+                census_receipt_sha256=queue_evidence["summary"]["receipt_sha256"],
+                usage_receipt_sha256=usage_summary["receipt_sha256"],
+            )
+        except RuntimeFailure as error:
+            report["evaluation_input"]["queue"] = {
+                "status": "refused",
+                "code": error.code,
+            }
+            report["errors"].append(
+                {"phase": "evaluation-input-queue", "code": error.code}
+            )
     recovery_state = paths.state / "publication-recovery-required.json"
     if recovery_state.exists():
         report["publication_recovery_required"] = True

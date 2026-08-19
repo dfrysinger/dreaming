@@ -65,6 +65,8 @@ class RuntimeTest(unittest.TestCase):
         if not self.case.exists():
             return
         for path in sorted(self.case.rglob("*"), reverse=True):
+            if path.is_symlink():
+                continue
             try:
                 os.chmod(path, 0o755 if path.is_dir() else 0o644)
             except FileNotFoundError:
@@ -103,63 +105,81 @@ class RuntimeTest(unittest.TestCase):
     def evaluation_input_content(
         self,
     ) -> tuple[dict[str, object], str, dict[str, object], dict[str, Path]]:
-        root = self.paths.state / "evaluation-input-owner"
         capability_id = runtime_module.digest({"capability": "fixture"})
-        capability_dir = root / "fixture-capability"
-        capability_dir.mkdir(parents=True)
-        files: dict[str, Path] = {}
-        for role in ("suite", "policy", "compilation", "routing", "catalog"):
-            path = capability_dir / f"{role}.json"
-            path.write_bytes(runtime_module.canonical({"role": role}))
-            os.chmod(path, 0o600)
-            files[role] = path
-        harness = capability_dir / "skill-evaluation-harness.py"
-        harness.write_bytes(
-            RUNTIME_PATH.with_name("skill-evaluation-harness.py").read_bytes()
+        owner, entries, file_sets = self.evaluation_input_content_set(
+            [capability_id]
         )
-        os.chmod(harness, 0o700)
-        files["harness"] = harness
-        manifest = {
-            "schema_version": 1,
-            "kind": "evaluation_input_capability_manifest",
-            "capability_id": capability_id,
-            "files": [
-                {
-                    "role": role,
-                    "path": path.name,
-                    "size": path.stat().st_size,
-                    "media_type": runtime_module.EVALUATION_INPUT_CONTENT_ROLES[
-                        role
-                    ],
-                    "sha256": "sha256:"
-                    + hashlib.sha256(path.read_bytes()).hexdigest(),
-                }
-                for role, path in sorted(files.items())
-            ],
-        }
-        manifest_path = (
-            capability_dir / runtime_module.EVALUATION_INPUT_MANIFEST_NAME
-        )
-        manifest_path.write_bytes(runtime_module.canonical(manifest))
-        os.chmod(manifest_path, 0o600)
-        entry = {
-            "capability_id": capability_id,
-            "directory": capability_dir.name,
-            "manifest_sha256": "sha256:"
-            + hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-        }
+        return owner, capability_id, entries[capability_id], file_sets[capability_id]
+
+    def evaluation_input_content_set(
+        self, capability_ids: list[str]
+    ) -> tuple[
+        dict[str, object],
+        dict[str, dict[str, object]],
+        dict[str, dict[str, Path]],
+    ]:
+        root = self.paths.state / "evaluation-input-owner"
+        entries: dict[str, dict[str, object]] = {}
+        file_sets: dict[str, dict[str, Path]] = {}
+        for position, capability_id in enumerate(capability_ids):
+            capability_dir = root / f"capability-{position:03d}"
+            capability_dir.mkdir(parents=True)
+            files: dict[str, Path] = {}
+            for role in ("suite", "policy", "compilation", "routing", "catalog"):
+                path = capability_dir / f"{role}.json"
+                path.write_bytes(runtime_module.canonical({"role": role}))
+                os.chmod(path, 0o600)
+                files[role] = path
+            harness = capability_dir / "skill-evaluation-harness.py"
+            harness.write_bytes(
+                RUNTIME_PATH.with_name("skill-evaluation-harness.py").read_bytes()
+            )
+            os.chmod(harness, 0o700)
+            files["harness"] = harness
+            manifest = {
+                "schema_version": 1,
+                "kind": "evaluation_input_capability_manifest",
+                "capability_id": capability_id,
+                "files": [
+                    {
+                        "role": role,
+                        "path": path.name,
+                        "size": path.stat().st_size,
+                        "media_type": runtime_module.EVALUATION_INPUT_CONTENT_ROLES[
+                            role
+                        ],
+                        "sha256": "sha256:"
+                        + hashlib.sha256(path.read_bytes()).hexdigest(),
+                    }
+                    for role, path in sorted(files.items())
+                ],
+            }
+            manifest_path = (
+                capability_dir / runtime_module.EVALUATION_INPUT_MANIFEST_NAME
+            )
+            manifest_path.write_bytes(runtime_module.canonical(manifest))
+            os.chmod(manifest_path, 0o600)
+            entries[capability_id] = {
+                "capability_id": capability_id,
+                "directory": capability_dir.name,
+                "manifest_sha256": "sha256:"
+                + hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+            }
+            file_sets[capability_id] = files
+            os.chmod(capability_dir, 0o700)
         index = {
             "schema_version": 1,
             "kind": "evaluation_input_content_root_index",
-            "capabilities": [entry],
+            "capabilities": [
+                entries[capability_id] for capability_id in capability_ids
+            ],
         }
         index["record_sha256"] = runtime_module.digest(index)
         index_path = root / runtime_module.EVALUATION_INPUT_INDEX_NAME
         index_path.write_bytes(runtime_module.canonical(index))
         os.chmod(index_path, 0o600)
-        os.chmod(capability_dir, 0o700)
         os.chmod(root, 0o700)
-        return {"content_root": str(root)}, capability_id, entry, files
+        return {"content_root": str(root)}, entries, file_sets
 
     def adapter(self, role: str, adapter_id: str, fixture: Path) -> ExecutableAdapter:
         return ExecutableAdapter(
@@ -557,6 +577,280 @@ class RuntimeTest(unittest.TestCase):
                 installed_skill_roots=[Path(owner["content_root"])],
             )
 
+    def test_evaluation_input_queue_is_same_run_ordered_and_nonpersistent(self) -> None:
+        capability_ids = [f"sha256:{value * 64}" for value in "1234567"]
+        content_ids = [
+            capability_id
+            for capability_id in capability_ids
+            if capability_id != capability_ids[2]
+        ]
+        owner, _, content_files = self.evaluation_input_content_set(content_ids)
+        physical = []
+        enabled = []
+        states = [
+            ("ready", "ready", False, []),
+            ("missing", "missing", False, []),
+            ("missing", "missing", False, []),
+            ("regression", "regression", True, []),
+            (
+                "pass",
+                "pass",
+                True,
+                [{"evaluation_class": "overlap", "comparable": True}],
+            ),
+            ("pass", "pass", True, []),
+            ("stale", "pass", False, []),
+        ]
+        for position, (capability_id, state) in enumerate(
+            zip(capability_ids, states)
+        ):
+            skill = (self.paths.skills / f"skill-{position}").resolve()
+            skill.mkdir(parents=True)
+            (skill / "SKILL.md").write_text(f"# Skill {position}\n")
+            instance_id = f"instance-{position}"
+            root_class = "plugin" if position == 5 else "user"
+            physical.append(
+                {
+                    "instance_id": instance_id,
+                    "canonical_capability_id": capability_id,
+                    "absolute_path": str(skill),
+                    "root_class": root_class,
+                    "owner": "plugin-1" if position == 5 else None,
+                    "evaluation": {
+                        "state": state[0],
+                        "status": state[1],
+                        "current": state[2],
+                        "cases": state[3],
+                    },
+                    "evaluation_complete": True,
+                    "dependencies_complete": True,
+                }
+            )
+            enabled.append(
+                {
+                    "instance_id": instance_id,
+                    "canonical_capability_id": capability_id,
+                    "runtime_enabled": True,
+                    "runtime_name": f"skill-{position}",
+                }
+            )
+        collected_at = "2026-08-18T16:00:00+00:00"
+        census = {
+            "schema_version": 1,
+            "host_id": "fixture-host",
+            "collected_at": collected_at,
+            "scope": {"complete": True},
+            "physical_instances": physical,
+            "enabled_instances": enabled,
+            "unresolved_mappings": [],
+            "plugins": [
+                {
+                    "plugin_id": "plugin-1",
+                    "enabled": True,
+                    "capabilities": {"complete": True},
+                }
+            ],
+            "evidence": {"evaluation_inventory": {"complete": True}},
+        }
+        census["snapshot_sha256"] = runtime_module.digest(census)
+        usage = {
+            "schema_version": 1,
+            "host_id": census["host_id"],
+            "collected_at": collected_at,
+            "census_snapshot_sha256": census["snapshot_sha256"],
+            "coverage": {
+                "complete": False,
+                "pending": [
+                    {
+                        "session_id": "active",
+                        "modified_at": collected_at,
+                        "reason": "events_recently_modified",
+                    }
+                ],
+                "failures": [],
+            },
+            "canonical_usage": [
+                {
+                    "canonical_capability_id": capability_id,
+                    "uses_30d": 0 if position == 0 else 1,
+                }
+                for position, capability_id in enumerate(capability_ids)
+            ],
+            "unattributed": [],
+        }
+        usage["snapshot_sha256"] = runtime_module.digest(usage)
+        receiver = {
+            "receiver_id": "fixture",
+            "receiver_sha256": "a" * 64,
+            "collector_sha256": "b" * 64,
+        }
+        receipt_receiver = {
+            key: receiver[key] for key in sorted(receiver)
+        }
+        census_receipt_sha256 = runtime_module.digest(
+            {
+                "schema_version": 1,
+                "snapshot_sha256": census["snapshot_sha256"],
+                "receiver": receipt_receiver,
+                "census": census,
+            }
+        )
+        usage_receipt_sha256 = runtime_module.digest(
+            {
+                "schema_version": 1,
+                "snapshot_sha256": usage["snapshot_sha256"],
+                "census_snapshot_sha256": census["snapshot_sha256"],
+                "receiver": receipt_receiver,
+                "usage": usage,
+            }
+        )
+        before = sorted(
+            path.relative_to(self.case).as_posix()
+            for path in self.case.rglob("*")
+        )
+        queue = runtime_module.derive_evaluation_input_queue(
+            owner,
+            census,
+            usage,
+            receiver,
+            census_receipt_sha256=census_receipt_sha256,
+            usage_receipt_sha256=usage_receipt_sha256,
+        )
+        after = sorted(
+            path.relative_to(self.case).as_posix()
+            for path in self.case.rglob("*")
+        )
+        self.assertEqual(before, after)
+        self.assertEqual(
+            [(row["priority"], row["capability_id"]) for row in queue["rows"]],
+            [
+                (1, capability_ids[0]),
+                (2, capability_ids[1]),
+                (2, capability_ids[2]),
+                (3, capability_ids[3]),
+                (4, capability_ids[4]),
+                (5, capability_ids[5]),
+                (6, capability_ids[6]),
+            ],
+        )
+        by_id = {row["capability_id"]: row for row in queue["rows"]}
+        self.assertEqual(
+            by_id[capability_ids[0]]["deferral_reason"],
+            "ready_for_execution",
+        )
+        self.assertIsNone(by_id[capability_ids[0]]["runnable_phase"])
+        self.assertEqual(
+            by_id[capability_ids[1]]["runnable_phase"], "authoring"
+        )
+        self.assertIsNotNone(
+            by_id[capability_ids[1]]["input_manifest_sha256"]
+        )
+        self.assertEqual(
+            by_id[capability_ids[2]]["deferral_reason"], "input_not_ready"
+        )
+        self.assertEqual(
+            by_id[capability_ids[3]]["queue_reason"],
+            "regression_or_routing_conflict",
+        )
+        content_files[capability_ids[1]]["suite"].write_text("{}")
+        rescanned = runtime_module.derive_evaluation_input_queue(
+            owner,
+            census,
+            usage,
+            receiver,
+            census_receipt_sha256=census_receipt_sha256,
+            usage_receipt_sha256=usage_receipt_sha256,
+        )
+        rescanned_by_id = {
+            row["capability_id"]: row for row in rescanned["rows"]
+        }
+        self.assertEqual(
+            rescanned_by_id[capability_ids[1]]["deferral_reason"],
+            "input_not_ready",
+        )
+        self.assertEqual(
+            rescanned_by_id[capability_ids[3]]["priority"], 3
+        )
+        cross_run = dict(usage)
+        cross_run["census_snapshot_sha256"] = "sha256:" + "f" * 64
+        cross_run["snapshot_sha256"] = runtime_module.digest(
+            {
+                key: value
+                for key, value in cross_run.items()
+                if key != "snapshot_sha256"
+            }
+        )
+        with self.assertRaisesRegex(RuntimeFailure, "cross-run"):
+            runtime_module.derive_evaluation_input_queue(
+                owner,
+                census,
+                cross_run,
+                receiver,
+                census_receipt_sha256=census_receipt_sha256,
+                usage_receipt_sha256=usage_receipt_sha256,
+            )
+        with self.assertRaisesRegex(RuntimeFailure, "cross-run"):
+            runtime_module.derive_evaluation_input_queue(
+                owner,
+                census,
+                usage,
+                receiver,
+                census_receipt_sha256="sha256:" + "d" * 64,
+                usage_receipt_sha256=usage_receipt_sha256,
+            )
+        malformed_usage = json.loads(json.dumps(usage))
+        malformed_usage["unattributed"] = [
+            {"name": "bad", "candidate_capability_ids": None}
+        ]
+        malformed_usage["snapshot_sha256"] = runtime_module.digest(
+            {
+                key: value
+                for key, value in malformed_usage.items()
+                if key != "snapshot_sha256"
+            }
+        )
+        malformed_usage_receipt = runtime_module.digest(
+            {
+                "schema_version": 1,
+                "snapshot_sha256": malformed_usage["snapshot_sha256"],
+                "census_snapshot_sha256": census["snapshot_sha256"],
+                "receiver": receipt_receiver,
+                "usage": malformed_usage,
+            }
+        )
+        with self.assertRaisesRegex(RuntimeFailure, "attribution is malformed"):
+            runtime_module.derive_evaluation_input_queue(
+                owner,
+                census,
+                malformed_usage,
+                receiver,
+                census_receipt_sha256=census_receipt_sha256,
+                usage_receipt_sha256=malformed_usage_receipt,
+            )
+        index_path = (
+            Path(owner["content_root"])
+            / runtime_module.EVALUATION_INPUT_INDEX_NAME
+        )
+        index = json.loads(index_path.read_bytes())
+        index["capabilities"][0]["capability_id"] = "sha256:" + "f" * 64
+        index["record_sha256"] = runtime_module.digest(
+            {
+                key: value
+                for key, value in index.items()
+                if key != "record_sha256"
+            }
+        )
+        index_path.write_bytes(runtime_module.canonical(index))
+        with self.assertRaisesRegex(RuntimeFailure, "unknown capability"):
+            runtime_module.derive_evaluation_input_queue(
+                owner,
+                census,
+                usage,
+                receiver,
+                census_receipt_sha256=census_receipt_sha256,
+                usage_receipt_sha256=usage_receipt_sha256,
+            )
+
     def test_disabled_evaluation_owner_recovers_before_census(self) -> None:
         adapters = {
             "session-source": {},
@@ -616,6 +910,64 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(
             report["errors"][0],
             {"phase": "estate-census", "code": "census-stop"},
+        )
+        self.assertEqual(
+            census.call_args.kwargs, {"include_evidence": False}
+        )
+        enabled_owner = {**owner, "enabled": True}
+        with (
+            mock.patch.object(runtime_module, "default_paths", return_value=self.paths),
+            mock.patch.object(
+                runtime_module,
+                "load_adapter_config",
+                return_value={"sources": {}, "executors": {}},
+            ),
+            mock.patch.object(
+                runtime_module, "validated_routing", return_value=(set(), [])
+            ),
+            mock.patch.object(
+                runtime_module,
+                "configured_adapters_tolerant",
+                return_value=(adapters, [], []),
+            ),
+            mock.patch.object(
+                runtime_module,
+                "configured_role_tolerant",
+                return_value=({}, [], []),
+            ),
+            mock.patch.object(
+                runtime_module,
+                "configured_evaluation_input_owner",
+                return_value=enabled_owner,
+            ),
+            mock.patch.object(
+                runtime_module,
+                "reconcile_evaluation_input_owner",
+                return_value=recovery,
+            ),
+            mock.patch.object(
+                runtime_module,
+                "collect_estate_census",
+                return_value=None,
+            ) as enabled_census,
+        ):
+            enabled_report = runtime_module.scheduled_run()
+        self.assertEqual(
+            enabled_census.call_args.kwargs, {"include_evidence": True}
+        )
+        self.assertEqual(
+            enabled_report["evaluation_input"]["queue"],
+            {
+                "status": "refused",
+                "code": "evaluation-input-evidence-invalid",
+            },
+        )
+        self.assertIn(
+            {
+                "phase": "evaluation-input-queue",
+                "code": "evaluation-input-evidence-invalid",
+            },
+            enabled_report["errors"],
         )
         with (
             mock.patch.object(runtime_module, "default_paths", return_value=self.paths),
