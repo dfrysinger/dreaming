@@ -495,6 +495,21 @@
   with no unresolved material defect. Model process-group monitoring, sealed
   content/root-index validation, the derived in-memory queue, and one-claim
   authoring orchestration remain.
+- Sealed evaluation-input content validation is implemented and committed
+  locally on the isolated preview branch as `c4f47c6`. The installation-owned
+  root index binds each capability ID to one directory and one canonical
+  manifest digest. Each manifest must declare exactly one bounded file for the
+  suite, policy, compilation, routing, catalog, and trusted harness roles.
+  Validation rejects stale digests, unsafe ownership or permissions, symlinks,
+  undeclared inventory, installed-root overlap, malformed JSON inputs, and a
+  harness that is not byte-identical to the bounded executable installed
+  harness. A root defect blocks the evaluation-input lane; a capability defect
+  remains a per-row `evaluation-input-not-ready` result. Validation passes 43
+  core checks, Python and shell syntax checks, and the diff check. Paired
+  implementation review closed manifest substitution, unreadable filesystem
+  paths, unbounded reads, and trusted-harness guard ordering with no unresolved
+  material defect. The derived in-memory queue, model process-group monitor,
+  and one-claim authoring orchestration remain.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
