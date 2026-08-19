@@ -19,7 +19,7 @@
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
-- Isolated governance preview tip: `a7880cb`
+- Isolated governance preview tip: `4aaa240`
 - The first natural successor `20260818T220321Z-97940` remains retained as a
   literal `SC-010` `NOT_SUPPORTED` result. It attempted 25 reviews, completed
   24, retained one `executor-timeout`, and ended honestly as `aborted` after
@@ -547,6 +547,25 @@
   Terra closure resolved model-order mismatch, commit-time authority loss,
   claim-handoff interruption, reused process-group identity, and unbounded
   descendant-held pipe waits with no unresolved material defect.
+- Complete evaluation-input pack sealing is implemented on the isolated
+  preview branch as `16dff3e`, with review closure at `4aaa240`. The public
+  `seal-inputs` command accepts a canonical capability plan, reads each mutable
+  source pack through descriptor-relative no-follow traversal, retains stable
+  file identities through bounded reads, copies the byte-identical reviewed
+  harness as evidence, and semantically validates every staged author packet
+  before one atomic publication. Manifests bind the six primary suite, policy,
+  compilation, routing, catalog, and harness roles plus complete sealed
+  `fixtures/` and `graders/` support trees. Published content and nested
+  directories are owner-read-only, exact inventory remains mandatory, and
+  execution uses only the installation-authorized sibling harness after
+  byte-identity verification. Validation passes 47 core checks and 42
+  certification checks. Paired review closed source-tree replacement, nested
+  directory mode, malformed support path, reserved-index collision, and
+  writable-publication findings; the transient writable root required by
+  macOS atomic rename is protected by the inherited Dreaming writer lease and
+  is not a same-UID hostile-process boundary. Production executor/comparator
+  routing and an environment-correct source-pack builder remain the next
+  prerequisites before any real zero-use cohort can be sealed or progressed.
 - Governance work remaining: bootstrap the sealed inputs for the real zero-use
   cohort, progress that cohort through reviewed readiness, then execute the
   evaluation queue under explicit daily operation, normalized-token, and
