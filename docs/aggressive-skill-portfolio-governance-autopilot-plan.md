@@ -510,6 +510,22 @@
   paths, unbounded reads, and trusted-harness guard ordering with no unresolved
   material defect. The derived in-memory queue, model process-group monitor,
   and one-claim authoring orchestration remain.
+- The derived evaluation-input queue is implemented and committed locally on
+  the isolated preview branch as `cd53928`. Enabled owner runs retain the exact
+  census, usage, and receiver collected in that run, reconstruct and verify
+  both content-addressed receipts, require complete enabled, usage, evaluation,
+  dependency, plugin, and physical-path evidence, then project queue rows in
+  the reviewed six-tier order with canonical capability identity as the stable
+  tie-breaker. The queue is in memory only. A malformed root refuses the whole
+  evaluation-input lane; a missing or stale capability input, ambiguous path,
+  or incomplete dependency record remains visible as a per-row deferral while
+  scanning continues. Ready rows remain visible as `ready_for_execution` and
+  cannot enter the authoring phase. Validation passes 44 core checks, Python
+  and shell syntax checks, and the diff check. Paired implementation review
+  closed unbound receipt provenance, malformed nested evidence, and malformed
+  plugin-package identity with no unresolved material defect. Model
+  process-group monitoring and one-claim authoring orchestration remain and
+  must be implemented together.
 - Governance work remaining: implement safe case authoring and progress the
   real zero-use cohort through reviewed readiness, then execute the evaluation
   queue under explicit daily
