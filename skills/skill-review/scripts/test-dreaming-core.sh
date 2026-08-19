@@ -100,6 +100,67 @@ class RuntimeTest(unittest.TestCase):
         path.write_text(json.dumps(value, indent=2, sort_keys=True) + "\n")
         return path
 
+    def evaluation_input_content(
+        self,
+    ) -> tuple[dict[str, object], str, dict[str, object], dict[str, Path]]:
+        root = self.paths.state / "evaluation-input-owner"
+        capability_id = runtime_module.digest({"capability": "fixture"})
+        capability_dir = root / "fixture-capability"
+        capability_dir.mkdir(parents=True)
+        files: dict[str, Path] = {}
+        for role in ("suite", "policy", "compilation", "routing", "catalog"):
+            path = capability_dir / f"{role}.json"
+            path.write_bytes(runtime_module.canonical({"role": role}))
+            os.chmod(path, 0o600)
+            files[role] = path
+        harness = capability_dir / "skill-evaluation-harness.py"
+        harness.write_bytes(
+            RUNTIME_PATH.with_name("skill-evaluation-harness.py").read_bytes()
+        )
+        os.chmod(harness, 0o700)
+        files["harness"] = harness
+        manifest = {
+            "schema_version": 1,
+            "kind": "evaluation_input_capability_manifest",
+            "capability_id": capability_id,
+            "files": [
+                {
+                    "role": role,
+                    "path": path.name,
+                    "size": path.stat().st_size,
+                    "media_type": runtime_module.EVALUATION_INPUT_CONTENT_ROLES[
+                        role
+                    ],
+                    "sha256": "sha256:"
+                    + hashlib.sha256(path.read_bytes()).hexdigest(),
+                }
+                for role, path in sorted(files.items())
+            ],
+        }
+        manifest_path = (
+            capability_dir / runtime_module.EVALUATION_INPUT_MANIFEST_NAME
+        )
+        manifest_path.write_bytes(runtime_module.canonical(manifest))
+        os.chmod(manifest_path, 0o600)
+        entry = {
+            "capability_id": capability_id,
+            "directory": capability_dir.name,
+            "manifest_sha256": "sha256:"
+            + hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
+        }
+        index = {
+            "schema_version": 1,
+            "kind": "evaluation_input_content_root_index",
+            "capabilities": [entry],
+        }
+        index["record_sha256"] = runtime_module.digest(index)
+        index_path = root / runtime_module.EVALUATION_INPUT_INDEX_NAME
+        index_path.write_bytes(runtime_module.canonical(index))
+        os.chmod(index_path, 0o600)
+        os.chmod(capability_dir, 0o700)
+        os.chmod(root, 0o700)
+        return {"content_root": str(root)}, capability_id, entry, files
+
     def adapter(self, role: str, adapter_id: str, fixture: Path) -> ExecutableAdapter:
         return ExecutableAdapter(
             [
@@ -369,6 +430,131 @@ class RuntimeTest(unittest.TestCase):
         ), self.assertRaisesRegex(RuntimeFailure, "installed digest"):
             runtime_module.configured_evaluation_input_owner(
                 config, config_path, self.paths
+            )
+
+    def test_evaluation_input_root_index_is_exact_and_fail_closed(self) -> None:
+        owner, capability_id, entry, _ = self.evaluation_input_content()
+        self.assertEqual(
+            runtime_module.load_evaluation_input_root(owner),
+            {capability_id: entry},
+        )
+        root = Path(owner["content_root"])
+        os.chmod(root, 0o200)
+        with self.assertRaisesRegex(RuntimeFailure, "permissions are unsafe"):
+            runtime_module.load_evaluation_input_root(owner)
+        os.chmod(root, 0o700)
+        unknown = root / "unknown"
+        unknown.mkdir()
+        with self.assertRaisesRegex(RuntimeFailure, "inventory differs"):
+            runtime_module.load_evaluation_input_root(owner)
+        unknown.rmdir()
+        manifest = root / entry["directory"] / runtime_module.EVALUATION_INPUT_MANIFEST_NAME
+        manifest.write_bytes(manifest.read_bytes() + b"\n")
+        with self.assertRaisesRegex(RuntimeFailure, "manifest identity is stale"):
+            runtime_module.load_evaluation_input_root(owner)
+
+    def test_evaluation_input_capability_manifest_enforces_every_file(self) -> None:
+        owner, capability_id, entry, files = self.evaluation_input_content()
+        indexed = runtime_module.load_evaluation_input_root(owner)
+        validated = runtime_module.validate_evaluation_input_capability(
+            owner,
+            indexed[capability_id],
+            installed_skill_roots=[self.paths.skills],
+        )
+        self.assertEqual(validated["capability_id"], capability_id)
+        self.assertEqual(set(validated["files"]), set(files))
+        manifest_path = (
+            Path(owner["content_root"])
+            / entry["directory"]
+            / runtime_module.EVALUATION_INPUT_MANIFEST_NAME
+        )
+        original_manifest = manifest_path.read_bytes()
+        manifest = json.loads(original_manifest)
+        manifest["files"] = list(reversed(manifest["files"]))
+        manifest_path.write_bytes(runtime_module.canonical(manifest))
+        with self.assertRaisesRegex(RuntimeFailure, "manifest identity is stale"):
+            runtime_module.validate_evaluation_input_capability(
+                owner,
+                entry,
+                installed_skill_roots=[self.paths.skills],
+            )
+        manifest_path.write_bytes(original_manifest)
+        suite_size = files["suite"].stat().st_size
+        files["suite"].write_bytes(b"x" * suite_size)
+        with self.assertRaisesRegex(RuntimeFailure, "suite identity is stale"):
+            runtime_module.validate_evaluation_input_capability(
+                owner,
+                entry,
+                installed_skill_roots=[self.paths.skills],
+            )
+        files["suite"].write_bytes(runtime_module.canonical({"role": "suite"}))
+        files["suite"].write_bytes(
+            b"x" * (runtime_module.EVALUATION_INPUT_MAX_FILE_BYTES + 1)
+        )
+        with self.assertRaisesRegex(RuntimeFailure, "suite size is stale"):
+            runtime_module.validate_evaluation_input_capability(
+                owner,
+                entry,
+                installed_skill_roots=[self.paths.skills],
+            )
+        files["suite"].write_bytes(runtime_module.canonical({"role": "suite"}))
+        os.chmod(files["suite"], 0o200)
+        with self.assertRaisesRegex(RuntimeFailure, "suite is not readable"):
+            runtime_module.validate_evaluation_input_capability(
+                owner,
+                entry,
+                installed_skill_roots=[self.paths.skills],
+            )
+        os.chmod(files["suite"], 0o600)
+        os.chmod(files["policy"], 0o620)
+        with self.assertRaisesRegex(RuntimeFailure, "permissions are unsafe"):
+            runtime_module.validate_evaluation_input_capability(
+                owner,
+                entry,
+                installed_skill_roots=[self.paths.skills],
+            )
+        os.chmod(files["policy"], 0o600)
+        extra = Path(owner["content_root"]) / entry["directory"] / "extra.json"
+        extra.write_text("{}")
+        with self.assertRaisesRegex(RuntimeFailure, "inventory differs"):
+            runtime_module.validate_evaluation_input_capability(
+                owner,
+                entry,
+                installed_skill_roots=[self.paths.skills],
+            )
+        extra.unlink()
+        fake_runtime = self.case / "installed" / "dreaming-core.py"
+        fake_runtime.parent.mkdir()
+        fake_runtime.write_text("")
+        trusted_harness = fake_runtime.with_name("skill-evaluation-harness.py")
+        trusted_harness.symlink_to(
+            RUNTIME_PATH.with_name("skill-evaluation-harness.py")
+        )
+        original_runtime_file = runtime_module.__file__
+        original_read_bytes = Path.read_bytes
+
+        def refuse_trusted_harness_read(path: Path) -> bytes:
+            if path == trusted_harness:
+                raise AssertionError("trusted symlink was opened before validation")
+            return original_read_bytes(path)
+
+        runtime_module.__file__ = str(fake_runtime)
+        try:
+            with mock.patch.object(
+                Path, "read_bytes", autospec=True, side_effect=refuse_trusted_harness_read
+            ), self.assertRaisesRegex(RuntimeFailure, "not a regular file"):
+                runtime_module.validate_evaluation_input_capability(
+                    owner,
+                    entry,
+                    installed_skill_roots=[self.paths.skills],
+                )
+        finally:
+            runtime_module.__file__ = original_runtime_file
+        with self.assertRaisesRegex(RuntimeFailure, "overlaps an installed"):
+            runtime_module.validate_evaluation_input_capability(
+                owner,
+                entry,
+                installed_skill_roots=[Path(owner["content_root"])],
             )
 
     def test_disabled_evaluation_owner_recovers_before_census(self) -> None:

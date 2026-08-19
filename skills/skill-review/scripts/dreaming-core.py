@@ -89,6 +89,18 @@ EVALUATION_INPUT_OWNER_KEYS = {
     "reviewer_b_model",
     "content_root",
 }
+EVALUATION_INPUT_CONTENT_ROLES = {
+    "suite": "application/json",
+    "policy": "application/json",
+    "compilation": "application/json",
+    "routing": "application/json",
+    "catalog": "application/json",
+    "harness": "text/x-python",
+}
+EVALUATION_INPUT_INDEX_NAME = "root-index.json"
+EVALUATION_INPUT_MANIFEST_NAME = "input-manifest.json"
+EVALUATION_INPUT_MAX_CONTROL_BYTES = 64_000
+EVALUATION_INPUT_MAX_FILE_BYTES = 1_048_576
 
 
 class RuntimeFailure(RuntimeError):
@@ -2502,6 +2514,361 @@ def configured_evaluation_input_owner(
         "content_root": str(expected_root),
         "config_sha256": "sha256:" + config_digest,
         "evaluator": str(evaluator),
+    }
+
+
+def read_canonical_control_json(
+    path: Path, field: str
+) -> tuple[dict[str, Any], bytes]:
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeFailure("evaluation-input-content-invalid", f"{field} is not a regular file")
+    try:
+        metadata = path.stat()
+        if (
+            metadata.st_uid != os.getuid()
+            or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+            or not metadata.st_mode & stat.S_IRUSR
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-content-invalid",
+                f"{field} ownership or permissions are unsafe",
+            )
+        if metadata.st_size > EVALUATION_INPUT_MAX_CONTROL_BYTES:
+            raise RuntimeFailure("evaluation-input-content-invalid", f"{field} is oversized")
+        content = path.read_bytes()
+        value = json.loads(content)
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeFailure(
+            "evaluation-input-content-invalid", f"{field} is unreadable: {error}"
+        ) from error
+    if not isinstance(value, dict) or content != canonical(value):
+        raise RuntimeFailure(
+            "evaluation-input-content-invalid", f"{field} is not canonical JSON"
+        )
+    return value, content
+
+
+def require_owned_content_path(
+    path: Path, field: str, *, executable: bool = False
+) -> os.stat_result:
+    if path.is_symlink() or not path.is_file():
+        raise RuntimeFailure("evaluation-input-not-ready", f"{field} is not a regular file")
+    try:
+        metadata = path.stat()
+    except OSError as error:
+        raise RuntimeFailure(
+            "evaluation-input-not-ready", f"{field} is unreadable: {error}"
+        ) from error
+    if metadata.st_uid != os.getuid() or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise RuntimeFailure(
+            "evaluation-input-not-ready", f"{field} ownership or permissions are unsafe"
+        )
+    if not metadata.st_mode & stat.S_IRUSR:
+        raise RuntimeFailure("evaluation-input-not-ready", f"{field} is not readable")
+    if executable and not metadata.st_mode & stat.S_IXUSR:
+        raise RuntimeFailure("evaluation-input-not-ready", f"{field} is not executable")
+    return metadata
+
+
+def load_evaluation_input_root(owner: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    root = Path(owner["content_root"])
+    if root.is_symlink() or not root.is_dir():
+        raise RuntimeFailure(
+            "evaluation-input-root-invalid", "evaluation-input content root is unavailable"
+        )
+    metadata = root.stat()
+    if (
+        metadata.st_uid != os.getuid()
+        or metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or not metadata.st_mode & stat.S_IRUSR
+        or not metadata.st_mode & stat.S_IXUSR
+    ):
+        raise RuntimeFailure(
+            "evaluation-input-root-invalid", "evaluation-input content root permissions are unsafe"
+        )
+    index_path = root / EVALUATION_INPUT_INDEX_NAME
+    try:
+        index, _ = read_canonical_control_json(
+            index_path, "evaluation-input root index"
+        )
+    except RuntimeFailure as error:
+        raise RuntimeFailure("evaluation-input-root-invalid", error.message) from error
+    if (
+        set(index) != {
+            "schema_version",
+            "kind",
+            "capabilities",
+            "record_sha256",
+        }
+        or index.get("schema_version") != 1
+        or index.get("kind") != "evaluation_input_content_root_index"
+        or not isinstance(index.get("capabilities"), list)
+        or index.get("record_sha256")
+        != digest({key: value for key, value in index.items() if key != "record_sha256"})
+    ):
+        raise RuntimeFailure(
+            "evaluation-input-root-invalid", "evaluation-input root index identity is invalid"
+        )
+    entries: dict[str, dict[str, Any]] = {}
+    directories: set[str] = set()
+    for position, entry in enumerate(index["capabilities"]):
+        if (
+            not isinstance(entry, dict)
+            or set(entry) != {"capability_id", "directory", "manifest_sha256"}
+            or not isinstance(entry.get("capability_id"), str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", entry["capability_id"]) is None
+            or not isinstance(entry.get("directory"), str)
+            or re.fullmatch(r"[a-z0-9][a-z0-9._-]{0,127}", entry["directory"]) is None
+            or entry["directory"] in {".", ".."}
+            or not isinstance(entry.get("manifest_sha256"), str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", entry["manifest_sha256"]) is None
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-root-invalid",
+                f"evaluation-input root index entry {position} is malformed",
+            )
+        if entry["capability_id"] in entries or entry["directory"] in directories:
+            raise RuntimeFailure(
+                "evaluation-input-root-invalid", "evaluation-input root index entries collide"
+            )
+        capability_dir = root / entry["directory"]
+        manifest_path = capability_dir / EVALUATION_INPUT_MANIFEST_NAME
+        if (
+            capability_dir.is_symlink()
+            or not capability_dir.is_dir()
+            or manifest_path.is_symlink()
+            or not manifest_path.is_file()
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-root-invalid",
+                "evaluation-input root index names an unavailable capability manifest",
+            )
+        try:
+            if manifest_path.stat().st_size > EVALUATION_INPUT_MAX_CONTROL_BYTES:
+                raise RuntimeFailure(
+                    "evaluation-input-root-invalid",
+                    "evaluation-input capability manifest is oversized",
+                )
+            manifest_bytes = manifest_path.read_bytes()
+        except OSError as error:
+            raise RuntimeFailure(
+                "evaluation-input-root-invalid",
+                f"evaluation-input capability manifest is unreadable: {error}",
+            ) from error
+        manifest_digest = "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+        if manifest_digest != entry["manifest_sha256"]:
+            raise RuntimeFailure(
+                "evaluation-input-root-invalid",
+                "evaluation-input root index manifest identity is stale",
+            )
+        entries[entry["capability_id"]] = dict(entry)
+        directories.add(entry["directory"])
+    try:
+        root_entries = list(root.iterdir())
+    except OSError as error:
+        raise RuntimeFailure(
+            "evaluation-input-root-invalid",
+            f"evaluation-input content root is unreadable: {error}",
+        ) from error
+    actual = {
+        path.name
+        for path in root_entries
+        if path.name != EVALUATION_INPUT_INDEX_NAME
+    }
+    if actual != directories or any(path.is_symlink() for path in root_entries):
+        raise RuntimeFailure(
+            "evaluation-input-root-invalid", "evaluation-input content root inventory differs from its index"
+        )
+    return entries
+
+
+def validate_evaluation_input_capability(
+    owner: dict[str, Any],
+    entry: dict[str, Any],
+    *,
+    installed_skill_roots: Iterable[Path],
+) -> dict[str, Any]:
+    root = Path(owner["content_root"]).resolve()
+    capability_dir = root / entry["directory"]
+    installed_roots = tuple(path.resolve() for path in installed_skill_roots)
+    if capability_dir.is_symlink() or not capability_dir.is_dir():
+        raise RuntimeFailure(
+            "evaluation-input-not-ready", "evaluation-input capability directory is unavailable"
+        )
+    directory_metadata = capability_dir.stat()
+    if (
+        directory_metadata.st_uid != os.getuid()
+        or directory_metadata.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
+        or not directory_metadata.st_mode & stat.S_IRUSR
+        or not directory_metadata.st_mode & stat.S_IXUSR
+    ):
+        raise RuntimeFailure(
+            "evaluation-input-not-ready",
+            "evaluation-input capability directory permissions are unsafe",
+        )
+    manifest_path = capability_dir / EVALUATION_INPUT_MANIFEST_NAME
+    try:
+        manifest, manifest_bytes = read_canonical_control_json(
+            manifest_path, "evaluation-input capability manifest"
+        )
+    except RuntimeFailure as error:
+        raise RuntimeFailure("evaluation-input-not-ready", error.message) from error
+    if (
+        "sha256:" + hashlib.sha256(manifest_bytes).hexdigest()
+        != entry["manifest_sha256"]
+    ):
+        raise RuntimeFailure(
+            "evaluation-input-not-ready",
+            "evaluation-input capability manifest identity is stale",
+        )
+    if (
+        set(manifest) != {"schema_version", "kind", "capability_id", "files"}
+        or manifest.get("schema_version") != 1
+        or manifest.get("kind") != "evaluation_input_capability_manifest"
+        or manifest.get("capability_id") != entry["capability_id"]
+        or not isinstance(manifest.get("files"), list)
+    ):
+        raise RuntimeFailure(
+            "evaluation-input-not-ready", "evaluation-input capability manifest is malformed"
+        )
+    files: dict[str, Path] = {}
+    declared_paths: set[str] = set()
+    for position, item in enumerate(manifest["files"]):
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"role", "path", "size", "media_type", "sha256"}
+            or item.get("role") not in EVALUATION_INPUT_CONTENT_ROLES
+            or item.get("media_type")
+            != EVALUATION_INPUT_CONTENT_ROLES.get(item.get("role"))
+            or not isinstance(item.get("path"), str)
+            or Path(item["path"]).is_absolute()
+            or Path(item["path"]).as_posix() != item["path"]
+            or ".." in Path(item["path"]).parts
+            or not isinstance(item.get("size"), int)
+            or isinstance(item["size"], bool)
+            or item["size"] < 0
+            or item["size"] > EVALUATION_INPUT_MAX_FILE_BYTES
+            or not isinstance(item.get("sha256"), str)
+            or re.fullmatch(r"sha256:[0-9a-f]{64}", item["sha256"]) is None
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-not-ready",
+                f"evaluation-input capability file {position} is malformed",
+            )
+        role = item["role"]
+        if role in files or item["path"] in declared_paths:
+            raise RuntimeFailure(
+                "evaluation-input-not-ready", "evaluation-input capability files collide"
+            )
+        path = capability_dir / item["path"]
+        resolved = path.resolve()
+        if not resolved.is_relative_to(capability_dir.resolve()):
+            raise RuntimeFailure(
+                "evaluation-input-not-ready", "evaluation-input capability file escapes its directory"
+            )
+        if any(
+            resolved == installed.resolve()
+            or resolved.is_relative_to(installed)
+            for installed in installed_roots
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-not-ready", "evaluation-input capability file overlaps an installed skill root"
+            )
+        metadata = require_owned_content_path(
+            path, f"evaluation-input {role}", executable=role == "harness"
+        )
+        if (
+            metadata.st_size > EVALUATION_INPUT_MAX_FILE_BYTES
+            or metadata.st_size != item["size"]
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-not-ready", f"evaluation-input {role} size is stale"
+            )
+        try:
+            content = path.read_bytes()
+        except OSError as error:
+            raise RuntimeFailure(
+                "evaluation-input-not-ready",
+                f"evaluation-input {role} is unreadable: {error}",
+            ) from error
+        if (
+            len(content) != item["size"]
+            or "sha256:" + hashlib.sha256(content).hexdigest() != item["sha256"]
+        ):
+            raise RuntimeFailure(
+                "evaluation-input-not-ready", f"evaluation-input {role} identity is stale"
+            )
+        if role == "harness":
+            trusted_harness = Path(__file__).with_name("skill-evaluation-harness.py")
+            trusted_metadata = require_owned_content_path(
+                trusted_harness, "installed evaluation-input harness", executable=True
+            )
+            if trusted_metadata.st_size > EVALUATION_INPUT_MAX_FILE_BYTES:
+                raise RuntimeFailure(
+                    "evaluation-input-not-ready",
+                    "installed evaluation-input harness is oversized",
+                )
+            try:
+                trusted_harness_content = trusted_harness.read_bytes()
+            except OSError as error:
+                raise RuntimeFailure(
+                    "evaluation-input-not-ready",
+                    f"installed evaluation-input harness is unreadable: {error}",
+                ) from error
+            if content != trusted_harness_content:
+                raise RuntimeFailure(
+                    "evaluation-input-not-ready", "evaluation-input harness is not installation-authorized"
+                )
+        else:
+            try:
+                if not isinstance(json.loads(content), dict):
+                    raise ValueError("not an object")
+            except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as error:
+                raise RuntimeFailure(
+                    "evaluation-input-not-ready", f"evaluation-input {role} is not a JSON object"
+                ) from error
+        files[role] = resolved
+        declared_paths.add(item["path"])
+    if set(files) != set(EVALUATION_INPUT_CONTENT_ROLES):
+        raise RuntimeFailure(
+            "evaluation-input-not-ready", "evaluation-input capability files are incomplete"
+        )
+    try:
+        inventory = list(capability_dir.rglob("*"))
+    except OSError as error:
+        raise RuntimeFailure(
+            "evaluation-input-not-ready",
+            f"evaluation-input capability inventory is unreadable: {error}",
+        ) from error
+    actual = {
+        path.relative_to(capability_dir).as_posix()
+        for path in inventory
+        if path.is_file() and path != manifest_path
+    }
+    expected_directories = {
+        parent.as_posix()
+        for declared in declared_paths
+        for parent in Path(declared).parents
+        if parent.as_posix() != "."
+    }
+    actual_directories = {
+        path.relative_to(capability_dir).as_posix()
+        for path in inventory
+        if path.is_dir()
+    }
+    if (
+        actual != declared_paths
+        or actual_directories != expected_directories
+        or any(path.is_symlink() for path in inventory)
+    ):
+        raise RuntimeFailure(
+            "evaluation-input-not-ready", "evaluation-input capability inventory differs from its manifest"
+        )
+    return {
+        "capability_id": entry["capability_id"],
+        "manifest_sha256": entry["manifest_sha256"],
+        "directory": str(capability_dir.resolve()),
+        "files": {role: str(path) for role, path in sorted(files.items())},
     }
 
 
