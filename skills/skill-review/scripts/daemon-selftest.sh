@@ -189,6 +189,7 @@ for script in daemon-pass.sh daemon-run.sh daemon-lock.sh daemon-lock.py \
   test-dreaming-certification.sh; do
   [[ -x "$SCRIPT_DIR/$script" ]] && ok "executable: $script" || bad "not executable: $script"
 done
+ROOT_SCRIPT_DIR="$REPO/scripts"
 for script in build-remote-subject-receiver.py \
   test-remote-subject-receiver.py; do
   [[ -x "$ROOT_SCRIPT_DIR/$script" ]] &&
@@ -196,7 +197,6 @@ for script in build-remote-subject-receiver.py \
     bad "not executable: scripts/$script"
 done
 
-ROOT_SCRIPT_DIR="$REPO/scripts"
 for script in install.sh dreaming-deps.py test-shared-deps.sh \
   test-headless-roots.sh test-installer.sh test-repository-boundary.sh \
   validate-private-boundary.py test-private-boundary.py \
