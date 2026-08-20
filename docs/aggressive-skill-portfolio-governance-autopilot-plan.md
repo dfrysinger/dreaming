@@ -19,7 +19,7 @@
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
-- Isolated governance preview tip: `7f10255`
+- Isolated governance preview tip: `d759b2f`
 - The first natural successor `20260818T220321Z-97940` remains retained as a
   literal `SC-010` `NOT_SUPPORTED` result. It attempted 25 reviews, completed
   24, retained one `executor-timeout`, and ended honestly as `aborted` after
@@ -707,6 +707,25 @@
   the dedicated transport command remains separate and disabled. One real
   subject, dashboard projection, rollback, and live report-only transport
   proof remain gated.
+- The mini-owned remote evaluation view and dashboard projection are committed
+  locally on the isolated preview branch as `d759b2f`. Immutable overlays are
+  retained separately from a mutable current pointer; only the live owner may
+  advance that pointer after complete queue derivation and immediate halt and
+  writer-lease checks. The pointer binds the exact census and usage receipts
+  and overlay digest. The dashboard accepts only the matching Mac mini view,
+  rejects stale or cross-run pointers, and suppresses all MacBook path-local
+  evaluation whenever remote configuration or current evidence is invalid.
+  Ordinary local dashboards retain their prior behavior. The read-only
+  portfolio now explains that skills live on the MacBook, evaluation runs on
+  the Mac mini, and each row is not copied, changed, snapshot-ready, refused,
+  or unavailable without exposing stable host or subject identifiers.
+  Validation passes five bridge checks, 47 core checks, 54 dashboard-contract
+  checks, and 162 dashboard checks. An adversarial re-review found no remaining
+  authority, privacy, or presentation defect after current-pointer fencing,
+  production-schema integration, invalid-configuration suppression, and
+  negative badge precedence were corrected. Structured refusal retention,
+  explicit subject propagation through downstream evaluation records, one real
+  subject, rollback, and live report-only proof remain gated.
 - Governance work remaining: bootstrap the sealed inputs for the real zero-use
   cohort through the reviewed remote-subject bridge, progress that cohort
   through reviewed readiness, then execute the evaluation queue under explicit
