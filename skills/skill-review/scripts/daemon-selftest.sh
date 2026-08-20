@@ -189,6 +189,12 @@ for script in daemon-pass.sh daemon-run.sh daemon-lock.sh daemon-lock.py \
   test-dreaming-certification.sh; do
   [[ -x "$SCRIPT_DIR/$script" ]] && ok "executable: $script" || bad "not executable: $script"
 done
+for script in build-remote-subject-receiver.py \
+  test-remote-subject-receiver.py; do
+  [[ -x "$ROOT_SCRIPT_DIR/$script" ]] &&
+    ok "executable: scripts/$script" ||
+    bad "not executable: scripts/$script"
+done
 
 ROOT_SCRIPT_DIR="$REPO/scripts"
 for script in install.sh dreaming-deps.py test-shared-deps.sh \
@@ -353,6 +359,12 @@ if run_isolated_test "$SCRIPT_DIR/test-remote-subject.py" >>"$RESULT" 2>&1; then
   ok "deterministic remote subject checks"
 else
   bad "deterministic remote subject checks"
+fi
+if run_isolated_test "$ROOT_SCRIPT_DIR/test-remote-subject-receiver.py" \
+  >>"$RESULT" 2>&1; then
+  ok "deterministic remote subject receiver bundle checks"
+else
+  bad "deterministic remote subject receiver bundle checks"
 fi
 if run_isolated_test "$ROOT_SCRIPT_DIR/test-estate-action.py" >>"$RESULT" 2>&1; then
   ok "deterministic estate action authority checks"

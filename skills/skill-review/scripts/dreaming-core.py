@@ -104,7 +104,18 @@ EVALUATION_INPUT_OWNER_KEYS = {
     "reviewer_b_model",
     "content_root",
 }
-REMOTE_EVALUATION_SUBJECT_KEYS = {"enabled", "command", "receiver"}
+REMOTE_EVALUATION_SUBJECT_KEYS = {
+    "enabled",
+    "protocol_version",
+    "origin_host_id",
+    "command",
+    "receiver",
+    "max_files",
+    "max_file_bytes",
+    "max_decoded_bytes",
+    "max_encoded_bytes",
+    "snapshot_root",
+}
 EVALUATION_INPUT_CONTENT_ROLES = {
     "suite": "application/json",
     "policy": "application/json",
@@ -130,7 +141,10 @@ EVALUATION_OVERLAY_REGISTRY_IDENTITY = {
 }
 REMOTE_SUBJECT_STORE_MAX_BYTES = 1024 * 1024 * 1024
 REMOTE_SUBJECT_FREE_SPACE_RESERVE = 256 * 1024 * 1024
+REMOTE_SUBJECT_MAX_FILES = 512
+REMOTE_SUBJECT_MAX_FILE_BYTES = 8 * 1024 * 1024
 REMOTE_SUBJECT_MAX_DECODED_BYTES = 32 * 1024 * 1024
+REMOTE_SUBJECT_MAX_ENCODED_BYTES = 48 * 1024 * 1024
 EVALUATION_INPUT_QUEUE_STATES = {
     "pass",
     "regression",
@@ -2627,6 +2641,26 @@ def configured_remote_evaluation_subjects(
             "invalid-adapter-config",
             "remote evaluation subjects require the enabled evaluation owner",
         )
+    expected_snapshot_root = (
+        paths.state / "remote-evaluation-subjects"
+    ).resolve()
+    if (
+        entry.get("protocol_version") != 1
+        or not isinstance(entry.get("origin_host_id"), str)
+        or not entry["origin_host_id"]
+        or entry.get("max_files") != REMOTE_SUBJECT_MAX_FILES
+        or entry.get("max_file_bytes") != REMOTE_SUBJECT_MAX_FILE_BYTES
+        or entry.get("max_decoded_bytes")
+        != REMOTE_SUBJECT_MAX_DECODED_BYTES
+        or entry.get("max_encoded_bytes")
+        != REMOTE_SUBJECT_MAX_ENCODED_BYTES
+        or Path(str(entry.get("snapshot_root"))).resolve()
+        != expected_snapshot_root
+    ):
+        raise RuntimeFailure(
+            "invalid-adapter-config",
+            "remote evaluation subject protocol bounds are malformed",
+        )
     command = list(entry["command"])
     executable = Path(command[0])
     if (
@@ -2730,7 +2764,7 @@ def configured_remote_evaluation_subjects(
         "receiver": dict(receiver),
         "content_policy": str(policy_path),
         "snapshot_store": str(
-            (paths.state / "remote-evaluation-subjects").resolve()
+            expected_snapshot_root
         ),
         "overlay_store": str(
             (paths.state / "evaluation-input-overlays").resolve()
@@ -6750,6 +6784,14 @@ def scheduled_run() -> dict[str, Any]:
                 )
             evaluation_overlay = None
             if remote_subjects is not None and remote_subjects["enabled"]:
+                if (
+                    queue_evidence["census"].get("host_id")
+                    != remote_subjects["origin_host_id"]
+                ):
+                    raise RuntimeFailure(
+                        "evaluation-overlay-invalid",
+                        "remote evaluation origin host differs from the census",
+                    )
                 if evaluation_input_owner_halt_path(paths).exists():
                     report["evaluation_input"]["run"] = {
                         "status": "halted",

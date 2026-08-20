@@ -515,6 +515,8 @@ if (
 fi
 [[ ! -e "$LOCAL_PUBLISHER_LOG" ]] ||
   { echo "local publisher was removed before remote preflight passed" >&2; exit 1; }
+REMOTE_KNOWN_HOSTS_SOURCE="$NATIVE/remote-subject-known-hosts.source"
+printf 'fixture-host-key\n' > "$REMOTE_KNOWN_HOSTS_SOURCE"
 (
   export DREAMING_ENABLE_COPILOT_COMPAT=0
   export DREAMING_CONFIGURE_NATIVE_ADAPTERS=1
@@ -531,6 +533,21 @@ fi
   export DREAMING_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY=6
   export DREAMING_COPILOT_PUBLISHER_RECEIVER_ID='fixture-receiver'
   export DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER=1
+  export DREAMING_CONFIGURE_EVALUATION_INPUT_OWNER=1
+  export DREAMING_EVALUATION_INPUT_OWNER_ENABLED=0
+  export DREAMING_EVALUATION_INPUT_AUTHOR_MODEL=author-model
+  export DREAMING_EVALUATION_INPUT_REVIEWER_A_MODEL=reviewer-a-model
+  export DREAMING_EVALUATION_INPUT_REVIEWER_B_MODEL=reviewer-b-model
+  export DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS=1
+  export DREAMING_REMOTE_EVALUATION_SUBJECTS_ENABLED=0
+  export DREAMING_REMOTE_SUBJECT_SSH_HOST='fixture@fd7a:115c:a1e0::1'
+  export DREAMING_REMOTE_SUBJECT_SSH_ADDRESS_FAMILY=6
+  export DREAMING_REMOTE_SUBJECT_SSH_SCRIPT='/fixture/remote-subject/ssh-estate-census.py'
+  export DREAMING_REMOTE_SUBJECT_ESTATE_SCRIPT='/fixture/remote-subject/dreaming-estate.py'
+  export DREAMING_REMOTE_SUBJECT_CONTENT_POLICY='/fixture/remote-subject/content-policy.json'
+  export DREAMING_REMOTE_SUBJECT_KNOWN_HOSTS_SOURCE="$REMOTE_KNOWN_HOSTS_SOURCE"
+  export DREAMING_REMOTE_SUBJECT_ORIGIN_HOST_ID=fixture-receiver
+  export DREAMING_REMOTE_SUBJECT_RECEIVER_ID=fixture-receiver
   export LOCAL_PUBLISHER_LOG
   run_native install >/dev/null
 )
@@ -544,6 +561,9 @@ if calls != [["remove"]]:
 PY
 NATIVE_ADAPTERS="$NATIVE/dreaming-state/adapters.json"
 grep -q '"copilot"' "$NATIVE_ADAPTERS"
+cmp "$REMOTE_KNOWN_HOSTS_SOURCE" \
+  "$NATIVE/dreaming-state/remote-subject-known-hosts"
+[[ "$(stat -f '%Lp' "$NATIVE/dreaming-state/remote-subject-known-hosts")" == "600" ]]
 python3 - "$NATIVE_ADAPTERS" <<'PY'
 import json
 import sys
@@ -614,6 +634,28 @@ if estate[estate.index("--host") + 1] != "fixture-client@fd7a:115c:a1e0::3":
     raise SystemExit(f"remote estate host is malformed: {estate!r}")
 if estate[estate.index("--expected-receiver-id") + 1] != "fixture-receiver":
     raise SystemExit(f"remote estate identity is malformed: {estate!r}")
+if "--fetch-subject" in estate:
+    raise SystemExit("existing census route was changed into a subject route")
+owner = config.get("evaluation_input_owner", {})
+if owner.get("enabled") is not False:
+    raise SystemExit(f"evaluation-input owner was unexpectedly enabled: {owner!r}")
+remote = config.get("remote_evaluation_subjects", {})
+remote_argv = remote.get("command", [])
+if (
+    remote.get("enabled") is not False
+    or remote.get("protocol_version") != 1
+    or remote.get("origin_host_id") != "fixture-receiver"
+    or "--fetch-subject" not in remote_argv
+):
+    raise SystemExit(f"disabled remote subject route is malformed: {remote!r}")
+if remote_argv[remote_argv.index("--known-hosts-file") + 1].endswith(
+    ".source"
+):
+    raise SystemExit("remote subject route did not use installed host-key evidence")
+if remote_argv[remote_argv.index("--remote-script") + 1] == estate[
+    estate.index("--remote-script") + 1
+]:
+    raise SystemExit("remote subject route reused the census receiver path")
 curator = config.get("estate_curator", {})
 curator_argv = curator.get("argv", [])
 if (
@@ -1175,5 +1217,54 @@ grep -q "user edit" "$OWNERSHIP/copilot/instructions/dreaming.instructions.md" |
 [[ -f "$OWNERSHIP/state/dreaming/managed-instructions.sha256" ]] ||
   { echo "modified managed instruction lost its ownership evidence" >&2; exit 1; }
 echo "PASS  managed instruction install/uninstall ownership"
+
+REMOTE_CONFIG="$TMP/remote-config"
+mkdir -p "$REMOTE_CONFIG/state"
+printf 'fixture-host-key\n' > \
+  "$REMOTE_CONFIG/state/remote-subject-known-hosts"
+chmod 600 "$REMOTE_CONFIG/state/remote-subject-known-hosts"
+DREAMING_SESSION_SOURCES=copilot \
+DREAMING_REVIEW_EXECUTORS=copilot \
+DREAMING_SKILL_TARGETS='' \
+DREAMING_COPILOT_BIN=/bin/echo \
+DREAMING_CONFIGURE_EVALUATION_INPUT_OWNER=1 \
+DREAMING_EVALUATION_INPUT_OWNER_ENABLED=0 \
+DREAMING_EVALUATION_INPUT_AUTHOR_MODEL=author-model \
+DREAMING_EVALUATION_INPUT_REVIEWER_A_MODEL=reviewer-a-model \
+DREAMING_EVALUATION_INPUT_REVIEWER_B_MODEL=reviewer-b-model \
+DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS=1 \
+DREAMING_REMOTE_EVALUATION_SUBJECTS_ENABLED=0 \
+DREAMING_REMOTE_SUBJECT_SSH_HOST=fixture-host \
+DREAMING_REMOTE_SUBJECT_ORIGIN_HOST_ID=fixture-origin \
+DREAMING_REMOTE_SUBJECT_RECEIVER_ID=fixture-receiver \
+DREAMING_REMOTE_SUBJECT_SSH_SCRIPT=/remote/receiver/ssh-estate-census.py \
+DREAMING_REMOTE_SUBJECT_ESTATE_SCRIPT=/remote/receiver/dreaming-estate.py \
+DREAMING_REMOTE_SUBJECT_CONTENT_POLICY=/remote/receiver/policy.json \
+  /usr/bin/python3 "$ROOT/scripts/configure-adapters.py" \
+  --output "$REMOTE_CONFIG/state/adapters.json" \
+  --repo-root "$ROOT" \
+  --state-dir "$REMOTE_CONFIG/state" >/dev/null
+/usr/bin/python3 - "$REMOTE_CONFIG/state/adapters.json" <<'PY'
+import json
+import sys
+
+value = json.load(open(sys.argv[1], encoding="utf-8"))
+owner = value["evaluation_input_owner"]
+remote = value["remote_evaluation_subjects"]
+assert owner["enabled"] is False
+assert remote["enabled"] is False
+assert remote["protocol_version"] == 1
+assert remote["origin_host_id"] == "fixture-origin"
+assert remote["max_files"] == 512
+assert remote["max_file_bytes"] == 8 * 1024 * 1024
+assert remote["max_decoded_bytes"] == 32 * 1024 * 1024
+assert remote["max_encoded_bytes"] == 48 * 1024 * 1024
+assert remote["snapshot_root"].endswith(
+    "/state/remote-evaluation-subjects"
+)
+assert "--fetch-subject" in remote["command"]
+assert remote["receiver"]["content_policy_sha256"]
+PY
+echo "PASS  disabled remote subject config pins identity and bounds"
 
 echo "installer tests: PASS"
