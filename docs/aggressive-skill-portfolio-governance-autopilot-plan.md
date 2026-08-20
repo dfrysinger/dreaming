@@ -19,7 +19,7 @@
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
-- Isolated governance preview tip: `cf900dd`
+- Isolated governance preview tip: `7f10255`
 - The first natural successor `20260818T220321Z-97940` remains retained as a
   literal `SC-010` `NOT_SUPPORTED` result. It attempted 25 reviews, completed
   24, retained one `executor-timeout`, and ended honestly as `aborted` after
@@ -686,6 +686,27 @@
   Thirteen installer checks, two receiver-bundle checks, five bridge checks,
   and 47 core checks pass. Installed report-only self-test, one real subject,
   dashboard projection, rollback, and live proof remain gated.
+- Installed disabled-bridge proof is retained for activation generation
+  `20260820T093551Z-install-82315` from isolated preview tip `7f10255`. The
+  complete installed self-test ended with zero failures and stamped that exact
+  generation. The halt switch remains present, evaluation-input authoring and
+  remote transport are both disabled, no remote snapshot root exists, and no
+  model claim has started. The first installed attempt failed closed before a
+  terminal stamp because the receiver-bundle executable check used its scripts
+  root before initialization; `5e6d068` fixes that ordering. The next complete
+  attempt exposed four deterministic fixtures that had not yet followed the
+  subject-bound input-manifest contract and one claim-day fixture tied to the
+  wall clock; `9b1d007` and `6243b99` close those gates, with 47 core, 54
+  dashboard-contract, 12 cross-CLI, and 42 certification checks passing.
+  Retained installed proof then found that regenerating from the preview tree
+  had moved the existing census and curator commands, violating the rollout
+  invariant before enablement. `7f10255` installs a digest-pinned baseline and
+  restores those two entries exactly during bridge rollout. The active census
+  and curator now equal the pre-rollout adapter config with SHA-256
+  `d0fb7bdb7a170de94c63999a8382cb1b3f9316c9b40ba208921074c5255178b1`;
+  the dedicated transport command remains separate and disabled. One real
+  subject, dashboard projection, rollback, and live report-only transport
+  proof remain gated.
 - Governance work remaining: bootstrap the sealed inputs for the real zero-use
   cohort through the reviewed remote-subject bridge, progress that cohort
   through reviewed readiness, then execute the evaluation queue under explicit
