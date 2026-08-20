@@ -583,8 +583,30 @@
   and 31 harness checks. Paired review closed prompt-data separation, CLI
   binding, token proof, finite-number, scrubbed-home, doctor, compare-time
   identity, and positive tool-free-turn findings with no unresolved material
-  defect. The environment-correct source-pack builder is now the next
-  prerequisite.
+  defect.
+- Environment-bound evaluation-input source generation is implemented and
+  committed locally on the isolated preview branch as `0c90083`. The builder
+  binds each source pack to the configured required and advisory executors in
+  canonical order, probes their exact model, CLI, and adapter identities, runs
+  each doctor, and emits the suite, policy, compilation, routing, catalog,
+  synthetic fixture, and objective grader contract needed by trusted
+  authoring. It uses encoded preference because the generic completion grader
+  proves a valid result but cannot by itself prove task-value uplift. Packs are
+  built in a private sibling directory, validated through the trusted
+  author-packet boundary, and published with macOS atomic create-only rename;
+  collision or validation failure leaves no partial final root and cannot
+  replace unrelated output. Blind packets include the task and reject
+  candidate identity in task IDs, prompts, responses, and rubric keys or
+  values across case, separator, camel-case, concatenated, and common suffix
+  forms without cross-word false positives for short names. The trusted
+  authoring adapter pin is tested against the exact adapter bytes, and the
+  builder test is part of the normal daemon self-test. Validation passes the
+  source-builder checks, 33 harness checks, 23 evaluator checks, 13 production
+  vendor-adapter tests, 42 certification checks, Python and shell syntax, and
+  the diff check. Paired review closed partial publication, stale adapter pin,
+  task omission, marker normalization, rubric coverage, and short-name
+  false-positive findings with no unresolved material defect. Real
+  environment packs for the settled-zero cohort are the next prerequisite.
 - Governance work remaining: bootstrap the sealed inputs for the real zero-use
   cohort, progress that cohort through reviewed readiness, then execute the
   evaluation queue under explicit daily operation, normalized-token, and
