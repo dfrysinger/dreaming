@@ -855,6 +855,33 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
             + 30,
             "enabled": False,
         }
+    if environment_flag("DREAMING_PRESERVE_ESTATE_ADAPTERS"):
+        baseline_path = state_dir / "estate-adapters-baseline.json"
+        if baseline_path.is_symlink() or not baseline_path.is_file():
+            raise ConfigError(
+                "installation-owned estate adapter baseline is missing"
+            )
+        expected_baseline_sha = required_environment(
+            "DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256"
+        )
+        observed_baseline_sha = hashlib.sha256(
+            baseline_path.read_bytes()
+        ).hexdigest()
+        if observed_baseline_sha != expected_baseline_sha:
+            raise ConfigError("estate adapter baseline digest does not match")
+        try:
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ConfigError("estate adapter baseline is malformed") from error
+        if not isinstance(baseline, dict) or baseline.get("contract_version") != 1:
+            raise ConfigError("estate adapter baseline contract is invalid")
+        for key in ("estate_census", "estate_curator"):
+            entry = baseline.get(key)
+            if not isinstance(entry, dict):
+                raise ConfigError(
+                    f"estate adapter baseline is missing {key}"
+                )
+            config[key] = entry
     configure_owner = environment_flag(
         "DREAMING_CONFIGURE_EVALUATION_INPUT_OWNER"
     )

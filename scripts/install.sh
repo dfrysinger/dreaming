@@ -263,6 +263,9 @@ export_runtime_env() {
     DREAMING_EVALUATION_INPUT_AUTHOR_MODEL \
     DREAMING_EVALUATION_INPUT_REVIEWER_A_MODEL \
     DREAMING_EVALUATION_INPUT_REVIEWER_B_MODEL \
+    DREAMING_PRESERVE_ESTATE_ADAPTERS \
+    DREAMING_ESTATE_ADAPTERS_BASELINE_SOURCE \
+    DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256 \
     DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS \
     DREAMING_REMOTE_EVALUATION_SUBJECTS_ENABLED \
     DREAMING_REMOTE_SUBJECT_SSH_HOST \
@@ -419,6 +422,9 @@ for name in (
     "DREAMING_EVALUATION_INPUT_AUTHOR_MODEL",
     "DREAMING_EVALUATION_INPUT_REVIEWER_A_MODEL",
     "DREAMING_EVALUATION_INPUT_REVIEWER_B_MODEL",
+    "DREAMING_PRESERVE_ESTATE_ADAPTERS",
+    "DREAMING_ESTATE_ADAPTERS_BASELINE_SOURCE",
+    "DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256",
     "DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS",
     "DREAMING_REMOTE_EVALUATION_SUBJECTS_ENABLED",
     "DREAMING_REMOTE_SUBJECT_SSH_HOST",
@@ -715,6 +721,37 @@ configure_native_adapters() {
     return 0
   fi
   export_runtime_env
+  if [[ "${DREAMING_PRESERVE_ESTATE_ADAPTERS:-0}" == "1" ]]; then
+    local baseline_source="${DREAMING_ESTATE_ADAPTERS_BASELINE_SOURCE:-}"
+    local baseline_target="$DREAMING_STATE_DIR/estate-adapters-baseline.json"
+    local expected_baseline_sha="${DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256:-}"
+    local observed_baseline_sha
+    [[ -n "$baseline_source" && -f "$baseline_source" &&
+      ! -L "$baseline_source" ]] || {
+      echo "estate adapter baseline source must be a regular file" >&2
+      return 1
+    }
+    [[ "$expected_baseline_sha" =~ ^[0-9a-f]{64}$ ]] || {
+      echo "estate adapter baseline digest must be a sha256 digest" >&2
+      return 1
+    }
+    observed_baseline_sha="$(
+      /usr/bin/shasum -a 256 "$baseline_source" |
+        /usr/bin/awk '{print $1}'
+    )"
+    [[ "$observed_baseline_sha" == "$expected_baseline_sha" ]] || {
+      echo "estate adapter baseline source digest does not match" >&2
+      return 1
+    }
+    mkdir -p "$DREAMING_STATE_DIR"
+    if [[ "$baseline_source" != "$baseline_target" ]]; then
+      cp "$baseline_source" "${baseline_target}.candidate.$$"
+      chmod 600 "${baseline_target}.candidate.$$"
+      mv "${baseline_target}.candidate.$$" "$baseline_target"
+    else
+      chmod 600 "$baseline_target"
+    fi
+  fi
   if [[ "${DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS:-0}" == "1" ]]; then
     local known_hosts_source="${DREAMING_REMOTE_SUBJECT_KNOWN_HOSTS_SOURCE:-}"
     local known_hosts_target="$DREAMING_STATE_DIR/remote-subject-known-hosts"
