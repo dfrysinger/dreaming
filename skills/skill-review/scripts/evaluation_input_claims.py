@@ -14,7 +14,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 OWNER_INTEGRATION_STATUS = "scheduled_owner_integration_v1"
 MAX_CLAIMS_PER_LOCAL_DAY = 4
 MAX_SLOTS = 6
@@ -196,6 +196,7 @@ CREATE TABLE claims (
   candidate_id TEXT NOT NULL,
   skill_key TEXT NOT NULL,
   skill_path TEXT NOT NULL,
+  subject_json TEXT,
   owner_run_id TEXT NOT NULL UNIQUE,
   owner_mode TEXT NOT NULL CHECK (owner_mode IN ('manual', 'scheduled')),
   lock_fence_token_sha256 TEXT,
@@ -354,6 +355,39 @@ def _validate_schema(connection: sqlite3.Connection) -> None:
         )
 
 
+def _migrate_schema(connection: sqlite3.Connection, version: int) -> int:
+    if version != 3:
+        return version
+    metadata = connection.execute(
+        """
+        SELECT schema_version, owner_integration_status
+        FROM schema_metadata
+        WHERE singleton=1
+        """
+    ).fetchall()
+    if (
+        len(metadata) != 1
+        or metadata[0]["schema_version"] != 3
+        or metadata[0]["owner_integration_status"]
+        != OWNER_INTEGRATION_STATUS
+    ):
+        raise ClaimLedgerError(
+            "claim ledger schema version or owner status is unsupported"
+        )
+    columns = {
+        row["name"] for row in connection.execute("PRAGMA table_info(claims)")
+    }
+    if "subject_json" in columns:
+        raise ClaimLedgerError("claim ledger v3 unexpectedly has subject state")
+    connection.execute("ALTER TABLE claims ADD COLUMN subject_json TEXT")
+    connection.execute(
+        "UPDATE schema_metadata SET schema_version=? WHERE singleton=1",
+        (SCHEMA_VERSION,),
+    )
+    connection.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
+    return SCHEMA_VERSION
+
+
 def _bootstrap_schema(connection: sqlite3.Connection) -> bool:
     connection.execute("BEGIN IMMEDIATE")
     try:
@@ -381,6 +415,8 @@ def _bootstrap_schema(connection: sqlite3.Connection) -> bool:
             raise ClaimLedgerError(
                 "claim ledger contains an incompatible nonempty schema"
             )
+        else:
+            version = _migrate_schema(connection, version)
         _validate_schema(connection)
         connection.commit()
         return installed
@@ -514,12 +550,72 @@ def reserve_claim(
     author_model: str,
     reviewer_a_model: str,
     reviewer_b_model: str,
+    subject: dict[str, Any] | None = None,
     owner_fence: dict[str, Any] | None = None,
     authority_check: Callable[[], None] | None = None,
 ) -> dict[str, Any]:
     skill_path = str(Path(require_text(skill_path, "skill path")).resolve())
     skill_key = require_text(skill_key, "skill key")
     candidate_id = require_sha256(candidate_id, "candidate_id")
+    subject_json = None
+    if subject is not None:
+        subject_fields = {
+            "schema_version",
+            "kind",
+            "subject_key",
+            "origin_host_id",
+            "origin_root_id",
+            "origin_relative_path",
+            "origin_path",
+            "canonical_capability_id",
+            "origin_inventory_sha256",
+            "candidate_id",
+            "transport_receipt_sha256",
+            "content_path",
+        }
+        if not isinstance(subject, dict) or set(subject) != subject_fields:
+            raise ClaimLedgerError("remote evaluation subject is malformed")
+        if (
+            subject.get("schema_version") != 1
+            or subject.get("kind") != "remote_evaluation_subject_binding"
+            or require_sha256(
+                subject.get("subject_key"), "remote subject key"
+            ).removeprefix(SHA256_PREFIX)
+            != skill_key
+            or require_sha256(
+                subject.get("candidate_id"), "remote subject candidate"
+            )
+            != candidate_id
+            or str(
+                Path(
+                    require_text(
+                        subject.get("content_path"),
+                        "remote subject content path",
+                    )
+                ).resolve()
+            )
+            != skill_path
+        ):
+            raise ClaimLedgerError(
+                "remote evaluation subject does not bind this claim"
+            )
+        for field in (
+            "origin_host_id",
+            "origin_root_id",
+            "origin_relative_path",
+            "origin_path",
+        ):
+            require_text(subject.get(field), f"remote subject {field}")
+        for field in (
+            "canonical_capability_id",
+            "transport_receipt_sha256",
+        ):
+            require_sha256(subject.get(field), f"remote subject {field}")
+        require_text(
+            subject.get("origin_inventory_sha256"),
+            "remote subject origin_inventory_sha256",
+        )
+        subject_json = canonical(subject).decode()
     owner_run_id = require_text(owner_run_id, "owner run ID")
     author_model = require_text(author_model, "author model")
     supplied_reviewers = [
@@ -543,6 +639,7 @@ def reserve_claim(
             "skill_path": skill_path,
             "skill_key": skill_key,
             "candidate_id": candidate_id,
+            "subject": subject,
             "owner_run_id": owner_run_id,
             "owner_mode": fence["owner_mode"],
             "owner_process_identity": fence["owner_process_identity"],
@@ -574,7 +671,7 @@ def reserve_claim(
             INSERT INTO claims (
               claim_id, local_day, created_epoch, terminal_epoch,
               timezone_name, timezone_offset_minutes, candidate_id,
-              skill_key, skill_path, owner_run_id, owner_mode,
+              skill_key, skill_path, subject_json, owner_run_id, owner_mode,
               lock_fence_token_sha256, owner_pid, owner_process_identity,
               owner_process_group_identity, owner_boot_identity,
               owner_config_sha256,
@@ -583,7 +680,7 @@ def reserve_claim(
               repaired_manifest_sha256, review_set_id,
               max_slots, max_normalized_tokens, max_elapsed_ms
             ) VALUES (
-              ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+              ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
               'open', NULL, NULL, NULL, NULL, ?, ?, ?
             )
             """,
@@ -596,6 +693,7 @@ def reserve_claim(
                 candidate_id,
                 skill_key,
                 skill_path,
+                subject_json,
                 owner_run_id,
                 fence["owner_mode"],
                 fence["lock_fence_token_sha256"],
@@ -911,7 +1009,7 @@ def pending_terminal_publications() -> list[dict[str, Any]]:
         rows = connection.execute(
             """
             SELECT p.*, c.owner_run_id, c.owner_mode
-                 , c.skill_path, c.skill_key, c.candidate_id
+                 , c.skill_path, c.skill_key, c.candidate_id, c.subject_json
                  , c.review_set_id, c.terminal_epoch
             FROM claim_terminal_publications p
             JOIN claims c ON c.claim_id=p.claim_id
@@ -927,6 +1025,11 @@ def pending_terminal_publications() -> list[dict[str, Any]]:
                 "skill_path": row["skill_path"],
                 "skill_key": row["skill_key"],
                 "candidate_id": row["candidate_id"],
+                "subject": (
+                    json.loads(row["subject_json"])
+                    if row["subject_json"] is not None
+                    else None
+                ),
                 "review_set_id": row["review_set_id"],
                 "terminal_epoch": row["terminal_epoch"],
                 "readiness_state": row["readiness_state"],
@@ -1081,6 +1184,11 @@ def open_scheduled_claims() -> list[dict[str, Any]]:
                     "owner_boot_identity": claim["owner_boot_identity"],
                     "owner_config_sha256": claim["owner_config_sha256"],
                     "skill_path": claim["skill_path"],
+                    "subject": (
+                        json.loads(claim["subject_json"])
+                        if claim["subject_json"] is not None
+                        else None
+                    ),
                     "skill_key": claim["skill_key"],
                     "candidate_id": claim["candidate_id"],
                     "dispatching_slots": [
@@ -2376,6 +2484,11 @@ def inspect_claim(claim_id: str) -> dict[str, Any]:
             "candidate_id": claim["candidate_id"],
             "skill_key": claim["skill_key"],
             "skill_path": claim["skill_path"],
+            "subject": (
+                json.loads(claim["subject_json"])
+                if claim["subject_json"] is not None
+                else None
+            ),
             "owner_run_id": claim["owner_run_id"],
             "lock_fence": {
                 "token_sha256": claim["lock_fence_token_sha256"],

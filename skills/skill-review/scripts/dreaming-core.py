@@ -9,6 +9,9 @@ legacy migration, and content-addressed publication.
 from __future__ import annotations
 
 import argparse
+import base64
+import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -26,6 +29,17 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
+
+SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
+from remote_subject_policy import (
+    REMOTE_SUBJECT_SIDECARS,
+    RemoteSubjectPolicyError,
+    load_content_policy,
+    validate_text,
+)
 
 CONTRACT_VERSION = 1
 ROLES = {
@@ -108,6 +122,9 @@ EVALUATION_INPUT_MAX_CONTROL_BYTES = 64_000
 EVALUATION_INPUT_MAX_FILE_BYTES = 1_048_576
 EVALUATION_INPUT_OWNER_MAX_SECONDS = 25 * 60
 EVALUATION_INPUT_OWNER_STOP_SECONDS = 10
+REMOTE_SUBJECT_STORE_MAX_BYTES = 1024 * 1024 * 1024
+REMOTE_SUBJECT_FREE_SPACE_RESERVE = 256 * 1024 * 1024
+REMOTE_SUBJECT_MAX_DECODED_BYTES = 32 * 1024 * 1024
 EVALUATION_INPUT_QUEUE_STATES = {
     "pass",
     "regression",
@@ -130,6 +147,44 @@ class RuntimeFailure(RuntimeError):
         super().__init__(f"{code}: {message}")
         self.code = code
         self.message = message
+
+
+def publish_directory_create_only(source: Path, destination: Path) -> None:
+    if sys.platform != "darwin":
+        raise RuntimeFailure(
+            "remote-candidate-publication-refused",
+            "atomic create-only directory publication requires macOS",
+        )
+    library = ctypes.CDLL(None, use_errno=True)
+    rename = library.renameatx_np
+    rename.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    rename.restype = ctypes.c_int
+    if (
+        rename(
+            -2,
+            os.fsencode(source),
+            -2,
+            os.fsencode(destination),
+            0x00000004,
+        )
+        != 0
+    ):
+        failure = ctypes.get_errno()
+        if failure in {errno.EEXIST, errno.ENOTEMPTY}:
+            raise RuntimeFailure(
+                "remote-candidate-publication-collision",
+                str(destination),
+            )
+        raise RuntimeFailure(
+            "remote-candidate-publication-refused",
+            f"{destination}: {os.strerror(failure)}",
+        )
 
 
 def canonical(value: Any) -> bytes:
@@ -3603,6 +3658,366 @@ def seal_evaluation_input_root(
         + hashlib.sha256(
             (output_root / EVALUATION_INPUT_INDEX_NAME).read_bytes()
         ).hexdigest(),
+    }
+
+
+def remote_subject_key(subject: dict[str, Any]) -> str:
+    fields = {
+        "origin_host_id": subject.get("origin_host_id"),
+        "origin_root_id": subject.get("origin_root_id"),
+        "origin_relative_path": subject.get("origin_relative_path"),
+    }
+    if not all(isinstance(value, str) and value for value in fields.values()):
+        raise RuntimeFailure(
+            "remote-candidate-invalid", "remote subject identity is malformed"
+        )
+    return digest(fields)
+
+
+def remote_subject_relative_path(value: Any) -> str:
+    if not isinstance(value, str) or not value:
+        raise RuntimeFailure(
+            "remote-candidate-invalid", "remote subject path is malformed"
+        )
+    path = Path(value)
+    if (
+        path.is_absolute()
+        or path.as_posix() != value
+        or ".." in path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise RuntimeFailure(
+            "remote-candidate-invalid", "remote subject path is unsafe"
+        )
+    return value
+
+
+def validate_remote_subject_inventory(
+    value: Any, field: str
+) -> list[dict[str, Any]]:
+    if not isinstance(value, list) or not value:
+        raise RuntimeFailure("remote-candidate-invalid", f"{field} is malformed")
+    result = []
+    seen = set()
+    for item in value:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"path", "sha256", "size"}
+            or re.fullmatch(r"[0-9a-f]{64}", str(item.get("sha256"))) is None
+            or not isinstance(item.get("size"), int)
+            or isinstance(item.get("size"), bool)
+            or item["size"] < 0
+        ):
+            raise RuntimeFailure(
+                "remote-candidate-invalid", f"{field} entry is malformed"
+            )
+        relative = remote_subject_relative_path(item.get("path"))
+        if relative in seen:
+            raise RuntimeFailure(
+                "remote-candidate-invalid", f"{field} paths collide"
+            )
+        seen.add(relative)
+        result.append(dict(item))
+    if result != sorted(result, key=lambda item: item["path"]):
+        raise RuntimeFailure(
+            "remote-candidate-invalid", f"{field} is not canonical"
+        )
+    return result
+
+
+def validate_remote_subject_response(
+    response: dict[str, Any],
+    request: dict[str, str],
+    expected_receiver: dict[str, str],
+    local_policy_path: Path,
+) -> dict[str, Any]:
+    if (
+        not isinstance(response, dict)
+        or set(response) != {"ok", "receiver", "subject"}
+        or response.get("ok") is not True
+        or response.get("receiver") != expected_receiver
+    ):
+        raise RuntimeFailure(
+            "remote-candidate-invalid", "remote subject response identity differs"
+        )
+    subject = response.get("subject")
+    subject_fields = {
+        "schema_version",
+        "kind",
+        "census_snapshot_sha256",
+        "origin_host_id",
+        "origin_root_id",
+        "origin_relative_path",
+        "origin_path",
+        "canonical_capability_id",
+        "origin_inventory_sha256",
+        "candidate_id",
+        "content_policy",
+        "origin_inventory",
+        "candidate_inventory",
+        "excluded_sidecars",
+        "files",
+        "receipt_sha256",
+    }
+    if (
+        not isinstance(subject, dict)
+        or set(subject) != subject_fields
+        or subject.get("schema_version") != 1
+        or subject.get("kind") != "remote_evaluation_subject"
+        or any(subject.get(key) != value for key, value in request.items())
+        or re.fullmatch(r"sha256:[0-9a-f]{64}", str(subject.get("candidate_id")))
+        is None
+    ):
+        raise RuntimeFailure(
+            "remote-candidate-invalid", "remote subject response is malformed"
+        )
+    without_receipt = {
+        key: value for key, value in subject.items() if key != "receipt_sha256"
+    }
+    if subject["receipt_sha256"] != digest(without_receipt):
+        raise RuntimeFailure(
+            "remote-candidate-invalid", "remote subject receipt identity differs"
+        )
+    remote_policy = subject.get("content_policy")
+    if (
+        not isinstance(remote_policy, dict)
+        or set(remote_policy) != {"schema_version", "sha256"}
+        or remote_policy.get("schema_version") != 1
+        or remote_policy.get("sha256")
+        != "sha256:" + expected_receiver["content_policy_sha256"]
+    ):
+        raise RuntimeFailure(
+            "remote-candidate-invalid", "remote subject content policy differs"
+        )
+    try:
+        local_policy = load_content_policy(local_policy_path)
+    except RemoteSubjectPolicyError as error:
+        raise RuntimeFailure("remote-candidate-invalid", str(error)) from error
+    origin = validate_remote_subject_inventory(
+        subject.get("origin_inventory"), "remote subject origin inventory"
+    )
+    candidate = validate_remote_subject_inventory(
+        subject.get("candidate_inventory"),
+        "remote subject candidate inventory",
+    )
+    excluded = validate_remote_subject_inventory(
+        subject.get("excluded_sidecars"),
+        "remote subject excluded sidecars",
+    )
+    if (
+        sorted([*candidate, *excluded], key=lambda item: item["path"]) != origin
+        or any(
+            Path(item["path"]).name not in REMOTE_SUBJECT_SIDECARS
+            for item in excluded
+        )
+        or any(
+            Path(item["path"]).name in REMOTE_SUBJECT_SIDECARS
+            for item in candidate
+        )
+        or not any(item["path"] == "SKILL.md" for item in candidate)
+    ):
+        raise RuntimeFailure(
+            "remote-candidate-invalid", "remote subject inventory partition differs"
+        )
+    census_inventory = [
+        {"path": item["path"], "sha256": item["sha256"]} for item in origin
+    ]
+    if digest(census_inventory) != request["origin_inventory_sha256"]:
+        raise RuntimeFailure(
+            "remote-candidate-invalid", "remote subject origin inventory differs"
+        )
+    if candidate_record_digest(candidate) != subject["candidate_id"]:
+        raise RuntimeFailure(
+            "remote-candidate-invalid", "remote subject candidate identity differs"
+        )
+    files = subject.get("files")
+    if not isinstance(files, list) or len(files) != len(candidate):
+        raise RuntimeFailure(
+            "remote-candidate-invalid", "remote subject files are malformed"
+        )
+    decoded = {}
+    total = 0
+    for inventory_item, file_item in zip(candidate, files):
+        if (
+            not isinstance(file_item, dict)
+            or set(file_item) != {
+                "path",
+                "sha256",
+                "size",
+                "content_base64",
+            }
+            or {
+                key: file_item.get(key) for key in ("path", "sha256", "size")
+            }
+            != inventory_item
+            or not isinstance(file_item.get("content_base64"), str)
+        ):
+            raise RuntimeFailure(
+                "remote-candidate-invalid", "remote subject file entry differs"
+            )
+        try:
+            content = base64.b64decode(
+                file_item["content_base64"], validate=True
+            )
+        except (ValueError, TypeError) as error:
+            raise RuntimeFailure(
+                "remote-candidate-invalid", "remote subject file encoding is invalid"
+            ) from error
+        total += len(content)
+        if (
+            total > REMOTE_SUBJECT_MAX_DECODED_BYTES
+            or len(content) != inventory_item["size"]
+            or hashlib.sha256(content).hexdigest()
+            != inventory_item["sha256"]
+        ):
+            raise RuntimeFailure(
+                "remote-candidate-invalid", "remote subject file identity differs"
+            )
+        try:
+            validate_text(content, inventory_item["path"], local_policy)
+        except RemoteSubjectPolicyError as error:
+            raise RuntimeFailure("remote-candidate-content-unsafe", str(error)) from error
+        decoded[inventory_item["path"]] = content
+    return {
+        "subject": subject,
+        "subject_key": remote_subject_key(subject),
+        "local_content_policy_sha256": local_policy["sha256"],
+        "decoded": decoded,
+        "decoded_bytes": total,
+    }
+
+
+def remote_subject_store_usage(root: Path) -> int:
+    total = 0
+    if root.is_symlink() or not root.is_dir():
+        raise RuntimeFailure(
+            "remote-candidate-store-invalid", "remote subject store is unavailable"
+        )
+    for path in root.rglob("*"):
+        if path.is_symlink():
+            raise RuntimeFailure(
+                "remote-candidate-store-invalid",
+                "remote subject store contains a symbolic link",
+            )
+        if path.is_file():
+            total += path.stat().st_size
+            if total > REMOTE_SUBJECT_STORE_MAX_BYTES:
+                break
+        elif not path.is_dir():
+            raise RuntimeFailure(
+                "remote-candidate-store-invalid",
+                "remote subject store contains a special file",
+            )
+    return total
+
+
+def publish_remote_subject_snapshot(
+    response: dict[str, Any],
+    request: dict[str, str],
+    expected_receiver: dict[str, str],
+    local_policy_path: Path,
+    store_root: Path,
+    *,
+    installed_skill_roots: Iterable[Path],
+) -> dict[str, Any]:
+    store_root = store_root.resolve()
+    if (
+        store_root.is_symlink()
+        or not store_root.is_dir()
+        or store_root.stat().st_uid != os.getuid()
+        or stat.S_IMODE(store_root.stat().st_mode) & 0o077
+    ):
+        raise RuntimeFailure(
+            "remote-candidate-store-invalid",
+            "remote subject store permissions are unsafe",
+        )
+    for installed in installed_skill_roots:
+        absolute = installed.resolve()
+        if store_root.is_relative_to(absolute) or absolute.is_relative_to(store_root):
+            raise RuntimeFailure(
+                "remote-candidate-store-invalid",
+                "remote subject store overlaps an installed skill root",
+            )
+    validated = validate_remote_subject_response(
+        response, request, expected_receiver, local_policy_path
+    )
+    if (
+        remote_subject_store_usage(store_root) + validated["decoded_bytes"]
+        > REMOTE_SUBJECT_STORE_MAX_BYTES
+        or shutil.disk_usage(store_root).free
+        < 2 * REMOTE_SUBJECT_MAX_DECODED_BYTES
+        + REMOTE_SUBJECT_FREE_SPACE_RESERVE
+    ):
+        raise RuntimeFailure(
+            "remote-candidate-store-full",
+            "remote subject store has insufficient capacity",
+        )
+    subject = validated["subject"]
+    subject_parent = store_root / validated["subject_key"].removeprefix("sha256:")
+    subject_parent.mkdir(mode=0o700, exist_ok=True)
+    if subject_parent.is_symlink() or not subject_parent.is_dir():
+        raise RuntimeFailure(
+            "remote-candidate-store-invalid",
+            "remote subject directory is unsafe",
+        )
+    destination = subject_parent / subject["candidate_id"].removeprefix("sha256:")
+    retained_receipt = {
+        "schema_version": 1,
+        "kind": "remote_evaluation_subject_transport_receipt",
+        "receiver": expected_receiver,
+        "remote_receipt_sha256": subject["receipt_sha256"],
+        "local_content_policy_sha256": validated[
+            "local_content_policy_sha256"
+        ],
+        "subject": {
+            key: value
+            for key, value in subject.items()
+            if key not in {"files", "receipt_sha256"}
+        },
+    }
+    retained_receipt["receipt_sha256"] = digest(retained_receipt)
+    if destination.exists():
+        existing = read_json(destination / "transport-receipt.json", None)
+        if existing != retained_receipt:
+            raise RuntimeFailure(
+                "remote-candidate-publication-collision", str(destination)
+            )
+        return {
+            "status": "existing",
+            "subject_key": validated["subject_key"],
+            "candidate_id": subject["candidate_id"],
+            "candidate_root": str(destination / "candidate"),
+            "receipt": str(destination / "transport-receipt.json"),
+        }
+    with tempfile.TemporaryDirectory(
+        prefix=".remote-subject.", dir=store_root
+    ) as temporary:
+        staging = Path(temporary) / "snapshot"
+        candidate_root = staging / "candidate"
+        candidate_root.mkdir(parents=True, mode=0o700)
+        for relative, content in validated["decoded"].items():
+            target = candidate_root / relative
+            target.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            target.write_bytes(content)
+            os.chmod(target, 0o400)
+        receipt_path = staging / "transport-receipt.json"
+        receipt_path.write_bytes(canonical(retained_receipt))
+        os.chmod(receipt_path, 0o400)
+        for directory in sorted(
+            [path for path in candidate_root.rglob("*") if path.is_dir()],
+            key=lambda path: len(path.parts),
+            reverse=True,
+        ):
+            os.chmod(directory, 0o500)
+        os.chmod(candidate_root, 0o500)
+        publish_directory_create_only(staging, destination)
+        os.chmod(destination, 0o500)
+    return {
+        "status": "published",
+        "subject_key": validated["subject_key"],
+        "candidate_id": subject["candidate_id"],
+        "candidate_root": str(destination / "candidate"),
+        "receipt": str(destination / "transport-receipt.json"),
     }
 
 

@@ -176,6 +176,7 @@ for script in daemon-pass.sh daemon-run.sh daemon-lock.sh daemon-lock.py \
   dreaming-run.sh dreaming-state.py test-daemon-pass.sh test-dreaming-daemon.sh \
   test-process-cleanup.sh \
   dreaming-core.py test-dreaming-core.sh dreaming-estate.py \
+  remote_subject_policy.py test-remote-subject.py \
   test-dreaming-estate.sh dreaming-vendor-adapter.py \
   test-vendor-adapters.sh dreaming-dashboard.py test-dreaming-dashboard.sh \
   test-dreaming-dashboard-contracts.sh \
@@ -347,6 +348,11 @@ if run_isolated_test "$ROOT_SCRIPT_DIR/test-ssh-estate-census.py" >>"$RESULT" 2>
   ok "deterministic SSH estate census checks"
 else
   bad "deterministic SSH estate census checks"
+fi
+if run_isolated_test "$SCRIPT_DIR/test-remote-subject.py" >>"$RESULT" 2>&1; then
+  ok "deterministic remote subject checks"
+else
+  bad "deterministic remote subject checks"
 fi
 if run_isolated_test "$ROOT_SCRIPT_DIR/test-estate-action.py" >>"$RESULT" 2>&1; then
   ok "deterministic estate action authority checks"

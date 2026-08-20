@@ -20,6 +20,26 @@ SPEC = importlib.util.spec_from_file_location("ssh_estate_census", SCRIPT)
 assert SPEC and SPEC.loader
 module = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(module)
+ESTATE = (
+    SCRIPT.parent.parent
+    / "skills"
+    / "skill-review"
+    / "scripts"
+    / "dreaming-estate.py"
+)
+sys.path.insert(0, str(ESTATE.parent))
+ESTATE_SPEC = importlib.util.spec_from_file_location("dreaming_estate_subject", ESTATE)
+assert ESTATE_SPEC and ESTATE_SPEC.loader
+estate = importlib.util.module_from_spec(ESTATE_SPEC)
+sys.modules[ESTATE_SPEC.name] = estate
+ESTATE_SPEC.loader.exec_module(estate)
+CONTENT_POLICY = (
+    SCRIPT.parent.parent
+    / "skills"
+    / "skill-review"
+    / "references"
+    / "remote-subject-content-policy-v1.json"
+)
 
 
 class SshEstateCensusTest(unittest.TestCase):
@@ -171,6 +191,141 @@ class SshEstateCensusTest(unittest.TestCase):
             "'/Users/fixture user/.local/state/dreaming/index.json'",
             command[-1],
         )
+
+    def remote_subject_fixture(
+        self, skill_files: dict[str, bytes]
+    ) -> tuple[dict[str, object], dict[str, str]]:
+        skill = self.root / "skills" / "fixture-skill"
+        skill.mkdir(parents=True)
+        for relative, content in skill_files.items():
+            target = skill / relative
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(content)
+        files, inventory_sha = estate.skill_inventory(skill)
+        capability_id = "sha256:" + "c" * 64
+        census = {
+            "host_id": "macbook",
+            "physical_instances": [
+                {
+                    "host_id": "macbook",
+                    "root_id": "personal-copilot",
+                    "relative_path": "fixture-skill",
+                    "absolute_path": str(skill),
+                    "canonical_capability_id": capability_id,
+                    "inventory_sha256": inventory_sha,
+                    "files": files,
+                }
+            ],
+        }
+        request = {
+            "census_snapshot_sha256": "sha256:" + "a" * 64,
+            "origin_host_id": "macbook",
+            "origin_root_id": "personal-copilot",
+            "origin_relative_path": "fixture-skill",
+            "origin_path": str(skill),
+            "canonical_capability_id": capability_id,
+            "origin_inventory_sha256": inventory_sha,
+        }
+        return census, request
+
+    def test_remote_subject_exports_exact_safe_text_without_sidecars(self) -> None:
+        census, request = self.remote_subject_fixture(
+            {
+                "SKILL.md": (
+                    b"---\nname: fixture-skill\ndescription: test\n---\n"
+                    b"Discuss transcript handling and /Users/example paths.\n"
+                ),
+                "references/guide.md": b"Use EXAMPLE_TOKEN as a placeholder.\n",
+                ".agent-created.json": b'{"metadata":"not evaluator input"}\n',
+                ".skill-evaluation-policy.json": b'{"untrusted":true}\n',
+            }
+        )
+        result = estate.export_remote_subject(
+            census,
+            request,
+            estate.remote_subject_content_policy(CONTENT_POLICY),
+        )
+        self.assertEqual(result["kind"], "remote_evaluation_subject")
+        self.assertEqual(
+            [item["path"] for item in result["excluded_sidecars"]],
+            [".agent-created.json", ".skill-evaluation-policy.json"],
+        )
+        self.assertEqual(
+            [item["path"] for item in result["candidate_inventory"]],
+            ["SKILL.md", "references/guide.md"],
+        )
+        self.assertEqual(
+            [item["path"] for item in result["files"]],
+            ["SKILL.md", "references/guide.md"],
+        )
+        self.assertRegex(result["candidate_id"], r"^sha256:[0-9a-f]{64}$")
+        self.assertRegex(result["receipt_sha256"], r"^sha256:[0-9a-f]{64}$")
+
+    def test_remote_subject_refuses_credentials_and_binary_content(self) -> None:
+        for name, content in (
+            ("credential", b"token = github_pat_abcdefghijklmnop\n"),
+            ("binary", b"\xff\xfe\x00\x01"),
+        ):
+            with self.subTest(name=name):
+                census, request = self.remote_subject_fixture(
+                    {
+                        "SKILL.md": (
+                            b"---\nname: fixture-skill\ndescription: test\n---\n"
+                        ),
+                        f"references/{name}.txt": content,
+                    }
+                )
+                with self.assertRaises(estate.EstateError):
+                    estate.export_remote_subject(
+                        census,
+                        request,
+                        estate.remote_subject_content_policy(CONTENT_POLICY),
+                    )
+                for child in (self.root / "skills").iterdir():
+                    if child.is_dir():
+                        for path in sorted(child.rglob("*"), reverse=True):
+                            if path.is_file():
+                                path.unlink()
+                            elif path.is_dir():
+                                path.rmdir()
+                        child.rmdir()
+
+    def test_subject_remote_command_pins_host_key_and_request(self) -> None:
+        known_hosts = self.root / "known-hosts"
+        known_hosts.write_text("fixture ssh-ed25519 AAAA\n", encoding="ascii")
+        args = Namespace(
+            remote_python="/fixture/python",
+            remote_script="/fixture/receiver.py",
+            remote_estate_script="/fixture/estate.py",
+            remote_receiver_id_file="/fixture/receiver-id",
+            expected_receiver_id="fixture-client",
+            expected_receiver_sha="a" * 64,
+            expected_collector_sha="b" * 64,
+            remote_content_policy="/fixture/policy.json",
+            expected_content_policy_sha="d" * 64,
+            target_host_id="macbook",
+            target_home="/Users/fixture",
+            remote_copilot_binary="/fixture/copilot",
+            remote_copilot_session_root=None,
+            remote_usage_index_path=None,
+            user_context_cwd=None,
+            remote_project_contexts_file=None,
+            ssh_bin="/usr/bin/ssh",
+            address_family="6",
+            host="fixture@fd7a::1",
+            known_hosts_file=str(known_hosts),
+            census_snapshot_sha256="sha256:" + "1" * 64,
+            origin_root_id="personal-copilot",
+            origin_relative_path="fixture-skill",
+            origin_path="/Users/fixture/.copilot/skills/fixture-skill",
+            canonical_capability_id="sha256:" + "2" * 64,
+            origin_inventory_sha256="sha256:" + "3" * 64,
+        )
+        command = module.subject_remote_command(args)
+        self.assertIn("StrictHostKeyChecking=yes", command)
+        self.assertIn(f"UserKnownHostsFile={known_hosts}", command)
+        self.assertIn("--receive-subject", command[-1])
+        self.assertIn("--origin-root-id personal-copilot", command[-1])
 
 
 if __name__ == "__main__":

@@ -273,6 +273,26 @@ except claims.ClaimLedgerError as error:
     assert "owner status" in str(error)
 else:
     raise AssertionError("an unsupported owner integration status was accepted")
+
+use_state("v3-subject-migration")
+legacy_claim = reserve("run-v3-migration")
+with sqlite3.connect(claims.ledger_path()) as connection:
+    connection.execute("ALTER TABLE claims DROP COLUMN subject_json")
+    connection.execute(
+        "UPDATE schema_metadata SET schema_version=3 WHERE singleton=1"
+    )
+    connection.execute("PRAGMA user_version=3")
+connection = claims.connect()
+assert connection.execute("PRAGMA user_version").fetchone()[0] == 4
+assert "subject_json" in {
+    row["name"] for row in connection.execute("PRAGMA table_info(claims)")
+}
+connection.close()
+migrated = claims.inspect_claim(legacy_claim["claim_id"])
+assert migrated["subject"] is None
+assert migrated["owner_run_id"] == "run-v3-migration"
+passed("v3 claims migrate transactionally with legacy local subject state")
+
 use_state("legacy-schema")
 legacy = claims.ledger_path()
 legacy.parent.mkdir(parents=True)
@@ -2395,6 +2415,6 @@ assert "one exact open or pending" in operator_with_halt.stderr
 passed("operator recovery requires both halt and the inherited writer lease")
 passed("historical inspection is stable and owner reconciliation requires authority")
 
-assert passes == 48
+assert passes == 49
 print(f"PASS  {passes} deterministic evaluation-input claim ledger checks")
 PY

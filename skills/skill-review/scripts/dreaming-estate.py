@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
@@ -20,6 +21,17 @@ from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
+from remote_subject_policy import (
+    REMOTE_SUBJECT_SIDECARS,
+    RemoteSubjectPolicyError,
+    load_content_policy,
+    validate_text,
+)
 
 SCHEMA_VERSION = 1
 ROOT_CLASSES = {
@@ -65,6 +77,10 @@ MAX_EVALUATION_CASES = 100
 MAX_EVALUATION_OUTPUT_BYTES = 2_000_000
 EVALUATION_READ_CHUNK_BYTES = 65_536
 EVALUATION_TIMEOUT_SECONDS = 120
+REMOTE_SUBJECT_MAX_FILES = 512
+REMOTE_SUBJECT_MAX_FILE_BYTES = 8 * 1024 * 1024
+REMOTE_SUBJECT_MAX_TOTAL_BYTES = 32 * 1024 * 1024
+REMOTE_SUBJECT_MAX_ENCODED_BYTES = 48 * 1024 * 1024
 USAGE_ALIASES = {
     "architecture-guardrails": {
         "target": "guardrails",
@@ -355,6 +371,227 @@ def skill_inventory(skill: Path) -> tuple[list[dict[str, str]], str]:
     if not any(item["path"] == "SKILL.md" for item in files):
         raise EstateError(f"skill has no SKILL.md: {skill}")
     return files, digest(files)
+
+
+def remote_subject_content_policy(path: Path) -> dict[str, Any]:
+    try:
+        return load_content_policy(path)
+    except RemoteSubjectPolicyError as error:
+        raise EstateError(str(error)) from error
+
+
+def validate_remote_subject_text(
+    content: bytes, relative: str, policy: dict[str, Any]
+) -> None:
+    try:
+        validate_text(content, relative, policy)
+    except RemoteSubjectPolicyError as error:
+        raise EstateError(str(error)) from error
+
+
+def read_remote_subject_file(
+    root_fd: int, relative: str
+) -> tuple[bytes, os.stat_result]:
+    path = Path(relative)
+    if (
+        not relative
+        or path.is_absolute()
+        or path.as_posix() != relative
+        or ".." in path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise EstateError("remote subject inventory path is unsafe")
+    directory_fd = os.dup(root_fd)
+    try:
+        directory_flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            directory_flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            directory_flags |= os.O_NOFOLLOW
+        for part in path.parts[:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        file_flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            file_flags |= os.O_NOFOLLOW
+        file_fd = os.open(path.parts[-1], file_flags, dir_fd=directory_fd)
+        try:
+            before = os.fstat(file_fd)
+            if not stat.S_ISREG(before.st_mode):
+                raise EstateError(f"{relative}: remote subject file is not regular")
+            if before.st_size > REMOTE_SUBJECT_MAX_FILE_BYTES:
+                raise EstateError(f"{relative}: remote subject file is too large")
+            chunks = []
+            remaining = REMOTE_SUBJECT_MAX_FILE_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(file_fd, min(65_536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            content = b"".join(chunks)
+            after = os.fstat(file_fd)
+            identity = (
+                "st_dev",
+                "st_ino",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+            if len(content) > REMOTE_SUBJECT_MAX_FILE_BYTES or any(
+                getattr(before, field) != getattr(after, field)
+                for field in identity
+            ):
+                raise EstateError(
+                    f"{relative}: remote subject file changed during read"
+                )
+            return content, after
+        finally:
+            os.close(file_fd)
+    except OSError as error:
+        raise EstateError(f"{relative}: remote subject file is unreadable") from error
+    finally:
+        os.close(directory_fd)
+
+
+def export_remote_subject(
+    census: dict[str, Any],
+    request: dict[str, Any],
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    required = {
+        "census_snapshot_sha256",
+        "origin_host_id",
+        "origin_root_id",
+        "origin_relative_path",
+        "origin_path",
+        "canonical_capability_id",
+        "origin_inventory_sha256",
+    }
+    if (
+        not isinstance(request, dict)
+        or set(request) != required
+        or any(
+            not isinstance(request.get(field), str) or not request[field]
+            for field in required
+        )
+        or not SHA256_ID_RE.fullmatch(request["census_snapshot_sha256"])
+        or not SHA256_ID_RE.fullmatch(request["canonical_capability_id"])
+        or not SHA256_ID_RE.fullmatch(request["origin_inventory_sha256"])
+        or request["origin_host_id"] != census.get("host_id")
+    ):
+        raise EstateError("remote subject request is malformed")
+    physical = census.get("physical_instances")
+    if not isinstance(physical, list):
+        raise EstateError("remote subject census inventory is malformed")
+    matches = [
+        item
+        for item in physical
+        if isinstance(item, dict)
+        and item.get("host_id") == request["origin_host_id"]
+        and item.get("root_id") == request["origin_root_id"]
+        and item.get("relative_path") == request["origin_relative_path"]
+        and item.get("absolute_path") == request["origin_path"]
+        and item.get("canonical_capability_id")
+        == request["canonical_capability_id"]
+        and item.get("inventory_sha256")
+        == request["origin_inventory_sha256"]
+    ]
+    if len(matches) != 1:
+        raise EstateError("remote subject request does not match one current skill")
+    subject = matches[0]
+    inventory = subject.get("files")
+    if (
+        not isinstance(inventory, list)
+        or not inventory
+        or len(inventory) > REMOTE_SUBJECT_MAX_FILES
+        or inventory != sorted(inventory, key=lambda item: item.get("path", ""))
+    ):
+        raise EstateError("remote subject inventory is malformed or too large")
+    root = Path(request["origin_path"])
+    directory_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+    try:
+        root_fd = os.open(root, directory_flags)
+    except OSError as error:
+        raise EstateError("remote subject root is unavailable") from error
+    origin_inventory = []
+    candidate_inventory = []
+    excluded = []
+    files = []
+    total_bytes = 0
+    try:
+        for item in inventory:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"path", "sha256"}
+                or not isinstance(item.get("path"), str)
+                or not HEX_SHA256_RE.fullmatch(str(item.get("sha256")))
+            ):
+                raise EstateError("remote subject inventory entry is malformed")
+            relative = item["path"]
+            content, _ = read_remote_subject_file(root_fd, relative)
+            total_bytes += len(content)
+            if total_bytes > REMOTE_SUBJECT_MAX_TOTAL_BYTES:
+                raise EstateError("remote subject content is too large")
+            content_sha = hashlib.sha256(content).hexdigest()
+            if content_sha != item["sha256"]:
+                raise EstateError(
+                    f"{relative}: remote subject inventory changed before fetch"
+                )
+            record = {
+                "path": relative,
+                "sha256": content_sha,
+                "size": len(content),
+            }
+            origin_inventory.append(record)
+            if Path(relative).name in REMOTE_SUBJECT_SIDECARS:
+                excluded.append(record)
+                continue
+            validate_remote_subject_text(content, relative, policy)
+            candidate_inventory.append(record)
+            files.append(
+                {
+                    **record,
+                    "content_base64": base64.b64encode(content).decode("ascii"),
+                }
+            )
+    finally:
+        os.close(root_fd)
+    census_inventory = [
+        {"path": item["path"], "sha256": item["sha256"]}
+        for item in origin_inventory
+    ]
+    if digest(census_inventory) != request["origin_inventory_sha256"]:
+        raise EstateError("remote subject origin inventory identity differs")
+    if not any(item["path"] == "SKILL.md" for item in candidate_inventory):
+        raise EstateError("remote subject candidate has no SKILL.md")
+    candidate_id = "sha256:" + hashlib.sha256(
+        json.dumps(
+            candidate_inventory, sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+    result = {
+        "schema_version": 1,
+        "kind": "remote_evaluation_subject",
+        **request,
+        "candidate_id": candidate_id,
+        "content_policy": {
+            "schema_version": policy["schema_version"],
+            "sha256": policy["sha256"],
+        },
+        "origin_inventory": origin_inventory,
+        "candidate_inventory": candidate_inventory,
+        "excluded_sidecars": excluded,
+        "files": files,
+    }
+    if len(canonical(result)) > REMOTE_SUBJECT_MAX_ENCODED_BYTES:
+        raise EstateError("remote subject encoded response is too large")
+    return {**result, "receipt_sha256": digest(result)}
 
 
 def classification(
@@ -4052,6 +4289,18 @@ def collect(config: dict[str, Any]) -> dict[str, Any]:
     }
     census["snapshot_sha256"] = digest(snapshot)
     return census
+
+
+def collect_remote_subject(
+    config: dict[str, Any],
+    request: dict[str, Any],
+    content_policy_path: Path,
+) -> dict[str, Any]:
+    return export_remote_subject(
+        collect(config),
+        request,
+        remote_subject_content_policy(content_policy_path),
+    )
 
 
 def load_object(path: Path) -> dict[str, Any]:

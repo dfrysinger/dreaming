@@ -54,7 +54,18 @@ def receiver_identity(args: argparse.Namespace) -> dict[str, str]:
     }
 
 
+def subject_receiver_identity(args: argparse.Namespace) -> dict[str, str]:
+    identity = receiver_identity(args)
+    policy_sha = sha256_file(Path(args.content_policy).expanduser().resolve())
+    if policy_sha != args.expected_content_policy_sha:
+        raise CensusError("remote subject content policy mismatch")
+    return {**identity, "content_policy_sha256": policy_sha}
+
+
 def load_collector(path: Path) -> Any:
+    collector_root = str(path.resolve().parent)
+    if collector_root not in sys.path:
+        sys.path.insert(0, collector_root)
     spec = importlib.util.spec_from_file_location("dreaming_estate_receiver", path)
     if spec is None or spec.loader is None:
         raise CensusError(f"cannot load collector: {path}")
@@ -119,6 +130,39 @@ def receive(args: argparse.Namespace) -> None:
     emit(result)
 
 
+def subject_request(args: argparse.Namespace) -> dict[str, str]:
+    return {
+        "census_snapshot_sha256": args.census_snapshot_sha256,
+        "origin_host_id": args.target_host_id,
+        "origin_root_id": args.origin_root_id,
+        "origin_relative_path": args.origin_relative_path,
+        "origin_path": args.origin_path,
+        "canonical_capability_id": args.canonical_capability_id,
+        "origin_inventory_sha256": args.origin_inventory_sha256,
+    }
+
+
+def receive_subject(args: argparse.Namespace) -> None:
+    identity = subject_receiver_identity(args)
+    collector = load_collector(Path(args.estate_script).expanduser().resolve())
+    if not hasattr(collector, "collect_remote_subject"):
+        raise CensusError("collector does not support remote subjects")
+    try:
+        subject = collector.collect_remote_subject(
+            receiver_config(args),
+            subject_request(args),
+            Path(args.content_policy).expanduser().resolve(),
+        )
+    except collector.EstateError as error:
+        raise CensusError(str(error)) from error
+    if (
+        not isinstance(subject, dict)
+        or subject.get("kind") != "remote_evaluation_subject"
+    ):
+        raise CensusError("collector returned an invalid remote subject")
+    emit({"ok": True, "subject": subject, "receiver": identity})
+
+
 def remote_command(args: argparse.Namespace) -> list[str]:
     receiver = [
         args.remote_python,
@@ -170,6 +214,73 @@ def remote_command(args: argparse.Namespace) -> list[str]:
     ]
 
 
+def subject_remote_command(args: argparse.Namespace) -> list[str]:
+    receiver = [
+        args.remote_python,
+        args.remote_script,
+        "--receive-subject",
+        "--estate-script",
+        args.remote_estate_script,
+        "--receiver-id-file",
+        args.remote_receiver_id_file,
+        "--expected-receiver-id",
+        args.expected_receiver_id,
+        "--expected-receiver-sha",
+        args.expected_receiver_sha,
+        "--expected-collector-sha",
+        args.expected_collector_sha,
+        "--content-policy",
+        args.remote_content_policy,
+        "--expected-content-policy-sha",
+        args.expected_content_policy_sha,
+        "--target-host-id",
+        args.target_host_id,
+        "--target-home",
+        args.target_home,
+        "--copilot-binary",
+        args.remote_copilot_binary,
+        "--census-snapshot-sha256",
+        args.census_snapshot_sha256,
+        "--origin-root-id",
+        args.origin_root_id,
+        "--origin-relative-path",
+        args.origin_relative_path,
+        "--origin-path",
+        args.origin_path,
+        "--canonical-capability-id",
+        args.canonical_capability_id,
+        "--origin-inventory-sha256",
+        args.origin_inventory_sha256,
+    ]
+    if args.remote_copilot_session_root:
+        receiver.extend(
+            ["--copilot-session-root", args.remote_copilot_session_root]
+        )
+    if args.remote_usage_index_path:
+        receiver.extend(["--usage-index-path", args.remote_usage_index_path])
+    if args.user_context_cwd:
+        receiver.extend(["--user-context-cwd", args.user_context_cwd])
+    if args.remote_project_contexts_file:
+        receiver.extend(
+            ["--project-contexts-file", args.remote_project_contexts_file]
+        )
+    return [
+        args.ssh_bin,
+        *([f"-{args.address_family}"] if args.address_family else []),
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "ConnectTimeout=15",
+        "-o",
+        "StrictHostKeyChecking=yes",
+        "-o",
+        f"UserKnownHostsFile={args.known_hosts_file}",
+        "--",
+        args.host,
+        shlex.join(receiver),
+    ]
+
+
 def parse_result(process: subprocess.CompletedProcess[str]) -> dict[str, Any]:
     try:
         values = [
@@ -212,6 +323,55 @@ def local(args: argparse.Namespace) -> None:
     emit(result)
 
 
+def local_subject(args: argparse.Namespace) -> None:
+    if args.host.startswith("-"):
+        raise CensusError("receiver host is invalid")
+    known_hosts = Path(args.known_hosts_file).expanduser().resolve()
+    if (
+        known_hosts.is_symlink()
+        or not known_hosts.is_file()
+        or sha256_file(known_hosts) != args.expected_known_hosts_sha
+    ):
+        raise CensusError("remote subject SSH host key file is invalid")
+    try:
+        process = subprocess.run(
+            subject_remote_command(args),
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=args.timeout,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise CensusError(f"remote subject fetch failed: {error}") from error
+    result = parse_result(process)
+    receiver = result.get("receiver")
+    if (
+        not isinstance(receiver, dict)
+        or receiver.get("receiver_id") != args.expected_receiver_id
+        or receiver.get("receiver_sha256") != args.expected_receiver_sha
+        or receiver.get("collector_sha256") != args.expected_collector_sha
+        or receiver.get("content_policy_sha256")
+        != args.expected_content_policy_sha
+    ):
+        raise CensusError("remote subject receiver identity is invalid")
+    subject = result.get("subject")
+    if (
+        not isinstance(subject, dict)
+        or subject.get("census_snapshot_sha256")
+        != args.census_snapshot_sha256
+        or subject.get("origin_host_id") != args.target_host_id
+        or subject.get("origin_root_id") != args.origin_root_id
+        or subject.get("origin_relative_path") != args.origin_relative_path
+        or subject.get("origin_path") != args.origin_path
+        or subject.get("canonical_capability_id")
+        != args.canonical_capability_id
+        or subject.get("origin_inventory_sha256")
+        != args.origin_inventory_sha256
+    ):
+        raise CensusError("remote subject response does not match its request")
+    emit(result)
+
+
 def common_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(add_help=False)
     parser.add_argument("--target-host-id", required=True)
@@ -237,6 +397,24 @@ def receiver_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def add_subject_request_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--census-snapshot-sha256", required=True)
+    parser.add_argument("--origin-root-id", required=True)
+    parser.add_argument("--origin-relative-path", required=True)
+    parser.add_argument("--origin-path", required=True)
+    parser.add_argument("--canonical-capability-id", required=True)
+    parser.add_argument("--origin-inventory-sha256", required=True)
+
+
+def subject_receiver_parser() -> argparse.ArgumentParser:
+    parser = receiver_parser()
+    parser.add_argument("--receive-subject", action="store_true")
+    parser.add_argument("--content-policy", required=True)
+    parser.add_argument("--expected-content-policy-sha", required=True)
+    add_subject_request_arguments(parser)
+    return parser
+
+
 def local_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(parents=[common_parser()])
     parser.add_argument("--ssh-bin", default="/usr/bin/ssh")
@@ -257,10 +435,25 @@ def local_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def subject_local_parser() -> argparse.ArgumentParser:
+    parser = local_parser()
+    parser.add_argument("--fetch-subject", action="store_true")
+    parser.add_argument("--known-hosts-file", required=True)
+    parser.add_argument("--expected-known-hosts-sha", required=True)
+    parser.add_argument("--remote-content-policy", required=True)
+    parser.add_argument("--expected-content-policy-sha", required=True)
+    add_subject_request_arguments(parser)
+    return parser
+
+
 def main() -> None:
     try:
+        if "--receive-subject" in sys.argv[1:]:
+            receive_subject(subject_receiver_parser().parse_args())
         if "--receive" in sys.argv[1:]:
             receive(receiver_parser().parse_args())
+        if "--fetch-subject" in sys.argv[1:]:
+            local_subject(subject_local_parser().parse_args())
         local(local_parser().parse_args())
     except CensusError as error:
         emit({"ok": False, "error": str(error)}, 2)

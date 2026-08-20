@@ -1037,8 +1037,159 @@ def evaluation_dir() -> Path:
     return root / "skill-review" / "evaluations"
 
 
+def remote_subject_path_shape(skill_dir: Path) -> bool:
+    return (
+        skill_dir.name == "candidate"
+        and re.fullmatch(r"[0-9a-f]{64}", skill_dir.parent.name) is not None
+        and re.fullmatch(r"[0-9a-f]{64}", skill_dir.parent.parent.name) is not None
+    )
+
+
+def remote_evaluation_subject(skill_dir: Path) -> dict[str, Any] | None:
+    skill_dir = skill_dir.resolve()
+    receipt_path = skill_dir.parent / "transport-receipt.json"
+    if not receipt_path.exists():
+        if remote_subject_path_shape(skill_dir):
+            raise EvaluationError(
+                "remote evaluation subject transport receipt is missing"
+            )
+        return None
+    if receipt_path.is_symlink() or not receipt_path.is_file():
+        raise EvaluationError(
+            "remote evaluation subject transport receipt is unsafe"
+        )
+    raw = receipt_path.read_bytes()
+    if len(raw) > 8_388_608:
+        raise EvaluationError(
+            "remote evaluation subject transport receipt is too large"
+        )
+    try:
+        receipt = json.loads(raw)
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise EvaluationError(
+            "remote evaluation subject transport receipt is invalid"
+        ) from error
+    if not isinstance(receipt, dict) or raw != canonical(receipt):
+        raise EvaluationError(
+            "remote evaluation subject transport receipt is not canonical"
+        )
+    if set(receipt) != {
+        "schema_version",
+        "kind",
+        "receiver",
+        "remote_receipt_sha256",
+        "local_content_policy_sha256",
+        "subject",
+        "receipt_sha256",
+    }:
+        raise EvaluationError(
+            "remote evaluation subject transport receipt fields are invalid"
+        )
+    expected_receipt = {
+        key: value for key, value in receipt.items() if key != "receipt_sha256"
+    }
+    if (
+        receipt.get("schema_version") != 1
+        or receipt.get("kind")
+        != "remote_evaluation_subject_transport_receipt"
+        or receipt.get("receipt_sha256")
+        != f"sha256:{digest(canonical(expected_receipt))}"
+    ):
+        raise EvaluationError(
+            "remote evaluation subject transport receipt identity is invalid"
+        )
+    subject = receipt.get("subject")
+    subject_fields = {
+        "schema_version",
+        "kind",
+        "census_snapshot_sha256",
+        "origin_host_id",
+        "origin_root_id",
+        "origin_relative_path",
+        "origin_path",
+        "canonical_capability_id",
+        "origin_inventory_sha256",
+        "candidate_id",
+        "content_policy",
+        "origin_inventory",
+        "candidate_inventory",
+        "excluded_sidecars",
+    }
+    if (
+        not isinstance(subject, dict)
+        or set(subject) != subject_fields
+        or subject.get("schema_version") != 1
+        or subject.get("kind") != "remote_evaluation_subject"
+        or not all(
+            isinstance(subject.get(field), str) and subject[field]
+            for field in (
+                "origin_host_id",
+                "origin_root_id",
+                "origin_relative_path",
+                "origin_path",
+            )
+        )
+        or not all(
+            isinstance(subject.get(field), str)
+            and SHA256_RE.fullmatch(subject[field]) is not None
+            for field in (
+                "census_snapshot_sha256",
+                "canonical_capability_id",
+                "candidate_id",
+            )
+        )
+    ):
+        raise EvaluationError("remote evaluation subject identity is invalid")
+    relative = Path(subject["origin_relative_path"])
+    if (
+        relative.is_absolute()
+        or relative.as_posix() != subject["origin_relative_path"]
+        or any(part in {"", ".", ".."} for part in relative.parts)
+    ):
+        raise EvaluationError("remote evaluation subject relative path is unsafe")
+    subject_identity = {
+        "origin_host_id": subject["origin_host_id"],
+        "origin_root_id": subject["origin_root_id"],
+        "origin_relative_path": subject["origin_relative_path"],
+    }
+    subject_key = f"sha256:{digest(canonical(subject_identity))}"
+    if (
+        skill_dir.parent.name != subject["candidate_id"].removeprefix("sha256:")
+        or skill_dir.parent.parent.name != subject_key.removeprefix("sha256:")
+    ):
+        raise EvaluationError(
+            "remote evaluation subject storage identity is invalid"
+        )
+    candidate, inventory = candidate_id(skill_dir)
+    if (
+        candidate != subject["candidate_id"]
+        or inventory != subject["candidate_inventory"]
+    ):
+        raise EvaluationError(
+            "remote evaluation subject candidate identity is stale"
+        )
+    return {
+        "schema_version": 1,
+        "kind": "remote_evaluation_subject_binding",
+        "subject_key": subject_key,
+        "origin_host_id": subject["origin_host_id"],
+        "origin_root_id": subject["origin_root_id"],
+        "origin_relative_path": subject["origin_relative_path"],
+        "origin_path": subject["origin_path"],
+        "canonical_capability_id": subject["canonical_capability_id"],
+        "origin_inventory_sha256": subject["origin_inventory_sha256"],
+        "candidate_id": subject["candidate_id"],
+        "transport_receipt_sha256": receipt["receipt_sha256"],
+        "content_path": str(skill_dir),
+    }
+
+
 def latest_key(skill_path: str) -> str:
-    return digest(str(Path(skill_path).resolve()).encode())
+    resolved = Path(skill_path).resolve()
+    subject = remote_evaluation_subject(resolved)
+    if subject is not None:
+        return subject["subject_key"].removeprefix("sha256:")
+    return digest(str(resolved).encode())
 
 
 def write_receipt(receipt: dict[str, Any]) -> tuple[Path, str]:
@@ -3576,6 +3727,7 @@ def v2_input_claim(args: argparse.Namespace) -> dict[str, Any]:
         skill_path=str(skill_dir),
         skill_key=latest_key(str(skill_dir)),
         candidate_id=candidate,
+        subject=remote_evaluation_subject(skill_dir),
         owner_run_id=require_text(args.owner_run_id, "claim owner run ID"),
         author_model=require_text(args.author_model, "claim author model"),
         reviewer_a_model=require_text(
@@ -5958,6 +6110,7 @@ def v2_input_owner_run(args: argparse.Namespace) -> dict[str, Any]:
         skill_path=str(skill_dir),
         skill_key=latest_key(str(skill_dir)),
         candidate_id=candidate,
+        subject=remote_evaluation_subject(skill_dir),
         owner_run_id=owner_run_id,
         author_model=require_text(args.author_model, "owner author model"),
         reviewer_a_model=require_text(
