@@ -19,7 +19,7 @@
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
-- Isolated governance preview tip: `65a70d1`
+- Isolated governance preview tip: `eb9a021`
 - The first natural successor `20260818T220321Z-97940` remains retained as a
   literal `SC-010` `NOT_SUPPORTED` result. It attempted 25 reviews, completed
   24, retained one `executor-timeout`, and ended honestly as `aborted` after
@@ -632,6 +632,22 @@
   sidecar, rollout, and storage findings with no unresolved material defect.
   The durable live gate is
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/live-proof-remote-subject-bridge.json`.
+- The remote transport, immutable snapshot, and first stable-subject evaluator
+  boundary are implemented and committed locally on the isolated preview
+  branch as `eb9a021`. The MacBook receiver exports one census-bound UTF-8
+  candidate through descriptor-relative no-follow reads with before-and-after
+  file identity checks. Both hosts apply the separately sealed content policy,
+  evaluator sidecars remain excluded, and the mini publishes exact candidate
+  bytes read-only with create-only rename under a 1 GiB aggregate bound and a
+  256 MiB reserve. The evaluator derives authority from origin host, declared
+  root, and relative path, refuses missing or altered transport evidence, and
+  persists the complete remote binding in each claim. Claim-ledger schema v4
+  migrates v3 transactionally and preserves existing local claims as explicit
+  legacy local subjects. Deterministic coverage passes six SSH transport tests,
+  four remote publication and identity tests, 49 claim-ledger checks, 23
+  evaluator checks, 62 estate checks, and 47 core checks. Owner fetch,
+  mini-owned overlay projection, installation wiring, and live proof remain
+  gated on their deterministic boundaries.
 - Governance work remaining: bootstrap the sealed inputs for the real zero-use
   cohort through the reviewed remote-subject bridge, progress that cohort
   through reviewed readiness, then execute the evaluation queue under explicit
