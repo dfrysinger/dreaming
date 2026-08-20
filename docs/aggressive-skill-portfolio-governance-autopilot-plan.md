@@ -19,7 +19,7 @@
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
-- Isolated governance preview tip: `eb9a021`
+- Isolated governance preview tip: `d7c71ab`
 - The first natural successor `20260818T220321Z-97940` remains retained as a
   literal `SC-010` `NOT_SUPPORTED` result. It attempted 25 reviews, completed
   24, retained one `executor-timeout`, and ended honestly as `aborted` after
@@ -647,6 +647,15 @@
   four remote publication and identity tests, 49 claim-ledger checks, 23
   evaluator checks, 62 estate checks, and 47 core checks. Owner fetch,
   mini-owned overlay projection, installation wiring, and live proof remain
+  gated on their deterministic boundaries.
+- Queue derivation now requires a complete content-addressed mini-owned overlay
+  when remote evaluation is enabled, committed locally as `d7c71ab`. The
+  overlay binds the exact census and usage receipts, receiver identity, origin
+  host, evaluator bytes, registry schema identity, every stable subject, and
+  each candidate snapshot state. Missing or mismatched coverage refuses the
+  lane. Remote path-local evaluation fields cannot grant authority, and
+  never-fetched or changed candidates enter an explicit transport phase before
+  any claim. Overlay construction, fetch execution, and persistence remain
   gated on their deterministic boundaries.
 - Governance work remaining: bootstrap the sealed inputs for the real zero-use
   cohort through the reviewed remote-subject bridge, progress that cohort
