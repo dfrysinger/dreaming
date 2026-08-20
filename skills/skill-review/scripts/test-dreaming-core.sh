@@ -208,7 +208,7 @@ class RuntimeTest(unittest.TestCase):
     def adapter(self, role: str, adapter_id: str, fixture: Path) -> ExecutableAdapter:
         return ExecutableAdapter(
             [
-                sys.executable,
+                "/usr/bin/python3",
                 str(FAKE),
                 "--fixture",
                 str(fixture),
@@ -417,6 +417,20 @@ class RuntimeTest(unittest.TestCase):
         config_path = self.paths.state / "adapters.json"
         config_path.parent.mkdir(parents=True, exist_ok=True)
         content_root = self.paths.state / "evaluation-input-owner"
+        policy_path = (
+            Path(runtime_module.__file__).resolve().parent.parent
+            / "references"
+            / "remote-subject-content-policy-v1.json"
+        )
+        policy_sha = runtime_module.load_content_policy(policy_path)[
+            "sha256"
+        ].removeprefix("sha256:")
+        transport_receiver = {
+            "receiver_id": "transport-receiver",
+            "receiver_sha256": "a" * 64,
+            "collector_sha256": "b" * 64,
+            "content_policy_sha256": policy_sha,
+        }
         config = {
             "contract_version": 1,
             "evaluation_input_owner": {
@@ -425,6 +439,31 @@ class RuntimeTest(unittest.TestCase):
                 "reviewer_a_model": "reviewer-a-model",
                 "reviewer_b_model": "reviewer-b-model",
                 "content_root": str(content_root),
+            },
+            "remote_evaluation_subjects": {
+                "enabled": False,
+                "command": [
+                    "/usr/bin/python3",
+                    str(
+                        Path(runtime_module.__file__).resolve().parents[3]
+                        / "scripts"
+                        / "ssh-estate-census.py"
+                    ),
+                    "--fetch-subject",
+                    "--known-hosts-file",
+                    str(self.case / "known-hosts"),
+                    "--expected-known-hosts-sha",
+                    "c" * 64,
+                    "--expected-receiver-id",
+                    transport_receiver["receiver_id"],
+                    "--expected-receiver-sha",
+                    transport_receiver["receiver_sha256"],
+                    "--expected-collector-sha",
+                    transport_receiver["collector_sha256"],
+                    "--expected-content-policy-sha",
+                    transport_receiver["content_policy_sha256"],
+                ],
+                "receiver": transport_receiver,
             },
         }
         config_path.write_text(json.dumps(config))
@@ -445,7 +484,22 @@ class RuntimeTest(unittest.TestCase):
             owner = runtime_module.configured_evaluation_input_owner(
                 config, config_path, self.paths
             )
+            remote = (
+                runtime_module.configured_remote_evaluation_subjects(
+                    config, owner, self.paths
+                )
+            )
         self.assertFalse(owner["enabled"])
+        self.assertFalse(remote["enabled"])
+        self.assertEqual(remote["receiver"], transport_receiver)
+        self.assertEqual(
+            remote["snapshot_store"],
+            str(
+                (
+                    self.paths.state / "remote-evaluation-subjects"
+                ).resolve()
+            ),
+        )
         self.assertEqual(owner["content_root"], str(content_root.resolve()))
         self.assertEqual(
             owner["config_sha256"],
@@ -999,6 +1053,10 @@ class RuntimeTest(unittest.TestCase):
             "usage_snapshot_sha256": usage["snapshot_sha256"],
             "usage_receipt_sha256": usage_receipt_sha256,
             "receiver": receipt_receiver,
+            "transport_receiver": {
+                **receipt_receiver,
+                "content_policy_sha256": "c" * 64,
+            },
             "origin_host_id": census["host_id"],
             "evaluator_sha256": "sha256:" + "e" * 64,
             "registry_identity": (
@@ -1015,6 +1073,7 @@ class RuntimeTest(unittest.TestCase):
             census_receipt_sha256=census_receipt_sha256,
             usage_receipt_sha256=usage_receipt_sha256,
             evaluation_overlay=overlay,
+            transport_receiver=overlay["transport_receiver"],
         )
         remote_by_id = {
             row["capability_id"]: row for row in remote_queue["rows"]
@@ -1052,6 +1111,7 @@ class RuntimeTest(unittest.TestCase):
                 census_receipt_sha256=census_receipt_sha256,
                 usage_receipt_sha256=usage_receipt_sha256,
                 evaluation_overlay=forged_overlay,
+                transport_receiver=overlay["transport_receiver"],
             )
         content_files[capability_ids[1]]["suite"].write_text("{}")
         rescanned = runtime_module.derive_evaluation_input_queue(

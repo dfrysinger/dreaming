@@ -185,6 +185,243 @@ class RemoteSubjectTest(unittest.TestCase):
         ):
             evaluation.latest_key(str(candidate))
 
+    def test_builds_current_bootstrap_and_changed_overlay_rows(self) -> None:
+        response, request, receiver = self.response()
+        published = core.publish_remote_subject_snapshot(
+            response,
+            request,
+            receiver,
+            POLICY,
+            self.store,
+            installed_skill_roots=[self.installed],
+        )
+        capability_id = request["canonical_capability_id"]
+        physical = {
+            "instance_id": "fixture-instance",
+            "host_id": request["origin_host_id"],
+            "root_id": request["origin_root_id"],
+            "relative_path": request["origin_relative_path"],
+            "absolute_path": request["origin_path"],
+            "canonical_capability_id": capability_id,
+            "inventory_sha256": request["origin_inventory_sha256"],
+        }
+        census = {
+            "schema_version": 1,
+            "host_id": request["origin_host_id"],
+            "physical_instances": [physical],
+            "enabled_instances": [
+                {
+                    "instance_id": physical["instance_id"],
+                    "canonical_capability_id": capability_id,
+                    "runtime_enabled": True,
+                }
+            ],
+        }
+        census["snapshot_sha256"] = core.digest(census)
+        usage = {
+            "schema_version": 1,
+            "census_snapshot_sha256": census["snapshot_sha256"],
+        }
+        usage["snapshot_sha256"] = core.digest(usage)
+        owner = {"evaluator": str(SCRIPT_DIR / "skill-evaluation.py")}
+        overlay = core.build_remote_evaluation_overlay(
+            owner,
+            census,
+            usage,
+            receiver,
+            census_receipt_sha256="sha256:" + "c" * 64,
+            usage_receipt_sha256="sha256:" + "d" * 64,
+            snapshot_store=self.store,
+        )
+        row = overlay["rows"][0]
+        self.assertEqual(
+            row["snapshot_state"], "remote_candidate_snapshot_ready"
+        )
+        self.assertEqual(row["candidate_id"], published["candidate_id"])
+        self.assertEqual(row["content_path"], published["candidate_root"])
+        self.assertEqual(row["evaluation"]["state"], "input_missing")
+        overlay_store = self.root / "state" / "evaluation-overlays"
+        overlay_path = core.publish_remote_evaluation_overlay(
+            overlay, overlay_store
+        )
+        self.assertEqual(overlay_path.read_bytes(), core.canonical(overlay))
+        self.assertEqual(
+            core.publish_remote_evaluation_overlay(overlay, overlay_store),
+            overlay_path,
+        )
+        self.assertEqual(overlay_path.stat().st_mode & 0o777, 0o400)
+
+        empty_store = self.root / "state" / "empty-remote-subjects"
+        empty_store.mkdir(mode=0o700)
+        bootstrap = core.build_remote_evaluation_overlay(
+            owner,
+            census,
+            usage,
+            receiver,
+            census_receipt_sha256="sha256:" + "c" * 64,
+            usage_receipt_sha256="sha256:" + "d" * 64,
+            snapshot_store=empty_store,
+        )
+        self.assertEqual(
+            bootstrap["rows"][0]["snapshot_state"],
+            "remote_candidate_not_fetched",
+        )
+        self.assertIsNone(bootstrap["rows"][0]["candidate_id"])
+        transport_response = json.loads(json.dumps(response))
+        transport_response["subject"]["census_snapshot_sha256"] = census[
+            "snapshot_sha256"
+        ]
+        transport_response["subject"]["receipt_sha256"] = core.digest(
+            {
+                key: value
+                for key, value in transport_response["subject"].items()
+                if key != "receipt_sha256"
+            }
+        )
+        fake_transport = self.root / "fake-transport.py"
+        fake_transport.write_text(
+            "import json\n"
+            f"print(json.dumps({transport_response!r}, sort_keys=True, separators=(',', ':')))\n",
+            encoding="utf-8",
+        )
+        os.chmod(fake_transport, 0o700)
+        transport_row = {
+            **bootstrap["rows"][0],
+            "skill_path": request["origin_path"],
+            "runnable_phase": "transport",
+        }
+        transport = core.execute_remote_subject_transport(
+            {
+                "enabled": True,
+                "command": [sys.executable, str(fake_transport)],
+                "receiver": receiver,
+                "content_policy": str(POLICY),
+                "snapshot_store": str(empty_store),
+            },
+            census,
+            transport_row,
+            core.RuntimePaths(
+                state=self.root / "owner-state",
+                data=self.root / "owner-data",
+                skills=self.root / "owner-skills",
+            ),
+            halt_check=lambda: False,
+            lease_check=lambda: True,
+        )
+        self.assertEqual(transport["status"], "published")
+        self.assertEqual(
+            transport["selected_capability_id"], capability_id
+        )
+        self.assertFalse(
+            (
+                self.root
+                / "claim-state"
+                / "dreaming"
+                / "evaluation-input-claims.sqlite3"
+            ).exists()
+        )
+        race_store = self.root / "state" / "race-remote-subjects"
+        race_store.mkdir(mode=0o700)
+        race = core.execute_remote_subject_transport(
+            {
+                "enabled": True,
+                "command": [sys.executable, str(fake_transport)],
+                "receiver": receiver,
+                "content_policy": str(POLICY),
+                "snapshot_store": str(race_store),
+            },
+            census,
+            transport_row,
+            core.RuntimePaths(
+                state=self.root / "race-owner-state",
+                data=self.root / "race-owner-data",
+                skills=self.root / "race-owner-skills",
+            ),
+            halt_check=lambda: False,
+            lease_check=lambda: not any(
+                race_store.rglob("transport-receipt.json")
+            ),
+        )
+        self.assertEqual(race["status"], "lock_lost")
+        self.assertTrue(any(race_store.rglob("transport-receipt.json")))
+        self.assertFalse(
+            (
+                self.root
+                / "race-owner-state"
+                / "evaluation-input-overlays"
+            ).exists()
+        )
+
+        slow_transport = self.root / "slow-transport.py"
+        slow_transport.write_text(
+            "import time\ntime.sleep(30)\n", encoding="utf-8"
+        )
+        os.chmod(slow_transport, 0o700)
+        halt_checks = iter([False, True])
+        halted_store = self.root / "state" / "halted-remote-subjects"
+        halted_store.mkdir(mode=0o700)
+        halted = core.execute_remote_subject_transport(
+            {
+                "enabled": True,
+                "command": [sys.executable, str(slow_transport)],
+                "receiver": receiver,
+                "content_policy": str(POLICY),
+                "snapshot_store": str(halted_store),
+            },
+            census,
+            transport_row,
+            core.RuntimePaths(
+                state=self.root / "halted-owner-state",
+                data=self.root / "halted-owner-data",
+                skills=self.root / "halted-owner-skills",
+            ),
+            halt_check=lambda: next(halt_checks, True),
+            lease_check=lambda: True,
+        )
+        self.assertEqual(halted["status"], "halted")
+        self.assertFalse(any(halted_store.iterdir()))
+
+        changed_census = json.loads(json.dumps(census))
+        changed_census["physical_instances"][0]["canonical_capability_id"] = (
+            "sha256:" + "f" * 64
+        )
+        changed_census["physical_instances"][0]["inventory_sha256"] = (
+            "changed-inventory"
+        )
+        changed_census["enabled_instances"][0][
+            "canonical_capability_id"
+        ] = "sha256:" + "f" * 64
+        changed_census["snapshot_sha256"] = core.digest(
+            {
+                key: value
+                for key, value in changed_census.items()
+                if key != "snapshot_sha256"
+            }
+        )
+        changed_usage = {
+            "schema_version": 1,
+            "census_snapshot_sha256": changed_census["snapshot_sha256"],
+        }
+        changed_usage["snapshot_sha256"] = core.digest(changed_usage)
+        changed = core.build_remote_evaluation_overlay(
+            owner,
+            changed_census,
+            changed_usage,
+            receiver,
+            census_receipt_sha256="sha256:" + "1" * 64,
+            usage_receipt_sha256="sha256:" + "2" * 64,
+            snapshot_store=self.store,
+        )
+        changed_row = changed["rows"][0]
+        self.assertEqual(
+            changed_row["snapshot_state"], "remote_candidate_changed"
+        )
+        self.assertEqual(
+            changed_row["superseded_candidate_ids"],
+            [published["candidate_id"]],
+        )
+        self.assertIsNone(changed_row["content_path"])
+
     def test_local_policy_rejects_content_accepted_by_stale_receiver(self) -> None:
         permissive = self.root / "permissive-policy.json"
         permissive.write_text(

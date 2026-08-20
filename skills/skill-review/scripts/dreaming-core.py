@@ -104,6 +104,7 @@ EVALUATION_INPUT_OWNER_KEYS = {
     "reviewer_b_model",
     "content_root",
 }
+REMOTE_EVALUATION_SUBJECT_KEYS = {"enabled", "command", "receiver"}
 EVALUATION_INPUT_CONTENT_ROLES = {
     "suite": "application/json",
     "policy": "application/json",
@@ -2597,6 +2598,146 @@ def configured_evaluation_input_owner(
     }
 
 
+def configured_remote_evaluation_subjects(
+    config: dict[str, Any],
+    owner: dict[str, Any] | None,
+    paths: RuntimePaths,
+) -> dict[str, Any] | None:
+    entry = config.get("remote_evaluation_subjects")
+    if entry is None:
+        return None
+    if (
+        owner is None
+        or not isinstance(entry, dict)
+        or set(entry) != REMOTE_EVALUATION_SUBJECT_KEYS
+        or not isinstance(entry.get("enabled"), bool)
+        or not isinstance(entry.get("command"), list)
+        or not entry["command"]
+        or not all(
+            isinstance(value, str) and value and value == value.strip()
+            for value in entry["command"]
+        )
+    ):
+        raise RuntimeFailure(
+            "invalid-adapter-config",
+            "remote_evaluation_subjects is malformed",
+        )
+    if entry["enabled"] and not owner.get("enabled"):
+        raise RuntimeFailure(
+            "invalid-adapter-config",
+            "remote evaluation subjects require the enabled evaluation owner",
+        )
+    command = list(entry["command"])
+    executable = Path(command[0])
+    if (
+        not executable.is_absolute()
+        or executable.is_symlink()
+        or not executable.is_file()
+        or not os.access(executable, os.X_OK)
+        or command.count("--fetch-subject") != 1
+    ):
+        raise RuntimeFailure(
+            "invalid-adapter-config",
+            "remote evaluation subject command is unsafe",
+        )
+    request_options = {
+        "--census-snapshot-sha256",
+        "--origin-root-id",
+        "--origin-relative-path",
+        "--origin-path",
+        "--canonical-capability-id",
+        "--origin-inventory-sha256",
+    }
+    if request_options.intersection(command):
+        raise RuntimeFailure(
+            "invalid-adapter-config",
+            "remote evaluation subject command contains a mutable request",
+        )
+    receiver = entry.get("receiver")
+    receiver_fields = {
+        "receiver_id",
+        "receiver_sha256",
+        "collector_sha256",
+        "content_policy_sha256",
+    }
+    if (
+        not isinstance(receiver, dict)
+        or set(receiver) != receiver_fields
+        or not isinstance(receiver.get("receiver_id"), str)
+        or not receiver["receiver_id"]
+        or not all(
+            re.fullmatch(r"[0-9a-f]{64}", str(receiver.get(field)))
+            is not None
+            for field in receiver_fields - {"receiver_id"}
+        )
+    ):
+        raise RuntimeFailure(
+            "invalid-adapter-config",
+            "remote evaluation subject receiver is malformed",
+        )
+
+    def command_option(name: str) -> str | None:
+        positions = [
+            index for index, value in enumerate(command) if value == name
+        ]
+        if (
+            len(positions) != 1
+            or positions[0] + 1 >= len(command)
+            or command[positions[0] + 1].startswith("--")
+        ):
+            return None
+        return command[positions[0] + 1]
+
+    expected_options = {
+        "--expected-receiver-id": receiver["receiver_id"],
+        "--expected-receiver-sha": receiver["receiver_sha256"],
+        "--expected-collector-sha": receiver["collector_sha256"],
+        "--expected-content-policy-sha": receiver[
+            "content_policy_sha256"
+        ],
+    }
+    if any(
+        command_option(option) != expected
+        for option, expected in expected_options.items()
+    ) or any(
+        command_option(option) is None
+        for option in ("--known-hosts-file", "--expected-known-hosts-sha")
+    ):
+        raise RuntimeFailure(
+            "invalid-adapter-config",
+            "remote evaluation subject command pins do not match its receiver",
+        )
+    policy_path = (
+        Path(__file__).resolve().parent.parent
+        / "references"
+        / "remote-subject-content-policy-v1.json"
+    )
+    try:
+        local_policy = load_content_policy(policy_path)
+    except RemoteSubjectPolicyError as error:
+        raise RuntimeFailure("invalid-adapter-config", str(error)) from error
+    if (
+        local_policy["sha256"].removeprefix("sha256:")
+        != receiver["content_policy_sha256"]
+    ):
+        raise RuntimeFailure(
+            "invalid-adapter-config",
+            "remote evaluation subject policy pin differs from local policy",
+        )
+    return {
+        **entry,
+        "command": command,
+        "receiver": dict(receiver),
+        "content_policy": str(policy_path),
+        "snapshot_store": str(
+            (paths.state / "remote-evaluation-subjects").resolve()
+        ),
+        "overlay_store": str(
+            (paths.state / "evaluation-input-overlays").resolve()
+        ),
+    }
+
+
 def read_canonical_control_json(
     path: Path, field: str
 ) -> tuple[dict[str, Any], bytes]:
@@ -4199,6 +4340,7 @@ def validate_remote_evaluation_overlay(
     census_receipt_sha256: str,
     usage_receipt_sha256: str,
     enabled_capability_ids: set[str],
+    transport_receiver: dict[str, Any] | None = None,
 ) -> dict[str, dict[str, Any]]:
     if not isinstance(overlay, dict):
         raise RuntimeFailure(
@@ -4213,6 +4355,7 @@ def validate_remote_evaluation_overlay(
         "usage_snapshot_sha256",
         "usage_receipt_sha256",
         "receiver",
+        "transport_receiver",
         "origin_host_id",
         "evaluator_sha256",
         "registry_identity",
@@ -4223,6 +4366,16 @@ def validate_remote_evaluation_overlay(
         key: receiver.get(key)
         for key in ("collector_sha256", "receiver_id", "receiver_sha256")
     }
+    expected_transport_receiver = (
+        transport_receiver
+        if transport_receiver is not None
+        else {
+            **receiver_identity,
+            "content_policy_sha256": receiver.get(
+                "content_policy_sha256"
+            ),
+        }
+    )
     without_identity = {
         key: value for key, value in overlay.items() if key != "overlay_sha256"
     }
@@ -4237,6 +4390,8 @@ def validate_remote_evaluation_overlay(
         != usage.get("snapshot_sha256")
         or overlay.get("usage_receipt_sha256") != usage_receipt_sha256
         or overlay.get("receiver") != receiver_identity
+        or overlay.get("transport_receiver")
+        != expected_transport_receiver
         or overlay.get("origin_host_id") != census.get("host_id")
         or re.fullmatch(
             r"sha256:[0-9a-f]{64}", str(overlay.get("evaluator_sha256"))
@@ -4370,6 +4525,436 @@ def validate_remote_evaluation_overlay(
     return by_capability
 
 
+def retained_remote_subject_snapshot(
+    destination: Path,
+    *,
+    subject_key: str,
+    origin_host_id: str,
+    origin_root_id: str,
+    origin_relative_path: str,
+) -> dict[str, Any]:
+    if (
+        destination.is_symlink()
+        or not destination.is_dir()
+        or re.fullmatch(r"[0-9a-f]{64}", destination.name) is None
+    ):
+        raise RuntimeFailure(
+            "evaluation-overlay-invalid",
+            "remote subject snapshot directory is unsafe",
+        )
+    receipt_path = destination / "transport-receipt.json"
+    candidate_root = destination / "candidate"
+    if (
+        receipt_path.is_symlink()
+        or not receipt_path.is_file()
+        or candidate_root.is_symlink()
+        or not candidate_root.is_dir()
+    ):
+        raise RuntimeFailure(
+            "evaluation-overlay-invalid",
+            "remote subject snapshot is incomplete",
+        )
+    try:
+        raw = receipt_path.read_bytes()
+        receipt = json.loads(raw)
+    except (OSError, json.JSONDecodeError, UnicodeDecodeError) as error:
+        raise RuntimeFailure(
+            "evaluation-overlay-invalid",
+            "remote subject snapshot receipt is unreadable",
+        ) from error
+    receipt_fields = {
+        "schema_version",
+        "kind",
+        "receiver",
+        "remote_receipt_sha256",
+        "local_content_policy_sha256",
+        "subject",
+        "receipt_sha256",
+    }
+    receipt_identity = {
+        key: value for key, value in receipt.items() if key != "receipt_sha256"
+    } if isinstance(receipt, dict) else {}
+    if (
+        not isinstance(receipt, dict)
+        or set(receipt) != receipt_fields
+        or raw != canonical(receipt)
+        or receipt.get("schema_version") != 1
+        or receipt.get("kind")
+        != "remote_evaluation_subject_transport_receipt"
+        or receipt.get("receipt_sha256") != digest(receipt_identity)
+    ):
+        raise RuntimeFailure(
+            "evaluation-overlay-invalid",
+            "remote subject snapshot receipt identity is invalid",
+        )
+    subject = receipt.get("subject")
+    if (
+        not isinstance(subject, dict)
+        or subject.get("kind") != "remote_evaluation_subject"
+        or subject.get("origin_host_id") != origin_host_id
+        or subject.get("origin_root_id") != origin_root_id
+        or subject.get("origin_relative_path") != origin_relative_path
+        or remote_subject_key(subject) != subject_key
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}", str(subject.get("candidate_id"))
+        )
+        is None
+        or destination.name
+        != str(subject["candidate_id"]).removeprefix("sha256:")
+    ):
+        raise RuntimeFailure(
+            "evaluation-overlay-invalid",
+            "remote subject snapshot differs from its stable subject",
+        )
+    return {
+        "candidate_id": subject["candidate_id"],
+        "canonical_capability_id": subject.get("canonical_capability_id"),
+        "origin_inventory_sha256": subject.get("origin_inventory_sha256"),
+        "origin_path": subject.get("origin_path"),
+        "transport_receipt_sha256": receipt["receipt_sha256"],
+        "candidate_root": str(candidate_root.resolve()),
+    }
+
+
+def remote_snapshot_evaluation(
+    evaluator: Path,
+    candidate_root: str,
+    *,
+    observed_at: str | None = None,
+) -> dict[str, Any]:
+    command = [
+        sys.executable,
+        str(evaluator),
+        "portfolio-current",
+        candidate_root,
+        "--max-age-days",
+        "90",
+    ]
+    if observed_at is not None:
+        command.extend(["--now", observed_at])
+    try:
+        process = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        raise RuntimeFailure(
+            "evaluation-overlay-evaluator-failed", str(error)
+        ) from error
+    try:
+        output = [
+            json.loads(line)
+            for line in process.stdout.splitlines()
+            if line.strip()
+        ]
+    except json.JSONDecodeError as error:
+        raise RuntimeFailure(
+            "evaluation-overlay-evaluator-malformed", str(error)
+        ) from error
+    if (
+        process.returncode != 0
+        or len(output) != 1
+        or not valid_overlay_evaluation(output[0])
+    ):
+        detail = (process.stderr or process.stdout).strip()[-1000:]
+        raise RuntimeFailure(
+            "evaluation-overlay-evaluator-failed",
+            detail or "remote subject evaluator refused the snapshot",
+        )
+    return output[0]
+
+
+def build_remote_evaluation_overlay(
+    owner: dict[str, Any],
+    census: dict[str, Any],
+    usage: dict[str, Any],
+    receiver: dict[str, Any],
+    *,
+    census_receipt_sha256: str,
+    usage_receipt_sha256: str,
+    snapshot_store: Path,
+    observed_at: str | None = None,
+    transport_receiver: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    snapshot_store = snapshot_store.resolve()
+    if (
+        snapshot_store.is_symlink()
+        or not snapshot_store.is_dir()
+        or snapshot_store.stat().st_uid != os.getuid()
+        or stat.S_IMODE(snapshot_store.stat().st_mode) & 0o077
+    ):
+        raise RuntimeFailure(
+            "evaluation-overlay-invalid",
+            "remote subject snapshot store is unsafe",
+        )
+    evaluator = Path(str(owner.get("evaluator")))
+    if evaluator.is_symlink() or not evaluator.is_file():
+        raise RuntimeFailure(
+            "evaluation-overlay-invalid",
+            "remote evaluation overlay evaluator is unavailable",
+        )
+    physical = census.get("physical_instances")
+    enabled = census.get("enabled_instances")
+    if not isinstance(physical, list) or not isinstance(enabled, list):
+        raise RuntimeFailure(
+            "evaluation-overlay-invalid",
+            "remote evaluation overlay census is malformed",
+        )
+    physical_by_instance = {
+        item.get("instance_id"): item
+        for item in physical
+        if isinstance(item, dict) and isinstance(item.get("instance_id"), str)
+    }
+    if len(physical_by_instance) != len(physical):
+        raise RuntimeFailure(
+            "evaluation-overlay-invalid",
+            "remote evaluation overlay physical inventory is ambiguous",
+        )
+    instances_by_capability: dict[str, set[str]] = {}
+    for item in enabled:
+        if not isinstance(item, dict) or item.get("runtime_enabled") is not True:
+            continue
+        capability_id = item.get("canonical_capability_id")
+        instance_id = item.get("instance_id")
+        if (
+            not isinstance(capability_id, str)
+            or not isinstance(instance_id, str)
+            or instance_id not in physical_by_instance
+        ):
+            raise RuntimeFailure(
+                "evaluation-overlay-invalid",
+                "remote evaluation overlay enabled inventory is malformed",
+            )
+        instances_by_capability.setdefault(capability_id, set()).add(
+            instance_id
+        )
+    rows = []
+    for capability_id in sorted(instances_by_capability):
+        instance_ids = instances_by_capability[capability_id]
+        if len(instance_ids) != 1:
+            raise RuntimeFailure(
+                "evaluation-overlay-invalid",
+                "remote evaluation overlay subject mapping is ambiguous",
+            )
+        item = physical_by_instance[next(iter(instance_ids))]
+        identity_fields = {
+            "origin_host_id": item.get("host_id"),
+            "origin_root_id": item.get("root_id"),
+            "origin_relative_path": item.get("relative_path"),
+        }
+        if (
+            item.get("canonical_capability_id") != capability_id
+            or any(
+                not isinstance(value, str) or not value
+                for value in identity_fields.values()
+            )
+            or not isinstance(item.get("absolute_path"), str)
+            or not isinstance(item.get("inventory_sha256"), str)
+        ):
+            raise RuntimeFailure(
+                "evaluation-overlay-invalid",
+                "remote evaluation overlay subject is malformed",
+            )
+        subject_key = digest(identity_fields)
+        subject_parent = snapshot_store / subject_key.removeprefix("sha256:")
+        snapshots = []
+        if subject_parent.exists():
+            if subject_parent.is_symlink() or not subject_parent.is_dir():
+                raise RuntimeFailure(
+                    "evaluation-overlay-invalid",
+                    "remote evaluation subject store is malformed",
+                )
+            snapshots = [
+                retained_remote_subject_snapshot(
+                    path,
+                    subject_key=subject_key,
+                    **identity_fields,
+                )
+                for path in sorted(subject_parent.iterdir())
+            ]
+        exact = [
+            snapshot
+            for snapshot in snapshots
+            if snapshot["canonical_capability_id"] == capability_id
+            and snapshot["origin_inventory_sha256"]
+            == item["inventory_sha256"]
+            and snapshot["origin_path"] == item["absolute_path"]
+        ]
+        if len(exact) > 1:
+            raise RuntimeFailure(
+                "evaluation-overlay-invalid",
+                "remote evaluation subject has multiple current snapshots",
+            )
+        superseded = sorted(
+            {
+                snapshot["candidate_id"]
+                for snapshot in snapshots
+                if not exact or snapshot["candidate_id"] != exact[0]["candidate_id"]
+            }
+        )
+        if exact:
+            selected = exact[0]
+            row = {
+                "candidate_id": selected["candidate_id"],
+                "superseded_candidate_ids": superseded,
+                "snapshot_state": "remote_candidate_snapshot_ready",
+                "content_path": selected["candidate_root"],
+                "transport_receipt_sha256": selected[
+                    "transport_receipt_sha256"
+                ],
+                "evaluation": remote_snapshot_evaluation(
+                    evaluator,
+                    selected["candidate_root"],
+                    observed_at=observed_at,
+                ),
+            }
+        else:
+            row = {
+                "candidate_id": None,
+                "superseded_candidate_ids": superseded,
+                "snapshot_state": (
+                    "remote_candidate_changed"
+                    if superseded
+                    else "remote_candidate_not_fetched"
+                ),
+                "content_path": None,
+                "transport_receipt_sha256": None,
+                "evaluation": None,
+            }
+        rows.append(
+            {
+                "capability_id": capability_id,
+                "subject_key": subject_key,
+                **identity_fields,
+                "origin_path": item["absolute_path"],
+                "canonical_capability_id": capability_id,
+                "origin_inventory_sha256": item["inventory_sha256"],
+                **row,
+            }
+        )
+    overlay = {
+        "schema_version": 1,
+        "kind": "remote_evaluation_overlay",
+        "census_snapshot_sha256": census.get("snapshot_sha256"),
+        "census_receipt_sha256": census_receipt_sha256,
+        "usage_snapshot_sha256": usage.get("snapshot_sha256"),
+        "usage_receipt_sha256": usage_receipt_sha256,
+        "receiver": {
+            key: receiver.get(key)
+            for key in ("collector_sha256", "receiver_id", "receiver_sha256")
+        },
+        "transport_receiver": (
+            transport_receiver
+            if transport_receiver is not None
+            else {
+                key: receiver.get(key)
+                for key in (
+                    "collector_sha256",
+                    "content_policy_sha256",
+                    "receiver_id",
+                    "receiver_sha256",
+                )
+            }
+        ),
+        "origin_host_id": census.get("host_id"),
+        "evaluator_sha256": "sha256:"
+        + hashlib.sha256(evaluator.read_bytes()).hexdigest(),
+        "registry_identity": EVALUATION_OVERLAY_REGISTRY_IDENTITY,
+        "rows": rows,
+    }
+    overlay["overlay_sha256"] = digest(overlay)
+    validate_remote_evaluation_overlay(
+        overlay,
+        census,
+        usage,
+        receiver,
+        census_receipt_sha256=census_receipt_sha256,
+        usage_receipt_sha256=usage_receipt_sha256,
+        enabled_capability_ids=set(instances_by_capability),
+        transport_receiver=overlay["transport_receiver"],
+    )
+    return overlay
+
+
+def publish_remote_evaluation_overlay(
+    overlay: dict[str, Any], overlay_root: Path
+) -> Path:
+    overlay_root = overlay_root.resolve()
+    if not overlay_root.exists():
+        overlay_root.mkdir(parents=True, mode=0o700)
+    if (
+        overlay_root.is_symlink()
+        or not overlay_root.is_dir()
+        or overlay_root.stat().st_uid != os.getuid()
+        or stat.S_IMODE(overlay_root.stat().st_mode) & 0o077
+    ):
+        raise RuntimeFailure(
+            "evaluation-overlay-store-invalid",
+            "remote evaluation overlay store is unsafe",
+        )
+    identity = overlay.get("overlay_sha256")
+    if (
+        re.fullmatch(r"sha256:[0-9a-f]{64}", str(identity)) is None
+        or identity
+        != digest(
+            {
+                key: value
+                for key, value in overlay.items()
+                if key != "overlay_sha256"
+            }
+        )
+    ):
+        raise RuntimeFailure(
+            "evaluation-overlay-invalid",
+            "remote evaluation overlay identity is invalid",
+        )
+    content = canonical(overlay)
+    destination = overlay_root / f"{identity.removeprefix('sha256:')}.json"
+    if destination.exists():
+        if (
+            destination.is_symlink()
+            or not destination.is_file()
+            or destination.read_bytes() != content
+        ):
+            raise RuntimeFailure(
+                "evaluation-overlay-publication-collision",
+                str(destination),
+            )
+        return destination
+    with tempfile.NamedTemporaryFile(
+        prefix=".overlay.", dir=overlay_root, delete=False
+    ) as temporary:
+        temporary_path = Path(temporary.name)
+        temporary.write(content)
+        temporary.flush()
+        os.fsync(temporary.fileno())
+    try:
+        os.chmod(temporary_path, 0o400)
+        try:
+            os.link(temporary_path, destination)
+        except FileExistsError:
+            if (
+                destination.is_symlink()
+                or not destination.is_file()
+                or destination.read_bytes() != content
+            ):
+                raise RuntimeFailure(
+                    "evaluation-overlay-publication-collision",
+                    str(destination),
+                )
+        directory_fd = os.open(overlay_root, os.O_RDONLY)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+    finally:
+        temporary_path.unlink(missing_ok=True)
+    return destination
+
+
 def derive_evaluation_input_queue(
     owner: dict[str, Any],
     census: dict[str, Any],
@@ -4379,6 +4964,7 @@ def derive_evaluation_input_queue(
     census_receipt_sha256: str,
     usage_receipt_sha256: str,
     evaluation_overlay: dict[str, Any] | None = None,
+    transport_receiver: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     census_snapshot = {
         key: value for key, value in census.items() if key != "snapshot_sha256"
@@ -4574,6 +5160,7 @@ def derive_evaluation_input_queue(
             census_receipt_sha256=census_receipt_sha256,
             usage_receipt_sha256=usage_receipt_sha256,
             enabled_capability_ids=set(enabled_by_capability),
+            transport_receiver=transport_receiver,
         )
         if evaluation_overlay is not None
         else None
@@ -5146,6 +5733,235 @@ def evaluation_input_owner_content(
     return validate_evaluation_input_capability(
         owner, entry, installed_skill_roots=installed_roots
     )
+
+
+def remote_subject_request_for_row(
+    census: dict[str, Any], row: dict[str, Any]
+) -> dict[str, str]:
+    physical = census.get("physical_instances")
+    if not isinstance(physical, list):
+        raise RuntimeFailure(
+            "remote-candidate-invalid",
+            "remote subject census inventory is unavailable",
+        )
+    matching = [
+        item
+        for item in physical
+        if isinstance(item, dict)
+        and item.get("canonical_capability_id") == row.get("capability_id")
+        and item.get("host_id") == row.get("origin_host_id")
+        and item.get("root_id") == row.get("origin_root_id")
+        and item.get("relative_path") == row.get("origin_relative_path")
+        and item.get("absolute_path") == row.get("skill_path")
+    ]
+    if len(matching) != 1:
+        raise RuntimeFailure(
+            "remote-candidate-invalid",
+            "remote subject queue row no longer resolves uniquely",
+        )
+    item = matching[0]
+    request = {
+        "census_snapshot_sha256": census.get("snapshot_sha256"),
+        "origin_host_id": item.get("host_id"),
+        "origin_root_id": item.get("root_id"),
+        "origin_relative_path": item.get("relative_path"),
+        "origin_path": item.get("absolute_path"),
+        "canonical_capability_id": item.get("canonical_capability_id"),
+        "origin_inventory_sha256": item.get("inventory_sha256"),
+    }
+    if not all(isinstance(value, str) and value for value in request.values()):
+        raise RuntimeFailure(
+            "remote-candidate-invalid",
+            "remote subject request is malformed",
+        )
+    return request
+
+
+def stop_remote_subject_process(process: subprocess.Popen[Any]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGTERM)
+        process.wait(timeout=5)
+    except ProcessLookupError:
+        return
+    except subprocess.TimeoutExpired:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait()
+
+
+def run_remote_subject_fetch(
+    remote: dict[str, Any],
+    request: dict[str, str],
+    paths: RuntimePaths,
+    *,
+    halt_check: Callable[[], bool],
+    lease_check: Callable[[], bool],
+    timeout_seconds: int = 240,
+    max_output_bytes: int = 64 * 1024 * 1024,
+) -> dict[str, Any]:
+    command = list(remote["command"])
+    for option, key in (
+        ("--census-snapshot-sha256", "census_snapshot_sha256"),
+        ("--origin-root-id", "origin_root_id"),
+        ("--origin-relative-path", "origin_relative_path"),
+        ("--origin-path", "origin_path"),
+        ("--canonical-capability-id", "canonical_capability_id"),
+        ("--origin-inventory-sha256", "origin_inventory_sha256"),
+    ):
+        command.extend([option, request[key]])
+    paths.state.mkdir(parents=True, exist_ok=True, mode=0o700)
+    with tempfile.TemporaryDirectory(
+        prefix=".remote-subject-fetch.", dir=paths.state
+    ) as temporary:
+        stdout_path = Path(temporary) / "stdout"
+        stderr_path = Path(temporary) / "stderr"
+        with stdout_path.open("w+b") as stdout_file, stderr_path.open(
+            "w+b"
+        ) as stderr_file:
+            try:
+                process = subprocess.Popen(
+                    command,
+                    stdin=subprocess.DEVNULL,
+                    stdout=stdout_file,
+                    stderr=stderr_file,
+                    start_new_session=True,
+                )
+            except OSError as error:
+                raise RuntimeFailure(
+                    "remote-candidate-fetch-failed", str(error)
+                ) from error
+            started = time.monotonic()
+            while process.poll() is None:
+                if halt_check():
+                    stop_remote_subject_process(process)
+                    return {"status": "halted", "response": None}
+                if not lease_check():
+                    stop_remote_subject_process(process)
+                    return {"status": "lock_lost", "response": None}
+                if (
+                    stdout_path.stat().st_size + stderr_path.stat().st_size
+                    > max_output_bytes
+                ):
+                    stop_remote_subject_process(process)
+                    raise RuntimeFailure(
+                        "remote-candidate-fetch-oversized",
+                        "remote subject transport output exceeded its bound",
+                    )
+                if time.monotonic() - started >= timeout_seconds:
+                    stop_remote_subject_process(process)
+                    raise RuntimeFailure(
+                        "remote-candidate-fetch-timeout",
+                        "remote subject transport exceeded its timeout",
+                    )
+                time.sleep(0.05)
+            stdout_file.flush()
+            stderr_file.flush()
+        stdout = stdout_path.read_bytes()
+        stderr = stderr_path.read_bytes()
+    if len(stdout) + len(stderr) > max_output_bytes:
+        raise RuntimeFailure(
+            "remote-candidate-fetch-oversized",
+            "remote subject transport output exceeded its bound",
+        )
+    try:
+        values = [
+            json.loads(line)
+            for line in stdout.decode("utf-8").splitlines()
+            if line.strip()
+        ]
+        error_text = stderr.decode("utf-8", errors="replace")
+    except (UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise RuntimeFailure(
+            "remote-candidate-fetch-malformed", str(error)
+        ) from error
+    if (
+        process.returncode != 0
+        or len(values) != 1
+        or not isinstance(values[0], dict)
+    ):
+        detail = (error_text or stdout.decode("utf-8", errors="replace"))
+        raise RuntimeFailure(
+            "remote-candidate-fetch-failed",
+            detail.strip()[-1000:]
+            or f"remote subject transport exited {process.returncode}",
+        )
+    return {"status": "fetched", "response": values[0]}
+
+
+def execute_remote_subject_transport(
+    remote: dict[str, Any],
+    census: dict[str, Any],
+    row: dict[str, Any],
+    paths: RuntimePaths,
+    *,
+    halt_check: Callable[[], bool] | None = None,
+    lease_check: Callable[[], bool] | None = None,
+) -> dict[str, Any]:
+    if not remote.get("enabled") or row.get("runnable_phase") != "transport":
+        return {"status": "idle", "selected_capability_id": None}
+    halt_check = halt_check or (
+        lambda: evaluation_input_owner_halt_path(paths).exists()
+    )
+    lease_check = lease_check or evaluation_input_owner_lease_valid
+    if halt_check():
+        return {"status": "halted", "selected_capability_id": row["capability_id"]}
+    if not lease_check():
+        return {
+            "status": "lock_lost",
+            "selected_capability_id": row["capability_id"],
+        }
+    request = remote_subject_request_for_row(census, row)
+    fetched = run_remote_subject_fetch(
+        remote,
+        request,
+        paths,
+        halt_check=halt_check,
+        lease_check=lease_check,
+    )
+    if fetched["status"] != "fetched":
+        return {
+            "status": fetched["status"],
+            "selected_capability_id": row["capability_id"],
+        }
+    if halt_check():
+        return {"status": "halted", "selected_capability_id": row["capability_id"]}
+    if not lease_check():
+        return {
+            "status": "lock_lost",
+            "selected_capability_id": row["capability_id"],
+        }
+    store = Path(remote["snapshot_store"])
+    if not store.exists():
+        store.mkdir(parents=True, mode=0o700)
+    published = publish_remote_subject_snapshot(
+        fetched["response"],
+        request,
+        remote["receiver"],
+        Path(remote["content_policy"]),
+        store,
+        installed_skill_roots=[
+            Path(item["absolute_path"])
+            for item in census.get("physical_instances", [])
+            if isinstance(item, dict)
+            and isinstance(item.get("absolute_path"), str)
+        ],
+    )
+    if halt_check():
+        status = "halted"
+    elif not lease_check():
+        status = "lock_lost"
+    else:
+        status = "published"
+    return {
+        "status": status,
+        "selected_capability_id": row["capability_id"],
+        "subject_key": published["subject_key"],
+        "candidate_id": published["candidate_id"],
+        "candidate_root": published["candidate_root"],
+        "publication_status": published["status"],
+    }
 
 
 def evaluation_input_owner_terminal_command(
@@ -5829,6 +6645,9 @@ def scheduled_run() -> dict[str, Any]:
         evaluation_owner = configured_evaluation_input_owner(
             config, config_path, paths
         )
+        remote_subjects = configured_remote_evaluation_subjects(
+            config, evaluation_owner, paths
+        )
     except RuntimeFailure as error:
         report["evaluation_input"] = {
             "configured": True,
@@ -5872,6 +6691,14 @@ def scheduled_run() -> dict[str, Any]:
             ),
             "config_sha256": evaluation_owner["config_sha256"],
             "recovery": recovery,
+            "remote_subjects": (
+                {
+                    "configured": True,
+                    "enabled": remote_subjects["enabled"],
+                }
+                if remote_subjects is not None
+                else {"configured": False, "enabled": False}
+            ),
         }
     queue_evidence = None
     try:
@@ -5921,6 +6748,67 @@ def scheduled_run() -> dict[str, Any]:
                     "evaluation-input-evidence-invalid",
                     "evaluation-input usage evidence is unavailable",
                 )
+            evaluation_overlay = None
+            if remote_subjects is not None and remote_subjects["enabled"]:
+                if evaluation_input_owner_halt_path(paths).exists():
+                    report["evaluation_input"]["run"] = {
+                        "status": "halted",
+                        "selected_capability_id": None,
+                    }
+                    return report
+                if not evaluation_input_owner_lease_valid():
+                    report["evaluation_input"]["run"] = {
+                        "status": "lock_lost",
+                        "selected_capability_id": None,
+                    }
+                    report["errors"].append(
+                        {
+                            "phase": "evaluation-input-run",
+                            "code": "writer-lock-lost",
+                        }
+                    )
+                    report["ok"] = False
+                    return report
+                snapshot_store = Path(remote_subjects["snapshot_store"])
+                if not snapshot_store.exists():
+                    snapshot_store.mkdir(parents=True, mode=0o700)
+                evaluation_overlay = build_remote_evaluation_overlay(
+                    evaluation_owner,
+                    queue_evidence["census"],
+                    usage,
+                    queue_evidence["receiver"],
+                    census_receipt_sha256=queue_evidence["summary"][
+                        "receipt_sha256"
+                    ],
+                    usage_receipt_sha256=usage_summary["receipt_sha256"],
+                    snapshot_store=snapshot_store,
+                    transport_receiver=remote_subjects["receiver"],
+                )
+                overlay_path = publish_remote_evaluation_overlay(
+                    evaluation_overlay,
+                    Path(remote_subjects["overlay_store"]),
+                )
+                report["evaluation_input"]["remote_subjects"].update(
+                    {
+                        "overlay_sha256": evaluation_overlay[
+                            "overlay_sha256"
+                        ],
+                        "overlay_path": str(overlay_path),
+                    }
+                )
+                if not evaluation_input_owner_lease_valid():
+                    report["evaluation_input"]["run"] = {
+                        "status": "lock_lost",
+                        "selected_capability_id": None,
+                    }
+                    report["errors"].append(
+                        {
+                            "phase": "evaluation-input-run",
+                            "code": "writer-lock-lost",
+                        }
+                    )
+                    report["ok"] = False
+                    return report
             derived_queue = derive_evaluation_input_queue(
                 evaluation_owner,
                 queue_evidence["census"],
@@ -5928,8 +6816,89 @@ def scheduled_run() -> dict[str, Any]:
                 queue_evidence["receiver"],
                 census_receipt_sha256=queue_evidence["summary"]["receipt_sha256"],
                 usage_receipt_sha256=usage_summary["receipt_sha256"],
+                evaluation_overlay=evaluation_overlay,
+                transport_receiver=(
+                    remote_subjects["receiver"]
+                    if remote_subjects is not None
+                    and remote_subjects["enabled"]
+                    else None
+                ),
             )
             report["evaluation_input"]["queue"] = derived_queue
+            if remote_subjects is not None and remote_subjects["enabled"]:
+                transport_row = next(
+                    (
+                        row
+                        for row in derived_queue["rows"]
+                        if row.get("runnable_phase") == "transport"
+                    ),
+                    None,
+                )
+                if transport_row is not None:
+                    transport = execute_remote_subject_transport(
+                        remote_subjects,
+                        queue_evidence["census"],
+                        transport_row,
+                        paths,
+                    )
+                    report["evaluation_input"]["remote_subjects"][
+                        "transport"
+                    ] = transport
+                    if transport["status"] in {"halted", "lock_lost"}:
+                        report["evaluation_input"]["run"] = transport
+                        if transport["status"] == "lock_lost":
+                            report["errors"].append(
+                                {
+                                    "phase": "evaluation-input-run",
+                                    "code": "writer-lock-lost",
+                                }
+                            )
+                            report["ok"] = False
+                        return report
+                    if transport["status"] == "published":
+                        evaluation_overlay = build_remote_evaluation_overlay(
+                            evaluation_owner,
+                            queue_evidence["census"],
+                            usage,
+                            queue_evidence["receiver"],
+                            census_receipt_sha256=queue_evidence["summary"][
+                                "receipt_sha256"
+                            ],
+                            usage_receipt_sha256=usage_summary[
+                                "receipt_sha256"
+                            ],
+                            snapshot_store=Path(
+                                remote_subjects["snapshot_store"]
+                            ),
+                            transport_receiver=remote_subjects["receiver"],
+                        )
+                        overlay_path = publish_remote_evaluation_overlay(
+                            evaluation_overlay,
+                            Path(remote_subjects["overlay_store"]),
+                        )
+                        derived_queue = derive_evaluation_input_queue(
+                            evaluation_owner,
+                            queue_evidence["census"],
+                            usage,
+                            queue_evidence["receiver"],
+                            census_receipt_sha256=queue_evidence["summary"][
+                                "receipt_sha256"
+                            ],
+                            usage_receipt_sha256=usage_summary[
+                                "receipt_sha256"
+                            ],
+                            evaluation_overlay=evaluation_overlay,
+                            transport_receiver=remote_subjects["receiver"],
+                        )
+                        report["evaluation_input"]["queue"] = derived_queue
+                        report["evaluation_input"]["remote_subjects"].update(
+                            {
+                                "overlay_sha256": evaluation_overlay[
+                                    "overlay_sha256"
+                                ],
+                                "overlay_path": str(overlay_path),
+                            }
+                        )
             report["evaluation_input"]["run"] = execute_evaluation_input_owner(
                 evaluation_owner,
                 queue_evidence["census"],

@@ -79,6 +79,8 @@ CERTIFICATE_STATUSES = {"pass", "regression", "inconclusive", "unavailable"}
 HARNESS_CONTRACT_VERSION = 1
 COMPILATION_SCHEMA_VERSION = 1
 INPUT_REGISTRY_SCHEMA_VERSION = 1
+INPUT_MANIFEST_SCHEMA_VERSION = 2
+INPUT_READINESS_SCHEMA_VERSION = 2
 AUTHORING_CATALOG_SCHEMA_VERSION = 1
 AUTHORING_PACKET_SCHEMA_VERSION = 1
 TRUSTED_MODEL_ENVIRONMENT_VERSION = 1
@@ -1192,6 +1194,19 @@ def latest_key(skill_path: str) -> str:
     return digest(str(resolved).encode())
 
 
+def evaluation_subject_binding(skill_dir: Path) -> dict[str, Any]:
+    resolved = skill_dir.resolve()
+    remote = remote_evaluation_subject(resolved)
+    if remote is not None:
+        return remote
+    return {
+        "schema_version": 1,
+        "kind": "legacy_local_evaluation_subject_binding",
+        "subject_key": f"sha256:{digest(str(resolved).encode())}",
+        "content_path": str(resolved),
+    }
+
+
 def write_receipt(receipt: dict[str, Any]) -> tuple[Path, str]:
     receipt_bytes = canonical(receipt)
     receipt_sha = digest(receipt_bytes)
@@ -1839,16 +1854,31 @@ def validate_input_manifest(
             "tool_version",
             "objects",
     }
-    if set(manifest) not in (manifest_keys, manifest_keys | {"repair_lineage"}):
+    schema_version = manifest.get("schema_version")
+    expected_keys = (
+        manifest_keys
+        if schema_version == 1
+        else manifest_keys | {"subject"}
+    )
+    if set(manifest) not in (
+        expected_keys,
+        expected_keys | {"repair_lineage"},
+    ):
         raise EvaluationError("input manifest has unexpected or missing fields")
     if (
-        manifest.get("schema_version") != INPUT_REGISTRY_SCHEMA_VERSION
+        schema_version not in {1, INPUT_MANIFEST_SCHEMA_VERSION}
         or manifest.get("kind") != "evaluation_input_manifest"
         or manifest.get("skill_path") != str(skill_dir)
         or manifest.get("skill_key") != latest_key(str(skill_dir))
         or manifest.get("tool_version") != RUNNER_VERSION
     ):
         raise EvaluationError("input manifest schema, skill, or tool identity is invalid")
+    subject = evaluation_subject_binding(skill_dir)
+    if (
+        (schema_version == 1 and subject["kind"] != "legacy_local_evaluation_subject_binding")
+        or (schema_version == INPUT_MANIFEST_SCHEMA_VERSION and manifest.get("subject") != subject)
+    ):
+        raise EvaluationError("input manifest subject identity is invalid")
     candidate, files = candidate_id(skill_dir)
     if (
         manifest.get("candidate_id") != candidate
@@ -3207,10 +3237,11 @@ def register_input_manifest(
     objects.sort(key=lambda item: (item["role"], item["logical_path"]))
     by_role = {item["role"]: item for item in objects}
     manifest = {
-        "schema_version": INPUT_REGISTRY_SCHEMA_VERSION,
+        "schema_version": INPUT_MANIFEST_SCHEMA_VERSION,
         "kind": "evaluation_input_manifest",
         "skill_path": str(skill_dir),
         "skill_key": latest_key(str(skill_dir)),
+        "subject": evaluation_subject_binding(skill_dir),
         "candidate_id": candidate,
         "candidate_inventory": files,
         "suite_id": suite_id,
@@ -3261,7 +3292,7 @@ def input_receipt_binding(
     kind: str,
 ) -> dict[str, Any]:
     manifest = resolved["manifest"]
-    return {
+    binding = {
         "schema_version": INPUT_REGISTRY_SCHEMA_VERSION,
         "kind": kind,
         "skill_path": manifest["skill_path"],
@@ -3270,6 +3301,9 @@ def input_receipt_binding(
         "input_manifest_sha256": resolved["input_manifest_sha256"],
         "object_inventory": manifest["objects"],
     }
+    if "subject" in manifest:
+        binding["subject"] = manifest["subject"]
+    return binding
 
 
 def v2_input_validate(args: argparse.Namespace) -> dict[str, Any]:
@@ -5278,25 +5312,40 @@ def load_input_current_pointer(skill_dir: Path) -> dict[str, Any] | None:
         path, input_registry_component("current"), "input current pointer"
     )
     pointer = load_json(path)
+    pointer_keys = {
+        "schema_version",
+        "kind",
+        "skill_path",
+        "skill_key",
+        "candidate_id",
+        "transition_id",
+    }
+    pointer_schema = pointer.get("schema_version")
     require_exact_keys(
         pointer,
         "input current pointer",
-        {
-            "schema_version",
-            "kind",
-            "skill_path",
-            "skill_key",
-            "candidate_id",
-            "transition_id",
-        },
+        (
+            pointer_keys
+            if pointer_schema == 1
+            else pointer_keys | {"subject"}
+        ),
     )
     if (
-        pointer.get("schema_version") != INPUT_REGISTRY_SCHEMA_VERSION
+        pointer_schema not in {1, INPUT_READINESS_SCHEMA_VERSION}
         or pointer.get("kind") != "evaluation_input_current"
         or pointer.get("skill_path") != str(skill_dir)
         or pointer.get("skill_key") != latest_key(str(skill_dir))
     ):
         raise EvaluationError("input current pointer identity is malformed")
+    subject = evaluation_subject_binding(skill_dir)
+    if (
+        (pointer_schema == 1 and subject["kind"] != "legacy_local_evaluation_subject_binding")
+        or (
+            pointer_schema == INPUT_READINESS_SCHEMA_VERSION
+            and pointer.get("subject") != subject
+        )
+    ):
+        raise EvaluationError("input current pointer subject is invalid")
     require_sha256(pointer.get("candidate_id"), "input current candidate_id")
     require_sha256(pointer.get("transition_id"), "input current transition_id")
     return pointer
@@ -5336,6 +5385,9 @@ def load_input_transition(
         "review_receipt_sha256s",
         "transition_id",
     }
+    transition_schema = transition.get("schema_version")
+    if transition_schema != 1:
+        transition_keys.add("subject")
     if set(transition) not in (
         transition_keys,
         transition_keys | {"claim_id"},
@@ -5354,7 +5406,7 @@ def load_input_transition(
         and re.fullmatch(r"[a-z][a-z0-9_]{0,127}", reason) is not None
     )
     if (
-        transition.get("schema_version") != INPUT_REGISTRY_SCHEMA_VERSION
+        transition_schema not in {1, INPUT_READINESS_SCHEMA_VERSION}
         or transition.get("kind") != "evaluation_input_readiness_transition"
         or transition.get("skill_path") != str(skill_dir)
         or transition.get("skill_key") != latest_key(str(skill_dir))
@@ -5370,6 +5422,15 @@ def load_input_transition(
         or path.name != f"{transition_id.removeprefix('sha256:')}.json"
     ):
         raise EvaluationError("input readiness transition identity is malformed")
+    subject = evaluation_subject_binding(skill_dir)
+    if (
+        (transition_schema == 1 and subject["kind"] != "legacy_local_evaluation_subject_binding")
+        or (
+            transition_schema == INPUT_READINESS_SCHEMA_VERSION
+            and transition.get("subject") != subject
+        )
+    ):
+        raise EvaluationError("input readiness transition subject is invalid")
     prior = transition.get("prior_transition_id")
     if prior is not None:
         require_sha256(prior, "input readiness prior transition")
@@ -5494,10 +5555,11 @@ def write_input_current_pointer(
     skill_dir: Path, candidate: str, transition_id: str
 ) -> None:
     pointer = {
-        "schema_version": INPUT_REGISTRY_SCHEMA_VERSION,
+        "schema_version": INPUT_READINESS_SCHEMA_VERSION,
         "kind": "evaluation_input_current",
         "skill_path": str(skill_dir),
         "skill_key": latest_key(str(skill_dir)),
+        "subject": evaluation_subject_binding(skill_dir),
         "candidate_id": candidate,
         "transition_id": transition_id,
     }
@@ -5550,10 +5612,11 @@ def _write_input_transition_locked(
         else None
     )
     transition = {
-        "schema_version": INPUT_REGISTRY_SCHEMA_VERSION,
+        "schema_version": INPUT_READINESS_SCHEMA_VERSION,
         "kind": "evaluation_input_readiness_transition",
         "skill_path": str(skill_dir),
         "skill_key": latest_key(str(skill_dir)),
+        "subject": evaluation_subject_binding(skill_dir),
         "candidate_id": candidate,
         "input_manifest_sha256": input_manifest_sha256,
         "prior_transition_id": prior_transition_id,
