@@ -19,7 +19,7 @@
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
-- Isolated governance preview tip: `5c9cb0c`
+- Isolated governance preview tip: `cf900dd`
 - The first natural successor `20260818T220321Z-97940` remains retained as a
   literal `SC-010` `NOT_SUPPORTED` result. It attempted 25 reviews, completed
   24, retained one `executor-timeout`, and ended honestly as `aborted` after
@@ -674,6 +674,18 @@
   checks, 23 evaluator checks, and 47 core checks pass. Installation wiring,
   report-only installed self-test, dashboard projection, and live proof remain
   gated.
+- Disabled installation wiring and the separate immutable MacBook receiver
+  bundle are implemented and committed locally as `cf900dd`. Installer-owned
+  configuration pins protocol version, origin host, dedicated known-hosts
+  bytes and digest, separate transport receiver paths and identities, fixed
+  snapshot root, and every content limit while leaving the existing census
+  command unchanged. The generated owner and remote transport remain disabled
+  by default. A content-addressed create-only bundle contains exactly the
+  receiver, collector, shared policy parser, and content policy needed for
+  transport; replay verifies every byte and refuses a modified collision.
+  Thirteen installer checks, two receiver-bundle checks, five bridge checks,
+  and 47 core checks pass. Installed report-only self-test, one real subject,
+  dashboard projection, rollback, and live proof remain gated.
 - Governance work remaining: bootstrap the sealed inputs for the real zero-use
   cohort through the reviewed remote-subject bridge, progress that cohort
   through reviewed readiness, then execute the evaluation queue under explicit
