@@ -442,6 +442,8 @@ class RuntimeTest(unittest.TestCase):
             },
             "remote_evaluation_subjects": {
                 "enabled": False,
+                "protocol_version": 1,
+                "origin_host_id": "fixture-host",
                 "command": [
                     "/usr/bin/python3",
                     str(
@@ -464,6 +466,13 @@ class RuntimeTest(unittest.TestCase):
                     transport_receiver["content_policy_sha256"],
                 ],
                 "receiver": transport_receiver,
+                "max_files": 512,
+                "max_file_bytes": 8 * 1024 * 1024,
+                "max_decoded_bytes": 32 * 1024 * 1024,
+                "max_encoded_bytes": 48 * 1024 * 1024,
+                "snapshot_root": str(
+                    self.paths.state / "remote-evaluation-subjects"
+                ),
             },
         }
         config_path.write_text(json.dumps(config))
