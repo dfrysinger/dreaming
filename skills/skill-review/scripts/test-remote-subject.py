@@ -474,6 +474,76 @@ class RemoteSubjectTest(unittest.TestCase):
                 / "evaluation-input-claims.sqlite3"
             ).exists()
         )
+        refused_store = self.root / "state" / "refused-remote-subjects"
+        refused_store.mkdir(mode=0o700)
+        refused_transport = self.root / "refused-transport.py"
+        refused_transport.write_text(
+            "import sys\nprint('receiver denied candidate', file=sys.stderr)\n"
+            "raise SystemExit(2)\n",
+            encoding="utf-8",
+        )
+        os.chmod(refused_transport, 0o700)
+        refused = core.execute_remote_subject_transport(
+            {
+                "enabled": True,
+                "command": [sys.executable, str(refused_transport)],
+                "receiver": receiver,
+                "content_policy": str(POLICY),
+                "snapshot_store": str(refused_store),
+            },
+            census,
+            transport_row,
+            core.RuntimePaths(
+                state=self.root / "refused-owner-state",
+                data=self.root / "refused-owner-data",
+                skills=self.root / "refused-owner-skills",
+            ),
+            halt_check=lambda: False,
+            lease_check=lambda: True,
+        )
+        self.assertEqual(refused["status"], "refused")
+        self.assertTrue(refused["refusal_receipt_sha256"].startswith("sha256:"))
+        refused_overlay = core.build_remote_evaluation_overlay(
+            owner,
+            census,
+            usage,
+            receiver,
+            census_receipt_sha256="sha256:" + "c" * 64,
+            usage_receipt_sha256="sha256:" + "d" * 64,
+            snapshot_store=refused_store,
+        )
+        refused_row = refused_overlay["rows"][0]
+        self.assertEqual(
+            refused_row["snapshot_state"], "remote_candidate_refused"
+        )
+        self.assertEqual(
+            refused_row["snapshot_refusal"]["receipt_sha256"],
+            refused["refusal_receipt_sha256"],
+        )
+        self.assertIn(
+            "receiver denied candidate",
+            refused_row["snapshot_refusal"]["message"],
+        )
+        dashboard_row = dashboard.DashboardData._apply_remote_evaluation(
+            [
+                {
+                    **physical,
+                    "evaluation": {"state": "missing"},
+                    "evaluation_complete": False,
+                }
+            ],
+            {
+                "configured": True,
+                "origin_host_id": request["origin_host_id"],
+                "origin_host": "MacBook",
+                "execution_host": "Mac mini",
+                "_rows": {capability_id: refused_row},
+            },
+        )[0]
+        self.assertEqual(
+            dashboard_row["remote_evaluation"]["refusal_reason"],
+            "The origin computer refused or could not provide a safe copy.",
+        )
         race_store = self.root / "state" / "race-remote-subjects"
         race_store.mkdir(mode=0o700)
         race = core.execute_remote_subject_transport(

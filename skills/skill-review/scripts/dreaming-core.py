@@ -4455,6 +4455,7 @@ def validate_remote_evaluation_overlay(
         "snapshot_state",
         "content_path",
         "transport_receipt_sha256",
+        "snapshot_refusal",
         "evaluation",
     }
     for row in overlay["rows"]:
@@ -4534,6 +4535,32 @@ def validate_remote_evaluation_overlay(
                     "evaluation-overlay-invalid",
                     "ready remote evaluation overlay row is incomplete",
                 )
+        elif state == "remote_candidate_refused":
+            refusal = row.get("snapshot_refusal")
+            if (
+                not isinstance(refusal, dict)
+                or set(refusal)
+                != {"code", "message", "receipt_sha256", "observed_at"}
+                or not isinstance(refusal.get("code"), str)
+                or not refusal["code"]
+                or not isinstance(refusal.get("message"), str)
+                or len(refusal["message"]) > 500
+                or re.fullmatch(
+                    r"sha256:[0-9a-f]{64}",
+                    str(refusal.get("receipt_sha256")),
+                )
+                is None
+                or not isinstance(refusal.get("observed_at"), str)
+            ):
+                raise RuntimeFailure(
+                    "evaluation-overlay-invalid",
+                    "refused remote evaluation overlay row is incomplete",
+                )
+        elif row.get("snapshot_refusal") is not None:
+            raise RuntimeFailure(
+                "evaluation-overlay-invalid",
+                "non-refused remote evaluation row retains refusal evidence",
+            )
         elif (
             row.get("candidate_id") is not None
             or row.get("content_path") is not None
@@ -4647,6 +4674,118 @@ def retained_remote_subject_snapshot(
         "origin_path": subject.get("origin_path"),
         "transport_receipt_sha256": receipt["receipt_sha256"],
         "candidate_root": str(candidate_root.resolve()),
+    }
+
+
+def retain_remote_subject_refusal(
+    store_root: Path,
+    request: dict[str, str],
+    error: RuntimeFailure,
+) -> dict[str, Any]:
+    identity_fields = {
+        "origin_host_id": request.get("origin_host_id"),
+        "origin_root_id": request.get("origin_root_id"),
+        "origin_relative_path": request.get("origin_relative_path"),
+    }
+    subject_key = digest(identity_fields)
+    message = " ".join(error.message.split())[:500]
+    receipt = {
+        "schema_version": 1,
+        "kind": "remote_evaluation_subject_refusal",
+        "observed_at": datetime.now(timezone.utc).isoformat(),
+        "census_snapshot_sha256": request.get("census_snapshot_sha256"),
+        "subject_key": subject_key,
+        **identity_fields,
+        "origin_path": request.get("origin_path"),
+        "canonical_capability_id": request.get("canonical_capability_id"),
+        "origin_inventory_sha256": request.get("origin_inventory_sha256"),
+        "code": error.code,
+        "message": message,
+    }
+    receipt["receipt_sha256"] = digest(receipt)
+    path = (
+        store_root
+        / "refusals"
+        / subject_key.removeprefix("sha256:")
+        / f"{receipt['receipt_sha256'].removeprefix('sha256:')}.json"
+    )
+    if path.exists():
+        if read_json(path, None) != receipt:
+            raise RuntimeFailure(
+                "remote-candidate-refusal-collision", str(path)
+            )
+    else:
+        atomic_json(path, receipt)
+    return {**receipt, "path": str(path)}
+
+
+def retained_remote_subject_refusal(
+    store_root: Path,
+    request: dict[str, str],
+) -> dict[str, Any] | None:
+    identity_fields = {
+        "origin_host_id": request.get("origin_host_id"),
+        "origin_root_id": request.get("origin_root_id"),
+        "origin_relative_path": request.get("origin_relative_path"),
+    }
+    subject_key = digest(identity_fields)
+    root = store_root / "refusals" / subject_key.removeprefix("sha256:")
+    if not root.exists():
+        return None
+    if root.is_symlink() or not root.is_dir():
+        raise RuntimeFailure(
+            "evaluation-overlay-invalid",
+            "remote subject refusal store is unsafe",
+        )
+    fields = {
+        "schema_version", "kind", "observed_at", "census_snapshot_sha256",
+        "subject_key", "origin_host_id", "origin_root_id",
+        "origin_relative_path", "origin_path", "canonical_capability_id",
+        "origin_inventory_sha256", "code", "message", "receipt_sha256",
+    }
+    matching = []
+    for path in sorted(root.iterdir()):
+        value = read_json(path, None)
+        identity = {
+            key: item for key, item in value.items() if key != "receipt_sha256"
+        } if isinstance(value, dict) else {}
+        if (
+            path.is_symlink()
+            or not path.is_file()
+            or not isinstance(value, dict)
+            or set(value) != fields
+            or path.name
+            != f"{str(value.get('receipt_sha256')).removeprefix('sha256:')}.json"
+            or value.get("schema_version") != 1
+            or value.get("kind") != "remote_evaluation_subject_refusal"
+            or value.get("receipt_sha256") != digest(identity)
+            or value.get("subject_key") != subject_key
+            or any(value.get(key) != expected for key, expected in request.items())
+            or not isinstance(value.get("code"), str)
+            or not value["code"]
+            or not isinstance(value.get("message"), str)
+            or len(value["message"]) > 500
+        ):
+            raise RuntimeFailure(
+                "evaluation-overlay-invalid",
+                "remote subject refusal receipt is malformed",
+            )
+        try:
+            observed_at = datetime.fromisoformat(value["observed_at"])
+        except (TypeError, ValueError) as error:
+            raise RuntimeFailure(
+                "evaluation-overlay-invalid",
+                "remote subject refusal time is malformed",
+            ) from error
+        matching.append((observed_at, value))
+    if not matching:
+        return None
+    _, value = max(matching, key=lambda item: item[0])
+    return {
+        "code": value["code"],
+        "message": value["message"],
+        "receipt_sha256": value["receipt_sha256"],
+        "observed_at": value["observed_at"],
     }
 
 
@@ -4839,6 +4978,7 @@ def build_remote_evaluation_overlay(
                 "transport_receipt_sha256": selected[
                     "transport_receipt_sha256"
                 ],
+                "snapshot_refusal": None,
                 "evaluation": remote_snapshot_evaluation(
                     evaluator,
                     selected["candidate_root"],
@@ -4846,16 +4986,27 @@ def build_remote_evaluation_overlay(
                 ),
             }
         else:
+            request = {
+                "census_snapshot_sha256": census.get("snapshot_sha256"),
+                **identity_fields,
+                "origin_path": item["absolute_path"],
+                "canonical_capability_id": capability_id,
+                "origin_inventory_sha256": item["inventory_sha256"],
+            }
+            refusal = retained_remote_subject_refusal(snapshot_store, request)
             row = {
                 "candidate_id": None,
                 "superseded_candidate_ids": superseded,
                 "snapshot_state": (
-                    "remote_candidate_changed"
+                    "remote_candidate_refused"
+                    if refusal is not None
+                    else "remote_candidate_changed"
                     if superseded
                     else "remote_candidate_not_fetched"
                 ),
                 "content_path": None,
                 "transport_receipt_sha256": None,
+                "snapshot_refusal": refusal,
                 "evaluation": None,
             }
         rows.append(
@@ -6002,13 +6153,24 @@ def execute_remote_subject_transport(
             "selected_capability_id": row["capability_id"],
         }
     request = remote_subject_request_for_row(census, row)
-    fetched = run_remote_subject_fetch(
-        remote,
-        request,
-        paths,
-        halt_check=halt_check,
-        lease_check=lease_check,
-    )
+    try:
+        fetched = run_remote_subject_fetch(
+            remote,
+            request,
+            paths,
+            halt_check=halt_check,
+            lease_check=lease_check,
+        )
+    except RuntimeFailure as error:
+        refusal = retain_remote_subject_refusal(
+            Path(remote["snapshot_store"]), request, error
+        )
+        return {
+            "status": "refused",
+            "selected_capability_id": row["capability_id"],
+            "refusal_code": refusal["code"],
+            "refusal_receipt_sha256": refusal["receipt_sha256"],
+        }
     if fetched["status"] != "fetched":
         return {
             "status": fetched["status"],
@@ -6024,19 +6186,28 @@ def execute_remote_subject_transport(
     store = Path(remote["snapshot_store"])
     if not store.exists():
         store.mkdir(parents=True, mode=0o700)
-    published = publish_remote_subject_snapshot(
-        fetched["response"],
-        request,
-        remote["receiver"],
-        Path(remote["content_policy"]),
-        store,
-        installed_skill_roots=[
-            Path(item["absolute_path"])
-            for item in census.get("physical_instances", [])
-            if isinstance(item, dict)
-            and isinstance(item.get("absolute_path"), str)
-        ],
-    )
+    try:
+        published = publish_remote_subject_snapshot(
+            fetched["response"],
+            request,
+            remote["receiver"],
+            Path(remote["content_policy"]),
+            store,
+            installed_skill_roots=[
+                Path(item["absolute_path"])
+                for item in census.get("physical_instances", [])
+                if isinstance(item, dict)
+                and isinstance(item.get("absolute_path"), str)
+            ],
+        )
+    except RuntimeFailure as error:
+        refusal = retain_remote_subject_refusal(store, request, error)
+        return {
+            "status": "refused",
+            "selected_capability_id": row["capability_id"],
+            "refusal_code": refusal["code"],
+            "refusal_receipt_sha256": refusal["receipt_sha256"],
+        }
     if halt_check():
         status = "halted"
     elif not lease_check():
@@ -6973,7 +7144,7 @@ def scheduled_run() -> dict[str, Any]:
                             )
                             report["ok"] = False
                         return report
-                    if transport["status"] == "published":
+                    if transport["status"] in {"published", "refused"}:
                         evaluation_overlay = build_remote_evaluation_overlay(
                             evaluation_owner,
                             queue_evidence["census"],

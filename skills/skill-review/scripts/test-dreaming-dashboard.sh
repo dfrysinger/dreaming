@@ -942,6 +942,7 @@ for index, (capability_id, physical) in enumerate(
         "snapshot_state": "remote_candidate_snapshot_ready",
         "content_path": f"/private/snapshots/{index}/candidate",
         "transport_receipt_sha256": "sha256:" + str(index + 5) * 64,
+        "snapshot_refusal": None,
         "evaluation": evaluation,
     })
 overlay_identity = {

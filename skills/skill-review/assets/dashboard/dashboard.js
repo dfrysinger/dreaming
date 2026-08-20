@@ -358,6 +358,9 @@ function bindPortfolioQueue(queue) {
     };
     if (item.remote_evaluation) {
       details.push(snapshotLabels[item.remote_evaluation.snapshot_state] || "Copy status unavailable");
+      if (item.remote_evaluation.refusal_reason) {
+        details.push(`Reason: ${item.remote_evaluation.refusal_reason}`);
+      }
     }
     if (item.evaluation_queue_position) {
       details.push(`Queue ${number(item.evaluation_queue_position)} · ${item.evaluation_queue_reason}`);

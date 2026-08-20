@@ -1051,6 +1051,7 @@ class RuntimeTest(unittest.TestCase):
                     "snapshot_state": "remote_candidate_not_fetched",
                     "content_path": None,
                     "transport_receipt_sha256": None,
+                    "snapshot_refusal": None,
                     "evaluation": None,
                 }
             )

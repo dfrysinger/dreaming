@@ -4014,6 +4014,7 @@ class DashboardData:
                 "snapshot_state",
                 "content_path",
                 "transport_receipt_sha256",
+                "snapshot_refusal",
                 "evaluation",
             }
             for row in overlay["rows"]:
@@ -4103,6 +4104,27 @@ class DashboardData:
                         state == "remote_candidate_not_fetched"
                         and row["superseded_candidate_ids"]
                     )
+                    or (
+                        state == "remote_candidate_refused"
+                        and (
+                            not isinstance(row.get("snapshot_refusal"), dict)
+                            or set(row["snapshot_refusal"])
+                            != {
+                                "code", "message",
+                                "receipt_sha256", "observed_at",
+                            }
+                            or not isinstance(
+                                row["snapshot_refusal"].get("code"), str
+                            )
+                            or not isinstance(
+                                row["snapshot_refusal"].get("message"), str
+                            )
+                        )
+                    )
+                    or (
+                        state != "remote_candidate_refused"
+                        and row.get("snapshot_refusal") is not None
+                    )
                 ):
                     return {
                         **configured,
@@ -4142,6 +4164,29 @@ class DashboardData:
             }
 
     @staticmethod
+    def _remote_refusal_reason(code: Any) -> str:
+        reasons = {
+            "remote-candidate-content-unsafe": (
+                "The skill contains content that cannot be copied safely."
+            ),
+            "remote-candidate-fetch-timeout": "Copying the skill timed out.",
+            "remote-candidate-fetch-oversized": (
+                "The skill copy exceeded the configured size limit."
+            ),
+            "remote-candidate-store-full": (
+                "The evaluation computer does not have enough protected "
+                "storage for this copy."
+            ),
+            "remote-candidate-fetch-failed": (
+                "The origin computer refused or could not provide a safe copy."
+            ),
+        }
+        return reasons.get(
+            code,
+            "The skill could not be copied safely.",
+        )
+
+    @staticmethod
     def _apply_remote_evaluation(
         physical: list[dict[str, Any]], remote: dict[str, Any]
     ) -> list[dict[str, Any]]:
@@ -4175,6 +4220,14 @@ class DashboardData:
                     row.get("subject_key") if isinstance(row, dict) else None
                 ),
                 "snapshot_state": state,
+                "refusal_reason": (
+                    DashboardData._remote_refusal_reason(
+                        row.get("snapshot_refusal", {}).get("code")
+                    )
+                    if isinstance(row, dict)
+                    and state == "remote_candidate_refused"
+                    else None
+                ),
             }
             if (
                 isinstance(row, dict)
