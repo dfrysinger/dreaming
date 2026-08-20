@@ -1156,6 +1156,7 @@ print(json.dumps(results[0], sort_keys=True, separators=(",", ":")))
 PY
 )"
 pass "pending recovery and concurrent readiness publish one tip and recover an interrupted pointer"
+export DREAMING_NOW_EPOCH=1787148000
 python3 - "$registration" "$source_catalog_id" <<'PY'
 import json
 import sys

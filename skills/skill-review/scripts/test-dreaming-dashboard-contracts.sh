@@ -138,6 +138,7 @@ subprocess.run(
 suite = {"cases": [{"id": "source-case", "class": "intended"}]}
 verified = {
     "candidate_id": evaluation_candidate,
+    "input_manifest_sha256": "sha256:" + "5" * 64,
     "suite_id": "sha256:" + "1" * 64,
     "policy_id": "sha256:" + "2" * 64,
     "policy": {
@@ -209,6 +210,7 @@ current_envelope["evaluation_v3_sha256"] = authority_sha
 evaluation.write_authority_transition(
     skill,
     evaluation_candidate,
+    verified["input_manifest_sha256"],
     "pass",
     authority_sha,
     aggregate_sha,
@@ -315,6 +317,7 @@ check(
 evaluation.write_authority_transition(
     skill,
     changed_candidate,
+    "sha256:" + "6" * 64,
     "regression",
     None,
     aggregate_sha,
