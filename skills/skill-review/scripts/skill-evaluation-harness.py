@@ -23,6 +23,8 @@ from typing import Any
 
 
 CONTRACT_VERSION = 1
+RUN_MANIFEST_SCHEMA_VERSION = 2
+RESULT_MANIFEST_SCHEMA_VERSION = 2
 HARNESS_VERSION = "skill-evaluation-harness-1"
 SHADOW_CONTRACT_VERSION = 2
 SHADOW_HARNESS_VERSION = "skill-evaluation-harness-shadow-2"
@@ -47,7 +49,8 @@ EVENT_KINDS = {
 }
 SHA_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 RUN_ID_FIELDS = (
-    "schema_version", "kind", "candidate_id", "suite_id", "profile", "trials_per_arm",
+    "schema_version", "kind", "subject", "input_manifest_sha256", "candidate_id",
+    "suite_id", "profile", "trials_per_arm",
     "executors", "comparator", "harness_executable_sha256", "tool_policy_id",
     "grader_set_id", "retention_policy_id", "limits", "file_inventory",
 )
@@ -265,14 +268,61 @@ def recheck_input(run: Path, sealed_inventory: list[dict[str, Any]], stage: str)
 def load_manifest(run: Path) -> dict[str, Any]:
     manifest = read_json(run / "manifest.json")
     keys = {
-        "schema_version", "kind", "run_id", "invocation_nonce", "candidate_id",
+        "schema_version", "kind", "run_id", "subject", "input_manifest_sha256",
+        "invocation_nonce", "candidate_id",
         "suite_id", "profile", "trials_per_arm", "executors", "comparator",
         "harness_executable_sha256", "tool_policy_id", "grader_set_id",
         "retention_policy_id", "limits", "file_inventory",
     }
     require_keys(manifest, keys, "run manifest")
-    if manifest["schema_version"] != CONTRACT_VERSION or manifest["kind"] != "skill_evaluation_run":
+    if manifest["schema_version"] != RUN_MANIFEST_SCHEMA_VERSION or manifest["kind"] != "skill_evaluation_run":
         raise HarnessError("unsupported run manifest version or kind")
+    subject = manifest["subject"]
+    if not isinstance(subject, dict) or subject.get("schema_version") != 1:
+        raise HarnessError("run manifest subject binding is invalid")
+    subject_kind = subject.get("kind")
+    if subject_kind == "legacy_local_evaluation_subject_binding":
+        require_keys(
+            subject,
+            {"schema_version", "kind", "subject_key", "content_path"},
+            "run manifest subject",
+        )
+        if set(subject) != {
+            "schema_version", "kind", "subject_key", "content_path",
+        }:
+            raise HarnessError("run manifest local subject binding is invalid")
+        text(subject.get("content_path"), "subject.content_path")
+    elif subject_kind == "remote_evaluation_subject_binding":
+        remote_keys = {
+            "schema_version", "kind", "subject_key", "origin_host_id",
+            "origin_root_id", "origin_relative_path", "origin_path",
+            "canonical_capability_id", "origin_inventory_sha256",
+            "candidate_id", "transport_receipt_sha256", "content_path",
+        }
+        require_keys(subject, remote_keys, "run manifest subject")
+        if set(subject) != remote_keys:
+            raise HarnessError("run manifest remote subject binding is invalid")
+        for field in (
+            "origin_host_id", "origin_root_id", "origin_relative_path",
+            "origin_path", "content_path",
+        ):
+            text(subject.get(field), f"subject.{field}")
+        for field in (
+            "canonical_capability_id", "origin_inventory_sha256",
+            "candidate_id", "transport_receipt_sha256",
+        ):
+            identity(subject.get(field), f"subject.{field}")
+    else:
+        raise HarnessError("run manifest subject binding is invalid")
+    identity(subject.get("subject_key"), "subject.subject_key")
+    if (
+        manifest["input_manifest_sha256"] is not None
+        and (
+            not isinstance(manifest["input_manifest_sha256"], str)
+            or not SHA_RE.fullmatch(manifest["input_manifest_sha256"])
+        )
+    ):
+        raise HarnessError("input_manifest_sha256 is invalid")
     for field in ("run_id", "candidate_id", "suite_id", "harness_executable_sha256",
                   "tool_policy_id", "grader_set_id", "retention_policy_id"):
         identity(manifest[field], field)
@@ -434,7 +484,7 @@ def load_routing(path: Path, manifest: dict[str, Any]) -> dict[str, Any]:
     """Routing is a trusted path-to-argv map only.  It carries no policy."""
     routing = read_json(path)
     require_keys(routing, {"schema_version", "kind", "executors", "comparator"}, "routing")
-    if routing["schema_version"] != CONTRACT_VERSION or routing["kind"] != "skill_evaluation_routing":
+    if routing["schema_version"] != 1 or routing["kind"] != "skill_evaluation_routing":
         raise HarnessError("unsupported routing config")
     if not isinstance(routing["executors"], list):
         raise HarnessError("routing executors invalid")
@@ -1190,7 +1240,9 @@ def seal_result(result: Path, sealed: dict[str, Any], trial_records: list[dict[s
     })
     inventory = regular_inventory(result, {"manifest.json"}, MAX_RESULT_FILES)
     output = {
-        "schema_version": CONTRACT_VERSION, "kind": "skill_evaluation_result",
+        "schema_version": RESULT_MANIFEST_SCHEMA_VERSION, "kind": "skill_evaluation_result",
+        "subject": manifest["subject"],
+        "input_manifest_sha256": manifest["input_manifest_sha256"],
         "state": infrastructure["required_state"],
         "collection_state": infrastructure["collection_state"],
         "executor_states": infrastructure["executor_states"],
@@ -1275,13 +1327,14 @@ def verify(args: argparse.Namespace) -> int:
     result = Path(args.result).resolve()
     manifest = read_json(result / "manifest.json")
     require_keys(manifest, {
-        "schema_version", "kind", "state", "collection_state", "executor_states",
+        "schema_version", "kind", "subject", "input_manifest_sha256",
+        "state", "collection_state", "executor_states",
         "input_run_id", "invocation_nonce", "harness_version",
         "harness_executable_sha256", "profile", "candidate_id", "suite_id", "grader_set_id",
         "trials", "pairs", "executor_identities", "comparator_identity", "producer_audit",
         "file_inventory", "result_id",
     }, "result manifest")
-    if manifest["schema_version"] != CONTRACT_VERSION or manifest["kind"] != "skill_evaluation_result":
+    if manifest["schema_version"] != RESULT_MANIFEST_SCHEMA_VERSION or manifest["kind"] != "skill_evaluation_result":
         raise HarnessError("unsupported result bundle")
     expected = dict(manifest); result_id = expected.pop("result_id")
     if result_id != sha(expected):
@@ -1298,6 +1351,12 @@ def verify(args: argparse.Namespace) -> int:
     run_manifest, suite = sealed["run_manifest"], sealed["suite"]
     if not isinstance(run_manifest, dict) or run_manifest.get("invocation_nonce") != manifest["invocation_nonce"]:
         raise HarnessError("sealed input nonce mismatch")
+    if (
+        manifest["subject"] != run_manifest.get("subject")
+        or manifest["input_manifest_sha256"]
+        != run_manifest.get("input_manifest_sha256")
+    ):
+        raise HarnessError("result subject or input manifest differs from the sealed run")
     validate_executors(run_manifest["executors"])
     validate_comparator(run_manifest["comparator"])
     normalize_inventory(run_manifest["file_inventory"], "sealed run file_inventory", MAX_INPUT_FILES)

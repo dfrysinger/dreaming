@@ -297,7 +297,8 @@ partitions = [
 ]
 for index, ((requirement, executor), status) in enumerate(zip(partitions, statuses)):
     cert = {
-        "schema_version": 2, "kind": "executor_certificate", "status": status,
+        "schema_version": 3, "kind": "executor_certificate", "status": status,
+        "subject": prepared["subject"],
         "candidate_id": prepared["candidate_id"], "suite_id": prepared["suite_id"],
         "input_manifest_sha256": prepared.get("input_manifest_sha256"),
         "policy_id": prepared["policy_id"],
@@ -313,8 +314,9 @@ for index, ((requirement, executor), status) in enumerate(zip(partitions, status
 required_statuses = statuses[:len(prepared["required_executors"])]
 overall = "regression" if "regression" in required_statuses else "inconclusive" if any(s != "pass" for s in required_statuses) else "pass"
 aggregate = {
-    "schema_version": 2, "kind": "aggregate_receipt", "status": overall,
+    "schema_version": 3, "kind": "aggregate_receipt", "status": overall,
     "skill_path": __import__("os").path.realpath(sys.stdin.name) if False else None,
+    "subject": prepared["subject"],
     "candidate_id": prepared["candidate_id"], "candidate_inventory": prepared["candidate_inventory"],
     "input_manifest_sha256": prepared.get("input_manifest_sha256"),
     "suite_id": prepared["suite_id"], "policy_id": prepared["policy_id"],

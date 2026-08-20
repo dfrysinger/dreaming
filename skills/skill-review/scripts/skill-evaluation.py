@@ -46,7 +46,7 @@ from evaluation_input_claims import (  # noqa: E402
 SCHEMA_VERSION = 1
 SUITE_SCHEMA_VERSION = 2
 POLICY_SCHEMA_VERSION = 2
-AUTHORITY_SCHEMA_VERSION = 3
+AUTHORITY_SCHEMA_VERSION = 4
 RUNNER_VERSION = "skill-evaluation-runner-1"
 PROMPT_VERSION = "skill-evaluation-prompt-1"
 COMPARATOR_VERSION = "skill-evaluation-comparator-1"
@@ -77,6 +77,7 @@ POLICY_KINDS = {"capability_uplift", "encoded_preference"}
 PROFILES = {"gate", "iterate"}
 CERTIFICATE_STATUSES = {"pass", "regression", "inconclusive", "unavailable"}
 HARNESS_CONTRACT_VERSION = 1
+HARNESS_MANIFEST_SCHEMA_VERSION = 2
 COMPILATION_SCHEMA_VERSION = 1
 INPUT_REGISTRY_SCHEMA_VERSION = 1
 INPUT_MANIFEST_SCHEMA_VERSION = 2
@@ -186,6 +187,8 @@ INPUT_READINESS_TRANSITIONS = {
 RESULT_MANIFEST_KEYS = {
     "schema_version",
     "kind",
+    "subject",
+    "input_manifest_sha256",
     "state",
     "collection_state",
     "executor_states",
@@ -1210,6 +1213,20 @@ def evaluation_subject_binding(skill_dir: Path) -> dict[str, Any]:
         "subject_key": f"sha256:{digest(str(resolved).encode())}",
         "content_path": str(resolved),
     }
+
+
+def evaluation_record_subject(
+    skill_dir: Path, candidate: str
+) -> dict[str, Any]:
+    subject = evaluation_subject_binding(skill_dir)
+    if (
+        subject["kind"] == "remote_evaluation_subject_binding"
+        and subject.get("candidate_id") != candidate
+    ):
+        raise EvaluationError(
+            "evaluation record candidate differs from remote subject"
+        )
+    return subject
 
 
 def write_receipt(receipt: dict[str, Any]) -> tuple[Path, str]:
@@ -7453,7 +7470,7 @@ def established_evaluation_state_exists(
         return True
     for path in transition_root.iterdir():
         try:
-            transition, _ = portfolio_transition(path, skill_key)
+            transition, _ = portfolio_transition(path, skill_dir)
         except (EvaluationError, OSError):
             return True
         if transition["candidate_id"] == candidate:
@@ -7517,6 +7534,7 @@ def identity_with(field: str, value: dict[str, Any]) -> str:
 
 def validate_certificate(
     value: Any,
+    subject: dict[str, Any],
     candidate: str,
     input_manifest_sha256: str,
     suite_id: str,
@@ -7537,6 +7555,7 @@ def validate_certificate(
             "schema_version",
             "kind",
             "status",
+            "subject",
             "candidate_id",
             "input_manifest_sha256",
             "suite_id",
@@ -7551,12 +7570,13 @@ def validate_certificate(
             "certificate_id",
         },
     )
-    if value.get("schema_version") != 2 or value.get("kind") != "executor_certificate":
-        raise EvaluationError(f"{field} must be a schema-v2 executor_certificate")
+    if value.get("schema_version") != 3 or value.get("kind") != "executor_certificate":
+        raise EvaluationError(f"{field} must be a schema-v3 executor_certificate")
     if value.get("status") not in CERTIFICATE_STATUSES:
         raise EvaluationError(f"{field}.status is invalid")
     if (
         value.get("candidate_id") != candidate
+        or value.get("subject") != subject
         or value.get("input_manifest_sha256") != input_manifest_sha256
         or value.get("suite_id") != suite_id
         or value.get("policy_id") != policy_id
@@ -7578,6 +7598,65 @@ def validate_certificate(
     expected_id = identity_with("certificate_id", value)
     if value.get("certificate_id") != expected_id:
         raise EvaluationError(f"{field}.certificate_id does not match certificate content")
+    if value["status"] == "unavailable":
+        evidence_sha = value["result_bundle_sha256"].removeprefix("sha256:")
+        evidence_path = v2_receipt_path(evidence_sha)
+        evidence, verified_evidence_sha = load_v2_receipt(evidence_path)
+        require_exact_keys(
+            evidence,
+            f"{field}.unavailable_evidence",
+            {
+                "schema_version",
+                "kind",
+                "subject",
+                "candidate_id",
+                "input_manifest_sha256",
+                "suite_id",
+                "policy_id",
+                "observation_plan_id",
+                "profile",
+                "requirement",
+                "executor",
+                "reason",
+                "result_id",
+            },
+        )
+        expected_result_id = identity_with("result_id", evidence)
+        expected_run_id = (
+            f"sha256:{digest(canonical({'unavailable': str(evidence_path)}))}"
+        )
+        expected_bindings = {
+            "receipt_sha256": (verified_evidence_sha, evidence_sha),
+            "schema_version": (evidence.get("schema_version"), 2),
+            "kind": (evidence.get("kind"), "skill_evaluation_unavailable"),
+            "subject": (evidence.get("subject"), subject),
+            "candidate_id": (evidence.get("candidate_id"), candidate),
+            "input_manifest_sha256": (
+                evidence.get("input_manifest_sha256"),
+                input_manifest_sha256,
+            ),
+            "suite_id": (evidence.get("suite_id"), suite_id),
+            "policy_id": (evidence.get("policy_id"), policy_id),
+            "observation_plan_id": (
+                evidence.get("observation_plan_id"),
+                expected_observation,
+            ),
+            "profile": (evidence.get("profile"), profile),
+            "requirement": (evidence.get("requirement"), requirement),
+            "executor": (evidence.get("executor"), expected_executor),
+            "result_id": (evidence.get("result_id"), expected_result_id),
+            "certificate_result_id": (
+                value["result_bundle_id"],
+                expected_result_id,
+            ),
+            "run_id": (value["run_id"], expected_run_id),
+        }
+        for binding, (actual, expected) in expected_bindings.items():
+            if actual != expected:
+                raise EvaluationError(
+                    f"{field} unavailable evidence differs at {binding}"
+                )
+        require_text(evidence.get("reason"), f"{field}.unavailable_evidence.reason")
     return {**value, "executor": executor}
 
 
@@ -7590,6 +7669,7 @@ def validate_aggregate(
         raise EvaluationError("legacy-compiled suites cannot anchor cross-executor authority")
     if not isinstance(value, dict):
         raise EvaluationError("aggregate receipt must be an object")
+    subject = evaluation_record_subject(skill_dir, candidate)
     require_exact_keys(
         value,
         "aggregate",
@@ -7598,6 +7678,7 @@ def validate_aggregate(
             "kind",
             "status",
             "skill_path",
+            "subject",
             "candidate_id",
             "candidate_inventory",
             "input_manifest_sha256",
@@ -7612,12 +7693,13 @@ def validate_aggregate(
             "aggregate_id",
         },
     )
-    if value.get("schema_version") != 2 or value.get("kind") != "aggregate_receipt":
-        raise EvaluationError("aggregate receipt must be schema-v2 aggregate_receipt")
+    if value.get("schema_version") != 3 or value.get("kind") != "aggregate_receipt":
+        raise EvaluationError("aggregate receipt must be schema-v3 aggregate_receipt")
     if value.get("skill_path") != str(skill_dir):
         raise EvaluationError("aggregate receipt belongs to another skill path")
     if (
         value.get("candidate_id") != candidate
+        or value.get("subject") != subject
         or value.get("input_manifest_sha256") != input_manifest_sha256
         or value.get("suite_id") != suite_id
         or value.get("policy_id") != policy_id
@@ -7667,6 +7749,7 @@ def validate_aggregate(
     certificates = [
         validate_certificate(
             item,
+            subject,
             candidate,
             input_manifest_sha256,
             suite_id,
@@ -7760,6 +7843,7 @@ def v2_prepare(args: argparse.Namespace) -> dict[str, Any]:
         policy_id = resolved["policy_id"]
         input_manifest_sha256 = resolved["input_manifest_sha256"]
     return {
+        "subject": evaluation_record_subject(skill_dir, current_candidate),
         "candidate_id": current_candidate,
         "candidate_inventory": files,
         "input_manifest_sha256": input_manifest_sha256,
@@ -8256,6 +8340,7 @@ def v2_run_compile(args: argparse.Namespace) -> dict[str, Any]:
                 raise EvaluationError(
                     "compile routing differs from the ready external input manifest"
                 )
+    subject = evaluation_record_subject(skill_dir, candidate)
     required_names, advisory_names = desired_executor_roles()
     if required_names != [item["name"] for item in policy["required_executors"]]:
         raise EvaluationError("policy required executors differ from DREAMING_EVALUATION_EXECUTORS")
@@ -8282,8 +8367,9 @@ def v2_run_compile(args: argparse.Namespace) -> dict[str, Any]:
     atomic_write(
         run_dir / "dreaming-input.json",
         {
-            "schema_version": 1,
+            "schema_version": 2,
             "skill_path": str(skill_dir),
+            "subject": subject,
             "candidate_id": candidate,
             "candidate_inventory": files,
             "input_manifest_sha256": input_manifest_sha256,
@@ -8304,8 +8390,10 @@ def v2_run_compile(args: argparse.Namespace) -> dict[str, Any]:
         if item["path"].startswith("candidate/")
     ]
     manifest = {
-        "schema_version": HARNESS_CONTRACT_VERSION,
+        "schema_version": HARNESS_MANIFEST_SCHEMA_VERSION,
         "kind": "skill_evaluation_run",
+        "subject": evaluation_record_subject(skill_dir, candidate),
+        "input_manifest_sha256": input_manifest_sha256,
         "invocation_nonce": require_text(args.nonce, "invocation nonce"),
         "candidate_id": f"sha256:{digest(canonical(harness_projection))}",
         "suite_id": f"sha256:{digest(canonical(harness_suite))}",
@@ -8323,7 +8411,8 @@ def v2_run_compile(args: argparse.Namespace) -> dict[str, Any]:
     manifest["run_id"] = f"sha256:{digest(canonical({
         key: manifest[key]
         for key in (
-            "schema_version", "kind", "candidate_id", "suite_id", "profile",
+            "schema_version", "kind", "subject", "input_manifest_sha256",
+            "candidate_id", "suite_id", "profile",
             "trials_per_arm", "executors", "comparator",
             "harness_executable_sha256", "tool_policy_id", "grader_set_id",
             "retention_policy_id", "limits", "file_inventory",
@@ -8355,7 +8444,8 @@ def load_compiled_run(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any], di
     expected_run_id = f"sha256:{digest(canonical({
         key: manifest.get(key)
         for key in (
-            "schema_version", "kind", "candidate_id", "suite_id", "profile",
+            "schema_version", "kind", "subject", "input_manifest_sha256",
+            "candidate_id", "suite_id", "profile",
             "trials_per_arm", "executors", "comparator",
             "harness_executable_sha256", "tool_policy_id", "grader_set_id",
             "retention_policy_id", "limits", "file_inventory",
@@ -8374,6 +8464,13 @@ def v2_run_execute(args: argparse.Namespace) -> dict[str, Any]:
     manifest, _, _, compilation = load_compiled_run(run_dir)
     dreaming_input = load_json(run_dir / "dreaming-input.json")
     input_manifest_sha256 = dreaming_input.get("input_manifest_sha256")
+    if (
+        manifest.get("subject") != dreaming_input.get("subject")
+        or manifest.get("input_manifest_sha256") != input_manifest_sha256
+    ):
+        raise EvaluationError(
+            "compiled run subject or input manifest differs from dreaming input"
+        )
     requested_routing_path = (
         Path(args.routing).resolve() if args.routing else None
     )
@@ -8381,11 +8478,19 @@ def v2_run_execute(args: argparse.Namespace) -> dict[str, Any]:
         resolved = resolve_ready_input(
             Path(require_text(dreaming_input.get("skill_path"), "dreaming input skill_path"))
         )
+        authoritative_subject = evaluation_record_subject(
+            Path(dreaming_input["skill_path"]).resolve(),
+            resolved["candidate_id"] if resolved is not None else "",
+        ) if resolved is not None else None
         if (
             resolved is None
             or resolved["input_manifest_sha256"] != input_manifest_sha256
+            or manifest.get("subject") != authoritative_subject
+            or dreaming_input.get("subject") != authoritative_subject
         ):
-            raise EvaluationError("compiled run external input manifest is no longer ready")
+            raise EvaluationError(
+                "compiled run external input or subject is no longer ready"
+            )
     if sha256_file(harness) != manifest.get("harness_executable_sha256"):
         raise EvaluationError("selected harness executable differs from the compiled run")
     routing_path = requested_routing_path
@@ -8516,6 +8621,7 @@ def verify_result_independently(
         {
             "schema_version",
             "skill_path",
+            "subject",
             "candidate_id",
             "candidate_inventory",
             "input_manifest_sha256",
@@ -8561,7 +8667,9 @@ def verify_result_independently(
     if compilation.get("comparator") != policy["comparator"]:
         raise EvaluationError("compiled comparator identity differs from the current policy")
     if (
-        run_manifest.get("executors") != compilation.get("executors")
+        run_manifest.get("subject") != evaluation_record_subject(skill_dir, candidate)
+        or run_manifest.get("input_manifest_sha256") != input_manifest_sha256
+        or run_manifest.get("executors") != compilation.get("executors")
         or run_manifest.get("comparator") != compilation.get("comparator")
         or run_manifest.get("tool_policy_id") != compilation.get("tool_policy_id")
         or run_manifest.get("retention_policy_id") != compilation.get("retention_policy_id")
@@ -8574,8 +8682,9 @@ def verify_result_independently(
     ):
         raise EvaluationError("compiled executor tool policy differs from the reviewed compilation")
     if dreaming_input != {
-        "schema_version": 1,
+        "schema_version": 2,
         "skill_path": str(skill_dir),
+        "subject": evaluation_record_subject(skill_dir, candidate),
         "candidate_id": candidate,
         "candidate_inventory": files,
         "input_manifest_sha256": input_manifest_sha256,
@@ -8640,10 +8749,15 @@ def verify_result_independently(
     result_manifest = load_json(result_dir / "manifest.json")
     require_exact_keys(result_manifest, "result manifest", RESULT_MANIFEST_KEYS)
     if (
-        result_manifest.get("schema_version") != HARNESS_CONTRACT_VERSION
+        result_manifest.get("schema_version") != HARNESS_MANIFEST_SCHEMA_VERSION
         or result_manifest.get("kind") != "skill_evaluation_result"
         or result_manifest.get("invocation_nonce") != nonce
         or result_manifest.get("input_run_id") != run_manifest["run_id"]
+        or result_manifest.get("subject") != evaluation_record_subject(skill_dir, candidate)
+        or result_manifest.get("subject") != run_manifest.get("subject")
+        or result_manifest.get("input_manifest_sha256") != input_manifest_sha256
+        or result_manifest.get("input_manifest_sha256")
+        != run_manifest.get("input_manifest_sha256")
         or result_manifest.get("candidate_id") != run_manifest["candidate_id"]
         or result_manifest.get("profile") != source_policy["profile"]
         or result_manifest.get("harness_executable_sha256") != harness_sha
@@ -8881,6 +8995,7 @@ def executor_policy_status(
 
 def make_executor_certificate(
     status: str,
+    subject: dict[str, Any],
     candidate: str,
     input_manifest_sha256: str,
     suite_id: str,
@@ -8894,9 +9009,10 @@ def make_executor_certificate(
     run_id: str,
 ) -> dict[str, Any]:
     certificate = {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "executor_certificate",
         "status": status,
+        "subject": subject,
         "candidate_id": candidate,
         "input_manifest_sha256": input_manifest_sha256,
         "suite_id": suite_id,
@@ -8924,6 +9040,7 @@ def write_certification_aggregate(
     policy: dict[str, Any],
     certificates: list[dict[str, Any]],
 ) -> tuple[dict[str, Any], Path, str]:
+    subject = evaluation_record_subject(skill_dir, candidate)
     required_certificates = [
         item for item in certificates if item["requirement"] == "required"
     ]
@@ -8936,10 +9053,11 @@ def write_certification_aggregate(
         else "pass"
     )
     aggregate = {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "aggregate_receipt",
         "status": aggregate_status,
         "skill_path": str(skill_dir),
+        "subject": subject,
         "candidate_id": candidate,
         "candidate_inventory": files,
         "input_manifest_sha256": input_manifest_sha256,
@@ -8981,6 +9099,7 @@ def write_portfolio_receipt(
     aggregate: dict[str, Any],
     aggregate_sha: str,
 ) -> tuple[dict[str, Any], str]:
+    subject = evaluation_record_subject(skill_dir, verified["candidate_id"])
     cases: list[dict[str, Any]] = []
     intended = {
         item["id"]
@@ -9037,9 +9156,10 @@ def write_portfolio_receipt(
                 }
             )
     receipt = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "dashboard_portfolio_receipt",
         "skill_key": latest_key(str(skill_dir)),
+        "subject": subject,
         "candidate_id": verified["candidate_id"],
         "input_manifest_sha256": verified["input_manifest_sha256"],
         "suite_id": verified["suite_id"],
@@ -9057,7 +9177,10 @@ def write_portfolio_receipt(
     if not path.exists():
         atomic_write(path, receipt)
     pointer = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "subject": receipt["subject"],
+        "candidate_id": receipt["candidate_id"],
+        "input_manifest_sha256": receipt["input_manifest_sha256"],
         "aggregate_receipt_sha256": aggregate_sha,
         "portfolio_receipt_sha256": receipt_sha,
         "portfolio_id": receipt["portfolio_id"],
@@ -9077,21 +9200,63 @@ def load_portfolio_for_aggregate(aggregate_sha: str) -> tuple[dict[str, Any], st
     if verified_aggregate_sha != aggregate_sha:
         raise EvaluationError("portfolio aggregate receipt digest does not match")
     pointer = load_json(v2_portfolio_pointer_path(aggregate_sha))
-    if pointer.get("aggregate_receipt_sha256") != aggregate_sha:
+    require_exact_keys(
+        pointer,
+        "portfolio pointer",
+        {
+            "schema_version",
+            "subject",
+            "candidate_id",
+            "input_manifest_sha256",
+            "aggregate_receipt_sha256",
+            "portfolio_receipt_sha256",
+            "portfolio_id",
+        },
+    )
+    if (
+        pointer.get("schema_version") != 2
+        or pointer.get("aggregate_receipt_sha256") != aggregate_sha
+    ):
         raise EvaluationError("portfolio pointer aggregate does not match")
     receipt_sha = require_text(
         pointer.get("portfolio_receipt_sha256"),
         "portfolio pointer receipt digest",
     )
     receipt = load_json(v2_portfolio_receipt_path(receipt_sha))
+    require_exact_keys(
+        receipt,
+        "portfolio receipt",
+        {
+            "schema_version",
+            "kind",
+            "skill_key",
+            "subject",
+            "candidate_id",
+            "input_manifest_sha256",
+            "suite_id",
+            "policy_id",
+            "status",
+            "aggregate_receipt_sha256",
+            "aggregate_id",
+            "cases",
+            "portfolio_id",
+        },
+    )
     if digest(canonical(receipt)) != receipt_sha:
         raise EvaluationError("portfolio receipt digest does not match")
     if (
         receipt.get("aggregate_receipt_sha256") != aggregate_sha
+        or receipt.get("schema_version") != 2
+        or receipt.get("subject") != aggregate.get("subject")
+        or receipt.get("candidate_id") != aggregate.get("candidate_id")
         or receipt.get("input_manifest_sha256")
         != aggregate.get("input_manifest_sha256")
         or receipt.get("portfolio_id") != identity_with("portfolio_id", receipt)
         or pointer.get("portfolio_id") != receipt.get("portfolio_id")
+        or pointer.get("subject") != receipt.get("subject")
+        or pointer.get("candidate_id") != receipt.get("candidate_id")
+        or pointer.get("input_manifest_sha256")
+        != receipt.get("input_manifest_sha256")
     ):
         raise EvaluationError("portfolio receipt identity does not match")
     return receipt, receipt_sha
@@ -9117,10 +9282,11 @@ def write_authority_transition(
     if status == "revoked" and authority_sha is not None:
         raise EvaluationError("revoked transition cannot retain authority")
     transition = {
-        "schema_version": 1,
+        "schema_version": 2,
         "kind": "dashboard_authority_transition",
         "effective_at": now_iso(),
         "skill_key": latest_key(str(skill_dir)),
+        "subject": evaluation_record_subject(skill_dir, candidate_id),
         "candidate_id": candidate_id,
         "input_manifest_sha256": input_manifest_sha256,
         "status": status,
@@ -9172,6 +9338,7 @@ def v2_result_certify(args: argparse.Namespace) -> dict[str, Any]:
         resolved,
     )
     policy = verified["policy"]
+    subject = evaluation_record_subject(skill_dir, verified["candidate_id"])
     certificates = []
     for requirement, executors in (
         ("required", policy["required_executors"]),
@@ -9190,6 +9357,7 @@ def v2_result_certify(args: argparse.Namespace) -> dict[str, Any]:
                         verified["records"],
                         verified["comparisons"],
                     ),
+                    subject,
                     verified["candidate_id"],
                     verified["input_manifest_sha256"],
                     verified["suite_id"],
@@ -9237,9 +9405,12 @@ def v2_result_certify(args: argparse.Namespace) -> dict[str, Any]:
         )
     if policy["profile"] == "gate" and aggregate["status"] == "pass":
         certification = {
-            "schema_version": 1,
+            "schema_version": 2,
             "kind": "dreaming_certification",
             "skill_path": str(skill_dir),
+            "subject": evaluation_record_subject(
+                skill_dir, verified["candidate_id"]
+            ),
             "candidate_id": verified["candidate_id"],
             "input_manifest_sha256": verified["input_manifest_sha256"],
             "suite_id": verified["suite_id"],
@@ -9293,6 +9464,7 @@ def v2_unavailable_aggregate(args: argparse.Namespace) -> dict[str, Any]:
     policy = resolved["policy"]
     policy_id = resolved["policy_id"]
     input_manifest_sha256 = resolved["input_manifest_sha256"]
+    subject = evaluation_record_subject(skill_dir, candidate)
     required_names, advisory_names = desired_executor_roles()
     if required_names != [item["name"] for item in policy["required_executors"]]:
         raise EvaluationError("policy required executors differ from DREAMING_EVALUATION_EXECUTORS")
@@ -9312,8 +9484,9 @@ def v2_unavailable_aggregate(args: argparse.Namespace) -> dict[str, Any]:
     ):
         for executor in executors:
             evidence = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "kind": "skill_evaluation_unavailable",
+                "subject": subject,
                 "candidate_id": candidate,
                 "input_manifest_sha256": input_manifest_sha256,
                 "suite_id": suite_id,
@@ -9331,6 +9504,7 @@ def v2_unavailable_aggregate(args: argparse.Namespace) -> dict[str, Any]:
             certificates.append(
                 make_executor_certificate(
                     "unavailable",
+                    subject,
                     candidate,
                     input_manifest_sha256,
                     suite_id,
@@ -9392,6 +9566,7 @@ def validate_authority(
 ) -> dict[str, Any]:
     if not isinstance(authority, dict):
         raise EvaluationError("authority document must be an object")
+    subject = evaluation_record_subject(skill_dir, candidate)
     require_exact_keys(
         authority,
         "authority",
@@ -9399,6 +9574,7 @@ def validate_authority(
             "schema_version",
             "kind",
             "skill_path",
+            "subject",
             "candidate_id",
             "input_manifest_sha256",
             "suite_id",
@@ -9413,11 +9589,12 @@ def validate_authority(
         },
     )
     if authority.get("schema_version") != AUTHORITY_SCHEMA_VERSION or authority.get("kind") != "cross_cli_authority":
-        raise EvaluationError("authority document must be schema-v3 cross_cli_authority")
+        raise EvaluationError("authority document must be schema-v4 cross_cli_authority")
     if authority.get("skill_path") != str(skill_dir):
         raise EvaluationError("authority document belongs to another skill path")
     if (
         authority.get("candidate_id") != candidate
+        or authority.get("subject") != subject
         or authority.get("input_manifest_sha256") != input_manifest_sha256
         or authority.get("suite_id") != suite_id
         or authority.get("policy_id") != policy_id
@@ -9450,6 +9627,7 @@ def validate_authority(
             "schema_version",
             "kind",
             "skill_path",
+            "subject",
             "candidate_id",
             "input_manifest_sha256",
             "suite_id",
@@ -9470,9 +9648,10 @@ def validate_authority(
         },
     )
     if (
-        certification.get("schema_version") != 1
+        certification.get("schema_version") != 2
         or certification.get("kind") != "dreaming_certification"
         or certification.get("skill_path") != str(skill_dir)
+        or certification.get("subject") != subject
         or certification.get("candidate_id") != candidate
         or certification.get("input_manifest_sha256") != input_manifest_sha256
         or certification.get("suite_id") != suite_id
@@ -9535,6 +9714,7 @@ def v2_authority_write(args: argparse.Namespace) -> dict[str, Any]:
     policy = resolved["policy"]
     policy_id = resolved["policy_id"]
     input_manifest_sha256 = resolved["input_manifest_sha256"]
+    subject = evaluation_record_subject(skill_dir, candidate)
     aggregate, aggregate_sha = load_v2_receipt(Path(args.aggregate).resolve())
     aggregate = validate_aggregate(
         aggregate,
@@ -9550,8 +9730,19 @@ def v2_authority_write(args: argparse.Namespace) -> dict[str, Any]:
         raise EvaluationError("only a passing aggregate receipt can issue cross-CLI authority")
     certification = load_json(v2_certification_path(aggregate_sha))
     if (
-        certification.get("kind") != "dreaming_certification"
+        certification.get("schema_version") != 2
+        or certification.get("kind") != "dreaming_certification"
+        or certification.get("skill_path") != str(skill_dir)
+        or certification.get("subject") != subject
+        or certification.get("candidate_id") != candidate
+        or certification.get("input_manifest_sha256") != input_manifest_sha256
+        or certification.get("suite_id") != suite_id
+        or certification.get("policy_id") != policy_id
+        or certification.get("required_certificate_set_id")
+        != aggregate["required_certificate_set_id"]
+        or certification.get("profile") != "gate"
         or certification.get("aggregate_receipt_sha256") != aggregate_sha
+        or certification.get("aggregate_id") != aggregate["aggregate_id"]
         or certification.get("certification_id") != identity_with("certification_id", certification)
     ):
         raise EvaluationError("aggregate lacks a valid Dreaming certification record")
@@ -9561,6 +9752,7 @@ def v2_authority_write(args: argparse.Namespace) -> dict[str, Any]:
         "schema_version": AUTHORITY_SCHEMA_VERSION,
         "kind": "cross_cli_authority",
         "skill_path": str(skill_dir),
+        "subject": subject,
         "candidate_id": candidate,
         "input_manifest_sha256": input_manifest_sha256,
         "suite_id": suite_id,
@@ -9589,8 +9781,9 @@ def v2_authority_write(args: argparse.Namespace) -> dict[str, Any]:
     atomic_write(
         v2_evaluation_dir() / "latest" / f"{latest_key(str(skill_dir))}.json",
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "skill_path": str(skill_dir),
+            "subject": evaluation_record_subject(skill_dir, candidate),
             "candidate_id": candidate,
             "input_manifest_sha256": input_manifest_sha256,
             "authority_path": str(authority_path),
@@ -9651,14 +9844,15 @@ def v2_authority_validate(args: argparse.Namespace) -> dict[str, Any]:
     )
     normalized_latest = {**latest, "authority_path": str(latest_authority_path)}
     if normalized_latest != {
-        "schema_version": 2,
+        "schema_version": 3,
         "skill_path": str(skill_dir),
+        "subject": evaluation_record_subject(skill_dir, candidate),
         "candidate_id": candidate,
         "input_manifest_sha256": input_manifest_sha256,
         "authority_path": str(path),
         "authority_sha256": authority_sha,
     }:
-        raise EvaluationError("version-2 latest authority pointer is stale or malformed")
+        raise EvaluationError("version-3 latest authority pointer is stale or malformed")
     return {
         "status": "pass",
         "candidate_id": candidate,
@@ -9678,8 +9872,8 @@ def validate_v2_waiver(
     suite_id: str, policy: dict[str, Any], policy_id: str,
     input_manifest_sha256: str,
 ) -> dict[str, Any]:
-    if not isinstance(waiver, dict) or waiver.get("schema_version") != 2 or waiver.get("kind") != "cross_cli_waiver":
-        raise EvaluationError("waiver must be a schema-v2 cross_cli_waiver")
+    if not isinstance(waiver, dict) or waiver.get("schema_version") != 3 or waiver.get("kind") != "cross_cli_waiver":
+        raise EvaluationError("waiver must be a schema-v3 cross_cli_waiver")
     require_exact_keys(
         waiver,
         "waiver",
@@ -9688,6 +9882,7 @@ def validate_v2_waiver(
             "kind",
             "status",
             "skill_path",
+            "subject",
             "candidate_id",
             "input_manifest_sha256",
             "base_candidate_id",
@@ -9709,6 +9904,8 @@ def validate_v2_waiver(
         raise EvaluationError("waiver status or skill path is invalid")
     if (
         waiver.get("candidate_id") != candidate
+        or waiver.get("subject")
+        != evaluation_record_subject(skill_dir, candidate)
         or waiver.get("input_manifest_sha256") != input_manifest_sha256
         or waiver.get("suite_id") != suite_id
         or waiver.get("policy_id") != policy_id
@@ -9831,10 +10028,11 @@ def v2_waive(args: argparse.Namespace) -> dict[str, Any]:
     if attestation != {"status": "pass", "verified_files": expected_files}:
         raise EvaluationError("cross-CLI waiver test attestation does not bind every changed file")
     waiver = {
-        "schema_version": 2,
+        "schema_version": 3,
         "kind": "cross_cli_waiver",
         "status": "waived",
         "skill_path": str(skill_dir),
+        "subject": evaluation_record_subject(skill_dir, candidate),
         "candidate_id": candidate,
         "input_manifest_sha256": input_manifest_sha256,
         "base_candidate_id": base_candidate,
@@ -9855,8 +10053,9 @@ def v2_waive(args: argparse.Namespace) -> dict[str, Any]:
     atomic_write(
         v2_latest_waiver_path(skill_dir),
         {
-            "schema_version": 2,
+            "schema_version": 3,
             "skill_path": str(skill_dir),
+            "subject": evaluation_record_subject(skill_dir, candidate),
             "candidate_id": candidate,
             "input_manifest_sha256": input_manifest_sha256,
             "waiver_path": str(path),
@@ -9955,6 +10154,7 @@ def current_gate(args: argparse.Namespace) -> dict[str, Any]:
         {
             "schema_version",
             "skill_path",
+            "subject",
             "candidate_id",
             "input_manifest_sha256",
             "waiver_path",
@@ -9964,8 +10164,9 @@ def current_gate(args: argparse.Namespace) -> dict[str, Any]:
     waiver_path = Path(require_text(latest.get("waiver_path"), "latest waiver path")).resolve()
     waiver, waiver_sha = load_v2_receipt(waiver_path)
     if latest != {
-        "schema_version": 2,
+        "schema_version": 3,
         "skill_path": str(skill_dir),
+        "subject": evaluation_record_subject(skill_dir, candidate),
         "candidate_id": candidate,
         "input_manifest_sha256": resolved["input_manifest_sha256"],
         "waiver_path": str(waiver_path),
@@ -10026,44 +10227,57 @@ def require_hex_sha256(value: Any, field: str) -> str:
 
 def portfolio_transition(
     path: Path,
-    skill_key: str,
+    skill_dir: Path,
 ) -> tuple[dict[str, Any], datetime]:
     if path.is_symlink() or not path.is_file():
         raise EvaluationError("portfolio transition must be a regular file")
     value = load_json(path)
-    require_exact_keys(
-        value,
-        "portfolio transition",
-        {
-            "schema_version",
-            "kind",
-            "effective_at",
-            "skill_key",
-            "candidate_id",
-            "input_manifest_sha256",
-            "status",
-            "authority_sha256",
-            "aggregate_receipt_sha256",
-            "portfolio_receipt_sha256",
-            "transition_id",
-        },
-    )
+    schema_version = value.get("schema_version") if isinstance(value, dict) else None
+    common_keys = {
+        "schema_version",
+        "kind",
+        "effective_at",
+        "skill_key",
+        "candidate_id",
+        "status",
+        "authority_sha256",
+        "aggregate_receipt_sha256",
+        "portfolio_receipt_sha256",
+        "transition_id",
+    }
+    if schema_version == 1:
+        require_exact_keys(value, "portfolio transition", common_keys)
+    elif schema_version == 2:
+        require_exact_keys(
+            value,
+            "portfolio transition",
+            common_keys | {"subject", "input_manifest_sha256"},
+        )
+    else:
+        raise EvaluationError("portfolio transition schema is unsupported")
+    skill_key = latest_key(str(skill_dir))
     if (
-        value.get("schema_version") != 1
-        or value.get("kind") != "dashboard_authority_transition"
+        value.get("kind") != "dashboard_authority_transition"
         or value.get("skill_key") != skill_key
         or value.get("status")
         not in {"pass", "regression", "inconclusive", "revoked"}
-        or value.get("transition_id") != identity_with("transition_id", value)
-        or path.name
-        != f"{str(value.get('transition_id')).removeprefix('sha256:')}.json"
     ):
         raise EvaluationError("portfolio transition identity is malformed")
+    if schema_version == 2:
+        if (
+            value.get("subject")
+            != evaluation_record_subject(skill_dir, value.get("candidate_id"))
+            or value.get("transition_id") != identity_with("transition_id", value)
+            or path.name
+            != f"{str(value.get('transition_id')).removeprefix('sha256:')}.json"
+        ):
+            raise EvaluationError("portfolio transition identity is malformed")
     require_sha256(value.get("candidate_id"), "transition.candidate_id")
-    require_sha256(
-        value.get("input_manifest_sha256"),
-        "transition.input_manifest_sha256",
-    )
+    if schema_version == 2:
+        require_sha256(
+            value.get("input_manifest_sha256"),
+            "transition.input_manifest_sha256",
+        )
     status = value["status"]
     authority_sha = value.get("authority_sha256")
     aggregate_sha = value.get("aggregate_receipt_sha256")
@@ -10140,14 +10354,14 @@ def portfolio_current_value(
     historical: list[tuple[datetime, dict[str, Any]]] = []
     transition_times: set[datetime] = set()
     for path in sorted(transition_root.iterdir()):
-        transition, effective_at = portfolio_transition(path, skill_key)
+        transition, effective_at = portfolio_transition(path, skill_dir)
         if effective_at > observed_at:
             raise EvaluationError("portfolio transition is from the future")
         if effective_at in transition_times:
             raise EvaluationError("portfolio transitions share an effective time")
         transition_times.add(effective_at)
         historical.append((effective_at, transition))
-        if transition["candidate_id"] == candidate:
+        if transition["schema_version"] == 2 and transition["candidate_id"] == candidate:
             matching.append((effective_at, transition))
     if not historical:
         return {

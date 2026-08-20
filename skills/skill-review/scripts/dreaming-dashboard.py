@@ -1435,6 +1435,62 @@ class DashboardData:
     def _skill_key(self, skill: Path) -> str:
         return hashlib.sha256(str(skill.resolve()).encode()).hexdigest()
 
+    def _current_evaluation_input(
+        self, skill: Path
+    ) -> dict[str, Any] | None:
+        python = shutil.which("python3")
+        evaluator = self.paths.repo / "skills/skill-review/scripts/skill-evaluation.py"
+        if python is None or not evaluator.is_file() or evaluator.is_symlink():
+            return None
+        try:
+            result = subprocess.run(
+                [python, str(evaluator), "v2-prepare", str(skill)],
+                check=True,
+                capture_output=True,
+                text=True,
+                timeout=15,
+            )
+            payload = json.loads(result.stdout)
+            subject = payload.get("subject")
+            identities = [
+                payload.get("candidate_id"),
+                payload.get("input_manifest_sha256"),
+                payload.get("suite_id"),
+                payload.get("policy_id"),
+            ]
+            if (
+                not isinstance(subject, dict)
+                or any(
+                    not isinstance(value, str)
+                    or not value.startswith("sha256:")
+                    or not SHA256_RE.fullmatch(value.removeprefix("sha256:"))
+                    for value in identities
+                )
+            ):
+                return None
+        except (
+            OSError,
+            ValueError,
+            json.JSONDecodeError,
+            subprocess.SubprocessError,
+        ):
+            return None
+        return payload
+
+    def _record_hash_matches(self, path: Path, expected: Any) -> bool:
+        if (
+            not isinstance(expected, str)
+            or not SHA256_RE.fullmatch(expected)
+            or path.is_symlink()
+            or not path.is_file()
+        ):
+            return False
+        try:
+            value = self._json(path, {}, f"evaluation record:{path.name}")
+        except DashboardError:
+            return False
+        return hashlib.sha256(canonical(value)).hexdigest() == expected
+
     def _current_transition(
         self, skill: Path, candidate: str
     ) -> dict[str, Any] | None:
@@ -1446,15 +1502,30 @@ class DashboardData:
         current = None
         if not root.is_dir():
             return None
+        current_input = self._current_evaluation_input(skill)
         for path in root.glob("*.json"):
             if path.is_symlink():
                 continue
             transition = self._json(path, {}, f"transition:{path.name}")
+            schema_version = (
+                transition.get("schema_version")
+                if isinstance(transition, dict)
+                else None
+            )
             if (
                 not isinstance(transition, dict)
+                or schema_version not in {1, 2}
                 or transition.get("kind") != "dashboard_authority_transition"
                 or transition.get("skill_key") != self._skill_key(skill)
                 or transition.get("candidate_id") != candidate
+                or (
+                    schema_version == 2
+                    and (
+                        current_input is None
+                        or transition.get("subject")
+                        != current_input.get("subject")
+                    )
+                )
                 or transition.get("status")
                 not in {"pass", "regression", "inconclusive", "revoked"}
             ):
@@ -1463,16 +1534,25 @@ class DashboardData:
                 parse_time(current.get("effective_at")) or 0
             ):
                 current = transition
-        if current is None or not self._transition_matches_current(skill, current):
+        if current is None or not self._transition_matches_current(
+            skill, current, current_input
+        ):
             return None
         return current
 
     def _transition_matches_current(
-        self, skill: Path, transition: dict[str, Any]
+        self,
+        skill: Path,
+        transition: dict[str, Any],
+        current_input: dict[str, Any] | None = None,
     ) -> bool:
         effective_at = parse_time(transition.get("effective_at"))
         if effective_at is None:
             return False
+        if transition.get("schema_version") == 2:
+            return self._subject_transition_matches_current(
+                skill, transition, current_input
+            )
         input_paths = [
             skill / name
             for name in (
@@ -1495,6 +1575,7 @@ class DashboardData:
                 return False
         if transition.get("status") != "pass":
             return True
+
         candidate = transition.get("candidate_id")
         authority_sha = transition.get("authority_sha256")
         aggregate_sha = transition.get("aggregate_receipt_sha256")
@@ -1544,6 +1625,135 @@ class DashboardData:
             identities is None
             or identities[0] != authority.get("suite_id")
             or identities[1] != authority.get("policy_id")
+        ):
+            return False
+        return True
+
+    def _subject_transition_matches_current(
+        self,
+        skill: Path,
+        transition: dict[str, Any],
+        current_input: dict[str, Any] | None = None,
+    ) -> bool:
+        key = self._skill_key(skill)
+        if current_input is None:
+            current_input = self._current_evaluation_input(skill)
+        if current_input is None:
+            return False
+        subject = current_input["subject"]
+        transition_id = transition.get("transition_id")
+        candidate = transition.get("candidate_id")
+        input_manifest_sha256 = transition.get("input_manifest_sha256")
+        expected_transition_id = "sha256:" + hashlib.sha256(
+            canonical(
+                {
+                    name: value
+                    for name, value in transition.items()
+                    if name != "transition_id"
+                }
+            )
+        ).hexdigest()
+        if (
+            transition.get("subject") != subject
+            or candidate != current_input.get("candidate_id")
+            or input_manifest_sha256
+            != current_input.get("input_manifest_sha256")
+            or not isinstance(transition_id, str)
+            or transition_id != expected_transition_id
+            or not isinstance(candidate, str)
+            or not SHA256_RE.fullmatch(candidate.removeprefix("sha256:"))
+            or not isinstance(input_manifest_sha256, str)
+            or not SHA256_RE.fullmatch(
+                input_manifest_sha256.removeprefix("sha256:")
+            )
+        ):
+            return False
+        authority_sha = transition.get("authority_sha256")
+        aggregate_sha = transition.get("aggregate_receipt_sha256")
+        portfolio_sha = transition.get("portfolio_receipt_sha256")
+        evaluation_root = self.paths.control_state / "skill-review/evaluations/v2"
+        aggregate_path = evaluation_root / "receipts" / f"{aggregate_sha}.json"
+        portfolio_path = (
+            evaluation_root
+            / "dashboard-v1/portfolio"
+            / f"{portfolio_sha}.json"
+        )
+        status = transition.get("status")
+        if status == "revoked":
+            return all(
+                value is None
+                for value in (authority_sha, aggregate_sha, portfolio_sha)
+            )
+        if status in {"regression", "inconclusive"}:
+            return (
+                authority_sha is None
+                and self._record_hash_matches(aggregate_path, aggregate_sha)
+                and self._record_hash_matches(portfolio_path, portfolio_sha)
+            )
+        if status != "pass":
+            return False
+        if not all(
+            isinstance(value, str) and SHA256_RE.fullmatch(value)
+            for value in (authority_sha, aggregate_sha, portfolio_sha)
+        ):
+            return False
+        if (
+            not self._record_hash_matches(aggregate_path, aggregate_sha)
+            or not self._record_hash_matches(portfolio_path, portfolio_sha)
+        ):
+            return False
+        authority_path = (
+            evaluation_root / "authority" / key / f"{candidate}.json"
+        )
+        latest_path = evaluation_root / "latest" / f"{key}.json"
+        try:
+            authority = self._json(
+                authority_path, {}, "subject-bound evaluation authority"
+            )
+            latest = self._json(
+                latest_path, {}, "latest subject-bound evaluation authority"
+            )
+        except DashboardError:
+            return False
+        authority_keys = {
+            "schema_version", "kind", "skill_path", "subject",
+            "candidate_id", "input_manifest_sha256", "suite_id", "policy_id",
+            "observation_plan_id", "required_certificate_set_id",
+            "required_executors", "advisory_executors",
+            "aggregate_receipt_sha256", "aggregate_id", "authority_id",
+        }
+        authority_projection = {
+            name: value
+            for name, value in authority.items()
+            if name != "authority_id"
+        }
+        expected_authority_id = "sha256:" + hashlib.sha256(
+            canonical(authority_projection)
+        ).hexdigest()
+        if (
+            set(authority) != authority_keys
+            or hashlib.sha256(canonical(authority)).hexdigest() != authority_sha
+            or authority.get("schema_version") != 4
+            or authority.get("kind") != "cross_cli_authority"
+            or authority.get("skill_path") != str(skill.resolve())
+            or authority.get("subject") != subject
+            or authority.get("candidate_id") != candidate
+            or authority.get("input_manifest_sha256")
+            != input_manifest_sha256
+            or authority.get("suite_id") != current_input.get("suite_id")
+            or authority.get("policy_id") != current_input.get("policy_id")
+            or authority.get("aggregate_receipt_sha256") != aggregate_sha
+            or authority.get("authority_id") != expected_authority_id
+            or latest
+            != {
+                "schema_version": 3,
+                "skill_path": str(skill.resolve()),
+                "subject": subject,
+                "candidate_id": candidate,
+                "input_manifest_sha256": input_manifest_sha256,
+                "authority_path": str(authority_path.resolve()),
+                "authority_sha256": authority_sha,
+            }
         ):
             return False
         return True

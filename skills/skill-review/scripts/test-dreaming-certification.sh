@@ -223,10 +223,10 @@ PY
 }
 
 publish_fixture() {
-  local root="$1"
+  local root="$1" skill="${2:-$1/skill}"
   local registration manifest validation review_one review_two ready
   registration="$(
-    "$EVAL" v2-input-register "$root/skill" \
+    "$EVAL" v2-input-register "$skill" \
       --suite "$root/skill/.skill-evaluation-cases.json" \
       --policy "$root/skill/.skill-evaluation-policy.json" \
       --config "$root/config/compilation.json" \
@@ -237,18 +237,18 @@ publish_fixture() {
   )"
   manifest="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["input_manifest_sha256"])' <<<"$registration")"
   validation="$(
-    "$EVAL" v2-input-validate "$root/skill" --manifest "$manifest"
+    "$EVAL" v2-input-validate "$skill" --manifest "$manifest"
   )"
   review_one="$(
-    "$EVAL" v2-input-review "$root/skill" --manifest "$manifest" \
+    "$EVAL" v2-input-review "$skill" --manifest "$manifest" \
       --reviewer fixture-reviewer-one --decision accept
   )"
   review_two="$(
-    "$EVAL" v2-input-review "$root/skill" --manifest "$manifest" \
+    "$EVAL" v2-input-review "$skill" --manifest "$manifest" \
       --reviewer fixture-reviewer-two --decision accept
   )"
   ready="$(
-    "$EVAL" v2-input-ready "$root/skill" --manifest "$manifest" \
+    "$EVAL" v2-input-ready "$skill" --manifest "$manifest" \
       --validation "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' <<<"$validation")" \
       --review "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' <<<"$review_one")" \
       --review "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' <<<"$review_two")" \
@@ -274,18 +274,18 @@ PY
 }
 
 run_fixture() {
-  local root="$1" nonce="$2"
-  publish_fixture "$root"
+  local root="$1" nonce="$2" skill="${3:-$1/skill}"
+  publish_fixture "$root" "$skill"
   mkdir -p "$root/run" "$root/result" "$root/run-scratch" "$root/verify-scratch"
   mv "$root/config/compilation.json" "$root/compilation.authoring"
   mv "$root/config/routing.json" "$root/routing.authoring"
-  "$EVAL" v2-run-compile "$root/skill" --run-dir "$root/run" \
+  "$EVAL" v2-run-compile "$skill" --run-dir "$root/run" \
     --nonce "$nonce" --harness "$HARNESS" >/dev/null
   "$EVAL" v2-run-execute --run-dir "$root/run" --result-dir "$root/result" \
     --scratch "$root/run-scratch" --harness "$HARNESS" >/dev/null
   local certification
   certification="$(
-    "$EVAL" v2-result-certify "$root/skill" --run-dir "$root/run" \
+    "$EVAL" v2-result-certify "$skill" --run-dir "$root/run" \
       --result-dir "$root/result" --scratch "$root/verify-scratch" \
       --nonce "$nonce" --harness "$HARNESS"
   )"
@@ -2321,6 +2321,39 @@ grep -q "caller nonce mismatch" "$BASE/wrong-nonce.err" ||
   fail "wrong nonce emitted multiple public REFUSED lines"
 pass "nested verifier failures emit one public REFUSED line first"
 aggregate="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["aggregate"])' <<<"$certification")"
+aggregate_sha="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["aggregate_receipt_sha256"])' <<<"$certification")"
+certification_path="$SKILLS_STATE_DIR/skill-review/evaluations/v2/certifications/$aggregate_sha.json"
+cp "$certification_path" "$BASE/certification-original.json"
+python3 - "$certification_path" schema <<'PY'
+import hashlib, json, sys
+path=sys.argv[1]; mutation=sys.argv[2]; value=json.load(open(path))
+if mutation == "schema":
+    value["schema_version"]=1
+else:
+    value["subject"]["content_path"]="/other/skill"
+value.pop("certification_id")
+value["certification_id"]="sha256:"+hashlib.sha256(
+    json.dumps(value,sort_keys=True,separators=(",",":")).encode()
+).hexdigest()
+open(path,"w").write(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n")
+PY
+expect_refusal authority-legacy-certification "valid Dreaming certification" \
+  "$EVAL" v2-authority-write "$BASE/skill" --aggregate "$aggregate"
+cp "$BASE/certification-original.json" "$certification_path"
+python3 - "$certification_path" subject <<'PY'
+import hashlib, json, sys
+path=sys.argv[1]; value=json.load(open(path))
+value["subject"]["content_path"]="/other/skill"
+value.pop("certification_id")
+value["certification_id"]="sha256:"+hashlib.sha256(
+    json.dumps(value,sort_keys=True,separators=(",",":")).encode()
+).hexdigest()
+open(path,"w").write(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n")
+PY
+expect_refusal authority-swapped-certification "valid Dreaming certification" \
+  "$EVAL" v2-authority-write "$BASE/skill" --aggregate "$aggregate"
+cp "$BASE/certification-original.json" "$certification_path"
+pass "authority issuance requires the exact schema-v2 certification subject"
 authority="$("$EVAL" v2-authority-write "$BASE/skill" --aggregate "$aggregate")"
 "$EVAL" v2-authority-validate "$BASE/skill" >/dev/null
 authority_path="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["authority"])' <<<"$authority")"
@@ -2372,7 +2405,27 @@ assert value["input_manifest_sha256"].startswith("sha256:")
 assert value["cases"]
 PY
 pass "portfolio inventory validates a current passing evaluation"
-aggregate_sha="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["aggregate_receipt_sha256"])' <<<"$certification")"
+legacy_transition_dir="$(dirname "$transition_path")"
+python3 - "$transition_path" "$legacy_transition_dir/pre-upgrade.json" <<'PY'
+import datetime, json, sys
+source=json.load(open(sys.argv[1]))
+at=datetime.datetime.fromisoformat(source["effective_at"])-datetime.timedelta(days=1)
+legacy={
+    "schema_version":1,
+    "kind":"dashboard_authority_transition",
+    "effective_at":at.isoformat(),
+    "skill_key":source["skill_key"],
+    "candidate_id":source["candidate_id"],
+    "status":"pass",
+    "authority_sha256":source["authority_sha256"],
+    "aggregate_receipt_sha256":source["aggregate_receipt_sha256"],
+    "portfolio_receipt_sha256":source["portfolio_receipt_sha256"],
+    "transition_id":"sha256:"+"1"*64,
+}
+open(sys.argv[2],"w").write(json.dumps(legacy,sort_keys=True,separators=(",",":"))+"\n")
+PY
+"$EVAL" portfolio-current "$BASE/skill" --now "$current_at" >/dev/null
+pass "retained schema-v1 transitions do not poison current schema-v2 authority"
 portfolio_sha="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["portfolio_receipt_sha256"])' "$transition_path")"
 python3 - \
   "$BASE/input-registry.json" \
@@ -2425,7 +2478,8 @@ for path in sorted(root.rglob("*")):
     )
 manifest["file_inventory"] = inventory
 fields = (
-    "schema_version", "kind", "candidate_id", "suite_id", "profile",
+    "schema_version", "kind", "subject", "input_manifest_sha256",
+    "candidate_id", "suite_id", "profile",
     "trials_per_arm", "executors", "comparator",
     "harness_executable_sha256", "tool_policy_id", "grader_set_id",
     "retention_policy_id", "limits", "file_inventory",
@@ -3090,6 +3144,75 @@ unavailable="$("$EVAL" v2-unavailable-aggregate "$UNAVAILABLE/skill" \
 [[ "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])' <<<"$unavailable")" == "inconclusive" ]] ||
   fail "unavailable required executors did not remain inconclusive"
 pass "absent required executors are explicit unavailable certificates"
+unavailable_aggregate="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["aggregate"])' <<<"$unavailable")"
+unavailable_evidence="$(
+  python3 - "$unavailable_aggregate" "$SKILLS_STATE_DIR" <<'PY'
+import json,sys
+aggregate=json.load(open(sys.argv[1]))
+sha=aggregate["certificates"][0]["result_bundle_sha256"].removeprefix("sha256:")
+print(f"{sys.argv[2]}/skill-review/evaluations/v2/receipts/{sha}.json")
+PY
+)"
+cp "$unavailable_evidence" "$UNAVAILABLE/evidence-original.json"
+python3 - "$unavailable_evidence" <<'PY'
+import json,sys
+path=sys.argv[1]; value=json.load(open(path))
+value["candidate_id"]="sha256:"+"9"*64
+open(path,"w").write(json.dumps(value,sort_keys=True,separators=(",",":"))+"\n")
+PY
+expect_refusal unavailable-evidence-forgery "hash or content-addressed path" \
+  "$EVAL" v2-authority-write "$UNAVAILABLE/skill" \
+    --aggregate "$unavailable_aggregate"
+cp "$UNAVAILABLE/evidence-original.json" "$unavailable_evidence"
+python3 - "$SCRIPT_DIR" "$UNAVAILABLE/skill" "$unavailable_aggregate" \
+  "$unavailable_evidence" <<'PY'
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+script_dir = Path(sys.argv[1])
+skill = Path(sys.argv[2])
+aggregate = json.loads(Path(sys.argv[3]).read_text())
+evidence = json.loads(Path(sys.argv[4]).read_text())
+spec = importlib.util.spec_from_file_location(
+    "unavailable_forgery_evaluation", script_dir / "skill-evaluation.py"
+)
+evaluation = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = evaluation
+spec.loader.exec_module(evaluation)
+resolved = evaluation.resolve_ready_input(skill)
+certificate = dict(aggregate["certificates"][0])
+forged = {**evidence, "candidate_id": "sha256:" + "9" * 64}
+forged["result_id"] = evaluation.identity_with("result_id", forged)
+_, forged_sha = evaluation.write_v2_receipt(forged)
+certificate["result_bundle_sha256"] = f"sha256:{forged_sha}"
+certificate["result_bundle_id"] = forged["result_id"]
+certificate["certificate_id"] = evaluation.identity_with(
+    "certificate_id", certificate
+)
+try:
+    evaluation.validate_certificate(
+        certificate,
+        evaluation.evaluation_record_subject(
+            skill, resolved["candidate_id"]
+        ),
+        resolved["candidate_id"],
+        resolved["input_manifest_sha256"],
+        resolved["suite_id"],
+        resolved["policy_id"],
+        aggregate["observation_plan_id"],
+        resolved["policy"]["profile"],
+        certificate["requirement"],
+        certificate["executor"],
+        0,
+    )
+except evaluation.EvaluationError as exc:
+    assert "candidate_id" in str(exc), exc
+else:
+    raise AssertionError("forged unavailable evidence validated")
+PY
+pass "forged unavailable evidence refuses during certificate replay"
 
 expect_compile_refusal() {
   local name="$1" python="$2"
@@ -3190,7 +3313,8 @@ def inventory():
         out.append({"path":rel,"sha256":"sha256:"+hashlib.sha256(data).hexdigest(),"size":len(data)})
     return out
 manifest["file_inventory"]=inventory()
-fields=("schema_version","kind","candidate_id","suite_id","profile","trials_per_arm",
+fields=("schema_version","kind","subject","input_manifest_sha256",
+        "candidate_id","suite_id","profile","trials_per_arm",
         "executors","comparator","harness_executable_sha256","tool_policy_id",
         "grader_set_id","retention_policy_id","limits","file_inventory")
 manifest["run_id"]="sha256:"+hashlib.sha256(json.dumps(
@@ -3240,6 +3364,332 @@ PY
   fi
 done
 pass "forged producer and result identities refuse"
+
+REMOTE="$TMP/remote-subject-chain"
+make_fixture "$REMOTE"
+remote_candidate="$(
+  python3 - "$REMOTE" "$SCRIPT_DIR" \
+    "$SCRIPT_DIR/../references/remote-subject-content-policy-v1.json" <<'PY'
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+root, script_dir, policy_path = map(Path, sys.argv[1:])
+
+def load(name, path):
+    spec = importlib.util.spec_from_file_location(name, path)
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+sys.path.insert(0, str(script_dir))
+core = load("certification_remote_core", script_dir / "dreaming-core.py")
+estate = load("certification_remote_estate", script_dir / "dreaming-estate.py")
+origin = root / "skill"
+files, inventory_sha = estate.skill_inventory(origin)
+request = {
+    "census_snapshot_sha256": "sha256:" + "a" * 64,
+    "origin_host_id": "fixture-macbook",
+    "origin_root_id": "personal-copilot",
+    "origin_relative_path": "fixture-skill",
+    "origin_path": str(origin),
+    "canonical_capability_id": "sha256:" + "b" * 64,
+    "origin_inventory_sha256": inventory_sha,
+}
+census = {
+    "host_id": request["origin_host_id"],
+    "physical_instances": [{
+        "host_id": request["origin_host_id"],
+        "root_id": request["origin_root_id"],
+        "relative_path": request["origin_relative_path"],
+        "absolute_path": request["origin_path"],
+        "canonical_capability_id": request["canonical_capability_id"],
+        "inventory_sha256": inventory_sha,
+        "files": files,
+    }],
+}
+policy = estate.remote_subject_content_policy(policy_path)
+subject = estate.export_remote_subject(census, request, policy)
+receiver = {
+    "receiver_id": "fixture",
+    "receiver_sha256": "1" * 64,
+    "collector_sha256": "2" * 64,
+    "content_policy_sha256": policy["sha256"].removeprefix("sha256:"),
+}
+store = root / "remote-subjects"
+store.mkdir(mode=0o700)
+published = core.publish_remote_subject_snapshot(
+    {"ok": True, "receiver": receiver, "subject": subject},
+    request,
+    receiver,
+    policy_path,
+    store,
+    installed_skill_roots=[],
+)
+print(published["candidate_root"])
+PY
+)"
+remote_certification="$(run_fixture "$REMOTE" remote-subject-nonce "$remote_candidate")"
+remote_aggregate="$(
+  python3 -c 'import json,sys; print(json.load(sys.stdin)["aggregate"])' \
+    <<<"$remote_certification"
+)"
+remote_authority="$(
+  "$EVAL" v2-authority-write "$remote_candidate" \
+    --aggregate "$remote_aggregate"
+)"
+python3 - "$REMOTE" "$remote_candidate" "$remote_certification" \
+  "$remote_authority" "$SCRIPT_DIR" <<'PY'
+import argparse
+import importlib.util
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+skill = Path(sys.argv[2])
+certification_result = json.loads(sys.argv[3])
+authority_result = json.loads(sys.argv[4])
+script_dir = Path(sys.argv[5])
+spec = importlib.util.spec_from_file_location(
+    "certification_remote_evaluation", script_dir / "skill-evaluation.py"
+)
+evaluation = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = evaluation
+spec.loader.exec_module(evaluation)
+
+expected = evaluation.evaluation_subject_binding(skill)
+try:
+    evaluation.evaluation_record_subject(skill, "sha256:" + "0" * 64)
+except evaluation.EvaluationError as exc:
+    assert "differs from remote subject" in str(exc)
+else:
+    raise AssertionError("remote evaluation subject accepted another candidate")
+registry = json.loads((root / "input-registry.json").read_text())
+aggregate_sha = certification_result["aggregate_receipt_sha256"]
+aggregate = json.loads(Path(certification_result["aggregate"]).read_text())
+portfolio_pointer_path = evaluation.v2_portfolio_pointer_path(aggregate_sha)
+portfolio_pointer = json.loads(portfolio_pointer_path.read_text())
+portfolio_receipt_path = evaluation.v2_portfolio_receipt_path(
+    portfolio_pointer["portfolio_receipt_sha256"]
+)
+latest_authority_path = (
+    evaluation.v2_evaluation_dir()
+    / "latest"
+    / f"{evaluation.latest_key(str(skill))}.json"
+)
+records = [
+    json.loads(Path(registry["registration"]["input_manifest"]).read_text()),
+    json.loads(Path(registry["validation"]["receipt"]).read_text()),
+    json.loads(Path(registry["review_one"]["receipt"]).read_text()),
+    json.loads(Path(registry["review_two"]["receipt"]).read_text()),
+    json.loads(Path(registry["ready"]["transition"]).read_text()),
+    json.loads(Path(registry["ready"]["current"]).read_text()),
+    json.loads((root / "run" / "dreaming-input.json").read_text()),
+    json.loads((root / "run" / "manifest.json").read_text()),
+    json.loads((root / "result" / "manifest.json").read_text()),
+    aggregate,
+    *aggregate["certificates"],
+    portfolio_pointer,
+    json.loads(portfolio_receipt_path.read_text()),
+    json.loads(evaluation.v2_certification_path(aggregate_sha).read_text()),
+    json.loads(Path(authority_result["authority"]).read_text()),
+    json.loads(latest_authority_path.read_text()),
+]
+transition_paths = sorted(evaluation.v2_transition_dir(skill).glob("*.json"))
+records.extend(json.loads(path.read_text()) for path in transition_paths)
+assert records
+for record in records:
+    assert record.get("subject") == expected, record.get("kind", "pointer")
+
+resolved = evaluation.resolve_ready_input(skill)
+swapped = {**expected, "origin_host_id": "other-host"}
+
+tampered_aggregate = {**aggregate, "subject": swapped}
+tampered_aggregate["aggregate_id"] = evaluation.identity_with(
+    "aggregate_id", tampered_aggregate
+)
+try:
+    evaluation.validate_aggregate(
+        tampered_aggregate,
+        skill,
+        resolved["candidate_id"],
+        resolved["input_manifest_sha256"],
+        resolved["suite"],
+        resolved["suite_id"],
+        resolved["policy"],
+        resolved["policy_id"],
+    )
+except evaluation.EvaluationError:
+    pass
+else:
+    raise AssertionError("aggregate accepted a swapped remote subject")
+
+tampered_certificate = {**aggregate["certificates"][0], "subject": swapped}
+tampered_certificate["certificate_id"] = evaluation.identity_with(
+    "certificate_id", tampered_certificate
+)
+executor = aggregate["required_executors"][0]
+try:
+    evaluation.validate_certificate(
+        tampered_certificate,
+        expected,
+        resolved["candidate_id"],
+        resolved["input_manifest_sha256"],
+        resolved["suite_id"],
+        resolved["policy_id"],
+        aggregate["observation_plan_id"],
+        resolved["policy"]["profile"],
+        "required",
+        executor,
+        0,
+    )
+except evaluation.EvaluationError:
+    pass
+else:
+    raise AssertionError("certificate accepted a swapped remote subject")
+
+original_pointer = portfolio_pointer_path.read_bytes()
+tampered_pointer = {**portfolio_pointer, "subject": swapped}
+portfolio_pointer_path.write_text(
+    json.dumps(tampered_pointer, sort_keys=True, separators=(",", ":")) + "\n"
+)
+try:
+    evaluation.load_portfolio_for_aggregate(aggregate_sha)
+except evaluation.EvaluationError:
+    pass
+else:
+    raise AssertionError("portfolio pointer accepted a swapped remote subject")
+portfolio_pointer_path.write_bytes(original_pointer)
+
+original_latest = latest_authority_path.read_bytes()
+latest = json.loads(original_latest)
+latest["subject"] = swapped
+latest_authority_path.write_text(
+    json.dumps(latest, sort_keys=True, separators=(",", ":")) + "\n"
+)
+try:
+    evaluation.v2_authority_validate(
+        argparse.Namespace(
+            skill_dir=str(skill),
+            authority=authority_result["authority"],
+            suite=None,
+            policy=None,
+        )
+    )
+except evaluation.EvaluationError:
+    pass
+else:
+    raise AssertionError("latest authority accepted a swapped remote subject")
+latest_authority_path.write_bytes(original_latest)
+
+transition = json.loads(transition_paths[-1].read_text())
+transition["subject"] = swapped
+transition["transition_id"] = evaluation.identity_with(
+    "transition_id", transition
+)
+tampered_transition_path = (
+    root
+    / f"{transition['transition_id'].removeprefix('sha256:')}.json"
+)
+tampered_transition_path.write_text(
+    json.dumps(transition, sort_keys=True, separators=(",", ":")) + "\n"
+)
+try:
+    evaluation.portfolio_transition(tampered_transition_path, skill)
+except evaluation.EvaluationError:
+    pass
+else:
+    raise AssertionError("portfolio transition accepted a swapped remote subject")
+PY
+
+cp -R "$REMOTE/run" "$REMOTE/tampered-run"
+chmod -R u+w "$REMOTE/tampered-run"
+python3 - "$REMOTE/tampered-run/manifest.json" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+manifest = json.loads(path.read_text())
+manifest["subject"]["origin_host_id"] = "other-host"
+fields = (
+    "schema_version", "kind", "subject", "input_manifest_sha256",
+    "candidate_id", "suite_id", "profile", "trials_per_arm", "executors",
+    "comparator", "harness_executable_sha256", "tool_policy_id",
+    "grader_set_id", "retention_policy_id", "limits", "file_inventory",
+)
+payload = json.dumps(
+    {key: manifest[key] for key in fields},
+    sort_keys=True,
+    separators=(",", ":"),
+).encode()
+manifest["run_id"] = "sha256:" + hashlib.sha256(payload).hexdigest()
+path.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+mkdir "$REMOTE/tampered-result" "$REMOTE/tampered-scratch"
+expect_refusal remote-run-subject-swap "subject or input manifest differs" \
+  "$EVAL" v2-run-execute --run-dir "$REMOTE/tampered-run" \
+    --result-dir "$REMOTE/tampered-result" \
+    --scratch "$REMOTE/tampered-scratch" --harness "$HARNESS"
+
+cp -R "$REMOTE/run" "$REMOTE/coordinated-tampered-run"
+chmod -R u+w "$REMOTE/coordinated-tampered-run"
+python3 - "$REMOTE/coordinated-tampered-run" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+for name in ("dreaming-input.json", "manifest.json"):
+    path = root / name
+    value = json.loads(path.read_text())
+    value["subject"]["origin_host_id"] = "other-host"
+    path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+
+def inventory():
+    result = []
+    for path in sorted(root.rglob("*")):
+        relative = path.relative_to(root).as_posix()
+        if path.is_dir() or relative == "manifest.json":
+            continue
+        data = path.read_bytes()
+        result.append({
+            "path": relative,
+            "sha256": "sha256:" + hashlib.sha256(data).hexdigest(),
+            "size": len(data),
+        })
+    return result
+
+manifest_path = root / "manifest.json"
+manifest = json.loads(manifest_path.read_text())
+manifest["file_inventory"] = inventory()
+fields = (
+    "schema_version", "kind", "subject", "input_manifest_sha256",
+    "candidate_id", "suite_id", "profile", "trials_per_arm", "executors",
+    "comparator", "harness_executable_sha256", "tool_policy_id",
+    "grader_set_id", "retention_policy_id", "limits", "file_inventory",
+)
+payload = json.dumps(
+    {key: manifest[key] for key in fields},
+    sort_keys=True,
+    separators=(",", ":"),
+).encode()
+manifest["run_id"] = "sha256:" + hashlib.sha256(payload).hexdigest()
+manifest_path.write_text(
+    json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n"
+)
+PY
+mkdir "$REMOTE/coordinated-tampered-result" "$REMOTE/coordinated-tampered-scratch"
+expect_refusal remote-coordinated-subject-swap "subject is no longer ready" \
+  "$EVAL" v2-run-execute --run-dir "$REMOTE/coordinated-tampered-run" \
+    --result-dir "$REMOTE/coordinated-tampered-result" \
+    --scratch "$REMOTE/coordinated-tampered-scratch" --harness "$HARNESS"
+pass "remote evaluation records retain one exact subject and reject subject swaps before execution"
 
 if "$EVAL" gate "$BASE/skill" >/dev/null 2>&1; then
   fail "legacy v1 gate authorized schema-v3 authority"

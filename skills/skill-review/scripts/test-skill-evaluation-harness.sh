@@ -214,13 +214,16 @@ routing={"schema_version":1,"kind":"skill_evaluation_routing",
          "executors":routing_executors,
          "comparator":{"route":"fixture-route","adapter_id":adapter_id,"adapter_executable_sha256":adapter_sha,"argv":[adapter,"--identity",str(comparator_path)]}}
 (root.parent/"routing.json").write_bytes(canonical(routing)+b"\n")
-manifest={"schema_version":1,"kind":"skill_evaluation_run","invocation_nonce":"fixture-nonce",
+subject={"schema_version":1,"kind":"legacy_local_evaluation_subject_binding",
+         "subject_key":sha("/fixture/skill"),"content_path":"/fixture/skill"}
+manifest={"schema_version":2,"kind":"skill_evaluation_run","subject":subject,
+ "input_manifest_sha256":None,"invocation_nonce":"fixture-nonce",
  "candidate_id":sha(candidate),"suite_id":sha(suite),"profile":profile,"trials_per_arm":3 if profile=="gate" else 1,
  "executors":executor_values,"comparator":comparator,"harness_executable_sha256":file_sha(harness),
  "tool_policy_id":tool,"grader_set_id":sha(grader_set),"retention_policy_id":"sha256:"+"b"*64,
  "limits":{"timeout_seconds":int(timeout),"output_bytes":int(output_bytes),"file_bytes":100000,"global_concurrency":1,"per_executor_concurrency":1},
  "file_inventory":inv(root)}
-fields=("schema_version","kind","candidate_id","suite_id","profile","trials_per_arm","executors","comparator",
+fields=("schema_version","kind","subject","input_manifest_sha256","candidate_id","suite_id","profile","trials_per_arm","executors","comparator",
         "harness_executable_sha256","tool_policy_id","grader_set_id","retention_policy_id","limits","file_inventory")
 manifest["run_id"]=sha({key:manifest[key] for key in fields})
 (root/"manifest.json").write_bytes(canonical(manifest)+b"\n")
@@ -238,6 +241,77 @@ run_case() {
   harness_run "$input" "$output" >/dev/null
   printf '%s\n' "$output"
 }
+
+expect_manifest_refusal() {
+  local name="$1" mutation="$2"
+  local input="$TMP/$name-input" output="$TMP/$name-output"
+  mkdir -p "$output"
+  make_run "$input"
+  python3 - "$input/manifest.json" "$mutation" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+mutation = sys.argv[2]
+manifest = json.loads(path.read_text())
+if mutation == "invalid-subject":
+    manifest["subject"]["kind"] = "invalid"
+elif mutation == "invalid-input-manifest":
+    manifest["input_manifest_sha256"] = 123
+elif mutation == "incomplete-remote-subject":
+    manifest["subject"] = {
+        "schema_version": 1,
+        "kind": "remote_evaluation_subject_binding",
+        "subject_key": "sha256:" + "9" * 64,
+    }
+elif mutation == "remote-candidate-mismatch":
+    manifest["subject"] = {
+        "schema_version": 1,
+        "kind": "remote_evaluation_subject_binding",
+        "subject_key": "sha256:" + "9" * 64,
+        "origin_host_id": "remote-host",
+        "origin_root_id": "personal",
+        "origin_relative_path": "fixture-skill",
+        "origin_path": "/remote/fixture-skill",
+        "canonical_capability_id": "sha256:" + "8" * 64,
+        "origin_inventory_sha256": "sha256:" + "7" * 64,
+        "candidate_id": "wrong",
+        "transport_receipt_sha256": "sha256:" + "5" * 64,
+        "content_path": "/transport/fixture-skill",
+    }
+else:
+    raise AssertionError(mutation)
+fields = (
+    "schema_version", "kind", "subject", "input_manifest_sha256",
+    "candidate_id", "suite_id", "profile", "trials_per_arm", "executors",
+    "comparator", "harness_executable_sha256", "tool_policy_id",
+    "grader_set_id", "retention_policy_id", "limits", "file_inventory",
+)
+payload = json.dumps(
+    {key: manifest[key] for key in fields},
+    sort_keys=True,
+    separators=(",", ":"),
+).encode()
+manifest["run_id"] = "sha256:" + hashlib.sha256(payload).hexdigest()
+path.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+  if harness_run "$input" "$output" >/dev/null 2>&1; then
+    fail "$name manifest ran"
+  fi
+  [[ -z "$(find "$output" -mindepth 1 -print -quit)" ]] ||
+    fail "$name manifest created evidence"
+}
+
+expect_manifest_refusal invalid-subject invalid-subject
+pass "invalid run subjects refuse before execution"
+expect_manifest_refusal invalid-input-manifest invalid-input-manifest
+pass "non-string input-manifest identities refuse without a traceback"
+expect_manifest_refusal incomplete-remote-subject incomplete-remote-subject
+pass "incomplete remote subjects refuse before execution"
+expect_manifest_refusal remote-candidate-mismatch remote-candidate-mismatch
+pass "malformed remote subject candidate identities refuse before execution"
 
 python3 - "$HARNESS" <<'PY'
 import importlib.util
@@ -730,5 +804,22 @@ if harness_verify "$assignment_tamper" >/dev/null 2>&1; then
   fail "resealed blind assignment tamper verified"
 fi
 pass "verifier re-derives blind assignment and packet from sealed trial evidence"
+
+sealed_subject_tamper="$(run_case sealed-subject-tamper correct iterate)"
+python3 - "$sealed_subject_tamper/manifest.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+manifest = json.loads(path.read_text())
+manifest["subject"]["content_path"] = "/other/skill"
+path.write_text(json.dumps(manifest, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+reseal "$sealed_subject_tamper"
+if harness_verify "$sealed_subject_tamper" >/dev/null 2>&1; then
+  fail "resealed result subject mismatch verified"
+fi
+pass "verifier rejects a resealed result subject differing from sealed input"
 
 echo "PASS  $passes deterministic skill-evaluation-harness checks"
