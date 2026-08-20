@@ -19,7 +19,7 @@
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
-- Isolated governance preview tip: `4aaa240`
+- Isolated governance preview tip: `04115fc`
 - The first natural successor `20260818T220321Z-97940` remains retained as a
   literal `SC-010` `NOT_SUPPORTED` result. It attempted 25 reviews, completed
   24, retained one `executor-timeout`, and ended honestly as `aborted` after
@@ -566,6 +566,25 @@
   is not a same-UID hostile-process boundary. Production executor/comparator
   routing and an environment-correct source-pack builder remain the next
   prerequisites before any real zero-use cohort can be sealed or progressed.
+- The production blind-comparator boundary is implemented and committed
+  locally on the isolated preview branch as `04115fc`. A distinct Copilot
+  comparator protocol binds the route, rubric, explicit model, adapter bytes,
+  CLI bytes and version, timeout, and normalized-token budget. It receives
+  only the blinded task, rubric, and A/B responses inside an explicit
+  untrusted-data boundary, runs one no-tools model turn in a synthetic home
+  under the macOS sandbox, and refuses unknown native events, absent or
+  multiple model turns, any tool/skill/subagent/permission event, incomplete
+  usage, model drift, CLI drift, malformed output, and non-finite scores. The
+  compare response returns its effective execution identity and the harness
+  re-attests it against the sealed version-time identity before accepting the
+  verdict. Its doctor resolves the real CLI, authentication, and passwd
+  account home and runs allowed-read and denied-credential sandbox canaries
+  before reporting ready. Validation passes 13 production vendor-adapter tests
+  and 31 harness checks. Paired review closed prompt-data separation, CLI
+  binding, token proof, finite-number, scrubbed-home, doctor, compare-time
+  identity, and positive tool-free-turn findings with no unresolved material
+  defect. The environment-correct source-pack builder is now the next
+  prerequisite.
 - Governance work remaining: bootstrap the sealed inputs for the real zero-use
   cohort, progress that cohort through reviewed readiness, then execute the
   evaluation queue under explicit daily operation, normalized-token, and
