@@ -19,7 +19,7 @@
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
-- Isolated governance preview tip: `04115fc`
+- Isolated governance preview tip: `65a70d1`
 - The first natural successor `20260818T220321Z-97940` remains retained as a
   literal `SC-010` `NOT_SUPPORTED` result. It attempted 25 reviews, completed
   24, retained one `executor-timeout`, and ended honestly as `aborted` after
@@ -607,10 +607,35 @@
   task omission, marker normalization, rubric coverage, and short-name
   false-positive findings with no unresolved material defect. Real
   environment packs for the settled-zero cohort are the next prerequisite.
+- Real-cohort preflight found that the Mac mini owner receives a MacBook census
+  but resolves every census path and evaluation pointer on the mini. Of the 19
+  settled-zero MacBook skills, 11 have a same-path mini directory, five exist
+  only at another mini path, and three are absent. The same-path case could
+  silently evaluate mini bytes as the MacBook capability, and mini-local
+  readiness would remain invisible to the MacBook-local evaluation field in a
+  later census. No real pack, claim, or model operation was started through
+  that unsafe path.
+- The critical remote-subject work order is reviewed and committed on the
+  isolated preview branch as `65a70d1`. It keeps the Mac mini as the sole
+  scheduler, writer-lease owner, claim-ledger owner, and evaluation-state
+  owner. One selected MacBook skill may be fetched before claim reservation
+  through a separately pinned, strict-host-key SSH receiver; the complete
+  candidate is safety-scanned on both hosts, stripped of evaluator sidecars,
+  published read-only outside runtime roots, and bound to the raw census.
+  Stable subject identity uses origin host, declared root, and relative path;
+  content-derived capability, inventory, and candidate identities remain
+  version fields. A mini-owned overlay supplies first-fetch, readiness, and
+  evaluation state without rewriting the remote receipt. The exact work order
+  and `REMOTE-SUBJECT-CHK-01` through `REMOTE-SUBJECT-CHK-07` are in
+  `docs/remote-evaluation-subject-bridge-design.md`. Paired design review
+  closed bootstrap, privacy, host authentication, lease-race, identity,
+  sidecar, rollout, and storage findings with no unresolved material defect.
+  The durable live gate is
+  `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/live-proof-remote-subject-bridge.json`.
 - Governance work remaining: bootstrap the sealed inputs for the real zero-use
-  cohort, progress that cohort through reviewed readiness, then execute the
-  evaluation queue under explicit daily operation, normalized-token, and
-  elapsed-time budgets. After that, prove
+  cohort through the reviewed remote-subject bridge, progress that cohort
+  through reviewed readiness, then execute the evaluation queue under explicit
+  daily operation, normalized-token, and elapsed-time budgets. After that, prove
   governed user intents, reversible personal withdrawal/archive/restore, and qualified whole-plugin
   disable/restore under `PORT-CHK-01` through `PORT-CHK-14`. Individual plugin
   skill disablement remains recommendation-only unless native CLI support is
