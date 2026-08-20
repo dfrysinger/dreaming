@@ -1017,7 +1017,12 @@ def run_comparison(result: Path, scratch: Scratch, pair: str, executor: dict[str
             harness_environment(workspace / "home"), manifest["comparator"]["timeout_seconds"],
             MAX_OUTPUT_BYTES, owned_directory(workspace / "cwd"),
         )
-        require_keys(response, {"response_sha256"}, "comparator response")
+        require_keys(
+            response,
+            {"response_sha256", "execution"},
+            "comparator response",
+        )
+        attest_comparator(response["execution"], comparator_identity)
         value = read_json(output_path)
         require_keys(value, {"winner", "criteria", "evidence"}, "comparator output")
         if value["winner"] not in {"A", "B", "tie"} or not isinstance(value["criteria"], list) or not isinstance(value["evidence"], str):

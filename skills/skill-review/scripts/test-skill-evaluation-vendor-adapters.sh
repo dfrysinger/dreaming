@@ -77,7 +77,9 @@ if "--version" in args:
     print(vendor + " 1.0")
     raise SystemExit()
 if "--help" in args:
-    print("--plugin-dir --output-format --model --json --ignore-user-config")
+    print("--plugin-dir --output-format --model --json --ignore-user-config "
+          "--available-tools --disable-builtin-mcps --no-custom-instructions "
+          "--no-ask-user --no-remote")
     raise SystemExit()
 if "plugin" in args:
     home = Path(os.environ["CODEX_HOME"])
@@ -89,11 +91,21 @@ if "plugin" in args:
     print(json.dumps({"ok": True}))
     raise SystemExit()
 model = args[args.index("--model") + 1]
+full_prompt = args[args.index("-p") + 1] if "-p" in args else ""
 prompt = next((value for value in args if value in {
     "fixture prompt", "DRIFT", "NOLOAD", "WRONGLOAD", "FALSETRIGGER", "TIMEOUT",
     "TOKENOVER", "FLOOD", "SCHEMA", "NOPATH", "NATIVEFAIL", "CURRENTCOPILOT",
     "SHADOWCANDIDATE", "SHADOWCATALOG", "COMMANDLOAD", "MULTIREAD",
 }), "")
+comparator = full_prompt.startswith("BLIND_SKILL_EVALUATION_COMPARISON")
+answer = (
+    json.dumps({
+        "winner":"A",
+        "criteria":[{"id":"quality","score":1,"reason":"A is clearer"}],
+        "evidence":"A directly satisfies the supplied rubric",
+    }, sort_keys=True)
+    if comparator else "answer"
+)
 observed = "drifted-model" if prompt == "DRIFT" else model
 workspace = Path(args[args.index("-C") + 1]) if "-C" in args else Path.cwd()
 (workspace / "out.txt").write_text("artifact\\n")
@@ -172,7 +184,13 @@ if vendor == "copilot":
         ]
     else:
         events = [{"type":"session.start","data":{"model":observed}},
-                  {"type":"assistant.message","data":{"content":"answer"}},
+                  *([{"type":"model.call_start","data":{"model":observed}}]
+                    if comparator and not os.environ.get(
+                        "FIXTURE_COMPARATOR_ZERO_TURN"
+                    ) else []),
+                  {"type":"assistant.message","data":{
+                      "content":answer,
+                      **({"outputTokens":5} if comparator else {})}},
                   {"type":"session.usage_checkpoint",
                    "usage":{"total_tokens":tokens}}]
     if candidate and prompt not in {"CURRENTCOPILOT", "SHADOWCANDIDATE", "SHADOWCATALOG"}:
@@ -192,7 +210,7 @@ if vendor == "copilot":
             {"type":"result","exitCode":0},
         ])
     else:
-        events.append({"type":"session.task_complete","data":{"summary":"answer"}})
+        events.append({"type":"session.task_complete","data":{"summary":answer}})
     print(json.dumps({"events":events}))
 elif vendor == "claude":
     system = {"type":"system","model":observed}
@@ -320,6 +338,140 @@ else:
         if check and result.returncode:
             self.fail(result.stdout + result.stderr)
         return json.loads(result.stdout.splitlines()[-1])
+
+    def comparator_call(self, rubric_id, *args, check=True, binary=None):
+        harness_home = self.root / "harness-home"
+        harness_home.mkdir(exist_ok=True)
+        command = [
+            sys.executable,
+            str(adapter),
+            "--vendor",
+            "copilot",
+            "--role",
+            "skill-evaluation-comparator",
+            "--binary",
+            str(binary or self.binaries["copilot"]),
+            "--credential-root",
+            str(self.credentials),
+            "--model",
+            "fixture-model",
+            "--route-name",
+            "copilot-blind-comparator",
+            "--rubric-id",
+            rubric_id,
+            "--timeout",
+            "10",
+            "--token-budget",
+            "100",
+            "--output-bytes",
+            "100000",
+            *map(str, args),
+        ]
+        result = subprocess.run(
+            command,
+            env={
+                **os.environ,
+                "HOME": str(harness_home),
+                "DREAMING_EXECUTOR_TEST_ALLOW_ROOT": str(self.root),
+                "GH_TOKEN": "fixture-token",
+            },
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if check and result.returncode:
+            self.fail(result.stdout + result.stderr)
+        return result
+
+    def test_blind_comparator_is_identity_bound_and_structured(self):
+        rubric = {
+            "criteria": [
+                {
+                    "id": "quality",
+                    "description": "Prefer the response that completes the task",
+                }
+            ]
+        }
+        rubric_id = sha(rubric)
+        version_result = self.comparator_call(rubric_id, "version")
+        version = json.loads(version_result.stdout)
+        self.assertEqual(version["route"], "copilot-blind-comparator")
+        self.assertEqual(version["model"], "fixture-model")
+        self.assertEqual(version["rubric_id"], rubric_id)
+        doctor = json.loads(
+            self.comparator_call(rubric_id, "doctor").stdout
+        )
+        self.assertTrue(doctor["healthy"])
+        self.assertTrue(doctor["boundary_ready"])
+        packet = self.root / "comparison-packet.json"
+        packet.write_bytes(
+            canonical(
+                {
+                    "schema_version": 1,
+                    "task_id": "task-one",
+                    "rubric": rubric,
+                    "A": "complete response",
+                    "B": "incomplete response",
+                }
+            )
+        )
+        output = self.root / "comparison-result.json"
+        response = self.comparator_call(
+            rubric_id,
+            "compare",
+            "--packet",
+            packet,
+            "--output",
+            output,
+        )
+        receipt = json.loads(response.stdout)
+        verdict = json.loads(output.read_text())
+        self.assertEqual(verdict["winner"], "A")
+        self.assertEqual(receipt["execution"], version)
+        self.assertEqual(receipt["response_sha256"], sha_bytes(output.read_bytes()))
+        zero_binary = self.bin / "copilot-zero-turn"
+        zero_source = (
+            "#include <unistd.h>\n#include <stdlib.h>\n"
+            "int main(int argc,char **argv){"
+            'setenv("FIXTURE_VENDOR","copilot",1);'
+            'setenv("FIXTURE_COMPARATOR_ZERO_TURN","1",1);'
+            f'setenv("DREAMING_EXECUTOR_TEST_ALLOW_ROOT","{self.root}",1);'
+            f'char **a=calloc(argc+2,sizeof(char*));a[0]="{sys.executable}";'
+            f'a[1]="{self.root / "fixture-cli.py"}";'
+            "for(int i=1;i<argc;i++)a[i+1]=argv[i];"
+            f'execv("{sys.executable}",a);return 127;}}\n'
+        )
+        subprocess.run(
+            ["/usr/bin/clang", "-x", "c", "-o", str(zero_binary), "-"],
+            input=zero_source,
+            text=True,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        zero_turn = self.comparator_call(
+            rubric_id,
+            "compare",
+            "--packet",
+            packet,
+            "--output",
+            self.root / "zero-turn-result.json",
+            check=False,
+            binary=zero_binary,
+        )
+        self.assertNotEqual(zero_turn.returncode, 0)
+        self.assertIn("comparator-no-tools-unproved", zero_turn.stdout)
+        refused = self.comparator_call(
+            "sha256:" + "0" * 64,
+            "compare",
+            "--packet",
+            packet,
+            "--output",
+            self.root / "refused-result.json",
+            check=False,
+        )
+        self.assertNotEqual(refused.returncode, 0)
+        self.assertIn("comparator-packet-invalid", refused.stdout)
 
     def write_timeout_diagnostic(self, vendor, trial, response, phase):
         workspace = Path(trial["workspace"])
