@@ -19,7 +19,7 @@
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
-- Isolated governance preview tip: `d7c71ab`
+- Isolated governance preview tip: `5c9cb0c`
 - The first natural successor `20260818T220321Z-97940` remains retained as a
   literal `SC-010` `NOT_SUPPORTED` result. It attempted 25 reviews, completed
   24, retained one `executor-timeout`, and ended honestly as `aborted` after
@@ -657,6 +657,23 @@
   never-fetched or changed candidates enter an explicit transport phase before
   any claim. Overlay construction, fetch execution, and persistence remain
   gated on their deterministic boundaries.
+- Overlay construction, content-addressed persistence, and one-subject owner
+  execution are implemented and committed locally as `5c9cb0c`. The owner
+  rebuilds complete remote rows from the exact census, usage receipts,
+  separately pinned census and transport receivers, evaluator bytes, registry
+  schema, immutable snapshots, and mini-local evaluation state. It fetches
+  only the first transport-eligible row, checks halt and lease before and
+  during transport and before publication, enforces a 64 MiB combined-output
+  ceiling and hard timeout, then rebuilds the overlay before claim
+  reservation. A lease loss racing snapshot publication can retain one
+  complete immutable snapshot but cannot publish later overlay, claim,
+  readiness, evaluation, or authority state. New manifests, validation and
+  review receipts, readiness transitions, current pointers, and claims retain
+  the complete subject binding; legacy local state remains readable through
+  the path-keyed local adapter. Five remote bridge tests, 49 claim-ledger
+  checks, 23 evaluator checks, and 47 core checks pass. Installation wiring,
+  report-only installed self-test, dashboard projection, and live proof remain
+  gated.
 - Governance work remaining: bootstrap the sealed inputs for the real zero-use
   cohort through the reviewed remote-subject bridge, progress that cohort
   through reviewed readiness, then execute the evaluation queue under explicit
