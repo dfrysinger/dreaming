@@ -19,7 +19,7 @@
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
-- Isolated governance preview tip: `d759b2f`
+- Isolated governance preview tip: `0a338f5`
 - The first natural successor `20260818T220321Z-97940` remains retained as a
   literal `SC-010` `NOT_SUPPORTED` result. It attempted 25 reviews, completed
   24, retained one `executor-timeout`, and ended honestly as `aborted` after
@@ -724,8 +724,27 @@
   authority, privacy, or presentation defect after current-pointer fencing,
   production-schema integration, invalid-configuration suppression, and
   negative badge precedence were corrected. Structured refusal retention,
-  explicit subject propagation through downstream evaluation records, one real
-  subject, rollback, and live report-only proof remain gated.
+  one real subject, rollback, and live report-only proof remain gated.
+- Exact evaluation-subject propagation is committed locally on the isolated
+  preview branch as `0a338f5`. Run and result manifests, executor
+  certificates, aggregates, portfolio receipts and pointers, certifications,
+  authority records, latest pointers, transitions, waivers, and unavailable
+  evidence now retain the same canonical local or transported subject. Run and
+  result identities cover that subject and the ready input manifest. Execution
+  refuses a coordinated subject substitution before launching the harness;
+  authority issuance requires the exact schema-v2 certification subject; the
+  dashboard binds schema-v2 state to the independently current input and full
+  authority contract; non-pass transitions require retained aggregate and
+  portfolio evidence; and retained schema-v1 transitions remain readable
+  without poisoning newer authority. Paired adversarial review adjudicated 31
+  candidates, confirming 28 and rejecting three; all confirmed correctness and
+  coverage findings were resolved, while one proposed harness comparison was
+  reconciled as comparing distinct governance and harness candidate identity
+  domains. Validation passes 38 harness, 46 certification, 12 cross-CLI, 23
+  evaluator, six remote-subject, 58 dashboard-contract, and 162 dashboard
+  checks. No installed generation, launchd state, halt state, or live writable
+  state changed. Structured refusal projection, one real report-only subject,
+  rollback, and live proof remain gated.
 - Governance work remaining: bootstrap the sealed inputs for the real zero-use
   cohort through the reviewed remote-subject bridge, progress that cohort
   through reviewed readiness, then execute the evaluation queue under explicit
