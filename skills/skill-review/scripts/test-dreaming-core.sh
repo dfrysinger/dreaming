@@ -824,6 +824,10 @@ class RuntimeTest(unittest.TestCase):
                     "instance_id": instance_id,
                     "canonical_capability_id": capability_id,
                     "absolute_path": str(skill),
+                    "host_id": "fixture-host",
+                    "root_id": "fixture-root",
+                    "relative_path": f"skill-{position}",
+                    "inventory_sha256": f"inventory-{position}",
                     "root_class": root_class,
                     "owner": "plugin-1" if position == 5 else None,
                     "evaluation": {
@@ -962,6 +966,93 @@ class RuntimeTest(unittest.TestCase):
             by_id[capability_ids[3]]["queue_reason"],
             "regression_or_routing_conflict",
         )
+        overlay_rows = []
+        for item in physical:
+            identity_fields = {
+                "origin_host_id": item["host_id"],
+                "origin_root_id": item["root_id"],
+                "origin_relative_path": item["relative_path"],
+            }
+            overlay_rows.append(
+                {
+                    "capability_id": item["canonical_capability_id"],
+                    "subject_key": runtime_module.digest(identity_fields),
+                    **identity_fields,
+                    "origin_path": item["absolute_path"],
+                    "canonical_capability_id": item[
+                        "canonical_capability_id"
+                    ],
+                    "origin_inventory_sha256": item["inventory_sha256"],
+                    "candidate_id": None,
+                    "superseded_candidate_ids": [],
+                    "snapshot_state": "remote_candidate_not_fetched",
+                    "content_path": None,
+                    "transport_receipt_sha256": None,
+                    "evaluation": None,
+                }
+            )
+        overlay = {
+            "schema_version": 1,
+            "kind": "remote_evaluation_overlay",
+            "census_snapshot_sha256": census["snapshot_sha256"],
+            "census_receipt_sha256": census_receipt_sha256,
+            "usage_snapshot_sha256": usage["snapshot_sha256"],
+            "usage_receipt_sha256": usage_receipt_sha256,
+            "receiver": receipt_receiver,
+            "origin_host_id": census["host_id"],
+            "evaluator_sha256": "sha256:" + "e" * 64,
+            "registry_identity": (
+                runtime_module.EVALUATION_OVERLAY_REGISTRY_IDENTITY
+            ),
+            "rows": overlay_rows,
+        }
+        overlay["overlay_sha256"] = runtime_module.digest(overlay)
+        remote_queue = runtime_module.derive_evaluation_input_queue(
+            owner,
+            census,
+            usage,
+            receiver,
+            census_receipt_sha256=census_receipt_sha256,
+            usage_receipt_sha256=usage_receipt_sha256,
+            evaluation_overlay=overlay,
+        )
+        remote_by_id = {
+            row["capability_id"]: row for row in remote_queue["rows"]
+        }
+        self.assertEqual(
+            remote_by_id[capability_ids[0]]["required_phase"], "transport"
+        )
+        self.assertEqual(
+            remote_by_id[capability_ids[0]]["runnable_phase"], "transport"
+        )
+        self.assertEqual(
+            remote_by_id[capability_ids[0]]["evaluation_state"], "missing"
+        )
+        self.assertEqual(
+            remote_by_id[capability_ids[0]]["snapshot_state"],
+            "remote_candidate_not_fetched",
+        )
+        forged_overlay = json.loads(json.dumps(overlay))
+        forged_overlay["rows"].pop()
+        forged_overlay["overlay_sha256"] = runtime_module.digest(
+            {
+                key: value
+                for key, value in forged_overlay.items()
+                if key != "overlay_sha256"
+            }
+        )
+        with self.assertRaisesRegex(
+            RuntimeFailure, "does not cover the enabled estate"
+        ):
+            runtime_module.derive_evaluation_input_queue(
+                owner,
+                census,
+                usage,
+                receiver,
+                census_receipt_sha256=census_receipt_sha256,
+                usage_receipt_sha256=usage_receipt_sha256,
+                evaluation_overlay=forged_overlay,
+            )
         content_files[capability_ids[1]]["suite"].write_text("{}")
         rescanned = runtime_module.derive_evaluation_input_queue(
             owner,

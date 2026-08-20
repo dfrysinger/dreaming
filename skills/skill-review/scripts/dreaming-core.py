@@ -122,6 +122,11 @@ EVALUATION_INPUT_MAX_CONTROL_BYTES = 64_000
 EVALUATION_INPUT_MAX_FILE_BYTES = 1_048_576
 EVALUATION_INPUT_OWNER_MAX_SECONDS = 25 * 60
 EVALUATION_INPUT_OWNER_STOP_SECONDS = 10
+EVALUATION_OVERLAY_REGISTRY_IDENTITY = {
+    "claim_schema_version": 4,
+    "input_registry_schema_version": 1,
+    "runner_version": "skill-evaluation-runner-1",
+}
 REMOTE_SUBJECT_STORE_MAX_BYTES = 1024 * 1024 * 1024
 REMOTE_SUBJECT_FREE_SPACE_RESERVE = 256 * 1024 * 1024
 REMOTE_SUBJECT_MAX_DECODED_BYTES = 32 * 1024 * 1024
@@ -4138,6 +4143,233 @@ def evaluation_input_queue_priority(
     return None
 
 
+def valid_overlay_evaluation(value: Any) -> bool:
+    return (
+        isinstance(value, dict)
+        and set(value)
+        == {
+            "state",
+            "status",
+            "current",
+            "evaluated_at",
+            "receipt_sha256",
+            "transition_id",
+            "input_manifest_sha256",
+            "cases",
+        }
+        and value.get("state") in EVALUATION_INPUT_QUEUE_STATES
+        and isinstance(value.get("status"), str)
+        and isinstance(value.get("current"), bool)
+        and (
+            value.get("evaluated_at") is None
+            or isinstance(value.get("evaluated_at"), str)
+        )
+        and (
+            value.get("receipt_sha256") is None
+            or re.fullmatch(
+                r"[0-9a-f]{64}", str(value.get("receipt_sha256"))
+            )
+            is not None
+        )
+        and (
+            value.get("transition_id") is None
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}", str(value.get("transition_id"))
+            )
+            is not None
+        )
+        and (
+            value.get("input_manifest_sha256") is None
+            or re.fullmatch(
+                r"sha256:[0-9a-f]{64}",
+                str(value.get("input_manifest_sha256")),
+            )
+            is not None
+        )
+        and isinstance(value.get("cases"), list)
+    )
+
+
+def validate_remote_evaluation_overlay(
+    overlay: Any,
+    census: dict[str, Any],
+    usage: dict[str, Any],
+    receiver: dict[str, Any],
+    *,
+    census_receipt_sha256: str,
+    usage_receipt_sha256: str,
+    enabled_capability_ids: set[str],
+) -> dict[str, dict[str, Any]]:
+    if not isinstance(overlay, dict):
+        raise RuntimeFailure(
+            "evaluation-overlay-invalid",
+            "remote evaluation overlay is unavailable",
+        )
+    fields = {
+        "schema_version",
+        "kind",
+        "census_snapshot_sha256",
+        "census_receipt_sha256",
+        "usage_snapshot_sha256",
+        "usage_receipt_sha256",
+        "receiver",
+        "origin_host_id",
+        "evaluator_sha256",
+        "registry_identity",
+        "rows",
+        "overlay_sha256",
+    }
+    receiver_identity = {
+        key: receiver.get(key)
+        for key in ("collector_sha256", "receiver_id", "receiver_sha256")
+    }
+    without_identity = {
+        key: value for key, value in overlay.items() if key != "overlay_sha256"
+    }
+    if (
+        set(overlay) != fields
+        or overlay.get("schema_version") != 1
+        or overlay.get("kind") != "remote_evaluation_overlay"
+        or overlay.get("census_snapshot_sha256")
+        != census.get("snapshot_sha256")
+        or overlay.get("census_receipt_sha256") != census_receipt_sha256
+        or overlay.get("usage_snapshot_sha256")
+        != usage.get("snapshot_sha256")
+        or overlay.get("usage_receipt_sha256") != usage_receipt_sha256
+        or overlay.get("receiver") != receiver_identity
+        or overlay.get("origin_host_id") != census.get("host_id")
+        or re.fullmatch(
+            r"sha256:[0-9a-f]{64}", str(overlay.get("evaluator_sha256"))
+        )
+        is None
+        or overlay.get("registry_identity")
+        != EVALUATION_OVERLAY_REGISTRY_IDENTITY
+        or overlay.get("overlay_sha256") != digest(without_identity)
+        or not isinstance(overlay.get("rows"), list)
+    ):
+        raise RuntimeFailure(
+            "evaluation-overlay-invalid",
+            "remote evaluation overlay identity is malformed or cross-run",
+        )
+    by_capability: dict[str, dict[str, Any]] = {}
+    row_fields = {
+        "capability_id",
+        "subject_key",
+        "origin_host_id",
+        "origin_root_id",
+        "origin_relative_path",
+        "origin_path",
+        "canonical_capability_id",
+        "origin_inventory_sha256",
+        "candidate_id",
+        "superseded_candidate_ids",
+        "snapshot_state",
+        "content_path",
+        "transport_receipt_sha256",
+        "evaluation",
+    }
+    for row in overlay["rows"]:
+        if not isinstance(row, dict) or set(row) != row_fields:
+            raise RuntimeFailure(
+                "evaluation-overlay-invalid",
+                "remote evaluation overlay row is malformed",
+            )
+        capability_id = row.get("capability_id")
+        identity_fields = {
+            "origin_host_id": row.get("origin_host_id"),
+            "origin_root_id": row.get("origin_root_id"),
+            "origin_relative_path": row.get("origin_relative_path"),
+        }
+        relative = Path(str(row.get("origin_relative_path")))
+        expected_subject_key = (
+            digest(identity_fields)
+            if all(isinstance(value, str) and value for value in identity_fields.values())
+            else None
+        )
+        state = row.get("snapshot_state")
+        superseded = row.get("superseded_candidate_ids")
+        if (
+            not isinstance(capability_id, str)
+            or capability_id in by_capability
+            or row.get("canonical_capability_id") != capability_id
+            or row.get("origin_host_id") != census.get("host_id")
+            or expected_subject_key is None
+            or row.get("subject_key") != expected_subject_key
+            or relative.is_absolute()
+            or relative.as_posix() != row.get("origin_relative_path")
+            or any(part in {"", ".", ".."} for part in relative.parts)
+            or not isinstance(row.get("origin_path"), str)
+            or not row["origin_path"]
+            or not isinstance(row.get("origin_inventory_sha256"), str)
+            or not row["origin_inventory_sha256"]
+            or not isinstance(superseded, list)
+            or len(superseded) != len(set(superseded))
+            or not all(
+                re.fullmatch(r"sha256:[0-9a-f]{64}", str(item)) is not None
+                for item in superseded
+            )
+            or state
+            not in {
+                "remote_candidate_not_fetched",
+                "remote_candidate_changed",
+                "remote_candidate_snapshot_ready",
+                "remote_candidate_refused",
+            }
+        ):
+            raise RuntimeFailure(
+                "evaluation-overlay-invalid",
+                "remote evaluation overlay subject identity is malformed",
+            )
+        if state == "remote_candidate_snapshot_ready":
+            content_path = Path(str(row.get("content_path")))
+            if (
+                re.fullmatch(
+                    r"sha256:[0-9a-f]{64}", str(row.get("candidate_id"))
+                )
+                is None
+                or not isinstance(row.get("content_path"), str)
+                or not row["content_path"]
+                or content_path.name != "candidate"
+                or content_path.parent.name
+                != str(row["candidate_id"]).removeprefix("sha256:")
+                or content_path.parent.parent.name
+                != str(row["subject_key"]).removeprefix("sha256:")
+                or re.fullmatch(
+                    r"sha256:[0-9a-f]{64}",
+                    str(row.get("transport_receipt_sha256")),
+                )
+                is None
+                or not valid_overlay_evaluation(row.get("evaluation"))
+            ):
+                raise RuntimeFailure(
+                    "evaluation-overlay-invalid",
+                    "ready remote evaluation overlay row is incomplete",
+                )
+        elif (
+            row.get("candidate_id") is not None
+            or row.get("content_path") is not None
+            or row.get("transport_receipt_sha256") is not None
+            or row.get("evaluation") is not None
+            or (
+                state == "remote_candidate_not_fetched" and superseded
+            )
+            or (
+                state == "remote_candidate_changed" and not superseded
+            )
+        ):
+            raise RuntimeFailure(
+                "evaluation-overlay-invalid",
+                "non-ready remote evaluation overlay grants local authority",
+            )
+        by_capability[capability_id] = row
+    if set(by_capability) != enabled_capability_ids:
+        raise RuntimeFailure(
+            "evaluation-overlay-invalid",
+            "remote evaluation overlay does not cover the enabled estate",
+        )
+    return by_capability
+
+
 def derive_evaluation_input_queue(
     owner: dict[str, Any],
     census: dict[str, Any],
@@ -4146,6 +4378,7 @@ def derive_evaluation_input_queue(
     *,
     census_receipt_sha256: str,
     usage_receipt_sha256: str,
+    evaluation_overlay: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     census_snapshot = {
         key: value for key, value in census.items() if key != "snapshot_sha256"
@@ -4332,6 +4565,19 @@ def derive_evaluation_input_queue(
             "evaluation-input-evidence-invalid",
             "evaluation-input usage inventory does not cover the enabled estate",
         )
+    overlay_by_capability = (
+        validate_remote_evaluation_overlay(
+            evaluation_overlay,
+            census,
+            usage,
+            receiver,
+            census_receipt_sha256=census_receipt_sha256,
+            usage_receipt_sha256=usage_receipt_sha256,
+            enabled_capability_ids=set(enabled_by_capability),
+        )
+        if evaluation_overlay is not None
+        else None
+    )
     routing_conflict_instances = {
         instance_id
         for item in unresolved
@@ -4401,6 +4647,47 @@ def derive_evaluation_input_queue(
                 "current": False,
                 "cases": [],
             }
+        overlay_row = (
+            overlay_by_capability.get(capability_id)
+            if overlay_by_capability is not None
+            else None
+        )
+        if overlay_by_capability is not None:
+            if representative is None or overlay_row is None:
+                raise RuntimeFailure(
+                    "evaluation-overlay-invalid",
+                    "remote evaluation overlay cannot resolve one physical subject",
+                )
+            if (
+                overlay_row["origin_host_id"] != representative.get("host_id")
+                or overlay_row["origin_root_id"] != representative.get("root_id")
+                or overlay_row["origin_relative_path"]
+                != representative.get("relative_path")
+                or overlay_row["origin_path"]
+                != representative.get("absolute_path")
+                or overlay_row["canonical_capability_id"]
+                != representative.get("canonical_capability_id")
+                or overlay_row["origin_inventory_sha256"]
+                != representative.get("inventory_sha256")
+            ):
+                raise RuntimeFailure(
+                    "evaluation-overlay-invalid",
+                    "remote evaluation overlay differs from the census subject",
+                )
+            evaluation = (
+                overlay_row["evaluation"]
+                if overlay_row["evaluation"] is not None
+                else {
+                    "state": "missing",
+                    "status": overlay_row["snapshot_state"],
+                    "current": False,
+                    "evaluated_at": None,
+                    "receipt_sha256": None,
+                    "transition_id": None,
+                    "input_manifest_sha256": None,
+                    "cases": [],
+                }
+            )
         usage_state = evaluation_input_usage_state(
             capability_id, usage, usage_by_capability[capability_id]
         )
@@ -4436,12 +4723,29 @@ def derive_evaluation_input_queue(
         if representative is None:
             deferral_reason = "capability_path_ambiguous"
         else:
-            skill_path = Path(representative["absolute_path"])
+            skill_path = Path(
+                overlay_row["content_path"]
+                if overlay_row is not None
+                and overlay_row["content_path"] is not None
+                else representative["absolute_path"]
+            )
+            needs_transport = (
+                overlay_row is not None
+                and overlay_row["snapshot_state"]
+                in {
+                    "remote_candidate_not_fetched",
+                    "remote_candidate_changed",
+                }
+            )
             try:
-                resolved_skill = skill_path.resolve(strict=True)
+                resolved_skill = (
+                    None if needs_transport else skill_path.resolve(strict=True)
+                )
             except OSError:
                 resolved_skill = None
-            if (
+            if needs_transport:
+                pass
+            elif (
                 skill_path.is_symlink()
                 or resolved_skill is None
                 or resolved_skill != skill_path
@@ -4467,7 +4771,14 @@ def derive_evaluation_input_queue(
                         raise
                     deferral_reason = "input_not_ready"
         required_phase = (
-            "authoring"
+            "transport"
+            if overlay_row is not None
+            and overlay_row["snapshot_state"]
+            in {
+                "remote_candidate_not_fetched",
+                "remote_candidate_changed",
+            }
+            else "authoring"
             if evaluation["state"]
             in {
                 "missing",
@@ -4487,10 +4798,26 @@ def derive_evaluation_input_queue(
                 "queue_reason": priority[1],
                 "usage_state": usage_state,
                 "evaluation_state": evaluation["state"],
+                "subject_key": (
+                    overlay_row["subject_key"]
+                    if overlay_row is not None
+                    else None
+                ),
+                "origin_host_id": (
+                    overlay_row["origin_host_id"]
+                    if overlay_row is not None
+                    else census.get("host_id")
+                ),
+                "snapshot_state": (
+                    overlay_row["snapshot_state"]
+                    if overlay_row is not None
+                    else "local_candidate"
+                ),
                 "required_phase": required_phase,
                 "runnable_phase": (
-                    "authoring"
-                    if deferral_reason is None and required_phase == "authoring"
+                    required_phase
+                    if deferral_reason is None
+                    and required_phase in {"transport", "authoring"}
                     else None
                 ),
                 "deferral_reason": (
@@ -4510,6 +4837,11 @@ def derive_evaluation_input_queue(
         "census_receipt_sha256": census_receipt_sha256,
         "usage_snapshot_sha256": usage["snapshot_sha256"],
         "usage_receipt_sha256": usage_receipt_sha256,
+        "evaluation_overlay_sha256": (
+            evaluation_overlay["overlay_sha256"]
+            if evaluation_overlay is not None
+            else None
+        ),
         "rows": rows,
     }
 
