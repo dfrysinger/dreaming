@@ -409,6 +409,7 @@ else:
                 {
                     "schema_version": 1,
                     "task_id": "task-one",
+                    "task": "Complete the supplied formatting task.",
                     "rubric": rubric,
                     "A": "complete response",
                     "B": "incomplete response",

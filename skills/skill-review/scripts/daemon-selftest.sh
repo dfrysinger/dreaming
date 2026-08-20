@@ -182,6 +182,7 @@ for script in daemon-pass.sh daemon-run.sh daemon-lock.sh daemon-lock.py \
   evidence-envelope.py append-skill-evidence.sh mark-agent-created.sh \
   test-evidence-envelope.sh skill-evaluation.py run-skill-evaluation.sh \
   test-skill-evaluation.sh test-cross-cli-evaluation.sh \
+  build-evaluation-input-source.py test-evaluation-input-source-builder.sh \
   skill-evaluation-harness.py fake-skill-evaluation-adapter.py \
   test-skill-evaluation-harness.sh test-skill-evaluation-vendor-adapters.sh \
   test-dreaming-certification.sh; do
@@ -286,6 +287,11 @@ if run_isolated_test "$SCRIPT_DIR/test-cross-cli-evaluation.sh" >>"$RESULT" 2>&1
   ok "deterministic cross-CLI evaluation checks"
 else
   bad "deterministic cross-CLI evaluation checks"
+fi
+if run_isolated_test "$SCRIPT_DIR/test-evaluation-input-source-builder.sh" >>"$RESULT" 2>&1; then
+  ok "deterministic evaluation-input source-builder checks"
+else
+  bad "deterministic evaluation-input source-builder checks"
 fi
 if run_isolated_test "$SCRIPT_DIR/test-skill-evaluation-harness.sh" >>"$RESULT" 2>&1; then
   ok "deterministic trial-harness checks"

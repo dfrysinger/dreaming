@@ -76,6 +76,53 @@ def canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode()
 
 
+def normalized_identity_text(value: str) -> str:
+    with_boundaries = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value)
+    with_boundaries = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", with_boundaries)
+    return re.sub(r"[\W_]+", " ", with_boundaries.casefold()).strip()
+
+
+def leaks_identity_marker(markers: list[str], *values: str) -> bool:
+    identity_suffixes = ("s", "es", "ing", "ed", "er", "ers", "based", "gen")
+    for marker in markers:
+        normalized_marker = normalized_identity_text(marker)
+        if not normalized_marker:
+            if any(marker.casefold() in value.casefold() for value in values):
+                return True
+            continue
+        compact_marker = normalized_marker.replace(" ", "")
+        for value in values:
+            normalized_value = normalized_identity_text(value)
+            if f" {normalized_marker} " in f" {normalized_value} ":
+                return True
+            if " " not in compact_marker and any(
+                token == compact_marker + suffix
+                for token in normalized_value.split()
+                for suffix in identity_suffixes
+            ):
+                return True
+            if (
+                len(compact_marker) >= 8
+                and compact_marker in normalized_value.replace(" ", "")
+            ):
+                return True
+    return False
+
+
+def text_leaf_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        return [
+            text
+            for child in [*value.keys(), *value.values()]
+            for text in text_leaf_values(child)
+        ]
+    if isinstance(value, list):
+        return [text for child in value for text in text_leaf_values(child)]
+    return []
+
+
 def sha_bytes(value: bytes) -> str:
     return "sha256:" + hashlib.sha256(value).hexdigest()
 
@@ -319,7 +366,9 @@ def validate_suite(suite: dict[str, Any], manifest: dict[str, Any], inventory: l
         raise HarnessError("grader set identity mismatch")
     if sha(suite["graders"]) != suite["grader_set_id"]:
         raise HarnessError("grader set digest does not bind the grader definitions")
-    if not isinstance(suite["identity_markers"], list) or not all(isinstance(x, str) and x for x in suite["identity_markers"]):
+    if not isinstance(suite["identity_markers"], list) or not all(
+        isinstance(x, str) and x.strip() for x in suite["identity_markers"]
+    ):
         raise HarnessError("identity_markers must be text")
     if sha(suite["rubric"]) != manifest["comparator"]["rubric_id"]:
         raise HarnessError("rubric identity mismatch")
@@ -982,10 +1031,18 @@ def comparator_packet(result: Path, case: dict[str, Any], assignment: dict[str, 
         arm = by_arm[assignment[label]]
         trial_dir = result / "trials" / arm["trial_id"].removeprefix("sha256:")
         outputs[label] = final_text(trace_from(trial_dir / "trace.json"))
-    packet = {"schema_version": CONTRACT_VERSION, "task_id": case["task_id"], "rubric": suite["rubric"],
-              "A": outputs["A"], "B": outputs["B"]}
-    encoded = canonical(packet).decode("utf-8")
-    if [marker for marker in suite["identity_markers"] if marker in encoded]:
+    packet = {
+        "schema_version": CONTRACT_VERSION,
+        "task_id": case["task_id"],
+        "task": case["prompt"],
+        "rubric": suite["rubric"],
+        "A": outputs["A"],
+        "B": outputs["B"],
+    }
+    if leaks_identity_marker(
+        suite["identity_markers"],
+        *text_leaf_values(list(packet.values())),
+    ):
         return None
     return packet
 

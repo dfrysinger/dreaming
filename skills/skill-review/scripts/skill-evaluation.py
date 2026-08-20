@@ -83,7 +83,7 @@ AUTHORING_CATALOG_SCHEMA_VERSION = 1
 AUTHORING_PACKET_SCHEMA_VERSION = 1
 TRUSTED_MODEL_ENVIRONMENT_VERSION = 1
 TRUSTED_AUTHORING_ADAPTER_SHA256 = (
-    "sha256:8679d5fb613194abe57164d2fdfdb19d23057d2d92289c8f6d6515ac41857648"
+    "sha256:dc2b6813539d4df31f4f53c88415d3c688d0cbab7ad8e4a8e5c54f0083659a67"
 )
 AUTHORING_FIXTURE_SOURCE_KINDS = {"public", "synthetic"}
 AUTHORING_MAX_SKILL_CONTRACT_BYTES = 131_072
@@ -215,6 +215,39 @@ def now_iso() -> str:
 
 def canonical(value: Any) -> bytes:
     return json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
+
+
+def normalized_identity_text(value: str) -> str:
+    with_boundaries = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", " ", value)
+    with_boundaries = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", " ", with_boundaries)
+    return re.sub(r"[\W_]+", " ", with_boundaries.casefold()).strip()
+
+
+def leaks_identity_marker(markers: list[str], *values: str) -> bool:
+    identity_suffixes = ("s", "es", "ing", "ed", "er", "ers", "based", "gen")
+    for marker in markers:
+        normalized_marker = normalized_identity_text(marker)
+        if not normalized_marker:
+            if any(marker.casefold() in value.casefold() for value in values):
+                return True
+            continue
+        compact_marker = normalized_marker.replace(" ", "")
+        for value in values:
+            normalized_value = normalized_identity_text(value)
+            if f" {normalized_marker} " in f" {normalized_value} ":
+                return True
+            if " " not in compact_marker and any(
+                token == compact_marker + suffix
+                for token in normalized_value.split()
+                for suffix in identity_suffixes
+            ):
+                return True
+            if (
+                len(compact_marker) >= 8
+                and compact_marker in normalized_value.replace(" ", "")
+            ):
+                return True
+    return False
 
 
 def shadow_canonical(value: Any) -> bytes:
@@ -2062,6 +2095,13 @@ def build_input_author_packet(
     harness_sha = sha256_file(harness)
     config_path = resolve_path(Path(args.config), "compilation config")
     config, _ = validate_compilation_config(config_path, suite, policy, harness_sha)
+    for index, case in enumerate(suite["cases"]):
+        if leaks_identity_marker(
+            config["identity_markers"], case["task_id"], case["prompt"]
+        ):
+            raise EvaluationError(
+                f"suite template.cases[{index}] leaks an identity marker"
+            )
     routing = validate_routing(
         resolve_path(Path(args.routing), "routing config"),
         config["executors"],
@@ -2254,6 +2294,10 @@ def validate_input_author_draft_value(
         )
         if prompt in prompts:
             raise EvaluationError(f"{field}.prompt duplicates another case prompt")
+        if leaks_identity_marker(
+            context["config"]["identity_markers"], task_id, prompt
+        ):
+            raise EvaluationError(f"{field} leaks an identity marker")
         task_ids.add(task_id)
         prompts.add(prompt)
         if task_id != template["task_id"] or prompt != template["prompt"]:
@@ -2851,7 +2895,8 @@ def validate_authoring_provenance(
         {
             "suite": template_suite,
             "config": {
-                "case_runtime": packet["compilation_contract"]["case_runtime"]
+                "case_runtime": packet["compilation_contract"]["case_runtime"],
+                "identity_markers": config["identity_markers"],
             },
         },
     )
@@ -7643,7 +7688,9 @@ def validate_compilation_config(
         for key in limits
     }
     markers = raw.get("identity_markers")
-    if not isinstance(markers, list) or not markers or not all(isinstance(item, str) and item for item in markers):
+    if not isinstance(markers, list) or not markers or not all(
+        isinstance(item, str) and item.strip() for item in markers
+    ):
         raise EvaluationError("compilation.identity_markers must be a non-empty text list")
     if len(set(markers)) != len(markers):
         raise EvaluationError("compilation.identity_markers cannot contain duplicates")

@@ -114,6 +114,7 @@ make_run() {
   local required_count="${8:-$executors}"
   local output_bytes="${9:-100000}"
   local comparator_timeout="${10:-120}"
+  local rubric_marker="${11:-none}"
   mkdir -p "$root/candidate" "$root/fixtures" "$root/graders"
   cat > "$root/candidate/SKILL.md" <<'EOF'
 ---
@@ -124,10 +125,10 @@ EOF
   printf 'fixture\n' > "$root/fixtures/input.txt"
   python3 - "$root" "$fixture" "$profile" "$executors" "$timeout" "$HARNESS" "$ADAPTER" \
       "$command_grader" "$behavior_cases" "$required_count" "$output_bytes" \
-      "$comparator_timeout" <<'PY'
+      "$comparator_timeout" "$rubric_marker" <<'PY'
 import hashlib, json, os, sys
 from pathlib import Path
-root, fixture, profile, executors, timeout, harness, adapter, command_grader, behavior_cases, required_count, output_bytes, comparator_timeout = map(str, sys.argv[1:])
+root, fixture, profile, executors, timeout, harness, adapter, command_grader, behavior_cases, required_count, output_bytes, comparator_timeout, rubric_marker = map(str, sys.argv[1:])
 root = Path(root)
 def canonical(x): return json.dumps(x, sort_keys=True, separators=(",", ":")).encode()
 def sha(x): return "sha256:" + hashlib.sha256(canonical(x)).hexdigest()
@@ -166,7 +167,18 @@ print(json.dumps({"passed": present and token in content,
                        "config":{"argv":["check-artifact.py",token],"timeout_seconds":10,
                                  "program_sha256":file_sha(program)}})
     grader_ids.append("command")
-rubric={"id":"quality","instruction":"Choose the better response only by task quality."}
+rubric=(
+    {"FixtureSkill criterion":"Choose the better response only by task quality."}
+    if rubric_marker == "key"
+    else {
+        "id":"quality",
+        "instruction": (
+            "Judge FixtureSkill by task quality."
+            if rubric_marker == "marker"
+            else "Choose the better response only by task quality."
+        ),
+    }
+)
 cases=[]
 for number in range(int(behavior_cases)):
     cases.append({"id":"behavior" if number==0 else f"behavior-{number+1}","class":"intended",
@@ -226,6 +238,26 @@ run_case() {
   harness_run "$input" "$output" >/dev/null
   printf '%s\n' "$output"
 }
+
+python3 - "$HARNESS" <<'PY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("evaluation_harness", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = module
+spec.loader.exec_module(module)
+assert module.leaks_identity_marker(["fixture-skill"], "Use FixtureSkill")
+assert module.leaks_identity_marker(["fixture-skill"], "Use fixtureskill")
+assert not module.leaks_identity_marker(
+    ["gaw"], "Refactor the parser so that debugging a workflow is easier."
+)
+assert module.leaks_identity_marker(["scout"], "We used scouts to survey.")
+assert module.leaks_identity_marker(["scout"], "Start scouting the repository.")
+assert module.leaks_identity_marker(["gaw"], "Use a gawbased pipeline.")
+assert module.leaks_identity_marker(["pptx"], "Read the pptxgen output.")
+assert module.leaks_identity_marker(["--"], "Keep -- literal")
+PY
 
 chmod +x "$HARNESS" "$ADAPTER"
 export DREAMING_LEAK_CANARY=leaked
@@ -363,6 +395,34 @@ assert comparisons and all(x["status"]=="inconclusive" for x in comparisons)
 assert not list((root/"comparisons").glob("*.response.json"))
 PY
 pass "identity-leaking blind packets are inconclusive before comparator invocation"
+
+rubric_leak_input="$TMP/rubric-leak-input"
+rubric_leak_output="$TMP/rubric-leak-output"
+mkdir -p "$rubric_leak_output"
+make_run "$rubric_leak_input" correct iterate 1 120 none 1 1 100000 120 marker
+harness_run "$rubric_leak_input" "$rubric_leak_output" >/dev/null
+python3 - "$rubric_leak_output" <<'PY'
+import json, sys
+root=__import__("pathlib").Path(sys.argv[1])
+comparisons=[json.load(open(p)) for p in (root/"comparisons").glob("*.json") if not p.name.endswith((".packet.json",".response.json"))]
+assert comparisons and all(x["status"]=="inconclusive" for x in comparisons)
+assert not list((root/"comparisons").glob("*.response.json"))
+PY
+pass "identity markers in the rubric are refused before comparator invocation"
+
+rubric_key_leak_input="$TMP/rubric-key-leak-input"
+rubric_key_leak_output="$TMP/rubric-key-leak-output"
+mkdir -p "$rubric_key_leak_output"
+make_run "$rubric_key_leak_input" correct iterate 1 120 none 1 1 100000 120 key
+harness_run "$rubric_key_leak_input" "$rubric_key_leak_output" >/dev/null
+python3 - "$rubric_key_leak_output" <<'PY'
+import json, sys
+root=__import__("pathlib").Path(sys.argv[1])
+comparisons=[json.load(open(p)) for p in (root/"comparisons").glob("*.json") if not p.name.endswith((".packet.json",".response.json"))]
+assert comparisons and all(x["status"]=="inconclusive" for x in comparisons)
+assert not list((root/"comparisons").glob("*.response.json"))
+PY
+pass "identity markers in rubric keys are refused before comparator invocation"
 
 python3 - "$base" <<'PY'
 import json, sys

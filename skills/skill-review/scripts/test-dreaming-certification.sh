@@ -142,7 +142,7 @@ cases = [
  {"id":"related-case","class":"related","task_id":"related:fixture-0002",
   "prompt":"Preserve the related task.","deterministic_graders":["answer","artifact"]},
  {"id":"activation-positive","class":"activation_positive","task_id":"activate:fixture-0003",
-  "prompt":"Use the fixture skill.","deterministic_graders":["answer","artifact"],
+  "prompt":"Complete the activation task.","deterministic_graders":["answer","artifact"],
   "activation":{"expected_load":True}},
  {"id":"activation-negative","class":"activation_negative","task_id":"activate:fixture-0004",
   "prompt":"Do unrelated work.","deterministic_graders":["answer","artifact"],
@@ -465,6 +465,8 @@ elif mode == "duplicate-task":
     cases[1]["task_id"] = cases[0]["task_id"]
 elif mode == "duplicate-prompt":
     cases[1]["prompt"] = cases[0]["prompt"]
+elif mode == "marker":
+    cases[0]["prompt"] = "Use fixtureskill for this task."
 draft = {
     "schema_version": 1,
     "kind": "safe_evaluation_input_draft",
@@ -2086,14 +2088,31 @@ else:
     raise AssertionError(f"{mode} retained provenance forgery was accepted")
 PY
 done
-for invalid_draft in fixture grader artifact semantic missing sensitive duplicate-task duplicate-prompt; do
+for invalid_draft in fixture grader artifact semantic missing sensitive duplicate-task duplicate-prompt marker; do
   make_authoring_draft "$AUTHORING/packet.json" \
     "$AUTHORING/draft-$invalid_draft.json" "$invalid_draft"
-  expect_refusal "authoring-draft-$invalid_draft" "REFUSED:" \
+  expected="REFUSED:"
+  [[ "$invalid_draft" == "marker" ]] && expected="leaks an identity marker"
+  expect_refusal "authoring-draft-$invalid_draft" "$expected" \
     materialize_authoring "$AUTHORING" "$AUTHORING/packet.json" \
       "$AUTHORING/draft-$invalid_draft.json" \
       "$AUTHORING/materialized-$invalid_draft"
 done
+AUTHORING_TEMPLATE_MARKER="$TMP/authoring-template-marker"
+make_fixture "$AUTHORING_TEMPLATE_MARKER"
+python3 - "$AUTHORING_TEMPLATE_MARKER/skill/.skill-evaluation-cases.json" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+value = json.loads(path.read_text())
+value["cases"][0]["prompt"] = "Use the Fixture Skill for this task."
+path.write_text(json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n")
+PY
+expect_refusal "authoring-template-marker" "leaks an identity marker" \
+  author_packet "$AUTHORING_TEMPLATE_MARKER" \
+    "$AUTHORING_TEMPLATE_MARKER/packet.json"
 expect_refusal "authoring-materialize-inside-skill" "cannot be written inside the skill root" \
   materialize_authoring "$AUTHORING" "$AUTHORING/packet.json" \
     "$AUTHORING/draft.json" "$AUTHORING/skill/materialized"
