@@ -905,6 +905,10 @@ def runtime_contract(candidate: str, cases_sha: str, model: str, cli: str) -> di
 
 def prepare(args: argparse.Namespace) -> dict[str, Any]:
     skill_dir = Path(args.skill_dir).resolve()
+    if remote_evaluation_subject(skill_dir) is not None:
+        raise EvaluationError(
+            "remote evaluation subjects require subject-bound v2 evaluation"
+        )
     run_dir = Path(args.run_dir).resolve()
     plugin = Path(args.plugin_dir).resolve()
     cases_path = Path(args.cases or skill_dir / CASE_FILE).resolve()
@@ -1137,6 +1141,7 @@ def remote_evaluation_subject(skill_dir: Path) -> dict[str, Any] | None:
             for field in (
                 "census_snapshot_sha256",
                 "canonical_capability_id",
+                "origin_inventory_sha256",
                 "candidate_id",
             )
         )
@@ -1244,6 +1249,13 @@ def update_envelope(skill_dir: Path, receipt_path: Path) -> None:
 def finalize(args: argparse.Namespace) -> dict[str, Any]:
     run_dir = Path(args.run_dir).resolve()
     metadata = load_json(run_dir / "metadata.json")
+    skill_dir = Path(
+        require_text(metadata.get("skill_path"), "skill_path")
+    ).resolve()
+    if remote_evaluation_subject(skill_dir) is not None:
+        raise EvaluationError(
+            "remote evaluation subjects require subject-bound v2 evaluation"
+        )
     cases = metadata["cases"]
     runs = {
         "source_baseline": score(
@@ -1344,6 +1356,10 @@ def verify_receipt_bytes(pointer: dict[str, Any]) -> tuple[dict[str, Any], str]:
 
 def gate(args: argparse.Namespace) -> dict[str, Any]:
     skill_dir = Path(args.skill_dir).resolve()
+    if remote_evaluation_subject(skill_dir) is not None:
+        raise EvaluationError(
+            "remote evaluation subjects require subject-bound v2 evaluation"
+        )
     pointer_path = evaluation_dir() / "latest" / f"{latest_key(str(skill_dir))}.json"
     pointer = load_json(pointer_path)
     if pointer.get("skill_path") != str(skill_dir):
@@ -1436,6 +1452,10 @@ def verify_evaluation_anchor(receipt: dict[str, Any], skill_dir: Path) -> None:
 
 def waive(args: argparse.Namespace) -> dict[str, Any]:
     skill_dir = Path(args.skill_dir).resolve()
+    if remote_evaluation_subject(skill_dir) is not None:
+        raise EvaluationError(
+            "remote evaluation subjects require subject-bound v2 evaluation"
+        )
     base_path = Path(args.base_receipt).resolve()
     if base_path.parent != (evaluation_dir() / "receipts").resolve():
         raise EvaluationError("base receipt must come from the evaluation receipt store")

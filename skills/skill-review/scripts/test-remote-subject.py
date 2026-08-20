@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import argparse
 import importlib.util
 import json
 import os
@@ -187,6 +188,81 @@ class RemoteSubjectTest(unittest.TestCase):
             "candidate identity is stale",
         ):
             evaluation.latest_key(str(candidate))
+
+    def test_remote_subject_refuses_legacy_authority_and_bad_inventory_id(
+        self,
+    ) -> None:
+        response, request, receiver = self.response()
+        published = core.publish_remote_subject_snapshot(
+            response,
+            request,
+            receiver,
+            POLICY,
+            self.store,
+            installed_skill_roots=[self.installed],
+        )
+        candidate = Path(published["candidate_root"])
+        with self.assertRaisesRegex(
+            evaluation.EvaluationError, "subject-bound v2 evaluation"
+        ):
+            evaluation.prepare(
+                argparse.Namespace(
+                    skill_dir=str(candidate),
+                    run_dir=str(self.root / "legacy-run"),
+                    plugin_dir=str(self.root / "legacy-plugin"),
+                    cases=None,
+                    model="fixture-model",
+                )
+            )
+        for command, arguments in (
+            (
+                evaluation.gate,
+                argparse.Namespace(skill_dir=str(candidate)),
+            ),
+            (
+                evaluation.waive,
+                argparse.Namespace(
+                    skill_dir=str(candidate),
+                    base_receipt=str(self.root / "missing"),
+                ),
+            ),
+            (
+                evaluation.current_gate,
+                argparse.Namespace(skill_dir=str(candidate)),
+            ),
+        ):
+            with self.assertRaisesRegex(
+                evaluation.EvaluationError, "subject-bound v2 evaluation"
+            ):
+                command(arguments)
+        run_dir = self.root / "legacy-finalize"
+        run_dir.mkdir()
+        (run_dir / "metadata.json").write_text(
+            json.dumps({"skill_path": str(candidate)}), encoding="utf-8"
+        )
+        with self.assertRaisesRegex(
+            evaluation.EvaluationError, "subject-bound v2 evaluation"
+        ):
+            evaluation.finalize(argparse.Namespace(run_dir=str(run_dir)))
+
+        receipt_path = candidate.parent / "transport-receipt.json"
+        receipt = json.loads(receipt_path.read_bytes())
+        receipt["subject"]["origin_inventory_sha256"] = "not-a-sha256"
+        receipt_identity = {
+            key: value
+            for key, value in receipt.items()
+            if key != "receipt_sha256"
+        }
+        receipt["receipt_sha256"] = "sha256:" + evaluation.digest(
+            evaluation.canonical(receipt_identity)
+        )
+        os.chmod(candidate.parent, 0o700)
+        os.chmod(receipt_path, 0o600)
+        receipt_path.write_bytes(evaluation.canonical(receipt))
+        with self.assertRaisesRegex(
+            evaluation.EvaluationError, "subject identity is invalid"
+        ):
+            evaluation.remote_evaluation_subject(candidate)
 
     def test_builds_current_bootstrap_and_changed_overlay_rows(self) -> None:
         response, request, receiver = self.response()
