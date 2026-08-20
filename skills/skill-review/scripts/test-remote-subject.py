@@ -29,6 +29,9 @@ estate = load_module("dreaming_estate_remote_subject", SCRIPT_DIR / "dreaming-es
 evaluation = load_module(
     "skill_evaluation_remote_subject", SCRIPT_DIR / "skill-evaluation.py"
 )
+dashboard = load_module(
+    "dreaming_dashboard_remote_subject", SCRIPT_DIR / "dreaming-dashboard.py"
+)
 POLICY = SCRIPT_DIR.parent / "references" / "remote-subject-content-policy-v1.json"
 
 
@@ -240,7 +243,7 @@ class RemoteSubjectTest(unittest.TestCase):
         self.assertEqual(row["candidate_id"], published["candidate_id"])
         self.assertEqual(row["content_path"], published["candidate_root"])
         self.assertEqual(row["evaluation"]["state"], "input_missing")
-        overlay_store = self.root / "state" / "evaluation-overlays"
+        overlay_store = self.root / "state" / "evaluation-input-overlays"
         overlay_path = core.publish_remote_evaluation_overlay(
             overlay, overlay_store
         )
@@ -250,6 +253,81 @@ class RemoteSubjectTest(unittest.TestCase):
             overlay_path,
         )
         self.assertEqual(overlay_path.stat().st_mode & 0o777, 0o400)
+        self.assertFalse(
+            (self.root / "state" / "evaluation-input-overlay-current.json").exists()
+        )
+        core.promote_remote_evaluation_overlay(
+            overlay,
+            overlay_store,
+            census,
+            usage,
+            receiver,
+            census_receipt_sha256=overlay["census_receipt_sha256"],
+            usage_receipt_sha256=overlay["usage_receipt_sha256"],
+            enabled_capability_ids={capability_id},
+            transport_receiver=overlay["transport_receiver"],
+        )
+        pointer = core.read_json(
+            self.root / "state" / "evaluation-input-overlay-current.json",
+            None,
+        )
+        pointer_identity = {
+            key: value
+            for key, value in pointer.items()
+            if key != "pointer_sha256"
+        }
+        self.assertEqual(pointer["overlay_sha256"], overlay["overlay_sha256"])
+        self.assertEqual(
+            pointer["census_receipt_sha256"],
+            overlay["census_receipt_sha256"],
+        )
+        self.assertEqual(pointer["pointer_sha256"], core.digest(pointer_identity))
+        (self.root / "state" / "adapters.json").write_text(
+            json.dumps(
+                {
+                    "evaluation_input_owner": {"enabled": True},
+                    "remote_evaluation_subjects": {
+                        "enabled": True,
+                        "protocol_version": 1,
+                        "origin_host_id": census["host_id"],
+                        "receiver": receiver,
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        paths = dashboard.DashboardPaths(
+            state=self.root / "state",
+            control_state=self.root / "control",
+            review_state=self.root / "review",
+            orchestrator_state=self.root / "orchestrator",
+            data=self.root / "data",
+            skills=self.root / "skills",
+            repo=SCRIPT_DIR.parents[2],
+            assets=SCRIPT_DIR.parent / "assets" / "dashboard",
+            token=self.root / "token",
+        )
+        projected = dashboard.DashboardData(paths)._estate_remote_evaluation(
+            census,
+            {
+                key: receiver[key]
+                for key in (
+                    "receiver_id",
+                    "receiver_sha256",
+                    "collector_sha256",
+                )
+            },
+            overlay["census_receipt_sha256"],
+            {
+                "_snapshot_sha256": usage["snapshot_sha256"],
+                "_receipt_sha256": overlay["usage_receipt_sha256"],
+            },
+        )
+        self.assertEqual(projected["status"], "current")
+        self.assertEqual(
+            projected["_rows"][capability_id]["candidate_id"],
+            published["candidate_id"],
+        )
 
         empty_store = self.root / "state" / "empty-remote-subjects"
         empty_store.mkdir(mode=0o700)

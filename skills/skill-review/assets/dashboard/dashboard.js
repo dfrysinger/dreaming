@@ -89,9 +89,9 @@ function fullTime(value) {
 
 function badge(value) {
   const normalized = text(value).toLowerCase();
-  const className = ["healthy", "ok", "pass", "current", "completed", "inspected"].some(word => normalized.includes(word))
-    ? "ok" : ["failed", "error", "regression", "unhealthy", "invalid"].some(word => normalized.includes(word))
-    ? "bad" : "warn";
+  const className = ["failed", "error", "regression", "unhealthy", "invalid"].some(word => normalized.includes(word))
+    ? "bad" : ["healthy", "ok", "pass", "current", "completed", "inspected"].some(word => normalized.includes(word))
+    ? "ok" : "warn";
   return `<span class="badge ${className}">${esc(value)}</span>`;
 }
 
@@ -274,6 +274,7 @@ async function renderEstate() {
     </tbody></table></article>`;
   const queue = data.portfolio_decisions || [];
   const evaluationQueue = data.evaluation_queue || {};
+  const remote = data.remote_evaluation || {configured:false};
   const decisionPanel = `<article class="panel full-span portfolio-queue"><div class="panel-head"><h2>Decision queue</h2><span>${number(evaluationQueue.queued)} evaluations waiting · ${number(queue.length)} enabled capabilities</span></div>
     <div class="toolbar"><input class="control" id="portfolio-query" placeholder="Filter skills or reasons"><select class="control" id="portfolio-filter"><option value="">All decisions</option><option value="needs-decision">Needs your decision</option><option value="failed">Evaluation failed</option><option value="needs-evaluation">Evaluation missing or stale</option><option value="unused-30">Unused 30 days</option><option value="unused-90">Unused 90 days</option><option value="plugin">Plugin skills</option><option value="protected">Protected dependencies</option><option value="insufficient">Insufficient information</option></select></div>
     <table class="portfolio-table"><thead><tr><th>Skill</th><th>Installed from</th><th>Recommendation</th><th>Why</th><th>Evaluation</th><th>Use 30d</th><th>Last used</th><th>Dependencies</th><th>Who may change it</th><th>Next action</th></tr></thead><tbody id="portfolio-rows">
@@ -292,6 +293,7 @@ async function renderEstate() {
     <div class="notice"><strong>Bounded scope:</strong> ${esc(data.scope?.label)} Registered: ${esc((data.scope?.registered_context_ids || []).join(", ") || "none")}. Outside claim: ${esc((data.scope?.outside_context_ids || []).join(", ") || "none")}.</div>
     <div class="notice"><strong>Verified source:</strong> receiver ${esc(data.receiver?.id || "unavailable")} · census receipt ${esc(data.receipt_sha256 ? `${data.receipt_sha256.slice(0,18)}…` : "unavailable")} · settings ${esc(data.settings_sha256 ? `${data.settings_sha256.slice(0,16)}…` : "hash unavailable")}.</div>
     <div class="notice"><strong>Verified usage:</strong> ${esc(usage.source || "Unavailable")} · ${badge(usage.status || "unavailable")} · corpus ${badge(usage.corpus_complete === true ? "complete" : usage.corpus_complete === false ? "catching up" : "unknown")} · attribution ${badge(usage.attribution_complete === true ? "complete" : usage.attribution_complete === false ? "incomplete" : "unknown")}. Missing or incomplete usage is never shown as zero.</div>
+    ${remote.configured ? `<div class="notice"><strong>Remote copy and evaluation view:</strong> ${badge(remote.status)}${remote.origin_host && remote.execution_host ? ` · Skills live on ${esc(remote.origin_host)} and evaluation runs on ${esc(remote.execution_host)}.` : "."} ${esc(remote.message || "")} Controls remain report-only.</div>` : ""}
     <div class="notice"><strong>Personal means installation location, not authorship.</strong> Automation authority and origin evidence are shown separately.</div>
     ${decisionPanel}
     <div class="grid split">
@@ -347,6 +349,16 @@ function bindPortfolioQueue(queue) {
   };
   const evaluationSummary = item => {
     const details = [];
+    const snapshotLabels = {
+      remote_candidate_not_fetched: "Not copied yet",
+      remote_candidate_changed: "Skill changed; refresh needed",
+      remote_candidate_snapshot_ready: "Snapshot ready",
+      remote_candidate_refused: "Copy refused",
+      remote_candidate_state_unavailable: "Copy status unavailable",
+    };
+    if (item.remote_evaluation) {
+      details.push(snapshotLabels[item.remote_evaluation.snapshot_state] || "Copy status unavailable");
+    }
     if (item.evaluation_queue_position) {
       details.push(`Queue ${number(item.evaluation_queue_position)} · ${item.evaluation_queue_reason}`);
     } else if (item.evaluation?.evaluated_at) {
@@ -358,7 +370,7 @@ function bindPortfolioQueue(queue) {
     return `${badge(item.evaluation?.label)}${details.map(detail => `<div class="submetric">${esc(detail)}</div>`).join("")}`;
   };
   const matches = item => {
-    const textMatch = `${item.skill_name} ${item.why} ${item.installed_from} ${item.evaluation_queue_reason || ""}`.toLowerCase().includes(query.value.toLowerCase());
+    const textMatch = `${item.skill_name} ${item.why} ${item.installed_from} ${item.evaluation_queue_reason || ""} ${item.remote_evaluation?.snapshot_state || ""}`.toLowerCase().includes(query.value.toLowerCase());
     if (!textMatch) return false;
     if (!filter.value) return true;
     if (filter.value === "needs-decision") return item.who_may_change === "Your decision";
@@ -372,7 +384,7 @@ function bindPortfolioQueue(queue) {
   };
   const render = () => {
     const visible = queue.filter(matches);
-    rows.innerHTML = visible.map(item => `<tr><td data-label="Skill">${esc(item.skill_name)}</td><td data-label="Installed from">${esc(item.installed_from)}</td><td data-label="Recommendation">${badge(item.recommendation_label)}</td><td data-label="Why">${esc(item.why)}</td><td data-label="Evaluation">${evaluationSummary(item)}</td><td data-label="Use 30d">${usage30d(item)}</td><td data-label="Last used">${portfolioLastUse(item)}</td><td data-label="Dependencies">${dependencySummary(item)}</td><td data-label="Who may change it">${esc(item.who_may_change)}</td><td data-label="Next action"><button class="control" disabled title="${esc(item.next_action?.reason)}">${esc(item.next_action?.label)}</button><div class="submetric">${esc(item.next_action?.reason)}</div></td></tr>`).join("") || `<tr><td colspan="10">No decisions match this filter.</td></tr>`;
+    rows.innerHTML = visible.map(item => `<tr><td data-label="Skill">${esc(item.skill_name)}${item.remote_evaluation ? `<div class="submetric">Skill lives on ${esc(item.remote_evaluation.origin_host || "origin computer")}</div><div class="submetric">Evaluation runs on ${esc(item.remote_evaluation.execution_host || "evaluation computer")}</div>` : ""}</td><td data-label="Installed from">${esc(item.installed_from)}</td><td data-label="Recommendation">${badge(item.recommendation_label)}</td><td data-label="Why">${esc(item.why)}</td><td data-label="Evaluation">${evaluationSummary(item)}</td><td data-label="Use 30d">${usage30d(item)}</td><td data-label="Last used">${portfolioLastUse(item)}</td><td data-label="Dependencies">${dependencySummary(item)}</td><td data-label="Who may change it">${esc(item.who_may_change)}</td><td data-label="Next action"><button class="control" disabled title="${esc(item.next_action?.reason)}">${esc(item.next_action?.label)}</button><div class="submetric">${esc(item.next_action?.reason)}</div></td></tr>`).join("") || `<tr><td colspan="10">No decisions match this filter.</td></tr>`;
   };
   query.addEventListener("input", render);
   filter.addEventListener("change", render);

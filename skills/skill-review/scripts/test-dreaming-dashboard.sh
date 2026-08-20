@@ -255,6 +255,26 @@ check(
     "dashboard omits ambiguous governance labels",
 )
 check(
+    all(
+        label in javascript
+        for label in (
+            "Skill lives on",
+            "Evaluation runs on",
+            "Not copied yet",
+            "Skill changed; refresh needed",
+            "Snapshot ready",
+            "Copy refused",
+            "Controls remain report-only",
+        )
+    ),
+    "dashboard explains remote skill location, copy state, and read-only control",
+)
+check(
+    javascript.index('["failed", "error", "regression", "unhealthy", "invalid"]')
+    < javascript.index('["healthy", "ok", "pass", "current", "completed", "inspected"]'),
+    "negative compound statuses take precedence over positive badge words",
+)
+check(
     not any(
         token in javascript
         for token in (
@@ -487,6 +507,16 @@ estate_snapshot = {
         "settings_sha256": private_sentinels["settings"],
     },
 }
+for index, item in enumerate(estate_snapshot["physical_instances"], start=1):
+    item.update({
+        "host_id": estate_snapshot["host_id"],
+        "root_id": f"fixture-root-{index}",
+        "relative_path": item["skill_name"],
+        "absolute_path": item.get(
+            "absolute_path", f"/private/skill/{item['skill_name']}"
+        ),
+        "inventory_sha256": "sha256:" + str(index) * 64,
+    })
 estate_census = {
     **estate_snapshot,
     "snapshot_sha256": dashboard.sha(estate_snapshot),
@@ -860,8 +890,98 @@ check(
                 "b" * 64,
             ]
         }
-    }
+    },
+    "evaluation_input_owner": {
+        "enabled": False,
+    },
+    "remote_evaluation_subjects": {
+        "enabled": False,
+        "protocol_version": 1,
+        "origin_host_id": estate_snapshot["host_id"],
+        "receiver": {
+            **estate_receipt["receiver"],
+            "content_policy_sha256": "c" * 64,
+        },
+    },
 }), encoding="utf-8")
+transport_receiver = {
+    **estate_receipt["receiver"],
+    "content_policy_sha256": "c" * 64,
+}
+overlay_rows = []
+enabled_capabilities = {
+    item["canonical_capability_id"]: next(
+        physical
+        for physical in estate_snapshot["physical_instances"]
+        if physical["instance_id"] == item["instance_id"]
+    )
+    for item in estate_snapshot["enabled_instances"]
+    if item["runtime_enabled"]
+}
+for index, (capability_id, physical) in enumerate(
+    sorted(enabled_capabilities.items()), start=1
+):
+    evaluation = {
+        **physical["evaluation"],
+        "input_manifest_sha256": "sha256:" + str(index + 6) * 64,
+    }
+    subject_identity = {
+        "origin_host_id": physical["host_id"],
+        "origin_root_id": physical["root_id"],
+        "origin_relative_path": physical["relative_path"],
+    }
+    overlay_rows.append({
+        "capability_id": capability_id,
+        "subject_key": dashboard.sha(subject_identity),
+        **subject_identity,
+        "origin_path": physical["absolute_path"],
+        "canonical_capability_id": capability_id,
+        "origin_inventory_sha256": physical["inventory_sha256"],
+        "candidate_id": "sha256:" + str(index + 3) * 64,
+        "superseded_candidate_ids": [],
+        "snapshot_state": "remote_candidate_snapshot_ready",
+        "content_path": f"/private/snapshots/{index}/candidate",
+        "transport_receipt_sha256": "sha256:" + str(index + 5) * 64,
+        "evaluation": evaluation,
+    })
+overlay_identity = {
+    "schema_version": 1,
+    "kind": "remote_evaluation_overlay",
+    "census_snapshot_sha256": estate_census["snapshot_sha256"],
+    "census_receipt_sha256": estate_receipt_sha,
+    "usage_snapshot_sha256": estate_usage["snapshot_sha256"],
+    "usage_receipt_sha256": usage_receipt_sha,
+    "receiver": estate_receipt["receiver"],
+    "transport_receiver": transport_receiver,
+    "origin_host_id": estate_snapshot["host_id"],
+    "evaluator_sha256": "sha256:" + "d" * 64,
+    "registry_identity": dashboard.EVALUATION_OVERLAY_REGISTRY_IDENTITY,
+    "rows": overlay_rows,
+}
+overlay = {
+    **overlay_identity,
+    "overlay_sha256": dashboard.sha(overlay_identity),
+}
+overlay_root = state / "evaluation-input-overlays"
+overlay_root.mkdir()
+(overlay_root / f"{overlay['overlay_sha256'].removeprefix('sha256:')}.json").write_text(
+    json.dumps(overlay), encoding="utf-8"
+)
+pointer_identity = {
+    "schema_version": 1,
+    "overlay_sha256": overlay["overlay_sha256"],
+    "census_snapshot_sha256": estate_census["snapshot_sha256"],
+    "census_receipt_sha256": estate_receipt_sha,
+    "usage_snapshot_sha256": estate_usage["snapshot_sha256"],
+    "usage_receipt_sha256": usage_receipt_sha,
+}
+(state / "evaluation-input-overlay-current.json").write_text(
+    json.dumps({
+        **pointer_identity,
+        "pointer_sha256": dashboard.sha(pointer_identity),
+    }),
+    encoding="utf-8",
+)
 (state / "remote-publication-summary.json").write_text(json.dumps({
     "schema_version": 1,
     "status": "committed",
@@ -1504,6 +1624,10 @@ try:
         and estate_view["receipt_sha256"] == estate_receipt_sha
         and estate_view["actions"]["status"] == "current"
         and estate_view["actions"]["total"] == 4
+        and estate_view["remote_evaluation"]["status"] == "current"
+        and estate_view["remote_evaluation"]["origin_host"] == "MacBook"
+        and estate_view["remote_evaluation"]["execution_host"] == "Mac mini"
+        and estate_view["remote_evaluation"]["report_only"] is True
         and {
             item["status"] for item in estate_view["actions"]["items"]
         } == {"committed", "protected", "unknown"}
@@ -1539,6 +1663,10 @@ try:
         and portfolio["fixture-skill"]["evaluation_queue_position"] is None
         and portfolio["fixture-skill"]["evaluation"]["cases"][0]["case_id"]
         == "fixture-intended"
+        and portfolio["fixture-skill"]["remote_evaluation"]["snapshot_state"]
+        == "remote_candidate_snapshot_ready"
+        and portfolio["fixture-skill"]["remote_evaluation"]["origin_host"]
+        == "MacBook"
         and portfolio["fixture-skill"]["dependencies"]["required_by"]
         == ["plugin-skill"]
         and portfolio["fixture-skill"]["dependencies"]["files_used_by"]
@@ -1563,6 +1691,83 @@ try:
             )
         ),
         "estate API excludes private settings, file inventories, and local roots",
+    )
+    original_overlay_pointer = (
+        state / "evaluation-input-overlay-current.json"
+    ).read_bytes()
+    stale_pointer = json.loads(original_overlay_pointer)
+    stale_pointer["usage_receipt_sha256"] = "sha256:" + "f" * 64
+    stale_identity = {
+        key: value
+        for key, value in stale_pointer.items()
+        if key != "pointer_sha256"
+    }
+    stale_pointer["pointer_sha256"] = dashboard.sha(stale_identity)
+    (state / "evaluation-input-overlay-current.json").write_text(
+        json.dumps(stale_pointer), encoding="utf-8"
+    )
+    _, _, stale_overlay_body = request("/api/v1/estate")
+    stale_overlay = json.loads(stale_overlay_body)["data"]
+    stale_portfolio = {
+        item["skill_name"]: item
+        for item in stale_overlay["portfolio_decisions"]
+    }
+    check(
+        stale_overlay["remote_evaluation"]["status"] == "current view invalid"
+        and all(
+            item["evaluation"]["state"] == "input_missing"
+            for item in stale_portfolio.values()
+        )
+        and all(
+            item["remote_evaluation"]["snapshot_state"]
+            == "remote_candidate_state_unavailable"
+            for item in stale_portfolio.values()
+        ),
+        "stale remote evaluation pointers fail closed without trusting path-local evaluation",
+    )
+    (state / "evaluation-input-overlay-current.json").write_bytes(
+        original_overlay_pointer
+    )
+    original_adapters = (state / "adapters.json").read_bytes()
+    local_adapters = json.loads(original_adapters)
+    mismatched_adapters = json.loads(original_adapters)
+    mismatched_adapters["remote_evaluation_subjects"][
+        "origin_host_id"
+    ] = "different-host"
+    (state / "adapters.json").write_text(
+        json.dumps(mismatched_adapters), encoding="utf-8"
+    )
+    _, _, mismatched_remote_body = request("/api/v1/estate")
+    mismatched_remote = json.loads(mismatched_remote_body)["data"]
+    check(
+        mismatched_remote["remote_evaluation"]["status"]
+        == "configuration invalid"
+        and all(
+            item["evaluation"]["state"] == "input_missing"
+            for item in mismatched_remote["portfolio_decisions"]
+        ),
+        "mismatched remote origin suppresses all path-local evaluation authority",
+    )
+    disabled_owner_adapters = json.loads(original_adapters)
+    disabled_owner_adapters["remote_evaluation_subjects"]["enabled"] = True
+    (state / "adapters.json").write_text(
+        json.dumps(disabled_owner_adapters), encoding="utf-8"
+    )
+    _, _, disabled_owner_body = request("/api/v1/estate")
+    disabled_owner = json.loads(disabled_owner_body)["data"]
+    check(
+        disabled_owner["remote_evaluation"]["status"]
+        == "configuration invalid"
+        and all(
+            item["evaluation"]["state"] == "input_missing"
+            for item in disabled_owner["portfolio_decisions"]
+        ),
+        "enabled remote transport with a disabled owner cannot restore raw evaluation",
+    )
+    local_adapters.pop("evaluation_input_owner")
+    local_adapters.pop("remote_evaluation_subjects")
+    (state / "adapters.json").write_text(
+        json.dumps(local_adapters), encoding="utf-8"
     )
     original_usage_current = (state / "estate-usage-current.json").read_bytes()
     (state / "estate-usage-current.json").unlink()
@@ -1836,6 +2041,7 @@ try:
         "identity ambiguity blocks only candidate capabilities",
     )
     (state / "estate-usage-current.json").write_bytes(original_usage_current)
+    (state / "adapters.json").write_bytes(original_adapters)
     incomplete_usage_receipt_path.unlink()
     for path in usage_variant_paths:
         path.unlink()

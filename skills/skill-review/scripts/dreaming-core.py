@@ -4957,36 +4957,91 @@ def publish_remote_evaluation_overlay(
                 "evaluation-overlay-publication-collision",
                 str(destination),
             )
-        return destination
-    with tempfile.NamedTemporaryFile(
-        prefix=".overlay.", dir=overlay_root, delete=False
-    ) as temporary:
-        temporary_path = Path(temporary.name)
-        temporary.write(content)
-        temporary.flush()
-        os.fsync(temporary.fileno())
-    try:
-        os.chmod(temporary_path, 0o400)
+    else:
+        with tempfile.NamedTemporaryFile(
+            prefix=".overlay.", dir=overlay_root, delete=False
+        ) as temporary:
+            temporary_path = Path(temporary.name)
+            temporary.write(content)
+            temporary.flush()
+            os.fsync(temporary.fileno())
         try:
-            os.link(temporary_path, destination)
-        except FileExistsError:
-            if (
-                destination.is_symlink()
-                or not destination.is_file()
-                or destination.read_bytes() != content
-            ):
-                raise RuntimeFailure(
-                    "evaluation-overlay-publication-collision",
-                    str(destination),
-                )
-        directory_fd = os.open(overlay_root, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
+            os.chmod(temporary_path, 0o400)
+            try:
+                os.link(temporary_path, destination)
+            except FileExistsError:
+                if (
+                    destination.is_symlink()
+                    or not destination.is_file()
+                    or destination.read_bytes() != content
+                ):
+                    raise RuntimeFailure(
+                        "evaluation-overlay-publication-collision",
+                        str(destination),
+                    )
+            directory_fd = os.open(overlay_root, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
         finally:
-            os.close(directory_fd)
-    finally:
-        temporary_path.unlink(missing_ok=True)
+            temporary_path.unlink(missing_ok=True)
     return destination
+
+
+def promote_remote_evaluation_overlay(
+    overlay: dict[str, Any],
+    overlay_root: Path,
+    census: dict[str, Any],
+    usage: dict[str, Any],
+    receiver: dict[str, Any],
+    *,
+    census_receipt_sha256: str,
+    usage_receipt_sha256: str,
+    enabled_capability_ids: set[str],
+    transport_receiver: dict[str, Any] | None = None,
+) -> Path:
+    validate_remote_evaluation_overlay(
+        overlay,
+        census,
+        usage,
+        receiver,
+        census_receipt_sha256=census_receipt_sha256,
+        usage_receipt_sha256=usage_receipt_sha256,
+        enabled_capability_ids=enabled_capability_ids,
+        transport_receiver=transport_receiver,
+    )
+    identity = overlay["overlay_sha256"]
+    destination = (
+        overlay_root.resolve() / f"{identity.removeprefix('sha256:')}.json"
+    )
+    if (
+        destination.is_symlink()
+        or not destination.is_file()
+        or destination.read_bytes() != canonical(overlay)
+    ):
+        raise RuntimeFailure(
+            "evaluation-overlay-invalid",
+            "remote evaluation overlay is not immutably retained",
+        )
+    pointer_identity = {
+        "schema_version": 1,
+        "overlay_sha256": identity,
+        "census_snapshot_sha256": overlay["census_snapshot_sha256"],
+        "census_receipt_sha256": overlay["census_receipt_sha256"],
+        "usage_snapshot_sha256": overlay["usage_snapshot_sha256"],
+        "usage_receipt_sha256": overlay["usage_receipt_sha256"],
+    }
+    pointer_path = overlay_root.parent / "evaluation-input-overlay-current.json"
+    atomic_json(
+        pointer_path,
+        {
+            **pointer_identity,
+            "pointer_sha256": digest(pointer_identity),
+        },
+        mode=0o600,
+    )
+    return pointer_path
 
 
 def derive_evaluation_input_queue(
@@ -6838,19 +6893,6 @@ def scheduled_run() -> dict[str, Any]:
                         "overlay_path": str(overlay_path),
                     }
                 )
-                if not evaluation_input_owner_lease_valid():
-                    report["evaluation_input"]["run"] = {
-                        "status": "lock_lost",
-                        "selected_capability_id": None,
-                    }
-                    report["errors"].append(
-                        {
-                            "phase": "evaluation-input-run",
-                            "code": "writer-lock-lost",
-                        }
-                    )
-                    report["ok"] = False
-                    return report
             derived_queue = derive_evaluation_input_queue(
                 evaluation_owner,
                 queue_evidence["census"],
@@ -6868,6 +6910,40 @@ def scheduled_run() -> dict[str, Any]:
             )
             report["evaluation_input"]["queue"] = derived_queue
             if remote_subjects is not None and remote_subjects["enabled"]:
+                if evaluation_input_owner_halt_path(paths).exists():
+                    report["evaluation_input"]["run"] = {
+                        "status": "halted",
+                        "selected_capability_id": None,
+                    }
+                    return report
+                if not evaluation_input_owner_lease_valid():
+                    report["evaluation_input"]["run"] = {
+                        "status": "lock_lost",
+                        "selected_capability_id": None,
+                    }
+                    report["errors"].append(
+                        {
+                            "phase": "evaluation-input-run",
+                            "code": "writer-lock-lost",
+                        }
+                    )
+                    report["ok"] = False
+                    return report
+                promote_remote_evaluation_overlay(
+                    evaluation_overlay,
+                    Path(remote_subjects["overlay_store"]),
+                    queue_evidence["census"],
+                    usage,
+                    queue_evidence["receiver"],
+                    census_receipt_sha256=queue_evidence["summary"][
+                        "receipt_sha256"
+                    ],
+                    usage_receipt_sha256=usage_summary["receipt_sha256"],
+                    enabled_capability_ids={
+                        row["capability_id"] for row in derived_queue["rows"]
+                    },
+                    transport_receiver=remote_subjects["receiver"],
+                )
                 transport_row = next(
                     (
                         row
@@ -6933,6 +7009,47 @@ def scheduled_run() -> dict[str, Any]:
                             transport_receiver=remote_subjects["receiver"],
                         )
                         report["evaluation_input"]["queue"] = derived_queue
+                        if evaluation_input_owner_halt_path(paths).exists():
+                            report["evaluation_input"]["run"] = {
+                                "status": "halted",
+                                "selected_capability_id": transport_row[
+                                    "capability_id"
+                                ],
+                            }
+                            return report
+                        if not evaluation_input_owner_lease_valid():
+                            report["evaluation_input"]["run"] = {
+                                "status": "lock_lost",
+                                "selected_capability_id": transport_row[
+                                    "capability_id"
+                                ],
+                            }
+                            report["errors"].append(
+                                {
+                                    "phase": "evaluation-input-run",
+                                    "code": "writer-lock-lost",
+                                }
+                            )
+                            report["ok"] = False
+                            return report
+                        promote_remote_evaluation_overlay(
+                            evaluation_overlay,
+                            Path(remote_subjects["overlay_store"]),
+                            queue_evidence["census"],
+                            usage,
+                            queue_evidence["receiver"],
+                            census_receipt_sha256=queue_evidence["summary"][
+                                "receipt_sha256"
+                            ],
+                            usage_receipt_sha256=usage_summary[
+                                "receipt_sha256"
+                            ],
+                            enabled_capability_ids={
+                                row["capability_id"]
+                                for row in derived_queue["rows"]
+                            },
+                            transport_receiver=remote_subjects["receiver"],
+                        )
                         report["evaluation_input"]["remote_subjects"].update(
                             {
                                 "overlay_sha256": evaluation_overlay[

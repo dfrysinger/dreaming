@@ -95,6 +95,11 @@ MAX_CANDIDATE_PACKAGE_FILES = 512
 MAX_CANDIDATE_PACKAGE_BYTES = 8 * 1024 * 1024
 CANDIDATE_FRESH_SECONDS = 30 * 86400
 CANDIDATE_AUTHORITY = "shadow-only"
+EVALUATION_OVERLAY_REGISTRY_IDENTITY = {
+    "claim_schema_version": 4,
+    "input_registry_schema_version": 1,
+    "runner_version": "skill-evaluation-runner-1",
+}
 CANDIDATE_LABEL = "Shadow-only candidate — not an active skill, not published"
 CANDIDATE_NOTICE = (
     "Shadow-only candidate record. It is not an active skill, is not published to any "
@@ -3530,6 +3535,446 @@ class DashboardData:
                 "message": "Estate action state is malformed.",
             }
 
+    @staticmethod
+    def _remote_overlay_evaluation_valid(value: Any) -> bool:
+        return (
+            isinstance(value, dict)
+            and set(value)
+            == {
+                "state",
+                "status",
+                "current",
+                "evaluated_at",
+                "receipt_sha256",
+                "transition_id",
+                "input_manifest_sha256",
+                "cases",
+            }
+            and isinstance(value.get("state"), str)
+            and isinstance(value.get("status"), str)
+            and isinstance(value.get("current"), bool)
+            and (
+                value.get("evaluated_at") is None
+                or parse_time(value.get("evaluated_at")) is not None
+            )
+            and (
+                value.get("receipt_sha256") is None
+                or SHA256_RE.fullmatch(str(value.get("receipt_sha256")))
+            )
+            and (
+                value.get("transition_id") is None
+                or CANDIDATE_ID_RE.fullmatch(str(value.get("transition_id")))
+            )
+            and (
+                value.get("input_manifest_sha256") is None
+                or CANDIDATE_ID_RE.fullmatch(
+                    str(value.get("input_manifest_sha256"))
+                )
+            )
+            and isinstance(value.get("cases"), list)
+        )
+
+    def _estate_remote_evaluation(
+        self,
+        census: dict[str, Any],
+        census_receiver: dict[str, Any],
+        census_receipt_sha256: str,
+        usage: dict[str, Any],
+    ) -> dict[str, Any]:
+        unavailable = {
+            "configured": False,
+            "enabled": False,
+            "status": "not configured",
+            "available": False,
+            "report_only": True,
+            "origin_host": None,
+            "origin_host_id": None,
+            "execution_host": "Mac mini",
+            "message": "Remote skill evaluation is not configured.",
+            "_rows": {},
+            "_suppress_all": False,
+        }
+        try:
+            config = self._adapter_config()
+            remote = config.get("remote_evaluation_subjects")
+            if not isinstance(remote, dict):
+                return unavailable
+            owner = config.get("evaluation_input_owner")
+            configured = {
+                **unavailable,
+                "configured": True,
+                "enabled": remote.get("enabled") is True,
+                "status": "waiting for current evaluation view",
+                "origin_host": "MacBook",
+                "origin_host_id": remote.get("origin_host_id"),
+                "message": (
+                    "Remote copying is disabled. Existing evidence remains "
+                    "read-only."
+                    if remote.get("enabled") is not True
+                    else "The Mac mini has not published a current evaluation "
+                    "view for this census."
+                ),
+                "_suppress_all": True,
+            }
+            transport_receiver = remote.get("receiver")
+            if (
+                remote.get("protocol_version") != 1
+                or not isinstance(remote.get("origin_host_id"), str)
+                or remote.get("origin_host_id") != census.get("host_id")
+                or not isinstance(transport_receiver, dict)
+                or set(transport_receiver)
+                != {
+                    "receiver_id",
+                    "receiver_sha256",
+                    "collector_sha256",
+                    "content_policy_sha256",
+                }
+                or any(
+                    not isinstance(transport_receiver.get(field), str)
+                    for field in transport_receiver
+                )
+                or not isinstance(owner, dict)
+                or not isinstance(owner.get("enabled"), bool)
+                or (
+                    remote.get("enabled") is True
+                    and owner.get("enabled") is not True
+                )
+            ):
+                return {
+                    **configured,
+                    "status": "configuration invalid",
+                    "origin_host": None,
+                    "origin_host_id": None,
+                    "execution_host": None,
+                    "message": "Remote evaluation configuration is invalid.",
+                }
+            configured["_suppress_all"] = False
+            pointer_path = (
+                self.paths.state / "evaluation-input-overlay-current.json"
+            )
+            if not pointer_path.is_file() or pointer_path.is_symlink():
+                return configured
+            pointer = self._json(
+                pointer_path, None, "current remote evaluation view"
+            )
+            pointer_fields = {
+                "schema_version",
+                "overlay_sha256",
+                "census_snapshot_sha256",
+                "census_receipt_sha256",
+                "usage_snapshot_sha256",
+                "usage_receipt_sha256",
+                "pointer_sha256",
+            }
+            pointer_identity = (
+                {
+                    key: value
+                    for key, value in pointer.items()
+                    if key != "pointer_sha256"
+                }
+                if isinstance(pointer, dict)
+                else {}
+            )
+            if (
+                not isinstance(pointer, dict)
+                or set(pointer) != pointer_fields
+                or pointer.get("schema_version") != 1
+                or not CANDIDATE_ID_RE.fullmatch(
+                    str(pointer.get("overlay_sha256", ""))
+                )
+                or pointer.get("pointer_sha256") != sha(pointer_identity)
+                or pointer.get("census_snapshot_sha256")
+                != census.get("snapshot_sha256")
+                or pointer.get("census_receipt_sha256")
+                != census_receipt_sha256
+                or pointer.get("usage_snapshot_sha256")
+                != usage.get("_snapshot_sha256")
+                or pointer.get("usage_receipt_sha256")
+                != usage.get("_receipt_sha256")
+            ):
+                return {
+                    **configured,
+                    "status": "current view invalid",
+                    "message": (
+                        "The retained Mac mini evaluation view does not match "
+                        "the current census and usage evidence."
+                    ),
+                }
+            overlay_path = (
+                self.paths.state
+                / "evaluation-input-overlays"
+                / f"{pointer['overlay_sha256'].removeprefix('sha256:')}.json"
+            )
+            if (
+                not overlay_path.is_file()
+                or overlay_path.is_symlink()
+                or overlay_path.stat().st_size > MAX_JSON_BYTES
+            ):
+                return {
+                    **configured,
+                    "status": "current view invalid",
+                    "message": "The retained Mac mini evaluation view is unavailable.",
+                }
+            overlay = self._json(
+                overlay_path, None, "remote evaluation view"
+            )
+            overlay_fields = {
+                "schema_version",
+                "kind",
+                "census_snapshot_sha256",
+                "census_receipt_sha256",
+                "usage_snapshot_sha256",
+                "usage_receipt_sha256",
+                "receiver",
+                "transport_receiver",
+                "origin_host_id",
+                "evaluator_sha256",
+                "registry_identity",
+                "rows",
+                "overlay_sha256",
+            }
+            overlay_identity = (
+                {
+                    key: value
+                    for key, value in overlay.items()
+                    if key != "overlay_sha256"
+                }
+                if isinstance(overlay, dict)
+                else {}
+            )
+            if (
+                not isinstance(overlay, dict)
+                or set(overlay) != overlay_fields
+                or overlay.get("schema_version") != 1
+                or overlay.get("kind") != "remote_evaluation_overlay"
+                or overlay.get("overlay_sha256") != pointer["overlay_sha256"]
+                or overlay.get("overlay_sha256") != sha(overlay_identity)
+                or overlay.get("census_snapshot_sha256")
+                != pointer["census_snapshot_sha256"]
+                or overlay.get("census_receipt_sha256")
+                != pointer["census_receipt_sha256"]
+                or overlay.get("usage_snapshot_sha256")
+                != pointer["usage_snapshot_sha256"]
+                or overlay.get("usage_receipt_sha256")
+                != pointer["usage_receipt_sha256"]
+                or overlay.get("receiver") != census_receiver
+                or overlay.get("transport_receiver") != transport_receiver
+                or overlay.get("origin_host_id") != remote["origin_host_id"]
+                or not CANDIDATE_ID_RE.fullmatch(
+                    str(overlay.get("evaluator_sha256", ""))
+                )
+                or overlay.get("registry_identity")
+                != EVALUATION_OVERLAY_REGISTRY_IDENTITY
+                or not isinstance(overlay.get("rows"), list)
+            ):
+                return {
+                    **configured,
+                    "status": "current view invalid",
+                    "message": "The retained Mac mini evaluation view is invalid.",
+                }
+            physical = {
+                item.get("instance_id"): item
+                for item in census.get("physical_instances", [])
+                if isinstance(item, dict)
+                and isinstance(item.get("instance_id"), str)
+            }
+            enabled_by_capability: dict[str, list[dict[str, Any]]] = {}
+            for enabled in census.get("enabled_instances", []):
+                if (
+                    not isinstance(enabled, dict)
+                    or enabled.get("runtime_enabled") is not True
+                    or enabled.get("instance_id") not in physical
+                ):
+                    continue
+                enabled_by_capability.setdefault(
+                    str(enabled.get("canonical_capability_id")), []
+                ).append(physical[enabled["instance_id"]])
+            rows: dict[str, dict[str, Any]] = {}
+            row_fields = {
+                "capability_id",
+                "subject_key",
+                "origin_host_id",
+                "origin_root_id",
+                "origin_relative_path",
+                "origin_path",
+                "canonical_capability_id",
+                "origin_inventory_sha256",
+                "candidate_id",
+                "superseded_candidate_ids",
+                "snapshot_state",
+                "content_path",
+                "transport_receipt_sha256",
+                "evaluation",
+            }
+            for row in overlay["rows"]:
+                capability_id = (
+                    row.get("capability_id")
+                    if isinstance(row, dict)
+                    else None
+                )
+                instances = enabled_by_capability.get(str(capability_id), [])
+                instance = instances[0] if len(instances) == 1 else {}
+                subject_identity = {
+                    "origin_host_id": instance.get("host_id"),
+                    "origin_root_id": instance.get("root_id"),
+                    "origin_relative_path": instance.get("relative_path"),
+                }
+                state = row.get("snapshot_state") if isinstance(row, dict) else None
+                non_ready = state in {
+                    "remote_candidate_not_fetched",
+                    "remote_candidate_changed",
+                    "remote_candidate_refused",
+                }
+                if (
+                    not isinstance(row, dict)
+                    or set(row) != row_fields
+                    or not CANDIDATE_ID_RE.fullmatch(str(capability_id))
+                    or capability_id in rows
+                    or len(instances) != 1
+                    or any(
+                        not isinstance(value, str) or not value
+                        for value in subject_identity.values()
+                    )
+                    or row.get("canonical_capability_id") != capability_id
+                    or row.get("origin_host_id")
+                    != subject_identity["origin_host_id"]
+                    or row.get("origin_root_id")
+                    != subject_identity["origin_root_id"]
+                    or row.get("origin_relative_path")
+                    != subject_identity["origin_relative_path"]
+                    or row.get("origin_path") != instance.get("absolute_path")
+                    or row.get("origin_inventory_sha256")
+                    != instance.get("inventory_sha256")
+                    or row.get("subject_key") != sha(subject_identity)
+                    or not isinstance(row.get("superseded_candidate_ids"), list)
+                    or not all(
+                        CANDIDATE_ID_RE.fullmatch(str(candidate))
+                        for candidate in row["superseded_candidate_ids"]
+                    )
+                    or state
+                    not in {
+                        "remote_candidate_not_fetched",
+                        "remote_candidate_changed",
+                        "remote_candidate_snapshot_ready",
+                        "remote_candidate_refused",
+                    }
+                    or (
+                        state == "remote_candidate_snapshot_ready"
+                        and (
+                            not CANDIDATE_ID_RE.fullmatch(
+                                str(row.get("candidate_id", ""))
+                            )
+                            or not isinstance(row.get("content_path"), str)
+                            or not CANDIDATE_ID_RE.fullmatch(
+                                str(row.get("transport_receipt_sha256", ""))
+                            )
+                            or not self._remote_overlay_evaluation_valid(
+                                row.get("evaluation")
+                            )
+                        )
+                    )
+                    or (
+                        non_ready
+                        and any(
+                            row.get(field) is not None
+                            for field in (
+                                "candidate_id",
+                                "content_path",
+                                "transport_receipt_sha256",
+                                "evaluation",
+                            )
+                        )
+                    )
+                    or (
+                        state == "remote_candidate_changed"
+                        and not row["superseded_candidate_ids"]
+                    )
+                    or (
+                        state == "remote_candidate_not_fetched"
+                        and row["superseded_candidate_ids"]
+                    )
+                ):
+                    return {
+                        **configured,
+                        "status": "current view invalid",
+                        "message": (
+                            "The retained Mac mini evaluation view has invalid "
+                            "skill identity."
+                        ),
+                    }
+                rows[capability_id] = row
+            if set(rows) != set(enabled_by_capability):
+                return {
+                    **configured,
+                    "status": "current view invalid",
+                    "message": (
+                        "The retained Mac mini evaluation view does not cover "
+                        "every enabled skill."
+                    ),
+                }
+            return {
+                **configured,
+                "status": "current",
+                "available": True,
+                "message": (
+                    "Exact copies, when available, are evaluated on the Mac "
+                    "mini. This dashboard cannot change skills or plugins."
+                ),
+                "_rows": rows,
+            }
+        except (DashboardError, OSError, TypeError, ValueError):
+            return {
+                **unavailable,
+                "configured": True,
+                "status": "current view invalid",
+                "message": "Remote evaluation evidence is malformed.",
+                "_suppress_all": True,
+            }
+
+    @staticmethod
+    def _apply_remote_evaluation(
+        physical: list[dict[str, Any]], remote: dict[str, Any]
+    ) -> list[dict[str, Any]]:
+        if not remote.get("configured"):
+            return physical
+        origin_host_id = remote.get("origin_host_id")
+        rows = remote.get("_rows", {})
+        sanitized = []
+        for raw in physical:
+            item = dict(raw)
+            if (
+                not remote.get("_suppress_all")
+                and item.get("host_id") != origin_host_id
+            ):
+                sanitized.append(item)
+                continue
+            item.pop("evaluation", None)
+            item["evaluation_complete"] = None
+            capability_id = item.get("canonical_capability_id")
+            row = rows.get(capability_id) if isinstance(rows, dict) else None
+            state = (
+                row.get("snapshot_state")
+                if isinstance(row, dict)
+                else "remote_candidate_state_unavailable"
+            )
+            item["remote_evaluation"] = {
+                "origin_host": remote.get("origin_host"),
+                "origin_host_id": origin_host_id,
+                "execution_host": remote.get("execution_host"),
+                "subject_key": (
+                    row.get("subject_key") if isinstance(row, dict) else None
+                ),
+                "snapshot_state": state,
+            }
+            if (
+                isinstance(row, dict)
+                and state == "remote_candidate_snapshot_ready"
+            ):
+                item["evaluation"] = row["evaluation"]
+                item["evaluation_complete"] = True
+            sanitized.append(item)
+        return sanitized
+
     def estate(self, summary_only: bool = False) -> dict[str, Any]:
         current_path = self.paths.state / "estate-census-current.json"
         recovery_path = self.paths.state / "estate-recovery-required.json"
@@ -3759,9 +4204,22 @@ class DashboardData:
                 None,
             )
 
-        for item in census.get("physical_instances", []):
-            if not isinstance(item, dict):
-                continue
+        usage = self._estate_usage(census, receiver)
+        remote_evaluation = self._estate_remote_evaluation(
+            census,
+            receiver,
+            current["receipt_sha256"],
+            usage,
+        )
+        source_physical = self._apply_remote_evaluation(
+            [
+                item
+                for item in census.get("physical_instances", [])
+                if isinstance(item, dict)
+            ],
+            remote_evaluation,
+        )
+        for item in source_physical:
             authority_name = safe_text(item.get("authority"), 80)
             root_class = safe_text(item.get("root_class"), 80)
             if authority_name in authority:
@@ -3841,6 +4299,22 @@ class DashboardData:
                     "instance_id": safe_text(item.get("instance_id"), 80),
                     "canonical_capability_id": safe_text(
                         item.get("canonical_capability_id"), 80
+                    ),
+                    "remote_evaluation": (
+                        {
+                            "origin_host": safe_text(
+                                item["remote_evaluation"].get("origin_host"), 80
+                            ),
+                            "execution_host": safe_text(
+                                item["remote_evaluation"].get("execution_host"), 80
+                            ),
+                            "snapshot_state": safe_text(
+                                item["remote_evaluation"].get("snapshot_state"),
+                                80,
+                            ),
+                        }
+                        if isinstance(item.get("remote_evaluation"), dict)
+                        else None
                     ),
                 }
             )
@@ -3954,7 +4428,6 @@ class DashboardData:
                 }
             )
 
-        usage = self._estate_usage(census, receiver)
         usage_by_capability = {
             item["canonical_capability_id"]: item
             for item in usage.get("canonical_usage", [])
@@ -4081,10 +4554,16 @@ class DashboardData:
                 not in {
                     "canonical_usage",
                     "_receipt_sha256",
+                    "_snapshot_sha256",
                     "_pending",
                     "_failures",
                     "_unattributed",
                 }
+            },
+            "remote_evaluation": {
+                key: value
+                for key, value in remote_evaluation.items()
+                if not key.startswith("_") and key != "origin_host_id"
             },
             "authority_counts": dict(sorted(authority.items())),
             "root_class_counts": dict(sorted(root_classes.items())),
@@ -4243,6 +4722,11 @@ class DashboardData:
                     "decision_coverage": decision_coverage,
                     "dependencies": dependencies,
                     "who_may_change": who_may_change,
+                    "remote_evaluation": (
+                        representative.get("remote_evaluation")
+                        if representative is not None
+                        else None
+                    ),
                     "next_action": {
                         "label": next_action,
                         "enabled": False,
@@ -4901,6 +5385,7 @@ class DashboardData:
             "unattributed_count": None,
             "canonical_usage": [],
             "_receipt_sha256": None,
+            "_snapshot_sha256": None,
             "_pending": [],
             "_failures": [],
             "_unattributed": [],
@@ -5310,6 +5795,7 @@ class DashboardData:
                 "unattributed_count": len(unattributed),
                 "canonical_usage": canonical_usage,
                 "_receipt_sha256": current["receipt_sha256"],
+                "_snapshot_sha256": current["snapshot_sha256"],
                 "_pending": coverage["pending"],
                 "_failures": coverage["failures"],
                 "_unattributed": unattributed,
