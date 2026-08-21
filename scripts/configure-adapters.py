@@ -292,6 +292,22 @@ def positive_integer(name: str, default: str) -> int:
     return int(value)
 
 
+def environment_flag(name: str, default: bool = False) -> bool:
+    value = os.environ.get(name)
+    if value is None:
+        return default
+    if value not in {"0", "1"}:
+        raise ConfigError(f"{name} must be 0 or 1")
+    return value == "1"
+
+
+def required_environment(name: str) -> str:
+    value = os.environ.get(name, "")
+    if not value:
+        raise ConfigError(f"{name} is required")
+    return value
+
+
 def argv_value(entry: object, flag: str) -> str | None:
     if not isinstance(entry, dict):
         return None
@@ -839,6 +855,217 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
             + 30,
             "enabled": False,
         }
+    if environment_flag("DREAMING_PRESERVE_ESTATE_ADAPTERS"):
+        baseline_path = state_dir / "estate-adapters-baseline.json"
+        if baseline_path.is_symlink() or not baseline_path.is_file():
+            raise ConfigError(
+                "installation-owned estate adapter baseline is missing"
+            )
+        expected_baseline_sha = required_environment(
+            "DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256"
+        )
+        observed_baseline_sha = hashlib.sha256(
+            baseline_path.read_bytes()
+        ).hexdigest()
+        if observed_baseline_sha != expected_baseline_sha:
+            raise ConfigError("estate adapter baseline digest does not match")
+        try:
+            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+            raise ConfigError("estate adapter baseline is malformed") from error
+        if not isinstance(baseline, dict) or baseline.get("contract_version") != 1:
+            raise ConfigError("estate adapter baseline contract is invalid")
+        for key in ("estate_census", "estate_curator"):
+            entry = baseline.get(key)
+            if not isinstance(entry, dict):
+                raise ConfigError(
+                    f"estate adapter baseline is missing {key}"
+                )
+        preserved_keys = ["estate_census", "estate_curator"]
+        if environment_flag("DREAMING_PRESERVE_OPERATIONAL_ADAPTERS"):
+            preserved_keys.extend(
+                (
+                    "allow_autonomous_skill_creation",
+                    "max_autonomous_session_age_days",
+                    "max_events",
+                    "max_field_bytes",
+                    "max_reviews_per_run",
+                    "max_snapshot_bytes",
+                    "policy_version",
+                    "sources",
+                    "executors",
+                    "publishers",
+                    "retired_publishers",
+                    "routes",
+                    "executor_order",
+                )
+            )
+        for key in preserved_keys:
+            if key in baseline:
+                config[key] = baseline[key]
+    configure_owner = environment_flag(
+        "DREAMING_CONFIGURE_EVALUATION_INPUT_OWNER"
+    )
+    existing_owner = existing.get("evaluation_input_owner")
+    if configure_owner:
+        owner = {
+            "enabled": environment_flag(
+                "DREAMING_EVALUATION_INPUT_OWNER_ENABLED"
+            ),
+            "author_model": required_environment(
+                "DREAMING_EVALUATION_INPUT_AUTHOR_MODEL"
+            ),
+            "reviewer_a_model": required_environment(
+                "DREAMING_EVALUATION_INPUT_REVIEWER_A_MODEL"
+            ),
+            "reviewer_b_model": required_environment(
+                "DREAMING_EVALUATION_INPUT_REVIEWER_B_MODEL"
+            ),
+            "content_root": str(state_dir / "evaluation-input-owner"),
+        }
+        if len(
+            {
+                owner["author_model"],
+                owner["reviewer_a_model"],
+                owner["reviewer_b_model"],
+            }
+        ) != 3:
+            raise ConfigError(
+                "evaluation-input owner requires three distinct models"
+            )
+        config["evaluation_input_owner"] = owner
+    elif isinstance(existing_owner, dict):
+        config["evaluation_input_owner"] = existing_owner
+
+    configure_remote_subjects = environment_flag(
+        "DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS"
+    )
+    existing_remote_subjects = existing.get("remote_evaluation_subjects")
+    if configure_remote_subjects:
+        owner = config.get("evaluation_input_owner")
+        if not isinstance(owner, dict):
+            raise ConfigError(
+                "remote evaluation subjects require evaluation-input owner configuration"
+            )
+        remote_host = required_environment(
+            "DREAMING_REMOTE_SUBJECT_SSH_HOST"
+        )
+        origin_host_id = required_environment(
+            "DREAMING_REMOTE_SUBJECT_ORIGIN_HOST_ID"
+        )
+        remote_home = os.environ.get(
+            "DREAMING_REMOTE_SUBJECT_HOME", str(Path.home())
+        )
+        known_hosts = state_dir / "remote-subject-known-hosts"
+        if known_hosts.is_symlink() or not known_hosts.is_file():
+            raise ConfigError(
+                "installation-owned remote subject known-hosts file is missing"
+            )
+        proxy = repo_root / "scripts/ssh-estate-census.py"
+        collector = repo_root / "skills/skill-review/scripts/dreaming-estate.py"
+        content_policy = (
+            repo_root
+            / "skills/skill-review/references/remote-subject-content-policy-v1.json"
+        )
+        address_family = os.environ.get(
+            "DREAMING_REMOTE_SUBJECT_SSH_ADDRESS_FAMILY", ""
+        )
+        if address_family not in {"", "4", "6"}:
+            raise ConfigError(
+                "DREAMING_REMOTE_SUBJECT_SSH_ADDRESS_FAMILY must be 4, 6, or empty"
+            )
+        receiver_id = os.environ.get(
+            "DREAMING_REMOTE_SUBJECT_RECEIVER_ID",
+            os.environ.get("DREAMING_COPILOT_ESTATE_RECEIVER_ID", ""),
+        )
+        if not receiver_id:
+            raise ConfigError("remote subject receiver ID is required")
+        remote_python = os.environ.get(
+            "DREAMING_REMOTE_SUBJECT_SSH_PYTHON", "/usr/bin/python3"
+        )
+        remote_script = required_environment(
+            "DREAMING_REMOTE_SUBJECT_SSH_SCRIPT"
+        )
+        remote_collector = required_environment(
+            "DREAMING_REMOTE_SUBJECT_ESTATE_SCRIPT"
+        )
+        remote_policy = required_environment(
+            "DREAMING_REMOTE_SUBJECT_CONTENT_POLICY"
+        )
+        receiver = {
+            "receiver_id": receiver_id,
+            "receiver_sha256": hashlib.sha256(proxy.read_bytes()).hexdigest(),
+            "collector_sha256": hashlib.sha256(
+                collector.read_bytes()
+            ).hexdigest(),
+            "content_policy_sha256": hashlib.sha256(
+                content_policy.read_bytes()
+            ).hexdigest(),
+        }
+        command = [
+            str(Path(sys.executable).resolve()),
+            str(proxy),
+            "--fetch-subject",
+            "--ssh-bin",
+            os.environ.get("DREAMING_REMOTE_SUBJECT_SSH_BIN", "/usr/bin/ssh"),
+            "--host",
+            remote_host,
+            *(["--address-family", address_family] if address_family else []),
+            "--remote-python",
+            remote_python,
+            "--remote-script",
+            remote_script,
+            "--remote-estate-script",
+            remote_collector,
+            "--remote-receiver-id-file",
+            os.environ.get(
+                "DREAMING_REMOTE_SUBJECT_RECEIVER_ID_FILE",
+                str(Path(remote_home) / ".local/state/dreaming/receiver-id"),
+            ),
+            "--remote-copilot-binary",
+            os.environ.get(
+                "DREAMING_REMOTE_SUBJECT_COPILOT_BIN",
+                str(Path(remote_home) / ".local/bin/copilot"),
+            ),
+            "--target-host-id",
+            origin_host_id,
+            "--target-home",
+            remote_home,
+            "--known-hosts-file",
+            str(known_hosts),
+            "--expected-known-hosts-sha",
+            hashlib.sha256(known_hosts.read_bytes()).hexdigest(),
+            "--remote-content-policy",
+            remote_policy,
+            "--expected-content-policy-sha",
+            receiver["content_policy_sha256"],
+            "--expected-receiver-id",
+            receiver["receiver_id"],
+            "--expected-receiver-sha",
+            receiver["receiver_sha256"],
+            "--expected-collector-sha",
+            receiver["collector_sha256"],
+            "--timeout",
+            str(positive_integer("DREAMING_REMOTE_SUBJECT_TIMEOUT", "180")),
+        ]
+        config["remote_evaluation_subjects"] = {
+            "enabled": environment_flag(
+                "DREAMING_REMOTE_EVALUATION_SUBJECTS_ENABLED"
+            ),
+            "protocol_version": 1,
+            "origin_host_id": origin_host_id,
+            "command": command,
+            "receiver": receiver,
+            "max_files": 512,
+            "max_file_bytes": 8 * 1024 * 1024,
+            "max_decoded_bytes": 32 * 1024 * 1024,
+            "max_encoded_bytes": 48 * 1024 * 1024,
+            "snapshot_root": str(
+                state_dir / "remote-evaluation-subjects"
+            ),
+        }
+    elif isinstance(existing_remote_subjects, dict):
+        config["remote_evaluation_subjects"] = existing_remote_subjects
     output.parent.mkdir(parents=True, exist_ok=True)
     temporary = output.parent / f".{output.name}.{uuid.uuid4().hex}"
     temporary.write_text(

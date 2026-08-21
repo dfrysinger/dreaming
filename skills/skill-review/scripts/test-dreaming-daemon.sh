@@ -152,6 +152,19 @@ set -e
 assert_eq "$release_status" "1" "absent lock token did not retain its not-found status"
 pass "release distinguishes absent tokens from lock database failures"
 
+new_case caller-token
+caller_token="12345678-1234-4234-9234-123456789abc"
+token="$("$SCRIPT_DIR/daemon-lock.py" acquire --mode session --owner caller-token --token "$caller_token")"
+assert_eq "$token" "$caller_token" "caller-provided token was not retained"
+"$SCRIPT_DIR/daemon-lock.py" release "$caller_token" --idempotent
+"$SCRIPT_DIR/daemon-lock.py" release "$caller_token" --idempotent
+if "$SCRIPT_DIR/daemon-lock.py" acquire --mode session --owner invalid-token --token "not-a-uuid" >/dev/null 2>&1; then
+  fail "malformed caller token was accepted"
+fi
+token="$("$SCRIPT_DIR/daemon-lock.py" acquire --mode session --owner replacement)"
+"$SCRIPT_DIR/daemon-lock.py" release "$token"
+pass "caller tokens are canonical and idempotent release is token-scoped"
+
 new_case legacy-lock
 mkdir -p "$SKILLS_LOCK_DIR"
 printf '%s\n' 999999 > "$SKILLS_LOCK_DIR/pid"

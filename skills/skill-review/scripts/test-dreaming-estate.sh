@@ -538,6 +538,352 @@ class EstateCensusTest(unittest.TestCase):
         )
         self.assertEqual(builtin_instance["authority"], "cli_builtin")
 
+    def test_chk03_distinguishes_runtime_dependencies_from_file_consumers(self) -> None:
+        root = self.case / "skills"
+        root.mkdir()
+        orchestrator = self.skill(root, "orchestrator")
+        worker = self.skill(root, "worker")
+        consumer = self.skill(root, "consumer")
+        reporter = self.skill(root, "reporter")
+        pinned = self.skill(root, "pinned-helper")
+        (orchestrator / "SKILL.md").write_text(
+            "---\nname: orchestrator\ndescription: Run `worker` for every task.\n---\n",
+            encoding="utf-8",
+        )
+        (orchestrator / "runner.js").write_text(
+            "export const worker = () => invoke('/worker');\n",
+            encoding="utf-8",
+        )
+        (consumer / "SKILL.md").write_text(
+            "---\nname: consumer\ndescription: Fixture.\n---\n"
+            "Call ../reporter/scripts/post.py directly, not the `reporter` skill.\n",
+            encoding="utf-8",
+        )
+        durable = {
+            "complete": True,
+            "dependencies": [],
+            "skills": [
+                {"name": name, "pinned": name == "pinned-helper"}
+                for name in (
+                    "consumer",
+                    "orchestrator",
+                    "pinned-helper",
+                    "reporter",
+                    "worker",
+                )
+            ],
+        }
+        contexts = [{
+            "id": "user",
+            "kind": "user",
+            "registered": True,
+            "runtime_skills": [
+                {
+                    "name": skill.name,
+                    "source": "fixture",
+                    "path": str(skill),
+                    "enabled": True,
+                }
+                for skill in (orchestrator, worker, consumer, reporter, pinned)
+            ],
+        }]
+        census = module.reconcile(
+            host_id="macbook",
+            roots=[self.root("fixture", "custom", root, "unknown_provenance")],
+            contexts=contexts,
+            collected_at="2026-08-18T00:00:00+00:00",
+            durable_dependency_inventory=durable,
+        )
+        instances = {
+            item["skill_name"]: item for item in census["physical_instances"]
+        }
+        worker_dependencies = instances["worker"]["dependencies"]
+        self.assertEqual(worker_dependencies["state"], "protected")
+        self.assertEqual(
+            {item["source_skill"] for item in worker_dependencies["blockers"]},
+            {"orchestrator"},
+        )
+        self.assertIn(
+            "runner.js",
+            {item["source_file"] for item in worker_dependencies["blockers"]},
+        )
+        reporter_dependencies = instances["reporter"]["dependencies"]
+        self.assertEqual(reporter_dependencies["state"], "clear")
+        self.assertEqual(
+            {
+                item["source_skill"]
+                for item in reporter_dependencies["installed_content_consumers"]
+            },
+            {"consumer"},
+        )
+        self.assertEqual(
+            instances["pinned-helper"]["dependencies"]["state"], "protected"
+        )
+        self.assertTrue(
+            census["evidence"]["dependency_inventory"]["source_graph_complete"]
+        )
+        self.assertTrue(census["evidence"]["dependency_inventory"]["complete"])
+
+    def test_chk03_incomplete_source_population_never_clears(self) -> None:
+        root = self.case / "skills"
+        root.mkdir()
+        target = self.skill(root, "target")
+        durable = {
+            "complete": True,
+            "dependencies": [],
+            "skills": [{"name": "target", "pinned": False}],
+        }
+        census = module.reconcile(
+            host_id="macbook",
+            roots=[self.root("fixture", "custom", root, "unknown_provenance")],
+            contexts=[{
+                "id": "user",
+                "kind": "user",
+                "registered": True,
+                "runtime_skills": [{
+                    "name": "target",
+                    "source": "fixture",
+                    "path": str(target),
+                    "enabled": True,
+                }, {
+                    "name": "unmapped-dependent",
+                    "source": "fixture",
+                    "path": str(self.case / "missing-dependent"),
+                    "enabled": True,
+                }],
+            }],
+            collected_at="2026-08-18T00:00:00+00:00",
+            durable_dependency_inventory=durable,
+        )
+        target_instance = next(
+            item for item in census["physical_instances"]
+            if item["skill_name"] == "target"
+        )
+        self.assertEqual(target_instance["dependencies"]["state"], "incomplete")
+        self.assertFalse(target_instance["dependencies_complete"])
+        self.assertFalse(
+            census["evidence"]["dependency_inventory"]["source_graph_complete"]
+        )
+
+    def test_chk03_normalizes_durable_targets_and_rejects_empty_sources(self) -> None:
+        root = self.case / "skills"
+        root.mkdir()
+        worker = self.skill(root, "worker")
+        contexts = [{
+            "id": "user",
+            "kind": "user",
+            "registered": True,
+            "runtime_skills": [{
+                "name": "worker",
+                "source": "fixture",
+                "path": str(worker),
+                "enabled": True,
+            }],
+        }]
+        root_record = self.root("fixture", "custom", root, "unknown_provenance")
+        durable = {
+            "complete": True,
+            "dependencies": [{
+                "skill": "WORKER",
+                "sources": ["/durable/owner"],
+            }],
+            "skills": [{"name": "worker", "pinned": False}],
+        }
+        protected = module.reconcile(
+            host_id="macbook",
+            roots=[root_record],
+            contexts=contexts,
+            collected_at="2026-08-18T00:00:00+00:00",
+            durable_dependency_inventory=durable,
+        )
+        self.assertEqual(
+            protected["physical_instances"][0]["dependencies"]["state"],
+            "protected",
+        )
+        durable["dependencies"][0]["sources"] = []
+        incomplete = module.reconcile(
+            host_id="macbook",
+            roots=[root_record],
+            contexts=contexts,
+            collected_at="2026-08-18T00:00:00+00:00",
+            durable_dependency_inventory=durable,
+        )
+        self.assertEqual(
+            incomplete["physical_instances"][0]["dependencies"]["state"],
+            "incomplete",
+        )
+        self.assertFalse(
+            incomplete["evidence"]["dependency_inventory"][
+                "durable_inventory_complete"
+            ]
+        )
+        durable["dependencies"] = [{
+            "skill": "stale-helper",
+            "sources": ["/durable/owner"],
+        }]
+        durable["skills"].append({"name": "stale-helper", "pinned": False})
+        stale = module.reconcile(
+            host_id="macbook",
+            roots=[root_record],
+            contexts=contexts,
+            collected_at="2026-08-18T00:00:00+00:00",
+            durable_dependency_inventory=durable,
+        )
+        self.assertEqual(
+            stale["physical_instances"][0]["dependencies"]["state"],
+            "incomplete",
+        )
+        self.assertFalse(
+            stale["evidence"]["dependency_inventory"][
+                "durable_inventory_complete"
+            ]
+        )
+
+    def test_evaluation_inventory_is_exact_and_fails_closed(self) -> None:
+        root = self.case / "skills"
+        root.mkdir()
+        evaluated = self.skill(root, "evaluated")
+        missing = self.skill(root, "missing")
+        contexts = [{
+            "id": "user",
+            "kind": "user",
+            "registered": True,
+            "runtime_skills": [
+                {
+                    "name": skill.name,
+                    "source": "fixture",
+                    "path": str(skill),
+                    "enabled": True,
+                }
+                for skill in (evaluated, missing)
+            ],
+        }]
+        census = module.reconcile(
+            host_id="macbook",
+            roots=[self.root("fixture", "custom", root, "unknown_provenance")],
+            contexts=contexts,
+            collected_at="2026-08-18T00:00:00+00:00",
+            durable_dependency_inventory={
+                "complete": True,
+                "dependencies": [],
+                "skills": [
+                    {"name": "evaluated", "pinned": False},
+                    {"name": "missing", "pinned": False},
+                ],
+            },
+        )
+        evaluation = {
+            "state": "pass",
+            "status": "pass",
+            "current": True,
+            "evaluated_at": "2026-08-17T00:00:00+00:00",
+            "receipt_sha256": "1" * 64,
+            "transition_id": "sha256:" + "2" * 64,
+            "input_manifest_sha256": "sha256:" + "4" * 64,
+            "cases": [{
+                "executor": "copilot",
+                "case_id": "intended",
+                "evaluation_class": "capability_uplift",
+                "candidate_valid_trials": 3,
+                "candidate_successful_trials": 3,
+                "control_valid_trials": 3,
+                "control_successful_trials": 1,
+                "comparable": True,
+                "exclusion_reason": None,
+            }],
+        }
+        missing_evaluation = {
+            "state": "input_missing",
+            "status": "input_missing",
+            "current": False,
+            "evaluated_at": None,
+            "receipt_sha256": None,
+            "transition_id": None,
+            "input_manifest_sha256": None,
+            "cases": [],
+        }
+        inventory = {
+            "complete": True,
+            "schema_version": 1,
+            "evaluator_sha256": "sha256:" + "3" * 64,
+            "observed_at": "2026-08-18T00:00:00+00:00",
+            "max_age_days": 90,
+            "evaluations": [
+                {"skill_path": str(evaluated), "evaluation": evaluation},
+                {
+                    "skill_path": str(missing),
+                    "evaluation": missing_evaluation,
+                },
+            ],
+        }
+        module.apply_evaluation_inventory(census, inventory)
+        instances = {
+            item["skill_name"]: item for item in census["physical_instances"]
+        }
+        self.assertEqual(instances["evaluated"]["evaluation"]["state"], "pass")
+        self.assertTrue(instances["evaluated"]["evaluation_complete"])
+        self.assertEqual(
+            instances["missing"]["evaluation"]["state"], "input_missing"
+        )
+        self.assertEqual(
+            census["evidence"]["evaluation_inventory"]["state_counts"]["pass"],
+            1,
+        )
+        malformed = json.loads(json.dumps(inventory))
+        malformed["evaluations"][0]["evaluation"]["state"] = []
+        module.apply_evaluation_inventory(census, malformed)
+        self.assertTrue(
+            all(
+                item["evaluation"]["state"] == "invalid"
+                and item["evaluation_complete"] is False
+                for item in census["physical_instances"]
+            )
+        )
+        module.apply_evaluation_inventory(census, inventory)
+        inventory["evaluations"].pop()
+        module.apply_evaluation_inventory(census, inventory)
+        self.assertFalse(
+            census["evidence"]["evaluation_inventory"]["complete"]
+        )
+        self.assertTrue(
+            all(
+                item["evaluation"]["state"] == "invalid"
+                and item["evaluation_complete"] is False
+                for item in census["physical_instances"]
+            )
+        )
+
+    def test_evaluation_collector_requires_the_exact_protocol(self) -> None:
+        evaluator = self.case / "evaluator.py"
+        evaluator.write_text(
+            "import json\n"
+            "print(json.dumps({'observed_at': '2026-08-18T00:00:00+00:00',"
+            " 'max_age_days': 90, 'evaluations': []}))\n",
+            encoding="utf-8",
+        )
+        inventory = module.collect_evaluation_inventory(
+            {"evaluation_script": str(evaluator)},
+            [],
+            "2026-08-18T00:00:00+00:00",
+        )
+        self.assertFalse(inventory["complete"])
+        self.assertEqual(inventory["evaluations"], [])
+
+    def test_evaluation_collector_bounds_combined_output(self) -> None:
+        evaluator = self.case / "noisy-evaluator.py"
+        evaluator.write_text(
+            "import sys\n"
+            f"sys.stdout.write('x' * {module.MAX_EVALUATION_OUTPUT_BYTES + 1})\n",
+            encoding="utf-8",
+        )
+        inventory = module.collect_evaluation_inventory(
+            {"evaluation_script": str(evaluator)},
+            [],
+            "2026-08-18T00:00:00+00:00",
+        )
+        self.assertFalse(inventory["complete"])
+        self.assertEqual(inventory["evaluations"], [])
+
     def test_chk02_classifies_the_full_provenance_authority_matrix(self) -> None:
         personal = self.case / "personal"
         personal.mkdir()
@@ -998,10 +1344,13 @@ class EstateCensusTest(unittest.TestCase):
         call_id: str = "call-1",
         name: str = "fixture-skill",
         success: bool = True,
+        argument_key: str = "skill",
     ) -> dict:
         data = {"toolCallId": call_id}
         if event_type == "tool.execution_start":
-            data.update({"toolName": "skill", "arguments": {"skill": name}})
+            data.update(
+                {"toolName": "skill", "arguments": {argument_key: name}}
+            )
         elif event_type == "tool.execution_complete":
             data["success"] = success
             if success:
@@ -1046,6 +1395,29 @@ class EstateCensusTest(unittest.TestCase):
                     "2026-08-17T11:00:01+00:00",
                     call_id="success-2",
                 ),
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T12:00:00+00:00",
+                    call_id="legacy-success",
+                    argument_key="name",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T12:00:01+00:00",
+                    call_id="legacy-success",
+                ),
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T13:00:00+00:00",
+                    call_id="invalid-failed",
+                    argument_key="unknown",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T13:00:01+00:00",
+                    call_id="invalid-failed",
+                    success=False,
+                ),
             ],
         )
         usage = module.collect_usage(
@@ -1063,11 +1435,11 @@ class EstateCensusTest(unittest.TestCase):
             [
                 {
                     "canonical_capability_id": capability_id,
-                    "uses_7d": 2,
-                    "uses_30d": 2,
-                    "uses_90d": 2,
-                    "uses_total": 2,
-                    "last_successful_invocation": "2026-08-17T11:00:01+00:00",
+                    "uses_7d": 3,
+                    "uses_30d": 3,
+                    "uses_90d": 3,
+                    "uses_total": 3,
+                    "last_successful_invocation": "2026-08-17T12:00:01+00:00",
                 }
             ],
         )
@@ -1330,6 +1702,17 @@ class EstateCensusTest(unittest.TestCase):
         self.assertFalse(usage["coverage"]["complete"])
         self.assertEqual(usage["coverage"]["bound_reached"], "max_sessions")
         self.assertEqual(usage["canonical_usage"][0]["uses_total"], 1)
+        self.assertEqual(len(usage["coverage"]["pending"]), 1)
+        deferred = usage["coverage"]["pending"][0]
+        self.assertEqual(deferred["reason"], "stable_budget_deferred")
+        self.assertRegex(deferred["session_id"], r"^sha256:[0-9a-f]{64}$")
+        self.assertIsNotNone(module.parse_usage_time(deferred["modified_at"]))
+        self.assertGreater(deferred["bytes"], 0)
+        self.assertIsNone(deferred["failure_id"])
+        self.assertEqual(
+            usage["coverage"]["collection_watermark"],
+            usage["collected_at"],
+        )
 
     def test_usage_index_advances_reuses_and_replaces_changed_sessions(self) -> None:
         capability_id = "sha256:" + "9" * 64
@@ -1415,6 +1798,95 @@ class EstateCensusTest(unittest.TestCase):
         self.assertEqual(changed["coverage"]["indexed_sessions"], 3)
         self.assertEqual(changed["coverage"]["sessions_parsed_this_run"], 1)
         self.assertEqual(changed["canonical_usage"][0]["uses_total"], 4)
+
+    def test_usage_index_migration_reparses_only_sessions_with_issues(self) -> None:
+        capability_id = "sha256:" + "8" * 64
+        collected_at = datetime(2026, 8, 18, 12, tzinfo=timezone.utc)
+        root = self.case / "sessions"
+        index = self.case / "state" / "usage-index.json"
+        clean = self.write_usage_events(
+            "clean",
+            [
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T09:00:00+00:00",
+                    call_id="clean",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T09:00:01+00:00",
+                    call_id="clean",
+                ),
+            ],
+        )
+        legacy = self.write_usage_events(
+            "legacy",
+            [
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-08-17T10:00:00+00:00",
+                    call_id="legacy",
+                    argument_key="name",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-08-17T10:00:01+00:00",
+                    call_id="legacy",
+                ),
+            ],
+        )
+        for path in (clean, legacy):
+            stamp = collected_at.timestamp() - 3600
+            os.utime(path, (stamp, stamp))
+        initial = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            root,
+            collected_at=collected_at,
+            max_sessions=10,
+            max_bytes=100_000,
+            index_path=index,
+        )
+        self.assertEqual(initial["canonical_usage"][0]["uses_total"], 2)
+
+        stale = json.loads(index.read_text(encoding="utf-8"))
+        stale.pop("parser_revision")
+        legacy_entry = stale["sessions"][module.opaque_session_id("legacy")]
+        legacy_entry["usage"] = {}
+        legacy_entry["issues"] = [
+            "usage_session_invalid_skill_name",
+            "usage_session_unmatched_skill_completion",
+        ]
+        index.write_text(json.dumps(stale), encoding="utf-8")
+        stale_bytes = index.read_bytes()
+        with mock.patch.object(
+            module,
+            "write_usage_index",
+            side_effect=module.EstateError("usage_index_unwritable"),
+        ):
+            with self.assertRaisesRegex(
+                module.EstateError, "usage_index_unwritable"
+            ):
+                module.load_usage_index(index, collected_at=collected_at)
+        self.assertEqual(index.read_bytes(), stale_bytes)
+        self.assertEqual(
+            list(index.parent.glob("usage-index.json.rejected-*")), []
+        )
+
+        migrated = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            root,
+            collected_at=collected_at,
+            max_sessions=10,
+            max_bytes=100_000,
+            index_path=index,
+        )
+        self.assertEqual(migrated["coverage"]["index_status"], "migrated")
+        self.assertEqual(migrated["coverage"]["sessions_parsed_this_run"], 1)
+        self.assertEqual(migrated["canonical_usage"][0]["uses_total"], 2)
+        stored = json.loads(index.read_text(encoding="utf-8"))
+        self.assertEqual(
+            stored["parser_revision"], module.USAGE_PARSER_REVISION
+        )
 
     def test_usage_index_streams_oversized_session_then_moves_beyond_it(self) -> None:
         capability_id = "sha256:" + "a" * 64
@@ -1561,6 +2033,12 @@ class EstateCensusTest(unittest.TestCase):
         self.assertEqual(
             first["coverage"]["pending"][0]["reason"],
             "events_recently_modified",
+        )
+        self.assertGreater(first["coverage"]["pending"][0]["bytes"], 0)
+        self.assertIsNotNone(
+            module.parse_usage_time(
+                first["coverage"]["pending"][0]["modified_at"]
+            )
         )
         index_text = index.read_text(encoding="utf-8")
         self.assertNotIn(sentinel, index_text)

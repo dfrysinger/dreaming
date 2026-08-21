@@ -55,6 +55,7 @@ assets = repo / "skills/skill-review/assets/dashboard"
 token_path = control / "dashboard/access-token"
 index_text = (assets / "index.html").read_text(encoding="utf-8")
 javascript = (assets / "dashboard.js").read_text(encoding="utf-8")
+stylesheet = (assets / "dashboard.css").read_text(encoding="utf-8")
 check('rel="icon"' in index_text and "data:image/svg+xml" in index_text, "static shell provides a self-contained favicon")
 check(
     "location.hash = `transcript/${button.dataset.transcript}`" in javascript
@@ -69,13 +70,13 @@ check(
     "browser routes expose candidate list and detail views",
 )
 check(
-    "Shadow candidates" in javascript
+    "Unpublished drafts" in javascript
     and "Not published" in javascript
     and "Not active" in javascript
     and "Not discoverable" in javascript
     and "Evaluation gates" in javascript
     and "Exact candidate identity" in javascript,
-    "candidate views conspicuously show shadow authority, identity, recurrence, freshness, and gates",
+    "candidate views conspicuously show unpublished authority, identity, recurrence, freshness, and gates",
 )
 check(
     'meta[name="dreaming-tailnet-host"]' in javascript
@@ -85,10 +86,193 @@ check(
     "browser uses tokenless API requests only on the exact injected HTTPS tailnet origin",
 )
 check(
-    "Governance decisions and actions" in javascript
+    "Portfolio decisions" in javascript
+    and "Decision queue" in javascript
+    and "Who may change it" in javascript
+    and "disabled title=" in javascript
     and "Recovery required:" in javascript
     and "receipts are verification-only" in javascript,
-    "estate view conspicuously reports action, receipt, and recovery state",
+    "portfolio view separates decisions, disabled actions, receipts, and recovery state",
+)
+check(
+    "Evaluation-input authoring must not start until the claims are recovered."
+    in javascript
+    and "Evaluation-input authoring must not start until the state is repaired."
+    in javascript
+    and "New evaluation work is paused." not in javascript,
+    "evaluation recovery notices require action without claiming an unimplemented pause",
+)
+check(
+    'class="portfolio-table"' in javascript
+    and 'data-label="Skill"' in javascript
+    and 'data-label="Next action"' in javascript
+    and "0 · active tails excluded" in javascript
+    and "+ · partial" in javascript
+    and "Unknown · stable backlog" in javascript
+    and "No settled use in 30 days" in javascript
+    and "Evaluation queue" in javascript
+    and "evaluation_queue_position" in javascript
+    and "enablement is not required" in javascript
+    and 'filesUsedBy.join(", ")' in javascript
+    and ".portfolio-queue .portfolio-table td::before" in stylesheet
+    and "@media (max-width: 700px)" in stylesheet,
+    "portfolio decisions disclose settled-use exclusions and stack labeled fields on narrow screens",
+)
+readiness_labels = {
+    state: dashboard.DashboardData._portfolio_evaluation(
+        {
+            "state": state,
+            "status": status,
+            "current": False,
+            "evaluated_at": "2026-08-19T00:00:00+00:00",
+            "receipt_sha256": None,
+            "transition_id": "sha256:" + "1" * 64,
+            "input_manifest_sha256": (
+                None
+                if state
+                in {
+                    "input_missing",
+                    "drafting",
+                    "insufficient_information",
+                }
+                else "sha256:" + "2" * 64
+            ),
+            "cases": [],
+        },
+        True,
+    )["label"]
+    for state, status in {
+        "input_missing": "input_missing",
+        "drafting": "authoring_claimed",
+        "review_required": "validation_passed",
+        "invalid": "independent_review_rejected",
+        "insufficient_information": "objective_grader_unavailable",
+        "ready": "ready",
+        "executing": "executing",
+        "stale": "pass",
+    }.items()
+}
+check(
+    readiness_labels
+    == {
+        "input_missing": "Needs test cases",
+        "drafting": "Test design in progress",
+        "review_required": "Test design in progress",
+        "invalid": "Test design rejected",
+        "insufficient_information": "Cannot test safely",
+        "ready": "Ready to test",
+        "executing": "Testing now",
+        "stale": "Stale evaluation",
+    },
+    "portfolio evaluation labels expose every readiness lifecycle state",
+)
+legacy_dependencies = dashboard.DashboardData._portfolio_dependencies(
+    ["/private/dependency/evidence"],
+    True,
+)
+check(
+    legacy_dependencies == {
+        "state": "protected",
+        "label": "Protected",
+        "complete": False,
+        "required_by": [],
+        "files_used_by": [],
+    },
+    "legacy dependency lists remain protective without disclosing their values",
+)
+malformed_dependencies = dashboard.DashboardData._portfolio_dependencies(
+    {
+        "state": "protected",
+        "complete": True,
+        "blockers": ["/private/dependency/evidence"],
+    },
+    True,
+)
+check(
+    malformed_dependencies["complete"] is False
+    and malformed_dependencies["required_by"] == []
+    and malformed_dependencies["files_used_by"] == [],
+    "malformed dependency dictionaries cannot claim completeness or disclose values",
+)
+malformed_evaluation = dashboard.DashboardData._portfolio_evaluation(
+    {
+        "state": "pass",
+        "status": "pass",
+        "current": True,
+        "evaluated_at": "2026-08-12T00:00:00+00:00",
+        "receipt_sha256": "a" * 64,
+        "transition_id": "sha256:" + "b" * 64,
+        "cases": [{
+            "executor": "copilot",
+            "case_id": "fixture",
+            "evaluation_class": "capability_uplift",
+            "candidate_valid_trials": {"private": "do-not-disclose"},
+            "candidate_successful_trials": 3,
+            "control_valid_trials": 3,
+            "control_successful_trials": 1,
+            "comparable": True,
+            "exclusion_reason": None,
+        }],
+    },
+    True,
+)
+check(
+    malformed_evaluation["state"] == "invalid"
+    and malformed_evaluation["current"] is False
+    and malformed_evaluation["cases"] == [],
+    "malformed evaluation cases fail closed without disclosing their values",
+)
+missing_kind_dependencies = dashboard.DashboardData._portfolio_dependencies(
+    {
+        "state": "protected",
+        "complete": True,
+        "blockers": [{"source_skill": "consumer"}],
+    },
+    True,
+)
+check(
+    missing_kind_dependencies["complete"] is False
+    and missing_kind_dependencies["required_by"] == [],
+    "dependency members missing their kind cannot claim completeness or labels",
+)
+check(
+    not any(
+        label in javascript
+        for label in (
+            "Governance decisions and actions",
+            "Evidence recommendation",
+            "Observed recommendation",
+            "Current recommendation",
+            "Historical action receipt",
+            "Dream review",
+            "Shadow candidates",
+            "<th>Observed</th>",
+            "Observed arrivals",
+            "Observed completions",
+            "Observed net",
+        )
+    ),
+    "dashboard omits ambiguous governance labels",
+)
+check(
+    all(
+        label in javascript
+        for label in (
+            "Skill lives on",
+            "Evaluation runs on",
+            "Not copied yet",
+            "Skill changed; refresh needed",
+            "Snapshot ready",
+            "Copy refused",
+            "Controls remain report-only",
+        )
+    ),
+    "dashboard explains remote skill location, copy state, and read-only control",
+)
+check(
+    javascript.index('["failed", "error", "regression", "unhealthy", "invalid"]')
+    < javascript.index('["healthy", "ok", "pass", "current", "completed", "inspected"]'),
+    "negative compound statuses take precedence over positive badge words",
 )
 check(
     not any(
@@ -200,6 +384,45 @@ estate_snapshot = {
             "basis": "private-provenance-sentinel",
             "private_evidence_path": "/private/provenance/path",
         },
+        "evaluation_complete": True,
+        "evaluation": {
+            "state": "pass",
+            "status": "pass",
+            "current": True,
+            "evaluated_at": "2026-08-12T00:00:00+00:00",
+            "receipt_sha256": "a" * 64,
+            "transition_id": "sha256:" + "b" * 64,
+            "cases": [{
+                "executor": "copilot",
+                "case_id": "fixture-intended",
+                "evaluation_class": "capability_uplift",
+                "candidate_valid_trials": 3,
+                "candidate_successful_trials": 3,
+                "control_valid_trials": 3,
+                "control_successful_trials": 1,
+                "comparable": True,
+                "exclusion_reason": None,
+            }],
+        },
+        "dependencies_complete": True,
+        "dependencies": {
+            "state": "protected",
+            "complete": True,
+            "blockers": [{
+                "kind": "runtime_capability",
+                "source_skill": "plugin-skill",
+                "source_capability_id": "sha256:" + "4" * 64,
+                "source_file": "SKILL.md",
+                "source_line": "12",
+            }],
+            "installed_content_consumers": [{
+                "kind": "installed_content",
+                "source_skill": "script-consumer",
+                "source_capability_id": "sha256:" + "7" * 64,
+                "source_file": "scripts/run.py",
+                "source_line": "4",
+            }],
+        },
     }, {
         "skill_name": "plugin-skill",
         "root_class": "plugin",
@@ -215,6 +438,20 @@ estate_snapshot = {
             "status": "verified",
             "basis": "exact_plugin_identity",
         },
+        "evaluation_complete": True,
+        "evaluation": {
+            "state": "regression",
+            "status": "regression",
+            "current": True,
+            "evaluated_at": "2026-08-12T00:00:00+00:00",
+            "receipt_sha256": "c" * 64,
+            "transition_id": "sha256:" + "d" * 64,
+            "cases": [],
+        },
+        "dependencies_complete": True,
+        "dependencies": {
+            "complete": True,
+        },
         "instance_id": "sha256:" + "3" * 64,
         "canonical_capability_id": "sha256:" + "4" * 64,
     }, {
@@ -229,6 +466,7 @@ estate_snapshot = {
             "status": "insufficient",
             "basis": "no_evidence",
         },
+        "dependencies": ["/private/dependency/evidence"],
     }],
     "enabled_instances": [{
         "context_id": "user",
@@ -269,6 +507,16 @@ estate_snapshot = {
         "settings_sha256": private_sentinels["settings"],
     },
 }
+for index, item in enumerate(estate_snapshot["physical_instances"], start=1):
+    item.update({
+        "host_id": estate_snapshot["host_id"],
+        "root_id": f"fixture-root-{index}",
+        "relative_path": item["skill_name"],
+        "absolute_path": item.get(
+            "absolute_path", f"/private/skill/{item['skill_name']}"
+        ),
+        "inventory_sha256": "sha256:" + str(index) * 64,
+    })
 estate_census = {
     **estate_snapshot,
     "snapshot_sha256": dashboard.sha(estate_snapshot),
@@ -321,6 +569,8 @@ usage_snapshot = {
         "bytes_parsed_this_run": 4096,
         "max_sessions": 100,
         "max_bytes": 100000,
+        "quiet_seconds": 300,
+        "collection_watermark": estate_snapshot["collected_at"],
         "bound_reached": None,
         "work_budget_stopped_run": False,
         "index_status": "loaded",
@@ -640,8 +890,99 @@ check(
                 "b" * 64,
             ]
         }
-    }
+    },
+    "evaluation_input_owner": {
+        "enabled": False,
+    },
+    "remote_evaluation_subjects": {
+        "enabled": False,
+        "protocol_version": 1,
+        "origin_host_id": estate_snapshot["host_id"],
+        "receiver": {
+            **estate_receipt["receiver"],
+            "content_policy_sha256": "c" * 64,
+        },
+    },
 }), encoding="utf-8")
+transport_receiver = {
+    **estate_receipt["receiver"],
+    "content_policy_sha256": "c" * 64,
+}
+overlay_rows = []
+enabled_capabilities = {
+    item["canonical_capability_id"]: next(
+        physical
+        for physical in estate_snapshot["physical_instances"]
+        if physical["instance_id"] == item["instance_id"]
+    )
+    for item in estate_snapshot["enabled_instances"]
+    if item["runtime_enabled"]
+}
+for index, (capability_id, physical) in enumerate(
+    sorted(enabled_capabilities.items()), start=1
+):
+    evaluation = {
+        **physical["evaluation"],
+        "input_manifest_sha256": "sha256:" + str(index + 6) * 64,
+    }
+    subject_identity = {
+        "origin_host_id": physical["host_id"],
+        "origin_root_id": physical["root_id"],
+        "origin_relative_path": physical["relative_path"],
+    }
+    overlay_rows.append({
+        "capability_id": capability_id,
+        "subject_key": dashboard.sha(subject_identity),
+        **subject_identity,
+        "origin_path": physical["absolute_path"],
+        "canonical_capability_id": capability_id,
+        "origin_inventory_sha256": physical["inventory_sha256"],
+        "candidate_id": "sha256:" + str(index + 3) * 64,
+        "superseded_candidate_ids": [],
+        "snapshot_state": "remote_candidate_snapshot_ready",
+        "content_path": f"/private/snapshots/{index}/candidate",
+        "transport_receipt_sha256": "sha256:" + str(index + 5) * 64,
+        "snapshot_refusal": None,
+        "evaluation": evaluation,
+    })
+overlay_identity = {
+    "schema_version": 1,
+    "kind": "remote_evaluation_overlay",
+    "census_snapshot_sha256": estate_census["snapshot_sha256"],
+    "census_receipt_sha256": estate_receipt_sha,
+    "usage_snapshot_sha256": estate_usage["snapshot_sha256"],
+    "usage_receipt_sha256": usage_receipt_sha,
+    "receiver": estate_receipt["receiver"],
+    "transport_receiver": transport_receiver,
+    "origin_host_id": estate_snapshot["host_id"],
+    "evaluator_sha256": "sha256:" + "d" * 64,
+    "registry_identity": dashboard.EVALUATION_OVERLAY_REGISTRY_IDENTITY,
+    "rows": overlay_rows,
+}
+overlay = {
+    **overlay_identity,
+    "overlay_sha256": dashboard.sha(overlay_identity),
+}
+overlay_root = state / "evaluation-input-overlays"
+overlay_root.mkdir()
+(overlay_root / f"{overlay['overlay_sha256'].removeprefix('sha256:')}.json").write_text(
+    json.dumps(overlay), encoding="utf-8"
+)
+pointer_identity = {
+    "schema_version": 1,
+    "overlay_sha256": overlay["overlay_sha256"],
+    "census_snapshot_sha256": estate_census["snapshot_sha256"],
+    "census_receipt_sha256": estate_receipt_sha,
+    "usage_snapshot_sha256": estate_usage["snapshot_sha256"],
+    "usage_receipt_sha256": usage_receipt_sha,
+}
+(state / "evaluation-input-overlay-current.json").write_text(
+    json.dumps({
+        **pointer_identity,
+        "pointer_sha256": dashboard.sha(pointer_identity),
+    }),
+    encoding="utf-8",
+)
 (state / "remote-publication-summary.json").write_text(json.dumps({
     "schema_version": 1,
     "status": "committed",
@@ -1284,12 +1625,55 @@ try:
         and estate_view["receipt_sha256"] == estate_receipt_sha
         and estate_view["actions"]["status"] == "current"
         and estate_view["actions"]["total"] == 4
+        and estate_view["remote_evaluation"]["status"] == "current"
+        and estate_view["remote_evaluation"]["origin_host"] == "MacBook"
+        and estate_view["remote_evaluation"]["execution_host"] == "Mac mini"
+        and estate_view["remote_evaluation"]["report_only"] is True
         and {
             item["status"] for item in estate_view["actions"]["items"]
         } == {"committed", "protected", "unknown"}
         and estate_view["read_only"] is True
         and estate_view["authorizes_actions"] is False,
         "estate API reports bounded totals, authority, and plugin capability inventory",
+    )
+    portfolio = {
+        item["skill_name"]: item
+        for item in estate_view["portfolio_decisions"]
+    }
+    check(
+        len(portfolio) == estate_view["totals"]["canonical_capabilities"]
+        and portfolio["fixture-skill"]["recommendation"] == "proven_useful"
+        and portfolio["plugin-skill"]["recommendation"] == "disable_candidate"
+        and portfolio["plugin-skill"]["who_may_change"] == "Plugin package only"
+        and portfolio["plugin-skill"]["dependencies"]["state"] == "incomplete"
+        and portfolio["plugin-skill"]["dependencies"]["complete"] is False
+        and estate_view["evaluation_queue"] == {
+            "queued": 1,
+            "current": 2,
+            "missing": 0,
+            "drafting": 0,
+            "review_required": 0,
+            "insufficient_information": 0,
+            "ready": 0,
+            "stale": 0,
+            "invalid": 0,
+        }
+        and portfolio["plugin-skill"]["evaluation_queue_position"] == 1
+        and portfolio["plugin-skill"]["evaluation_queue_reason"]
+        == "No successful use in 30 days"
+        and portfolio["fixture-skill"]["evaluation_queue_position"] is None
+        and portfolio["fixture-skill"]["evaluation"]["cases"][0]["case_id"]
+        == "fixture-intended"
+        and portfolio["fixture-skill"]["remote_evaluation"]["snapshot_state"]
+        == "remote_candidate_snapshot_ready"
+        and portfolio["fixture-skill"]["remote_evaluation"]["origin_host"]
+        == "MacBook"
+        and portfolio["fixture-skill"]["dependencies"]["required_by"]
+        == ["plugin-skill"]
+        and portfolio["fixture-skill"]["dependencies"]["files_used_by"]
+        == ["script-consumer"]
+        and all(item["next_action"]["enabled"] is False for item in portfolio.values()),
+        "portfolio decisions cover each enabled capability and separate value from authority",
     )
     check(
         all(
@@ -1303,10 +1687,88 @@ try:
                 "/private/plugin/path",
                 "/private/skill/path",
                 "/private/provenance/path",
+                "/private/dependency/evidence",
                 "private-provenance-sentinel",
             )
         ),
         "estate API excludes private settings, file inventories, and local roots",
+    )
+    original_overlay_pointer = (
+        state / "evaluation-input-overlay-current.json"
+    ).read_bytes()
+    stale_pointer = json.loads(original_overlay_pointer)
+    stale_pointer["usage_receipt_sha256"] = "sha256:" + "f" * 64
+    stale_identity = {
+        key: value
+        for key, value in stale_pointer.items()
+        if key != "pointer_sha256"
+    }
+    stale_pointer["pointer_sha256"] = dashboard.sha(stale_identity)
+    (state / "evaluation-input-overlay-current.json").write_text(
+        json.dumps(stale_pointer), encoding="utf-8"
+    )
+    _, _, stale_overlay_body = request("/api/v1/estate")
+    stale_overlay = json.loads(stale_overlay_body)["data"]
+    stale_portfolio = {
+        item["skill_name"]: item
+        for item in stale_overlay["portfolio_decisions"]
+    }
+    check(
+        stale_overlay["remote_evaluation"]["status"] == "current view invalid"
+        and all(
+            item["evaluation"]["state"] == "input_missing"
+            for item in stale_portfolio.values()
+        )
+        and all(
+            item["remote_evaluation"]["snapshot_state"]
+            == "remote_candidate_state_unavailable"
+            for item in stale_portfolio.values()
+        ),
+        "stale remote evaluation pointers fail closed without trusting path-local evaluation",
+    )
+    (state / "evaluation-input-overlay-current.json").write_bytes(
+        original_overlay_pointer
+    )
+    original_adapters = (state / "adapters.json").read_bytes()
+    local_adapters = json.loads(original_adapters)
+    mismatched_adapters = json.loads(original_adapters)
+    mismatched_adapters["remote_evaluation_subjects"][
+        "origin_host_id"
+    ] = "different-host"
+    (state / "adapters.json").write_text(
+        json.dumps(mismatched_adapters), encoding="utf-8"
+    )
+    _, _, mismatched_remote_body = request("/api/v1/estate")
+    mismatched_remote = json.loads(mismatched_remote_body)["data"]
+    check(
+        mismatched_remote["remote_evaluation"]["status"]
+        == "configuration invalid"
+        and all(
+            item["evaluation"]["state"] == "input_missing"
+            for item in mismatched_remote["portfolio_decisions"]
+        ),
+        "mismatched remote origin suppresses all path-local evaluation authority",
+    )
+    disabled_owner_adapters = json.loads(original_adapters)
+    disabled_owner_adapters["remote_evaluation_subjects"]["enabled"] = True
+    (state / "adapters.json").write_text(
+        json.dumps(disabled_owner_adapters), encoding="utf-8"
+    )
+    _, _, disabled_owner_body = request("/api/v1/estate")
+    disabled_owner = json.loads(disabled_owner_body)["data"]
+    check(
+        disabled_owner["remote_evaluation"]["status"]
+        == "configuration invalid"
+        and all(
+            item["evaluation"]["state"] == "input_missing"
+            for item in disabled_owner["portfolio_decisions"]
+        ),
+        "enabled remote transport with a disabled owner cannot restore raw evaluation",
+    )
+    local_adapters.pop("evaluation_input_owner")
+    local_adapters.pop("remote_evaluation_subjects")
+    (state / "adapters.json").write_text(
+        json.dumps(local_adapters), encoding="utf-8"
     )
     original_usage_current = (state / "estate-usage-current.json").read_bytes()
     (state / "estate-usage-current.json").unlink()
@@ -1336,11 +1798,260 @@ try:
     )
     (state / "estate-usage-current.json").write_bytes(original_usage_current)
 
+    usage_variant_paths = []
+
+    def record_usage_variant(snapshot):
+        variant_usage = {
+            **snapshot,
+            "snapshot_sha256": dashboard.sha(snapshot),
+        }
+        variant_receipt = {
+            "schema_version": 1,
+            "snapshot_sha256": variant_usage["snapshot_sha256"],
+            "census_snapshot_sha256": estate_census["snapshot_sha256"],
+            "receiver": estate_receipt["receiver"],
+            "usage": variant_usage,
+        }
+        variant_receipt_sha = dashboard.sha(variant_receipt)
+        variant_path = (
+            usage_receipts
+            / f"{variant_receipt_sha.removeprefix('sha256:')}.json"
+        )
+        variant_path.write_text(json.dumps(variant_receipt), encoding="utf-8")
+        usage_variant_paths.append(variant_path)
+        (state / "estate-usage-current.json").write_text(
+            json.dumps({
+                "schema_version": 1,
+                "receipt_sha256": variant_receipt_sha,
+                "snapshot_sha256": variant_usage["snapshot_sha256"],
+                "census_snapshot_sha256": estate_census["snapshot_sha256"],
+                "usage": variant_usage,
+            }),
+            encoding="utf-8",
+        )
+
+    migrated_usage_snapshot = json.loads(json.dumps(usage_snapshot))
+    migrated_usage_snapshot["coverage"]["index_status"] = "migrated"
+    record_usage_variant(migrated_usage_snapshot)
+    _, _, migrated_usage_body = request("/api/v1/estate")
+    check(
+        json.loads(migrated_usage_body)["data"]["usage"]["status"] == "complete",
+        "a parser-revision migration remains a valid usage receipt",
+    )
+
+    sealed_legacy_usage = json.loads(json.dumps(usage_snapshot))
+    sealed_legacy_coverage = sealed_legacy_usage["coverage"]
+    sealed_legacy_coverage.pop("quiet_seconds")
+    sealed_legacy_coverage.pop("collection_watermark")
+    sealed_legacy_coverage["complete"] = False
+    sealed_legacy_coverage["corpus_complete"] = False
+    sealed_legacy_coverage["attribution_complete"] = False
+    sealed_legacy_coverage["discovered_sessions"] += 1
+    sealed_legacy_coverage["discovered_bytes"] += 128
+    sealed_legacy_coverage["pending_sessions"] = 1
+    sealed_legacy_coverage["pending_bytes"] = 128
+    sealed_legacy_coverage["pending"] = []
+    sealed_legacy_coverage["failures"] = [{
+        "session_id": "copilot:legacy-session",
+        "reason": "usage_session_invalid_skill_name",
+    }]
+    sealed_legacy_usage["unattributed"] = [{
+        "name": "retired-skill",
+        "reason": "unmapped",
+        "uses_7d": 0,
+        "uses_30d": 0,
+        "uses_90d": 1,
+        "uses_total": 1,
+    }]
+    record_usage_variant(sealed_legacy_usage)
+    _, _, sealed_legacy_body = request("/api/v1/estate")
+    sealed_legacy_view = json.loads(sealed_legacy_body)["data"]
+    sealed_legacy_portfolio = {
+        item["skill_name"]: item
+        for item in sealed_legacy_view["portfolio_decisions"]
+    }
+    check(
+        sealed_legacy_view["usage"]["status"] == "incomplete"
+        and sealed_legacy_view["usage"]["pending_sessions"] == 1
+        and sealed_legacy_portfolio["plugin-skill"]["usage_state"]
+        == "blocked_stable_backlog"
+        and sealed_legacy_portfolio["plugin-skill"]["decision_coverage"][
+            "relevant_stable_backlog"
+        ] == {
+            "count": 2,
+            "bytes": 128,
+            "oldest_modified_at": None,
+        },
+        "sealed legacy usage without pending detail remains visible and blocks zero-use",
+    )
+
+    legacy_recent_usage = json.loads(json.dumps(usage_snapshot))
+    legacy_recent_coverage = legacy_recent_usage["coverage"]
+    legacy_recent_coverage.pop("quiet_seconds")
+    legacy_recent_coverage.pop("collection_watermark")
+    legacy_recent_coverage["complete"] = False
+    legacy_recent_coverage["corpus_complete"] = False
+    legacy_recent_coverage["attribution_complete"] = False
+    legacy_recent_coverage["discovered_sessions"] += 1
+    legacy_recent_coverage["discovered_bytes"] += 128
+    legacy_recent_coverage["pending_sessions"] = 1
+    legacy_recent_coverage["pending_bytes"] = 128
+    legacy_recent_coverage["pending"] = [{
+        "session_id": "sha256:" + "6" * 64,
+        "reason": "events_recently_modified",
+    }]
+    legacy_recent_coverage["failures"] = []
+    record_usage_variant(legacy_recent_usage)
+    _, _, legacy_recent_body = request("/api/v1/estate")
+    legacy_recent_view = json.loads(legacy_recent_body)["data"]
+    legacy_recent_portfolio = {
+        item["skill_name"]: item
+        for item in legacy_recent_view["portfolio_decisions"]
+    }
+    check(
+        legacy_recent_view["usage"]["status"] == "incomplete"
+        and legacy_recent_portfolio["plugin-skill"]["usage_state"]
+        == "settled_zero_30d"
+        and legacy_recent_portfolio["plugin-skill"]["decision_coverage"][
+            "excluded_recent"
+        ] == {"count": 1, "bytes": 128}
+        and legacy_recent_portfolio["plugin-skill"]["decision_coverage"][
+            "relevant_stable_backlog"
+        ]["count"] == 0,
+        "sealed legacy recent tails remain excluded from 30-day zero decisions",
+    )
+
+    legacy_mixed_usage = json.loads(json.dumps(legacy_recent_usage))
+    legacy_mixed_coverage = legacy_mixed_usage["coverage"]
+    legacy_mixed_coverage["discovered_sessions"] += 1
+    legacy_mixed_coverage["pending_sessions"] = 2
+    legacy_mixed_coverage["pending"] = [
+        {
+            "session_id": "sha256:" + "6" * 64,
+            "reason": "events_recently_modified",
+        },
+        {
+            "session_id": "sha256:" + "7" * 64,
+            "reason": "stable_budget_deferred",
+        },
+    ]
+    record_usage_variant(legacy_mixed_usage)
+    _, _, legacy_mixed_body = request("/api/v1/estate")
+    legacy_mixed_view = json.loads(legacy_mixed_body)["data"]
+    legacy_mixed_portfolio = {
+        item["skill_name"]: item
+        for item in legacy_mixed_view["portfolio_decisions"]
+    }
+    check(
+        legacy_mixed_view["usage"]["status"] == "incomplete"
+        and legacy_mixed_portfolio["plugin-skill"]["usage_state"]
+        == "blocked_stable_backlog"
+        and legacy_mixed_portfolio["plugin-skill"]["decision_coverage"][
+            "excluded_recent"
+        ] == {"count": 1, "bytes": 0}
+        and legacy_mixed_portfolio["plugin-skill"]["decision_coverage"][
+            "relevant_stable_backlog"
+        ] == {
+            "count": 1,
+            "bytes": 128,
+            "oldest_modified_at": None,
+        },
+        "mixed legacy tails attribute aggregate bytes to a stable blocker",
+    )
+
+    hybrid_usage_snapshot = json.loads(json.dumps(usage_snapshot))
+    hybrid_usage_snapshot["coverage"]["complete"] = False
+    hybrid_usage_snapshot["coverage"]["failures"] = [{
+        "session_id": "copilot:hybrid-session",
+        "reason": "usage_session_invalid_skill_name",
+    }]
+    record_usage_variant(hybrid_usage_snapshot)
+    _, _, hybrid_usage_body = request("/api/v1/estate")
+    check(
+        json.loads(hybrid_usage_body)["data"]["usage"]["status"]
+        == "unavailable",
+        "modern coverage rejects legacy two-field failure records",
+    )
+
+    hybrid_pending_snapshot = json.loads(json.dumps(usage_snapshot))
+    hybrid_pending_snapshot["coverage"]["complete"] = False
+    hybrid_pending_snapshot["coverage"]["pending"] = [{
+        "session_id": "sha256:" + "6" * 64,
+        "reason": "events_recently_modified",
+    }]
+    hybrid_pending_snapshot["coverage"]["discovered_sessions"] += 1
+    hybrid_pending_snapshot["coverage"]["discovered_bytes"] += 128
+    hybrid_pending_snapshot["coverage"]["pending_sessions"] = 1
+    hybrid_pending_snapshot["coverage"]["pending_bytes"] = 128
+    record_usage_variant(hybrid_pending_snapshot)
+    _, _, hybrid_pending_body = request("/api/v1/estate")
+    check(
+        json.loads(hybrid_pending_body)["data"]["usage"]["status"]
+        == "unavailable",
+        "modern coverage rejects legacy two-field pending records",
+    )
+
+    impossible_complete_snapshot = json.loads(json.dumps(usage_snapshot))
+    impossible_coverage = impossible_complete_snapshot["coverage"]
+    impossible_coverage["discovered_sessions"] += 1
+    impossible_coverage["discovered_bytes"] += 128
+    impossible_coverage["pending_sessions"] = 1
+    impossible_coverage["pending_bytes"] = 128
+    impossible_coverage["pending"] = [{
+        "session_id": "sha256:" + "6" * 64,
+        "reason": "events_recently_modified",
+        "modified_at": "2026-08-13T11:59:00+00:00",
+        "bytes": 128,
+        "failure_id": None,
+    }]
+    record_usage_variant(impossible_complete_snapshot)
+    _, _, impossible_complete_body = request("/api/v1/estate")
+    check(
+        json.loads(impossible_complete_body)["data"]["usage"]["status"]
+        == "unavailable",
+        "complete corpus claims with pending sessions fail closed",
+    )
+
+    mismatched_failure_snapshot = json.loads(json.dumps(usage_snapshot))
+    mismatched_coverage = mismatched_failure_snapshot["coverage"]
+    mismatched_coverage["complete"] = False
+    mismatched_coverage["corpus_complete"] = False
+    mismatched_coverage["discovered_sessions"] += 1
+    mismatched_coverage["discovered_bytes"] += 128
+    mismatched_coverage["pending_sessions"] = 1
+    mismatched_coverage["pending_bytes"] = 128
+    mismatched_coverage["pending"] = [{
+        "session_id": "sha256:" + "6" * 64,
+        "reason": "usage_session_malformed_json",
+        "modified_at": "2026-08-13T11:59:00+00:00",
+        "bytes": 128,
+        "failure_id": "sha256:" + "8" * 64,
+    }]
+    mismatched_coverage["failures"] = [{
+        "failure_id": "sha256:" + "8" * 64,
+        "session_id": "sha256:" + "7" * 64,
+        "reason": "usage_session_malformed_json",
+        "modified_at": "2026-08-13T11:59:00+00:00",
+        "bytes": 128,
+        "candidate_capability_ids": [],
+    }]
+    record_usage_variant(mismatched_failure_snapshot)
+    _, _, mismatched_failure_body = request("/api/v1/estate")
+    check(
+        json.loads(mismatched_failure_body)["data"]["usage"]["status"]
+        == "unavailable",
+        "pending failures must match their exact referenced session record",
+    )
+
     incomplete_usage_snapshot = json.loads(json.dumps(usage_snapshot))
     incomplete_usage_snapshot["coverage"]["complete"] = False
     incomplete_usage_snapshot["coverage"]["failures"] = [{
+        "failure_id": "sha256:" + "8" * 64,
         "session_id": "sha256:" + "7" * 64,
         "reason": "usage_session_malformed_json",
+        "modified_at": "2026-08-13T10:00:00+00:00",
+        "bytes": 128,
+        "candidate_capability_ids": [],
     }]
     incomplete_usage = {
         **incomplete_usage_snapshot,
@@ -1381,8 +2092,175 @@ try:
         ),
         "incomplete coverage remains distinct from complete zero usage",
     )
+    incomplete_portfolio = {
+        item["skill_name"]: item
+        for item in incomplete_usage_view["portfolio_decisions"]
+    }
+    check(
+        incomplete_portfolio["fixture-skill"]["usage_state"] == "used_30d"
+        and incomplete_portfolio["fixture-skill"]["decision_coverage"][
+            "is_lower_bound"
+        ] is True
+        and incomplete_portfolio["fixture-skill"]["uses_30d"] == 5
+        and incomplete_portfolio["fixture-skill"]["last_successful_invocation"]
+        == "2026-08-13T11:00:00+00:00"
+        and incomplete_portfolio["fixture-skill"]["recommendation"]
+        == "proven_useful",
+        "incomplete coverage preserves verified positive usage as decisive evidence",
+    )
+    check(
+        incomplete_portfolio["plugin-skill"]["usage_state"]
+        == "blocked_stable_backlog"
+        and incomplete_portfolio["plugin-skill"]["recommendation"]
+        == "disable_candidate",
+        "current regression remains visible while in-window transcript failure blocks non-use authority",
+    )
+    legacy_usage_snapshot = json.loads(json.dumps(incomplete_usage_snapshot))
+    legacy_usage_snapshot["coverage"]["failures"][0].pop(
+        "candidate_capability_ids"
+    )
+    legacy_usage_snapshot["unattributed"] = [{
+        "name": "retired-skill",
+        "reason": "unmapped",
+        "uses_7d": 0,
+        "uses_30d": 0,
+        "uses_90d": 1,
+        "uses_total": 1,
+    }]
+    record_usage_variant(legacy_usage_snapshot)
+    _, _, legacy_usage_body = request("/api/v1/estate")
+    legacy_usage_view = json.loads(legacy_usage_body)["data"]
+    check(
+        legacy_usage_view["usage"]["status"] == "incomplete"
+        and legacy_usage_view["usage"]["failure_count"] == 1
+        and legacy_usage_view["usage"]["unattributed_count"] == 1,
+        "sealed legacy usage attribution remains visible without inventing candidate identities",
+    )
+    decision_usage = {
+        "available": True,
+        "complete": False,
+        "collected_at": estate_snapshot["collected_at"],
+        "collection_watermark": estate_snapshot["collected_at"],
+        "_receipt_sha256": usage_receipt_sha,
+        "_failures": [],
+        "_unattributed": [],
+        "_pending": [{
+            "session_id": "sha256:" + "9" * 64,
+            "reason": "events_recently_modified",
+            "modified_at": "2026-08-13T11:59:00+00:00",
+            "bytes": 256,
+            "failure_id": None,
+        }],
+    }
+    zero_row = {
+        "uses_7d": 0,
+        "uses_30d": 0,
+        "uses_90d": 0,
+        "uses_total": 0,
+        "last_successful_invocation": None,
+    }
+    settled = dashboard.DashboardData._portfolio_usage_coverage(
+        "sha256:" + "4" * 64,
+        decision_usage,
+        zero_row,
+    )
+    check(
+        settled["state"] == "settled_zero_30d"
+        and settled["excluded_recent"] == {"count": 1, "bytes": 256}
+        and settled["relevant_stable_backlog"]["count"] == 0,
+        "recent active tails produce explicit settled 30-day zero coverage",
+    )
+    legacy_byte_shortfall = json.loads(json.dumps(decision_usage))
+    legacy_byte_shortfall["_legacy_pending_count"] = 0
+    legacy_byte_shortfall["_legacy_pending_bytes"] = 190
+    byte_shortfall_blocked = (
+        dashboard.DashboardData._portfolio_usage_coverage(
+            "sha256:" + "4" * 64,
+            legacy_byte_shortfall,
+            zero_row,
+        )
+    )
+    check(
+        byte_shortfall_blocked["state"] == "blocked_stable_backlog"
+        and byte_shortfall_blocked["relevant_stable_backlog"] == {
+            "count": 1,
+            "bytes": 190,
+            "oldest_modified_at": None,
+        },
+        "legacy pending byte shortfall cannot grant settled zero-use authority",
+    )
+    stable_usage = json.loads(json.dumps(decision_usage))
+    stable_usage["_pending"][0]["reason"] = "stable_budget_deferred"
+    blocked = dashboard.DashboardData._portfolio_usage_coverage(
+        "sha256:" + "4" * 64,
+        stable_usage,
+        zero_row,
+    )
+    check(
+        blocked["state"] == "blocked_stable_backlog"
+        and blocked["relevant_stable_backlog"]["count"] == 1,
+        "stable unread transcripts inside the decision window block zero-use",
+    )
+    stable_usage["_pending"][0]["modified_at"] = "2026-07-01T00:00:00+00:00"
+    aged_out = dashboard.DashboardData._portfolio_usage_coverage(
+        "sha256:" + "4" * 64,
+        stable_usage,
+        zero_row,
+    )
+    check(
+        aged_out["state"] == "settled_zero_30d"
+        and aged_out["relevant_stable_backlog"]["count"] == 0,
+        "stable unread transcripts older than the decision window do not block it",
+    )
+    identity_usage = json.loads(json.dumps(decision_usage))
+    identity_usage["_pending"] = []
+    identity_usage["_unattributed"] = [{
+        "name": "ambiguous-name",
+        "candidate_capability_ids": ["sha256:" + "4" * 64],
+    }]
+    identity_blocked = dashboard.DashboardData._portfolio_usage_coverage(
+        "sha256:" + "4" * 64,
+        identity_usage,
+        zero_row,
+    )
+    unrelated = dashboard.DashboardData._portfolio_usage_coverage(
+        "sha256:" + "2" * 64,
+        identity_usage,
+        zero_row,
+    )
+    check(
+        identity_blocked["state"] == "blocked_identity"
+        and unrelated["state"] == "settled_zero_30d",
+        "identity ambiguity blocks only candidate capabilities",
+    )
+    legacy_identity_usage = json.loads(json.dumps(decision_usage))
+    legacy_identity_usage["_pending"] = []
+    legacy_identity_usage["_unattributed"] = [{
+        "name": "ambiguous-legacy-name",
+        "reason": "conflicting_mapping",
+    }]
+    legacy_identity_blocked = dashboard.DashboardData._portfolio_usage_coverage(
+        "sha256:" + "4" * 64,
+        legacy_identity_usage,
+        zero_row,
+    )
+    legacy_unmapped_usage = json.loads(json.dumps(legacy_identity_usage))
+    legacy_unmapped_usage["_unattributed"][0]["reason"] = "unmapped"
+    legacy_unmapped = dashboard.DashboardData._portfolio_usage_coverage(
+        "sha256:" + "4" * 64,
+        legacy_unmapped_usage,
+        zero_row,
+    )
+    check(
+        legacy_identity_blocked["state"] == "blocked_identity"
+        and legacy_unmapped["state"] == "settled_zero_30d",
+        "ambiguous legacy attribution blocks zero-use while candidate-free legacy names do not",
+    )
     (state / "estate-usage-current.json").write_bytes(original_usage_current)
+    (state / "adapters.json").write_bytes(original_adapters)
     incomplete_usage_receipt_path.unlink()
+    for path in usage_variant_paths:
+        path.unlink()
 
     original_estate_current = (
         state / "estate-census-current.json"
@@ -1594,6 +2472,49 @@ try:
         "authenticated health exposes remote publication recovery",
     )
     recovery.unlink()
+    evaluation_recovery = {
+        "schema_version": 1,
+        "kind": "evaluation_input_recovery_required",
+        "claims": [
+            {
+                "claim_id": "sha256:" + "1" * 64,
+                "reason": "prior_owner_live",
+            }
+        ],
+    }
+    evaluation_recovery["record_sha256"] = dashboard.sha(
+        evaluation_recovery
+    )
+    evaluation_recovery_path = (
+        control / "dreaming/evaluation-input-recovery-required.json"
+    )
+    evaluation_recovery_path.parent.mkdir(parents=True, exist_ok=True)
+    evaluation_recovery_path.write_text(
+        json.dumps(evaluation_recovery), encoding="utf-8"
+    )
+    status, _, body = request("/api/v1/health")
+    evaluation_health = json.loads(body)["data"]
+    check(
+        status == 200
+        and evaluation_health["status"] == "Evaluation recovery required"
+        and evaluation_health["evaluation_input_recovery_required"] is True
+        and evaluation_health["evaluation_input_recovery_claims"] == 1,
+        "authenticated health exposes lane-scoped evaluation recovery",
+    )
+    evaluation_recovery_path.write_text("{}", encoding="utf-8")
+    status, _, body = request("/api/v1/health")
+    invalid_evaluation_health = json.loads(body)["data"]
+    check(
+        status == 200
+        and invalid_evaluation_health["status"]
+        == "Evaluation recovery state invalid"
+        and invalid_evaluation_health[
+            "evaluation_input_recovery_invalid"
+        ]
+        is True,
+        "authenticated health fails closed on malformed evaluation recovery",
+    )
+    evaluation_recovery_path.unlink()
 finally:
     server.terminate()
     server.wait(timeout=30)

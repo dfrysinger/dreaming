@@ -47,37 +47,233 @@ SH
 
 write_suite() {
   local skill="$1"
-  cat > "$skill/.skill-evaluation-cases.json" <<'JSON'
-{
-  "schema_version": 2,
-  "graders": [{"id":"safe-outcome","type":"regex","safety":true,"identity":"sha256:0000000000000000000000000000000000000000000000000000000000000000"}],
-  "cases": [
+  python3 - "$skill/.skill-evaluation-cases.json" <<'PY'
+import hashlib
+import json
+import sys
+
+grader = {
+    "id": "safe-outcome",
+    "type": "regex",
+    "safety": True,
+    "config": {"required": ["SUCCESS"], "forbidden": []},
+}
+canonical = json.dumps(grader, sort_keys=True, separators=(",", ":")).encode()
+suite_grader = {
+    "id": grader["id"],
+    "type": grader["type"],
+    "safety": grader["safety"],
+    "identity": "sha256:" + hashlib.sha256(canonical).hexdigest(),
+}
+cases = [
     {"id":"intended-case","class":"intended","task_id":"intended:fixture-0001","prompt":"Improve this task.","deterministic_graders":["safe-outcome"]},
     {"id":"related-case","class":"related","task_id":"related:fixture-0002","prompt":"Preserve this task.","deterministic_graders":["safe-outcome"]},
-    {"id":"activation-positive","class":"activation_positive","task_id":"activate:fixture-0003","prompt":"Use the fixture skill.","deterministic_graders":["safe-outcome"],"activation":{"expected_load":true}},
-    {"id":"activation-negative","class":"activation_negative","task_id":"activate:fixture-0004","prompt":"Do unrelated work.","deterministic_graders":["safe-outcome"],"activation":{"expected_load":false}}
-  ]
-}
-JSON
+    {"id":"activation-positive","class":"activation_positive","task_id":"activate:fixture-0003","prompt":"Use the fixture skill.","deterministic_graders":["safe-outcome"],"activation":{"expected_load":True}},
+    {"id":"activation-negative","class":"activation_negative","task_id":"activate:fixture-0004","prompt":"Do unrelated work.","deterministic_graders":["safe-outcome"],"activation":{"expected_load":False}},
+]
+with open(sys.argv[1], "w", encoding="utf-8") as output:
+    json.dump(
+        {"schema_version": 2, "graders": [suite_grader], "cases": cases},
+        output,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    output.write("\n")
+PY
 }
 
 write_policy() {
   local skill="$1" comparator_model="${2:-judge-1}"
+  local adapter_sha rubric_sha
+  adapter_sha="sha256:$(shasum -a 256 "$SCRIPT_DIR/fake-skill-evaluation-adapter.py" | awk '{print $1}')"
+  rubric_sha="$(
+    python3 - <<'PY'
+import hashlib
+import json
+
+rubric = {
+    "id": "quality",
+    "instruction": "Choose the better response only by task quality.",
+}
+canonical = json.dumps(rubric, sort_keys=True, separators=(",", ":")).encode()
+print("sha256:" + hashlib.sha256(canonical).hexdigest())
+PY
+  )"
   cat > "$skill/.skill-evaluation-policy.json" <<JSON
 {
   "schema_version": 2,
   "profile": "gate",
   "policy_kind": "capability_uplift",
   "required_executors": [
-    {"name":"copilot","model":"copilot-model-1","adapter_id":"sha256:1111111111111111111111111111111111111111111111111111111111111111","adapter_version":1,"adapter_executable_sha256":"sha256:1212121212121212121212121212121212121212121212121212121212121212","cli_executable_sha256":"sha256:1313131313131313131313131313131313131313131313131313131313131313"}
+    {"name":"copilot","model":"copilot-model-1","adapter_id":"sha256:1111111111111111111111111111111111111111111111111111111111111111","adapter_version":1,"adapter_executable_sha256":"$adapter_sha","cli_executable_sha256":"sha256:1313131313131313131313131313131313131313131313131313131313131313"}
   ],
   "advisory_executors": [
-    {"name":"claude","model":"claude-model-1","adapter_id":"sha256:2222222222222222222222222222222222222222222222222222222222222222","adapter_version":1,"adapter_executable_sha256":"sha256:2323232323232323232323232323232323232323232323232323232323232323","cli_executable_sha256":"sha256:2424242424242424242424242424242424242424242424242424242424242424"},
-    {"name":"codex","model":"codex-model-1","adapter_id":"sha256:3333333333333333333333333333333333333333333333333333333333333333","adapter_version":1,"adapter_executable_sha256":"sha256:3434343434343434343434343434343434343434343434343434343434343434","cli_executable_sha256":"sha256:3535353535353535353535353535353535353535353535353535353535353535"}
+    {"name":"claude","model":"claude-model-1","adapter_id":"sha256:2222222222222222222222222222222222222222222222222222222222222222","adapter_version":1,"adapter_executable_sha256":"$adapter_sha","cli_executable_sha256":"sha256:2424242424242424242424242424242424242424242424242424242424242424"},
+    {"name":"codex","model":"codex-model-1","adapter_id":"sha256:3333333333333333333333333333333333333333333333333333333333333333","adapter_version":1,"adapter_executable_sha256":"$adapter_sha","cli_executable_sha256":"sha256:3535353535353535353535353535353535353535353535353535353535353535"}
   ],
-  "comparator":{"route":"local-fixture","model":"$comparator_model","adapter_id":"sha256:4444444444444444444444444444444444444444444444444444444444444444","adapter_version":1,"adapter_executable_sha256":"sha256:4545454545454545454545454545454545454545454545454545454545454545","timeout_seconds":120,"token_budget":4096,"rubric_id":"sha256:4646464646464646464646464646464646464646464646464646464646464646"}
+  "comparator":{"route":"local-fixture","model":"$comparator_model","adapter_id":"sha256:4444444444444444444444444444444444444444444444444444444444444444","adapter_version":1,"adapter_executable_sha256":"$adapter_sha","timeout_seconds":120,"token_budget":4096,"rubric_id":"$rubric_sha"}
 }
 JSON
+}
+
+publish_ready_input() {
+  local skill="$1" source="$2"
+  local registration manifest validation review_one review_two
+  mkdir -p "$source/fixtures" "$source/graders"
+  python3 - "$skill" "$source" "$SCRIPT_DIR/skill-evaluation-harness.py" \
+    "$SCRIPT_DIR/fake-skill-evaluation-adapter.py" <<'PY'
+import hashlib
+import json
+import sys
+from pathlib import Path
+
+skill, source, harness, adapter = map(Path, sys.argv[1:])
+canonical = lambda value: json.dumps(
+    value, sort_keys=True, separators=(",", ":")
+).encode()
+file_sha = lambda path: "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest()
+suite = json.load(open(skill / ".skill-evaluation-cases.json", encoding="utf-8"))
+policy = json.load(open(skill / ".skill-evaluation-policy.json", encoding="utf-8"))
+grader = {
+    "id": "safe-outcome",
+    "type": "regex",
+    "safety": True,
+    "config": {"required": ["SUCCESS"], "forbidden": []},
+}
+tool_policy = "sha256:" + "1" * 64
+compiled = []
+routes = []
+for index, entry in enumerate(
+    policy["required_executors"] + policy["advisory_executors"], 1
+):
+    requirement = (
+        "required" if entry in policy["required_executors"] else "advisory"
+    )
+    full = {
+        **entry,
+        "requirement": requirement,
+        "cli_version": f"{entry['name']}-cli-1",
+        "tool_policy_id": tool_policy,
+        "limits": {
+            "timeout_seconds": 120,
+            "token_budget": 100,
+            "output_bytes": 100000,
+        },
+        "sandbox_id": "sha256:" + str(index + 5) * 64,
+    }
+    identity = {
+        key: value
+        for key, value in full.items()
+        if key not in {"name", "requirement"}
+    }
+    identity_path = source / f"{entry['name']}-identity.json"
+    identity_path.write_bytes(canonical(identity) + b"\n")
+    compiled.append(full)
+    routes.append(
+        {
+            "name": entry["name"],
+            "adapter_id": entry["adapter_id"],
+            "adapter_executable_sha256": entry["adapter_executable_sha256"],
+            "argv": [str(adapter), "--identity", str(identity_path)],
+        }
+    )
+comparator_path = source / "comparator-identity.json"
+comparator_path.write_bytes(canonical(policy["comparator"]) + b"\n")
+routing = {
+    "schema_version": 1,
+    "kind": "skill_evaluation_routing",
+    "executors": routes,
+    "comparator": {
+        "route": policy["comparator"]["route"],
+        "adapter_id": policy["comparator"]["adapter_id"],
+        "adapter_executable_sha256": policy["comparator"][
+            "adapter_executable_sha256"
+        ],
+        "argv": [str(adapter), "--identity", str(comparator_path)],
+    },
+}
+(source / "routing.json").write_bytes(canonical(routing) + b"\n")
+runtime = []
+for case in suite["cases"]:
+    fixture = (
+        "activation-negative"
+        if case["class"] == "activation_negative"
+        else "correct"
+    )
+    runtime.append(
+        {
+            "id": case["id"],
+            "fixture": fixture,
+            "artifacts": ["out.txt"],
+            "semantic": case["class"] in {"intended", "related"},
+        }
+    )
+for fixture in {"correct", "activation-negative"}:
+    content = canonical(
+        {"schema_version": 1, "kind": "synthetic_fixture", "fixture": fixture}
+    ) + b"\n"
+    (source / "fixtures" / f"{fixture}.json").write_bytes(content)
+(source / "graders/contracts.json").write_bytes(
+    canonical(
+        {
+            "schema_version": 1,
+            "kind": "deterministic_grader_contracts",
+            "graders": [grader],
+        }
+    )
+    + b"\n"
+)
+rubric = {
+    "id": "quality",
+    "instruction": "Choose the better response only by task quality.",
+}
+config = {
+    "schema_version": 1,
+    "kind": "dreaming_evaluation_compilation",
+    "harness_executable_sha256": file_sha(harness),
+    "tool_policy_id": tool_policy,
+    "retention_policy_id": "sha256:" + "b" * 64,
+    "limits": {
+        "timeout_seconds": 120,
+        "output_bytes": 100000,
+        "file_bytes": 100000,
+        "global_concurrency": 1,
+        "per_executor_concurrency": 1,
+    },
+    "identity_markers": ["candidate-marker", "waiver-skill"],
+    "graders": [grader],
+    "case_runtime": runtime,
+    "rubric": rubric,
+    "executors": compiled,
+    "comparator": policy["comparator"],
+}
+(source / "compilation.json").write_bytes(canonical(config) + b"\n")
+PY
+  registration="$(
+    "$EVAL" v2-input-register "$skill" \
+      --suite "$skill/.skill-evaluation-cases.json" \
+      --policy "$skill/.skill-evaluation-policy.json" \
+      --config "$source/compilation.json" \
+      --routing "$source/routing.json" \
+      --harness "$SCRIPT_DIR/skill-evaluation-harness.py" \
+      --authoring-method deterministic-fixture \
+      --source-id synthetic:cross-cli-waiver-fixture
+  )"
+  manifest="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["input_manifest_sha256"])' <<<"$registration")"
+  validation="$("$EVAL" v2-input-validate "$skill" --manifest "$manifest")"
+  review_one="$(
+    "$EVAL" v2-input-review "$skill" --manifest "$manifest" \
+      --reviewer waiver-reviewer-one --decision accept
+  )"
+  review_two="$(
+    "$EVAL" v2-input-review "$skill" --manifest "$manifest" \
+      --reviewer waiver-reviewer-two --decision accept
+  )"
+  "$EVAL" v2-input-ready "$skill" --manifest "$manifest" \
+    --validation "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' <<<"$validation")" \
+    --review "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' <<<"$review_one")" \
+    --review "$(python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt_sha256"])' <<<"$review_two")" \
+    --created-at 2026-01-01T00:00:00Z >/dev/null
 }
 
 make_aggregate() {
@@ -101,8 +297,10 @@ partitions = [
 ]
 for index, ((requirement, executor), status) in enumerate(zip(partitions, statuses)):
     cert = {
-        "schema_version": 2, "kind": "executor_certificate", "status": status,
+        "schema_version": 3, "kind": "executor_certificate", "status": status,
+        "subject": prepared["subject"],
         "candidate_id": prepared["candidate_id"], "suite_id": prepared["suite_id"],
+        "input_manifest_sha256": prepared.get("input_manifest_sha256"),
         "policy_id": prepared["policy_id"],
         "observation_plan_id": prepared["observation_plan_id"] if requirement == "advisory" else None,
         "profile": prepared["profile"], "requirement": requirement,
@@ -116,9 +314,11 @@ for index, ((requirement, executor), status) in enumerate(zip(partitions, status
 required_statuses = statuses[:len(prepared["required_executors"])]
 overall = "regression" if "regression" in required_statuses else "inconclusive" if any(s != "pass" for s in required_statuses) else "pass"
 aggregate = {
-    "schema_version": 2, "kind": "aggregate_receipt", "status": overall,
+    "schema_version": 3, "kind": "aggregate_receipt", "status": overall,
     "skill_path": __import__("os").path.realpath(sys.stdin.name) if False else None,
+    "subject": prepared["subject"],
     "candidate_id": prepared["candidate_id"], "candidate_inventory": prepared["candidate_inventory"],
+    "input_manifest_sha256": prepared.get("input_manifest_sha256"),
     "suite_id": prepared["suite_id"], "policy_id": prepared["policy_id"],
     "observation_plan_id": prepared["observation_plan_id"],
     "profile": prepared["profile"],
@@ -128,7 +328,9 @@ aggregate = {
 }
 required_ids = [item["certificate_id"] for item in certificates if item["requirement"] == "required"]
 aggregate["required_certificate_set_id"] = "sha256:" + hashlib.sha256(canonical({
-    "candidate_id": prepared["candidate_id"], "suite_id": prepared["suite_id"],
+    "candidate_id": prepared["candidate_id"],
+    "input_manifest_sha256": prepared.get("input_manifest_sha256"),
+    "suite_id": prepared["suite_id"],
     "policy_id": prepared["policy_id"], "profile": prepared["profile"],
     "certificate_ids": required_ids,
 })).hexdigest()
@@ -328,6 +530,7 @@ pass "authority requires production certification and remains inert to the old g
 make_skill "$ROOT" waiver-skill
 write_suite "$ROOT/waiver-skill"
 write_policy "$ROOT/waiver-skill"
+publish_ready_input "$ROOT/waiver-skill" "$TMP/waiver-base-input-source"
 make_aggregate "$ROOT/waiver-skill" "$TMP/waiver-base.json" pass pass pass
 mkdir -p "$SKILLS_STATE_DIR/skill-review/evaluations/v2/receipts"
 base_sha="$(python3 - "$TMP/waiver-base.json" <<'PY'
@@ -354,6 +557,7 @@ cat > "$ROOT/waiver-skill/scripts/helper.sh" <<'SH'
 exit 0
 SH
 chmod +x "$ROOT/waiver-skill/scripts/helper.sh"
+publish_ready_input "$ROOT/waiver-skill" "$TMP/waiver-input-source"
 waiver="$("$EVAL" v2-waive "$ROOT/waiver-skill" --base-aggregate "$base_receipt" \
   --reason "Bound helper behavior is covered by its unchanged test" --test-script scripts/test-helper.sh)"
 waiver_receipt="$(python3 -c 'import json,sys; print(json.load(sys.stdin)["receipt"])' <<<"$waiver")"

@@ -29,9 +29,16 @@ missing or stale.
 - Do not uninstall plugins automatically.
 - Do not automatically edit, consolidate, or archive user-created or
   unknown-origin personal skills.
+- Do not treat free-form reviewer labels, repeated calls to one model, shared
+  model conversations, or a reviewer reading the author's private workspace as
+  independent evaluation-input review.
 - Do not allow dashboard code to edit files or settings directly.
 - Do not treat missing usage, missing evaluation, or an inconclusive
   evaluation as positive evidence.
+- Do not call a decision that excludes active-session tails complete transcript
+  coverage.
+- Do not let an exhausted collection budget, an old unread transcript, or an
+  unresolved identity that could name the target become non-use evidence.
 - Do not treat provenance or ownership as evidence that a skill is useful.
 - Do not remove pins, bypass scheduled dependencies, discard Git history, or
   weaken restore verification.
@@ -143,7 +150,7 @@ report was generated.
 | Concern | Existing owner | Required extension |
 | --- | --- | --- |
 | Complete enabled-skill inventory | `dreaming-estate.py` census | Preserve one row per canonical enabled capability |
-| Verified usage | `dreaming-estate.py` usage collector | Expose 7, 30, and 90-day successful loads and completeness |
+| Verified usage | `dreaming-estate.py` usage collector | Expose 7, 30, and 90-day successful loads, global completeness, a collection watermark, and pending files classified by quiet-period recency, stable budget deferral, read failure, parse failure, and changed-during-read, including identity, modification time, count, bytes, and failure-record identity |
 | Candidate and active-skill evaluation | `skill-evaluation.py` and retained receipts | Join current exact-skill results into estate decisions |
 | Complete-catalog routing and portfolio cost | Existing portfolio benchmark | Evaluate proposed removals as well as additions |
 | Dependencies and pins | `scheduled-skill-deps.py` and curator inventory | Show blockers and bind them into actions |
@@ -233,7 +240,9 @@ changing the recommendation to `keep`.
    - successful loads in the last 7, 30, and 90 days;
    - distinct sessions or tasks when available;
    - last successful load;
-   - whether the usage corpus and capability attribution are complete.
+   - whether the usage corpus and capability attribution are complete;
+   - the per-capability 30-day decision coverage, including any excluded
+     active-session tails and any stable backlog or identity blocker.
 
 3. **Portfolio relationship**
    - overlapping or superseding skills;
@@ -255,6 +264,88 @@ still matters. They do not substitute for evaluation or usage when deciding
 whether an active skill should stay enabled.
 
 Provenance controls automatic authority. It does not increase value.
+
+### Thirty-day settled-use boundary
+
+Global usage coverage remains an audit fact. `complete`,
+`corpus_complete`, `attribution_complete`, pending sessions, failures, and the
+collection work budget retain their existing meanings. The decision engine
+does not relabel incomplete global coverage as complete.
+
+For the 30-day pruning policy, each enabled capability also receives a
+decision-coverage object with `window_days: 30` and one state:
+
+- `used_30d`: at least one verified successful load in the last 30 days;
+- `complete_zero_30d`: the complete retained corpus contains no successful
+  load in the last 30 days;
+- `settled_zero_30d`: every stable transcript eligible for collection whose
+  modification time intersects the 30-day window has been indexed, no
+  successful load appears in that settled corpus, and the only unread
+  transcript data intersecting the window is in files modified inside the
+  collector's existing quiet period;
+- `blocked_stable_backlog`: an eligible transcript whose modification time
+  intersects the decision window remains unread after the quiet period because
+  the work budget was reached, the file changed during collection, or it could
+  not be read or parsed;
+- `blocked_identity`: an unattributed observed name could identify this
+  capability through a reviewed alias or conflicting current mapping.
+
+The collector classifies every pending file before the decision engine derives
+coverage. The classification records the file identity, modification time,
+bytes, and one reason: quiet-period recency, stable budget deferral, read
+failure, parse failure, or changed during read. Aggregate counts do not
+substitute for these records. A read or parse failure remains retryable and
+visible in the global audit. It blocks a zero-use decision while its
+modification time intersects that decision's window; after it ages outside the
+window, it cannot contain an invocation inside the window and no longer blocks
+that decision. The engine never clears a relevant failure through guessed
+target attribution.
+
+`settled_zero_30d` is decision evidence under the versioned portfolio policy,
+not a claim that the transcript corpus is complete. Its bound object records
+the state, window boundaries, collection watermark and receipt identity,
+excluded recent file count and bytes, relevant stable-backlog count and bytes,
+pending-failure identities, and target-scoped identity blockers and candidate
+identities. The dashboard renders it as "No use in settled transcripts for 30
+days" and names the active-tail exclusion. It never renders "Never used" or
+"Complete zero."
+
+Archive maturity uses a separate decision-coverage object with
+`window_days: 60`. `decision_grade_zero_60d` means the 60-day object is
+`complete_zero_60d` or `settled_zero_60d` under the same active-tail,
+stable-backlog, failure-aging, and identity rules; the corresponding non-zero
+and blocked states are `used_60d`, `blocked_stable_backlog_60d`, and
+`blocked_identity_60d`. It is evaluated at archive decision time; continuity
+of earlier recommendations is not a substitute. A withdrawn skill must also
+have remained withdrawn for the full 60 days. A use inside that window,
+relevant stable unread file, or identity blocker prevents archive.
+
+An unattributed historical name with no reviewed alias and no current mapping
+candidate remains visible in the global audit but does not block unrelated
+current skills. A conflicting mapping blocks only its candidate capabilities
+when those identities are available. When the collector cannot identify the
+candidate set, zero-use decisions remain blocked rather than guessing.
+
+Direct usage and dependency evidence remain separate. A helper launched by an
+enabled skill, scheduled job, or plugin member can be required even when it has
+zero direct `skill` tool loads. Pins and complete dependency inventory override
+non-use mutation authority without changing the non-use value finding.
+
+The 30- and 60-day windows and active-tail exclusion are policy constants, not
+new runtime configuration. Immediately before every automatic
+removal-affecting dispatch, including withdrawal, archive, consolidation,
+individual plugin disablement, and whole-plugin disablement,
+`estate-action.py` acquires the writer lease, performs a fresh collection,
+derives and appends a new current decision, and rechecks the target, dependency
+set, disposition set, and policy identity. The earlier recommendation is only
+a trigger for reconsideration; it never authorizes dispatch. The action binds
+the newly appended decision and, when that decision still grants automatic
+authority, dispatches before releasing the lease. An advanced watermark, new
+receipt identity, shifted window, or changed active-tail count is expected and
+is evaluated as input to the new decision rather than compared byte-for-byte
+with the old one. A new verified use, relevant stable backlog, changed target
+identity, blocker, dependency, disposition, or policy refuses authority and
+creates no mutation receipt.
 
 ## Decision policy
 
@@ -279,13 +370,13 @@ Rules are evaluated in this order:
    `portfolio_value_unproven`.
 5. Recent verified use without a current evaluation produces
    `used_evaluation_missing`.
-6. Complete affirmative non-use for 30 days without a current passing
+6. `complete_zero_30d` or `settled_zero_30d` without a current passing
    evaluation produces `evaluate_now`.
-7. A failed or non-inferior-value evaluation with complete non-use produces
-   `disable_candidate`.
-8. A disabled or withdrawn personal skill with 60 days of complete non-use,
-   no passing unique-value evaluation, and no dependency produces
-   `archive_candidate`.
+7. A failed or non-inferior-value evaluation with `complete_zero_30d` or
+   `settled_zero_30d` produces `disable_candidate`.
+8. A personal skill that has remained disabled or withdrawn for 60 days, has
+   `decision_grade_zero_60d`, has no passing unique-value evaluation, and has
+   no dependency produces `archive_candidate`.
 9. Missing or conflicting primary evidence produces
     `insufficient_information`, never `proven_useful`.
 
@@ -319,9 +410,739 @@ The evaluator prioritizes:
 6. stale passing evaluations.
 
 The initial migration queue includes every enabled skill. Work is bounded by a
-configured daily case and AI-credit budget. Unfinished evaluation work remains
-visible with its queue position and reason. Budget exhaustion never becomes a
-keep decision.
+configured daily operation, normalized-token, and elapsed-time budget.
+Unfinished evaluation work remains visible with its queue position and reason.
+Budget exhaustion never becomes a keep decision. Model-backed operation and
+normalized-token counts are execution bounds, not measured billing credits.
+Actual billing cost may be shown only when a provider receipt supplies it.
+
+### Evaluation-input bootstrap and bounded execution
+
+The current inventory proves usage and evaluation separately. A capability can
+have decision-grade 30-day usage while its behavioral evaluation is still
+missing. The initial real inventory contains 95 enabled canonical capabilities
+and 109 physical skill instances. All 95 enabled capabilities have explicit
+usage classifications; 19 are settled 30-day non-use. None has a current
+behavioral evaluation because no active skill root has both a version-2 suite
+and policy. This is an input-readiness backlog, not an unknown-usage backlog.
+
+Installed personal, plugin, publisher, and built-in roots are runtime inputs.
+Dreaming must not edit them merely to add evaluation metadata. Evaluation
+inputs therefore live in a separate content-addressed registry under the
+existing version-2 evaluation state. The registry is evidence state, not part
+of the candidate's runtime identity.
+
+#### External input registry
+
+The registry contains immutable byte objects, immutable manifests, immutable
+review receipts, immutable readiness transitions, and a replaceable current
+pointer:
+
+```text
+evaluations/v2/input-registry/
+  objects/<sha256>
+  manifests/<sha256>.json
+  reviews/<sha256>.json
+  readiness/<skill-key>/<candidate-id>/<transition-id>.json
+  current/<skill-key>.json
+```
+
+An object filename is the lowercase SHA-256 of its exact bytes. A manifest is
+canonical JSON whose filename is the SHA-256 of its canonical bytes. It binds:
+
+- the absolute canonical skill path and exact candidate ID;
+- normalized suite bytes, suite ID, and all four required case classes;
+- normalized complete policy bytes, policy ID, and observation-plan ID;
+- compilation configuration, routing, fixture, grader, rubric, and harness
+  identities required to reproduce the run;
+- the authoring method and safe source identities;
+- for bounded safe authoring, the exact immutable author operation and adapter
+  objects;
+- the registry schema and tool version.
+
+The complete normalized policy object is addressed separately from
+`policy_id`. The existing policy ID intentionally excludes advisory-executor
+details, so it is not a unique address for the policy bytes. The manifest binds
+both identities and refuses substitution.
+
+Each manifest entry names a logical role, media type, object digest, and
+expected byte size. Objects and manifests must be regular non-symbolic-link
+files beneath the registry root. Writes are create-only and collision checked.
+A different object at an existing address, a missing object, a digest or size
+mismatch, an unexpected role, an absolute or escaping logical path, or an
+unknown schema refuses the input set.
+
+Bootstrap reads each mutable source pack through descriptor-relative,
+no-follow traversal and retains the opened file identity through the bounded
+read. It semantically validates the staged pack before publication, removes
+owner-write permission from every content file and nested directory before
+publication, atomically renames the complete root, and immediately removes
+owner-write permission from the published root. The inherited writer lease
+excludes another Dreaming writer throughout that boundary.
+
+The six primary roles are suite, policy, compilation, routing, authoring
+catalog, and harness. A manifest may also contain repeated fixture entries
+beneath `fixtures/` and grader entries beneath `graders/`. These support trees
+are part of the exact sealed inventory: every file and containing directory is
+path-, ownership-, permission-, size-, and digest-checked, and undeclared
+content refuses the input set.
+
+The sealed harness object is reproducibility evidence. Execution uses the
+installation-authorized sibling harness only after verifying that its bytes
+match the sealed object. A copied harness beneath the content root is never
+treated as an executable authority.
+
+For a bounded-safe-author initial manifest, the retained author operation binds
+the exact author packet and normalized draft digests, candidate ID, requested
+and provider-observed model identities, adapter object digest and size, actual
+normalized-token usage, elapsed time, and provider billing provenance in the
+same available-or-explicitly-unavailable form required for reviews. The
+manifest object inventory binds that operation and exact adapter bytes.
+Manifest resolution revalidates the author operation before any review receipt
+or readiness transition can be accepted. A repaired manifest additionally
+binds the initial manifest digest, review set ID, and an immutable repair
+operation with the same fields. The repair's requested and observed model must
+equal the original retained author model; substitution refuses before a model
+call.
+
+The trusted evaluator owns the causal handoff for author, repair, review, and
+re-review operations. It rebuilds the exact packet, invokes the canonical
+qualified adapter itself, keeps the adapter result in an evaluator-owned
+temporary directory, validates it immediately, and only then publishes the
+operation or a receipt. Registry commands do not accept a caller-supplied
+operation report, adapter digest, provider event, usage record, elapsed time,
+decision, or model observation as evidence that a model call occurred.
+Content hashes prove retained-byte integrity only; they are never treated as
+proof that a caller-authored operation happened.
+
+The canonical qualified adapter is the regular, non-symlink sibling selected
+from the resolved evaluator executable. Before a call, the evaluator requires
+that exact path and bytes to match the adapter identity sealed by the reviewed
+owner or installation authority; a caller cannot supply a path or expected
+digest, and any path, byte, or authority mismatch refuses before launch.
+Recording the bytes that happened to execute is descriptive provenance, not
+adapter authorization.
+
+For every authoritative call, the evaluator constructs the adapter environment
+from a versioned allowlist rather than copying the caller's environment.
+Process-runtime paths, locale, synthetic home and temporary roots, registry
+root, and any provider authentication handle are fixed constants or come from
+validated evaluator/owner authority. Provider selection, executable
+resolution, model selection, sandbox allowances, custom instructions, plugin
+state, test controls, and fake-process controls never come from the inherited
+caller environment. An unrecognized variable is absent, not forwarded.
+
+Deterministic tests may substitute a provider executable only when the
+candidate, registry state, executable, and sandbox allow root all resolve
+beneath the checkout's fixed disposable `.test-work` root. The evaluator
+uses the same allowlist-built environment, then adds only the
+evaluator-derived fixed test root and validated test executable. This seam
+cannot produce evidence for an installed skill or authoritative state.
+
+Every readiness transition is canonical content-addressed JSON. It binds the
+exact skill path, candidate ID, manifest digest or explicit null, prior
+transition ID, state, reason, creation time, and transition ID. A `ready`
+transition additionally binds the deterministic-validation receipt and two
+independent accepting review receipt digests for that same manifest.
+
+For a bounded-safe-author manifest, each review receipt binds the exact review
+packet digest, candidate ID, manifest digest, reviewed object inventory,
+decision, requested and provider-observed model identities, adapter object
+digest and size, actual normalized-token usage, elapsed time, and provider
+billing provenance. An available measured cost binds the canonical
+provider-native billing event or line-item bytes, provider identity, native
+line-item identity when present, digest, and size. Unavailable billing binds
+the explicit unavailable reason and null event, line-item identity, digest,
+size, and cost. Missing observed model identity or disagreement between the
+requested and provider-observed identity refuses the operation; the requested
+label never substitutes for provider evidence.
+
+The author operation and two initial review receipts define a canonical review
+set ID from the daily claim ID, candidate ID, initial manifest digest, author
+model identity, and the two sorted reviewer model identities. The two reviewer
+models must differ from each other and from the author model. Initial
+readiness binds that review set ID. Consumers resolve the retained author
+operation from the initial manifest, recompute requested-versus-observed
+agreement and three-way model distinctness from the author and review
+receipts, and recompute the review set ID rather than trusting its stored
+value. A repaired manifest binds the initial manifest digest and review set
+ID. Its `ready` transition binds the two original review receipt digests as
+identity-only lineage and two accepting re-review receipt digests for the
+repaired manifest. Consumers revalidate the initial manifest's author
+operation, repair operation, and original receipts, require the repair to use
+the original author model, and require both repaired receipts to use the same
+two observed reviewer model identities. Original receipts remain immutable
+history but cannot authorize the repaired manifest.
+
+A readiness transition cannot borrow validation or review from another
+manifest or claim. The manifest does not contain validation or initial review
+receipt identities: those receipts are created only after the immutable
+manifest exists, and the later readiness transition binds all of them without
+a circular content address. A repaired manifest may bind prior manifest,
+claim, and review-set identities because those inputs already exist before the
+repair is materialized.
+
+The mutable current pointer is only a discovery aid. It names the exact skill
+path, candidate ID, and latest readiness transition ID. The transition, not
+the pointer, selects the manifest. Every consumer revalidates the pointer,
+transition chain, manifest, validation receipt, and any required review
+receipts. A pointer that also supplies, overrides, or disagrees with a manifest
+digest is invalid. A pointer never grants evaluation or mutation authority.
+
+Root-local `.skill-evaluation-cases.json` and
+`.skill-evaluation-policy.json` remain supported for existing development
+workflows only through non-authoritative validation, preparation, compilation,
+and execution commands whose outputs cannot be certified, written as
+authority, or projected as portfolio transitions. Version-2 certification,
+unavailable evidence, authority write, authority validate, current gate,
+portfolio current, and portfolio inventory require an external manifest
+unconditionally. An explicit external binding also takes precedence when an
+authoritative workflow prepares, compiles, or executes. Missing or invalid
+registry state refuses the authoritative workflow; it never falls back to
+root-local, caller-supplied, retained-run, or legacy evidence.
+
+The same resolver is used by prepare, compile, certify, unavailable evidence,
+authority write, authority validate, current gate, portfolio current, and
+portfolio inventory. Compile materializes a private read-only run copy of the
+resolved objects. The run manifest, certification record, aggregate receipt,
+authority document, and portfolio transition all bind the input-manifest
+digest. Later currentness checks resolve that digest from retained authority,
+not from mutable skill-root sidecars. Existing sealed `source-suite.json` and
+`source-policy.json` files remain execution evidence, but an arbitrary run
+directory is not the registry.
+
+Authoritative evaluation state never writes a pointer into the installed skill
+root. The existing `.agent-created.json:evaluation_v3_sha256` update is removed
+from the external authoritative path. Current authority is discovered from the
+version-2 state keyed by canonical path and candidate ID, then revalidated
+through the immutable readiness and manifest chain. Existing in-root pointers
+remain readable only as historical root-local development evidence. Their
+presence, absence, value, or staleness has no effect on external authority:
+authority validation, current gate, portfolio current, and dashboard
+currentness neither consult nor compare the in-root pointer. It cannot select,
+replace, validate, or invalidate external authority.
+
+#### Readiness lifecycle
+
+Readiness is an append-only transition history for one exact candidate:
+
+1. `input_missing`: no valid external manifest exists. A root-local
+   development input does not satisfy portfolio readiness.
+2. `drafting`: a bounded authoring attempt has been claimed.
+3. `review_required`: deterministic validation passed and independent review
+   has not completed.
+4. `invalid`: deterministic validation or independent review rejected the
+   input set; the reason and attempted manifest remain visible.
+5. `insufficient_information`: safe deterministic cases cannot be authored
+   from the declared contract and allowed fixtures. This is a terminal
+   evaluation-readiness result for the current candidate, but never a pass or
+   keep decision.
+6. `ready`: deterministic validation and both independent reviews accept the
+   exact manifest.
+7. `executing`: the existing owner claimed a ready manifest for one bounded
+   run.
+8. `current`: certification and, when passing, authority validation succeeded
+   for the exact candidate and manifest.
+9. `stale`: candidate, suite, policy, model, CLI, harness, grader, routing, or
+   environment identity changed, or the 90-day currency window elapsed.
+
+Only `ready` may enter execution. Only a valid certification can produce
+`current`. `insufficient_information` satisfies portfolio coverage only as an
+explicit inability to evaluate; it cannot produce `proven_useful`, a passing
+evaluation, or automatic keep authority. A changed candidate starts a new
+lifecycle and leaves prior transitions as history.
+
+The dashboard uses these terms directly. It says `Needs test cases` for
+`input_missing`, `Test design in progress` for `drafting` or
+`review_required`, `Test design rejected` for `invalid`, `Cannot test safely`
+for `insufficient_information`, `Ready to test` for `ready`, `Testing now` for
+`executing`, and the existing passing, regression, inconclusive, or stale
+evaluation language after execution.
+Lane-scoped `evaluation_input_recovery_required` is shown separately as
+`Evaluation recovery required`; it is an owner-recovery condition, not a
+readiness state or an estate-wide mutation fence.
+
+#### Safe case authoring
+
+The authoring boundary may read only:
+
+- the exact candidate inventory and skill contract;
+- public or synthetic fixtures explicitly copied into the input registry;
+- allowlisted deterministic grader and rubric templates;
+- declared executor, comparator, harness, and environment contracts.
+
+It may not send raw transcript text, credentials, home-directory state,
+unrelated repository content, dashboard snapshots, user dispositions, or
+historical private prompts to a model. Transcript-derived recurrence may decide
+queue priority, but never becomes evaluation prompt content.
+
+Each ready suite contains intended-use, related-use, activation-positive, and
+activation-negative cases, three trials per treatment arm, objective observable
+outcomes, and allowlisted graders. A generated draft receives deterministic
+schema, path, fixture, grader, privacy, and candidate-binding validation,
+followed by two independent reviews of the exact manifest.
+
+Trusted code builds each review packet from the resolved content-addressed
+manifest rather than from caller-authored review context. The packet binds the
+manifest and candidate identities, normalized suite and prompts, skill
+contract, objective grader and rubric declarations, declared fixture metadata,
+projected execution contracts, validation receipt, and retained safe-authoring
+provenance. It excludes fixture bytes, grader implementation bytes, transcript
+text, credentials, home state, unrelated files, dashboard state, user
+dispositions, and private historical prompts. The same privacy and size scans
+used for authoring apply before the packet reaches a reviewer.
+
+While Copilot is the only qualified isolated no-tools authoring boundary, one
+explicit pinned Copilot model authors and two different explicit pinned Copilot
+models review. The requested model must exactly equal a provider-observed model
+identity for every operation, and all three observed identities must be
+distinct. Missing, aliased, or mismatched provider model evidence refuses
+rather than falling back to the requested label. Each review is a fresh
+process with a fresh synthetic home and workspace, no shared conversation or
+tools, source-path and real-home sandbox denies, and the exact packet rebuilt
+by the trusted sibling evaluator. A reviewer returns only `accept` or `reject`,
+a bounded summary, and an allowed correction reason. Trusted code records the
+packet, exact manifest, requested and observed models, exact adapter bytes,
+actual normalized-token use, canonical provider-native billing provenance or
+an explicit unavailable record, elapsed time, decision, and content identity
+in the immutable review receipt. Free-form labels do not establish
+independence.
+
+Review disagreement or a requested correction keeps the input non-ready. At
+most one bounded repair may be attempted under the same daily claim. The
+repair creates a new manifest and invalidates all reviews of the prior
+manifest. The original author model performs the repair, and both original
+reviewer model identities independently re-review and accept the repaired
+manifest before it becomes ready. A substituted author or reviewer is refused
+before a model call, records `author_identity_unavailable` or
+`reviewer_identity_unavailable`, spends no additional operation slot, and
+leaves the current claim `invalid`. If the original author or reviewer is
+unavailable or any required slot is already spent, the claim cannot become
+ready. A later daily claim may start a new six-slot authoring lifecycle with a
+new initial manifest and review set; it cannot carry forward the failed
+claim's draft, repair, validation, or review authority. Otherwise the row
+remains `invalid` or `review_required`.
+
+When the contract does not expose a safe deterministic outcome, the author
+writes `insufficient_information` with a reason such as
+`evaluation_case_unavailable`. It must not invent an expected result, infer a
+pass from documentation, or use model opinion as the grader.
+
+#### Existing owner and derived queue
+
+There is no new scheduler, daemon, worker, durable queue, evaluator, or
+mutation authority. The Mac mini's existing four-hour Dreaming owner remains
+the sole scheduler. The queue is derived each run from the current census,
+decision-grade usage, readiness transitions, evaluation inventory,
+dependencies, and enabled state.
+
+The initial execution order is:
+
+1. the 19 `settled_zero_30d` capabilities, in stable canonical-capability
+   order after queue priority;
+2. other missing or invalid evaluations;
+3. current regressions and routing conflicts;
+4. overlapping capabilities;
+5. complete plugin-package candidates;
+6. stale passing evaluations.
+
+The owner processes at most one skill per four-hour run and at most four skills
+per local calendar day. Work is sequential. It rechecks the halt switch and
+writer lease before authoring, before execution, and before each persistent
+transition. It claims a daily slot before model-backed work by an atomic
+compare-and-swap in the existing Dreaming state root. A claimed slot remains
+spent after timeout, crash, refusal, or inconclusive output so repeated failure
+cannot create an unbounded loop.
+
+The current row records `daily_budget_deferred`, `run_budget_deferred`,
+`halted`, `lock_lost`, `input_not_ready`, or the exact failure reason when work
+does not finish. No deferred row disappears from the derived queue. Recovery
+reconciles an `executing` transition before a new claim and never assumes
+success from process exit alone.
+
+#### Existing-owner integration contract
+
+Evaluation-input work is an optional extension of the existing standalone
+`dreaming-core.py run` pass. It is disabled unless the reviewed adapter
+configuration contains an `evaluation_input_owner` object with
+`enabled: true`. The object names three distinct explicit Copilot model
+identities and an evaluator-owned content root containing a sealed root index.
+The index contains zero or one entry for each supported canonical capability.
+Each indexed capability directory contains the trusted suite template,
+complete evaluation policy, compilation, routing, authoring catalog, and
+harness executable required by the existing evaluator. The owner derives the
+skill path from the current estate census. Configuration cannot substitute a
+different candidate path.
+
+The installed owner accepts this object only from the canonical adapter
+configuration selected and hashed by installation authority. An inherited or
+caller-selected adapter configuration cannot enable automatic work. The run
+and claim retain the exact configuration digest. Each capability directory
+contains a canonical input manifest that binds the relative path, size, media
+type, and SHA-256 identity of every required file and executable. The owner
+opens and hashes the declared regular files beneath the resolved content root
+before every consuming evaluator command. The evaluator then independently
+rebuilds and binds those same sources. Any byte or identity change refuses
+rather than switching the work order after authorization.
+
+The installed root index binds every allowed capability-directory name and
+manifest digest. An unknown entry, index mismatch, unreadable root, or root
+outside the fixed evaluator-owned state location is a whole-root failure and
+starts no work. A capability absent from an otherwise valid index, or a
+capability whose indexed files fail their recorded path, size, media-type,
+digest, regular-file, ownership, permissions, installed-root exclusion, or
+allowed-content checks, is a per-row `input_not_ready` deferral. The owner
+continues deterministic scanning for the next runnable row.
+
+The integration uses the fixed regular non-symlink
+`skill-evaluation.py` sibling of `dreaming-core.py`; configuration cannot
+select another evaluator. The content root, every capability directory, and
+every required file must be real non-symlink paths beneath the fixed root and
+outside every installed skill root. The harness executable uses the same
+installation-sealed path-and-byte authorization as the evaluator and adapter.
+
+The owner derives candidates in memory from the exact current census,
+decision-grade usage, readiness transitions, evaluation inventory,
+dependencies, and enabled state collected or resolved by the same run. It
+persists no second queue. Census and usage receipts must bind the same snapshot
+and receiver, evaluation inventory must be complete, and each enabled
+canonical capability must resolve to exactly one real physical skill path or
+receive a per-row deferral. Queue ordering follows the six-tier initial
+execution order in `Existing owner and derived queue` and is deterministic by
+canonical capability identity within each priority. Rows that cannot be
+resolved remain visible with an exact deferral reason.
+
+Automatic work requires `DREAMING_ORCHESTRATED=1`,
+`SKILLS_LOCK_HELD_BY_PARENT=1`, the parent run ID, lock token, owner PID, and
+owner process identity supplied by `dreaming-run.sh`. Before recovery, claim
+reservation, every model-backed command, and every readiness transition, the
+core rechecks the halt file and asserts the inherited token through the
+existing `daemon-lock.py` authority. Missing or mismatched ownership refuses.
+The claim ledger stores the token digest, parent run ID, owner PID, owner
+process identity, owned process-group identity, exact host boot identity, and
+configuration digest as a fence, never the token.
+
+At run start, the newly fenced owner completes recovery before reserving a new
+claim, including when `evaluation_input_owner.enabled` is false. Disabled mode
+is reconcile-only and starts no new claim or model operation. Recovery first
+replays any terminal claim whose exact `ready`, `invalid`, or
+`insufficient_information` transition or current pointer was interrupted, then
+reconciles every earlier open claim. Pending terminal replay is permitted in
+reconcile-only mode because it starts no claim or model operation.
+
+For an open claim, the successor probes the recorded prior owner identity and
+owned evaluator process group. If the prior owner remains live, recovery waits
+up to ten seconds for normal teardown. Exit within that bound continues
+recovery. An owner still live at the bound records lane-scoped
+`evaluation_input_recovery_required` and starts no new work. If the prior owner
+is gone and the exact recorded evaluator group remains live, the successor's
+valid lease authorizes termination of only that group, followed by a bounded
+ten-second proof that it no longer exists. A PID occupied by a process whose
+exact identity differs from the recorded identity proves that the recorded
+owner is gone; the unrelated occupant is never signaled. A genuinely
+unreadable, permission-denied, or still-live recorded identity is never
+signaled and records the same lane-scoped reason.
+
+This reason does not set or borrow the estate-wide publication
+`recovery-required` state and cannot block unrelated estate writers. The
+dashboard labels it `Evaluation recovery required` and stops only this
+evaluation-input lane. Recovery uses
+`skill-evaluation.py v2-input-owner-recover --claim-id <id>
+--expected-owner-run-id <run> --confirm-owner-dead`. The command requires the
+halt file, a valid inherited writer lease, exact recorded owner and process
+identities, and fresh proof that no recorded process remains live. A same-boot
+unreadable identity cannot be overridden. The operator must either restore
+process-inspection authority and re-run the proof, or restart the host. After
+restart the command verifies that the current boot identity differs from the
+claim's recorded boot identity, which proves every recorded prior-boot process
+is gone. It cannot edit any other claim. After operator inspection it
+terminalizes the exact claim through the normal pending terminal protocol; no
+state file may be hand-edited and no unverified death attestation is accepted.
+
+After liveness is resolved, a dispatching slot becomes failed with unknown
+usage and the claim becomes invalid. An open claim with no dispatching slot is
+also terminalized as `owner_interrupted`; it is not resumed from process-exit
+inference. Reconciliation appends readiness `invalid` with reason
+`owner_interrupted` when the interrupted lifecycle was still `drafting` or
+`review_required`. The daily claim remains spent. The candidate is eligible
+for a wholly new claim on a later local day only after this claim and readiness
+reconciliation is durably recorded.
+
+One owner run may reserve at most one claim. The authoring sequence is fixed:
+
+1. reserve the claim and append `drafting`;
+2. author the initial suite;
+3. if authoring returns `insufficient_information`, validate that terminal
+   result, append `insufficient_information`, close the claim, and leave all
+   review and repair slots unstarted;
+4. if authoring fails, refuses, times out, or returns malformed output, close
+   the claim and append `invalid` with that exact failure reason; otherwise
+   validate the authored manifest;
+5. if initial deterministic validation fails, close the claim and append
+   `invalid` with the exact validation reason; otherwise append
+   `review_required`;
+6. run the two original reviews;
+7. if either review fails, refuses, times out, or returns malformed output,
+   close the claim and append `invalid` with that exact failure reason; an
+   indeterminate review does not authorize repair;
+8. if both reviews accept, close the claim and append exactly one `ready`;
+9. if either well-formed review rejects, run the single repair, validate the
+   repaired manifest, retain `review_required`, and run the two fixed-identity
+   re-reviews;
+10. on the repair path, any repair, validation, or re-review failure closes the
+    claim and appends `invalid` with the exact failure reason; otherwise close
+    the claim and append exactly one `ready`, `invalid`, or
+    `insufficient_information` from the retained receipts and claim terminal
+    reason.
+
+Exactly one terminal readiness transition is appended for a claim. Duplicate
+terminal publication refuses except for exact idempotent replay of the pending
+transition recorded by the claim, for any terminal outcome. Every bounded
+terminal publication uses one serialized protocol under
+the readiness lock. The claim-closing transaction first records the terminal
+claim reason and the exact pending readiness state, reason, manifest, and
+receipt identities. The owner then writes and publishes only that transition
+and acknowledges the pending marker. If the process stops between stores,
+run-start recovery revalidates the terminal claim, retained identities, and
+unique exact transition, then publishes or acknowledges only that transition
+before open claims are reconciled or new work is considered. If the transition
+store lacks the exact pending transition, recovery publishes it. If the exact
+transition already exists, recovery validates it and acknowledges the marker
+without attempting a different publication. This protocol applies equally to
+`ready`, `invalid`, `insufficient_information`, and `halted` claim outcomes.
+An open claim therefore cannot own an already-published terminal transition,
+and a terminal claim cannot leave `drafting` or `review_required` stranded
+after recovery.
+
+Each fixed model-operation slot uses the existing claim-ledger dispatch
+protocol. The evaluator durably records `dispatching` before spawning the
+provider adapter, then records exactly one completed or failed outcome. Every
+nonterminal dispatch is recovered as unknown-but-spent. Deterministic crash
+checks cover the boundary before dispatch, after dispatch but before spawn,
+after spawn but before a receipt, and after a receipt but before terminal
+recording for author, review, repair, and re-review slots.
+
+The halt and lease checks occur immediately before each numbered persistent
+step and each model-backed operation within a step. Losing either fence
+starts no further operation. A lease monitor remains active while every owned
+evaluator process group runs; halt or lease loss terminates and reaps that
+group before the losing process exits. Lease loss is non-mutating for the
+losing process: it reports `lock_lost` only in its local run result, and the
+next valid lease holder performs durable claim reconciliation. If halt appears
+while the lease remains valid, the halt check permits exactly one
+terminalization protocol: the owner must close the open claim as `halted`,
+record the pending readiness `invalid` with reason `halted`, publish that exact
+transition, and acknowledge it; it performs no other write or operation. A
+crash within this protocol is completed by run-start pending-terminal recovery.
+If the lease is also lost, it performs no persistent write and later
+reconciliation uses `owner_interrupted`. The owner returns one structured
+`evaluation_input` result with separate `claim_status`,
+`claim_terminal_reason`, `readiness_state`, and `readiness_reason` fields, plus
+the candidate, claim, started-operation count, normalized-token status,
+elapsed time, and billing availability.
+
+This authoring sequence may make one manifest `ready`, but it does not enter
+the `executing` state until the executor and comparator portions of the
+42-operation budget are integrated. A ready capability therefore remains in
+the derived queue with reason `ready_for_execution`; it cannot be mistaken for
+a current evaluation. Queue visibility, priority, and runnable phase are
+separate derived fields. During the authoring-only rollout,
+`ready_for_execution` is visible but non-runnable, consumes no claim or run
+budget, and cannot block deterministic scanning to the next authorable
+candidate.
+
+#### Hard execution budget
+
+Per claimed skill, the maximum is:
+
+- one authoring generation, two independent input reviews, and one bounded
+  repair followed by two independent re-reviews: six model-backed authoring
+  operations and 112,000 normalized tokens;
+- 24 executor trials: four case classes, two treatment arms, three trials per
+  arm, each capped at 20,000 normalized tokens;
+- 12 paired comparator operations, each capped at 4,000 normalized tokens;
+- 42 total model-backed operations and 640,000 normalized tokens;
+- 25 elapsed minutes including authoring, execution, certification, and
+  reconciliation.
+
+Per local day, the maximum is four claimed skills, 168 model-backed operations,
+2,560,000 normalized tokens, and 100 cumulative elapsed minutes. The existing
+per-process output-byte, turn, tool, and timeout bounds remain independently
+enforced. The lower applicable bound always wins.
+
+These numbers are safety ceilings. They are not forecasts, billing-credit
+measurements, or permission to consume the full amount. A provider-supplied
+usage receipt records actual normalized usage and, when available, measured
+billing cost and canonical provider-native billing provenance. Missing billing
+telemetry is shown as unavailable with an exact reason, not estimated from
+token counts. Available telemetry without the native event or line-item
+identity and content digest is invalid. Every started author, review, repair,
+or re-review operation counts even when it times out, refuses, crashes, or
+returns malformed output. A pre-call identity mismatch refuses without
+starting or spending an extra model operation, while the already-failed
+required slot remains spent. The aggregate ledger binds all six ordered
+operation slots to one daily claim, candidate, initial manifest, optional
+repaired manifest, author model, two reviewer models, review set ID, actual
+usage, elapsed time, and billing provenance. Crossing any skill, process, or
+daily bound terminates the owned process group, spends the claim, and closes it
+through the pending terminal protocol with readiness `invalid` and the exact
+reason `skill_operation_budget_exhausted`,
+`skill_token_budget_exhausted`, `skill_elapsed_budget_exhausted`,
+`daily_operation_budget_exhausted`, `daily_token_budget_exhausted`,
+`daily_elapsed_budget_exhausted`, or the exact lower process-bound reason. The
+capability remains queued without mutation authority.
+
+#### Evaluation-input rollback
+
+Rollback disables automatic authoring and queue execution in configuration,
+then proves the existing owner no longer claims evaluation slots. It does not
+delete input objects, manifests, readiness transitions, runs, receipts,
+certifications, or authority history. Current pointers may be ignored but are
+not rewritten to fabricate an older state. Root-local non-authoritative development workflows continue to work, but
+cannot certify, issue authority, or project a portfolio transition. Report-only
+inventory and dashboard projection remain available.
+
+### Deterministic check contract: evaluation-input bootstrap
+
+#### PORT-CHK-EVAL-INPUT-01: Immutable external inputs
+
+- **Protects:** Installed skills can be evaluated without editing runtime roots
+  or weakening candidate identity.
+- **Setup:** Use immutable personal, plugin, publisher, and built-in fixtures
+  with external suites, policies, graders, routing, and configuration.
+- **Pass:** Prepare, compile, execute, certify, authority write, authority
+  validate, current gate, portfolio current, and portfolio inventory resolve
+  the same manifest; runtime roots remain byte-identical.
+- **Failure:** A command requires a root-local sidecar, changes a runtime root,
+  or resolves a different manifest.
+- **Why:** It closes the architectural gap affecting the real portfolio.
+
+#### PORT-CHK-EVAL-INPUT-02: Content and identity refusal
+
+- **Protects:** Mutable pointers and retained run paths cannot substitute
+  evaluation inputs.
+- **Setup:** Remove, alter, replace, symlink, collide, or path-escape every
+  object class; change candidate, complete policy advisory details, grader,
+  routing, CLI, model, harness, or environment identity. Create two valid
+  manifests for one candidate, review only one, and make the current pointer
+  name the reviewed transition while attempting to supply or execute the
+  unreviewed manifest.
+- **Pass:** Every mismatch refuses currentness and authority. Policies with the
+  same policy ID but different observation plans have distinct manifests and
+  cannot substitute for one another. Readiness, execution, and currentness
+  select only the manifest bound by the retained transition and reject the
+  unreviewed-manifest swap.
+- **Failure:** Validation falls back to a sidecar or accepts a digest, size,
+  identity, or schema mismatch.
+- **Why:** It proves exact reproducibility and fail-closed resolution.
+
+#### PORT-CHK-EVAL-INPUT-03: Readiness and privacy
+
+- **Protects:** Generated tests are safe, objective, and independently checked.
+- **Setup:** Exercise valid cases, unsafe transcript-derived input, secret and
+  home-path fixtures, subjective graders, missing case classes, substituted
+  review packets, repeated or author-equal reviewer models, missing or
+  mismatched retained author operations, caller-authored author, repair,
+  review, and re-review reports, provider-test overrides aimed at installed
+  state or live paths, an unrecognized inherited variable that redirects a
+  provider, a caller-selected or byte-substituted adapter, shared review state,
+  disagreement, one repair, stale pre-repair reviews, author or reviewer
+  substitution, and an untestable contract.
+- **Pass:** Only the exact validated and twice-accepted manifest becomes
+  `ready`; both review receipts bind the exact packet, manifest, distinct
+  provider-observed models, retained adapter, usage, billing provenance, and
+  elapsed time; missing or mismatched observed model evidence refuses;
+  repaired readiness binds its initial manifest and review set and uses two
+  re-reviews by the original reviewer model identities; repair uses the
+  original author model; author or reviewer substitution refuses before a
+  model call and leaves the claim invalid; caller-authored operation reports
+  and authoritative provider-test overrides have no ingress; authoritative
+  adapter environments contain only allowlisted evaluator-derived values; the
+  adapter matches its pre-authorized path, bytes, and authority identity;
+  unsafe input never reaches a reviewer or executor; the untestable contract
+  becomes explicit `insufficient_information`.
+- **Failure:** A draft executes, model opinion becomes a grader, private input
+  leaves the boundary, labels or repeated models satisfy independence, an old
+  review authorizes a repaired manifest, a substituted author or reviewer
+  completes a claim, caller-authored operation JSON grants readiness, a test
+  provider writes authoritative evidence or receives a live-path sandbox
+  allowance, an inherited unrecognized variable redirects an authoritative
+  provider, a non-canonical or byte-substituted adapter runs, or inability to
+  test becomes pass.
+- **Why:** It prevents evaluation bootstrap from manufacturing evidence.
+
+#### PORT-CHK-EVAL-INPUT-04: Bounded single-owner execution
+
+- **Protects:** Catch-up cannot create a second owner or unbounded spend.
+- **Setup:** Seed more than four authorable skills, higher-priority
+  ready-but-not-executable rows, a lower-priority authorable row, per-row
+  missing or digest-mismatched inputs, a malformed sealed root, timeouts,
+  crashes at every model-slot dispatch boundary, halt, lease loss during an
+  in-flight model call, a prior owner that exits within the ten-second bound, a
+  prior owner still live at the bound, an exact orphaned evaluator group, an
+  ambiguous or permission-denied prior identity, a recorded PID occupied by an
+  unrelated process with a different exact identity, an interrupted claim from
+  a prior boot identity, each terminal claim close before transition
+  publication and before pending-marker acknowledgement, malformed output,
+  initial validation failure, and an unfinished `executing` transition.
+- **Pass:** One skill runs at a time, no run claims more than one, no local day
+  claims more than four, visible non-runnable rows do not block the next
+  authorable row, per-row input failure skips without a claim, whole-root
+  failure starts no work, claims survive failure, the losing owner performs no
+  post-lease write, its model group is terminated and reaped, recovery proves
+  the prior group dead and reconciles before new work, owner exit within the
+  bound continues recovery, an owner still live at the bound or an ambiguous
+  identity produces visible `evaluation_input_recovery_required` and no new
+  evaluation-input work, unrelated estate writers remain unaffected, the
+  halted owner-recovery command refuses a live or same-boot unreadable
+  identity, treats a mismatched PID identity as proof the recorded owner is
+  gone, and clears an inspected dead identity or a prior-boot claim without
+  hand editing,
+  pending terminal replay occurs before open-claim reconciliation, halt under
+  a valid lease records exactly `halted` and readiness `invalid`, every
+  well-formed rejection alone authorizes repair, every other operation or
+  validation failure records its exact terminal reason, and every unfinished
+  row remains queued with an exact reason.
+- **Failure:** Work overlaps, a failed claim is refunded, a fifth skill starts,
+  an old executing state is ignored, a ready row is re-authored, one bad row
+  blocks all later rows, a losing owner writes shared state, an old model group
+  survives successor dispatch, or deferred work disappears.
+- **Why:** It preserves the existing ownership and failure boundaries.
+
+#### PORT-CHK-EVAL-INPUT-05: Budget enforcement and accounting
+
+- **Protects:** Operation, token, time, and billing claims remain honest.
+- **Setup:** Reach each per-operation, per-skill, per-process, and per-day
+  boundary independently, including failed author, review, repair, and
+  re-review slots, with and without provider billing telemetry.
+- **Pass:** The lower bound stops work and records actual operation,
+  normalized-token, elapsed-time, and available provider cost facts; missing
+  cost remains unavailable; available cost binds its canonical provider-native
+  event or line item; swapped, missing, or mismatched billing provenance
+  refuses; all started operations remain charged to the claim; no stopped
+  result gains current or mutation authority; every crossed bound closes the
+  claim through the pending terminal protocol with readiness `invalid` and the
+  exact bound reason.
+- **Failure:** Work exceeds a bound, token counts are labeled billing credits,
+  or a stopped result becomes pass.
+- **Why:** It gives the aggressive catch-up lane a finite cost and time box.
+
+#### PORT-CHK-EVAL-INPUT-06: Evaluation-input rollback
+
+- **Protects:** The new lane can be stopped without deleting evidence or
+  changing installed skills.
+- **Setup:** Roll back after drafting, ready, executing, current, invalid, and
+  insufficient-information transitions, including one interrupted open claim
+  and terminal claims interrupted before transition publication or
+  pending-marker acknowledgement.
+- **Pass:** Reconcile-only mode terminalizes the interrupted claim and
+  readiness state under the existing lease, replays each exact pending
+  terminal transition, but claims no new slot and starts no model operation;
+  installed roots and scheduler inventory remain unchanged; all retained state
+  stays readable as inert history; the dashboard remains report-only.
+- **Failure:** Rollback deletes evidence, changes a runtime root, adds or
+  removes a scheduler, or permits new evaluation execution.
+- **Why:** It preserves the current reversible governance boundary.
 
 ## Personal skills
 
@@ -338,7 +1159,8 @@ automatically.
 Automatic withdrawal, archive, or consolidation requires:
 
 - `disable_candidate`, `archive_candidate`, or `merge_candidate`;
-- complete evaluation and usage evidence required by that recommendation;
+- complete evaluation evidence and decision-grade usage evidence required by
+  that recommendation;
 - complete dependency and pin inventory;
 - no unrelated dirty work;
 - exact provenance and target identity;
@@ -350,10 +1172,11 @@ Automatic withdrawal, archive, or consolidation requires:
 A machine-created `disable_candidate` first enters a reversible withdrawn
 state through an `estate-action.py` `personal_withdraw` action. Withdrawal
 removes the skill from active loading without deleting its Git-backed package,
-writes a retirement record, and proves exact restore. After 60 days of complete
-non-use in the withdrawn state, an `archive_candidate` decision may authorize
-archive. Consolidation uses the same authority owner and may not bypass
-withdrawal or archive proof.
+writes a retirement record, and proves exact restore. After 60 days
+continuously in the withdrawn state and a current
+`decision_grade_zero_60d` result, an `archive_candidate` decision may authorize
+archive. Consolidation uses the same authority owner, fresh pre-dispatch
+collection, and restore proof, and may not bypass withdrawal or archive proof.
 
 ### User actions
 
@@ -595,12 +1418,33 @@ transaction.
     "current": false
   },
   "usage": {
-    "complete": true,
+    "complete": false,
     "uses_7d": 0,
     "uses_30d": 0,
     "uses_90d": 0,
     "last_successful_invocation": null
   },
+  "decision_coverage": {
+    "window_days": 30,
+    "window_start": "timestamp",
+    "window_end": "timestamp",
+    "state": "settled_zero_30d",
+    "usage_receipt_sha256": "sha256:...",
+    "collection_watermark": "opaque monotonic identity",
+    "excluded_recent": {
+      "count": 2,
+      "bytes": 4096
+    },
+    "relevant_stable_backlog": {
+      "count": 0,
+      "bytes": 0,
+      "oldest_modified_at": null
+    },
+    "pending_failure_ids": [],
+    "identity_blockers": [],
+    "candidate_capability_ids": []
+  },
+  "archive_coverage": null,
   "dependencies": {
     "complete": true,
     "blocking": []
@@ -647,6 +1491,11 @@ recommendation but never revives or executes a previously authorized action.
 | Evaluation stale | Show Stale evaluation and queue refresh |
 | Usage unavailable | Show Unknown; do not convert to zero |
 | No usage with complete corpus | Show the measured zero and apply policy |
+| No usage with only recent active tails unread | Show settled 30-day non-use, the excluded file count, and the collection watermark |
+| Collection stops with stable eligible transcripts unread | Keep affected zero-use decisions blocked and show the stable backlog |
+| Stable unread file cannot be read or parsed | Retry and show it in the global audit; block windows intersecting its modification time, then stop blocking only after it ages outside the window |
+| Historical name has no current mapping candidate | Keep it in the global audit without blocking unrelated current capabilities |
+| Direct-use zero belongs to an indirect dependency | Preserve the non-use value finding but block removal with the dependency |
 | Recommendation generated but no action taken | Show recommendation only; no receipt |
 | Completed action authority later changes | Keep the receipt as history, not current evidence |
 | User action targets stale census identity | Reject and require refreshed confirmation |
@@ -676,7 +1525,8 @@ recommendation but never revives or executes a previously authorized action.
 2. Provenance never counts as value evidence.
 3. A recommendation never counts as an action receipt.
 4. Missing or inconclusive evaluation never becomes a passing evaluation.
-5. Missing usage never becomes zero usage.
+5. Missing usage never becomes zero usage. Settled 30-day non-use always names
+   its active-tail exclusion and never claims complete coverage.
 6. Every automatic personal mutation targets only
    `dreaming_managed` or `legacy_machine`.
 7. User-created and unknown-origin personal skills require explicit user
@@ -700,6 +1550,17 @@ recommendation but never revives or executes a previously authorized action.
     that lock for at most 30 seconds, never begins within ten minutes of known
     interval eligibility, and never writes through the live boundary.
 18. Preview mode never registers or changes a launchd owner.
+19. Stable unread transcript work whose modification time intersects a decision
+    window blocks zero-use authority until collection drains it. Read and parse
+    failures remain visible and retryable; they stop blocking a window only
+    after their modification time predates it, never through guessed
+    attribution.
+20. An unmapped historical name blocks only capabilities it could identify;
+    indirect dependencies block removal even when direct usage is zero.
+21. Every automatic removal-affecting action binds and freshly re-derives the
+    complete decision-coverage object for its required window under the writer
+    lease, authorizes only the newly appended decision, and dispatches before
+    releasing that lease.
 
 ## Migration
 
@@ -707,7 +1568,11 @@ recommendation but never revives or executes a previously authorized action.
 2. Render the new portfolio table and decision details while retaining the old
    estate API fields for compatibility.
 3. Backfill one decision for every enabled canonical capability.
-4. Join current evaluation receipts and usage summaries.
+4. Extend the existing usage receipt with the collection watermark and
+   per-pending-file reason, identity, modification time, and bytes. Join
+   current evaluation receipts and usage summaries, derive bound
+   per-capability 30- and 60-day decision coverage, and preserve the existing
+   global coverage facts unchanged.
 5. Generate individual plugin-skill recommendations.
 6. Add the human decision queue with all controls disabled.
 7. Qualify intent creation, idempotency, authentication, stale-state refusal,
@@ -774,6 +1639,14 @@ Fail-closed rollback proof requires:
   evaluated skill.
 - Verified 7, 30, and 90-day usage and last use are visible or explicitly
   Unknown.
+- Zero-use skills distinguish complete zero, settled 30-day non-use with
+  active tails excluded, stable collection backlog, and identity ambiguity.
+- Every decision record binds its decision-window coverage, usage receipt and
+  watermark, excluded active tails, relevant stable backlog, terminal
+  failures, and target-scoped identity blockers.
+- Unmapped retired names do not make unrelated current skills unknown.
+- Direct-use zero never overrides a complete dependency or enabled plugin
+  member relationship.
 - Supporting occurrences are shown separately from evaluation and usage.
 - Recommendation reasons are plain and name the deciding facts.
 - Recommendation history is separate from completed action receipts.
@@ -857,12 +1730,25 @@ Fail-closed rollback proof requires:
 
 - **Protects:** Decisions follow the declared policy.
 - **Setup:** Cover passing, failing, stale, missing, and inconclusive
-  evaluations with recent use, complete non-use, unknown usage, declared rare
-  cases, redundancy, pins, and required dependencies.
+  evaluations with recent use, complete non-use, settled 30-day non-use,
+  active recent tails, stable budget-blocked transcripts, read and parse
+  failures inside and outside the decision window, and a stable
+  budget-deferred file whose modification time predates the window. Include
+  target-specific and unrelated unmapped names, declared rare cases,
+  redundancy, pins, and direct or indirect dependencies. Assert each decision
+  record contains the source-receipt identity, watermark, window,
+  excluded-tail facts, relevant stable-backlog facts, pending failures, and
+  identity blockers used to derive its state.
 - **Pass:** Every matrix row produces the specified value state and reason
-  codes; pins and dependencies preserve but do not hide a regression.
+  codes; only recent active tails can produce `settled_zero_30d`; stable
+  backlog intersecting the decision window and target identity ambiguity
+  remain blocked; an older stable deferral does not block the current window;
+  unrelated retired names do not block; pins and dependencies preserve but do
+  not hide a regression.
 - **Failure:** Missing evidence becomes positive evidence, a critical
-  regression is labeled useful, or protection replaces its value state.
+  regression is labeled useful, a stable unread file becomes non-use evidence,
+  an unrelated old name blocks every skill, or protection replaces its value
+  state.
 - **Why:** It proves the primary evidence model.
 
 ### PORT-CHK-04: Recommendation is not evidence or receipt
@@ -956,15 +1842,29 @@ Fail-closed rollback proof requires:
 ### PORT-CHK-12: Automatic aggressive pruning
 
 - **Protects:** Aggressive policy remains evidence-bound.
-- **Setup:** Seed 30-day non-use, failing evaluation, redundancy, missing
-  evidence, pins, and dependencies across authority classes.
-- **Pass:** Eligible machine-created disable candidates withdraw, mature
-  withdrawn candidates archive, and protected, unknown, and user-decision
-  targets do not mutate. Automation remains report-only until every capability
-  has a current or explicit insufficient-information decision and two
-  consecutive daily dry-run comparisons agree.
-- **Failure:** Missing data authorizes removal or eligible machine-created work
-  remains permanently recommendation-only.
+- **Setup:** Seed complete and settled 30-day non-use, complete and settled
+  60-day non-use for withdrawn skills, a use in days 31 through 60, recent
+  active tails, stable collection backlog, read and parse failures inside and
+  outside each decision window, failing evaluation, redundancy, missing
+  evidence, pins, direct dependencies, indirect plugin-member dependencies,
+  and a new use that arrives between recommendation and dispatch. Exercise the
+  fresh-use race separately for withdrawal, archive, consolidation, individual
+  plugin disablement, and whole-plugin disablement.
+- **Pass:** Eligible machine-created disable candidates withdraw; only skills
+  withdrawn for 60 days with current decision-grade 60-day zero archive;
+  settled-zero decisions name their active-tail exclusion; failures block only
+  intersecting windows; and protected, stable-backlog, stale-action, and
+  user-decision targets do not mutate. Under one writer lease, every automatic
+  action kind collects again, appends and binds a new current decision, then
+  dispatches only if that new decision grants authority. A seeded active-tail
+  size change alone does not block an otherwise eligible action, while every
+  seeded fresh use prevents mutation and creates no mutation receipt.
+  Automation remains report-only until every capability has a current or
+  explicit insufficient-information decision and two consecutive daily
+  dry-run comparisons agree.
+- **Failure:** Missing or stable unread data authorizes removal, a dependency
+  is treated as unused, a fresh use fails to cancel dispatch, or eligible
+  machine-created work remains permanently recommendation-only.
 - **Why:** It proves both aggression and safety.
 
 ### PORT-CHK-13: Browser decision workflow
@@ -992,11 +1892,22 @@ Fail-closed rollback proof requires:
 
 ## Definition of Done: Aggressive skill portfolio governance
 
+- [ ] Every item under
+      `Definition of Done: Evaluation-input bootstrap and bounded execution`
+      is complete before automatic portfolio mutation authority can advance.
 - [ ] The isolated preview passes PORT-CHK-PREVIEW and is available for
       browser review without changing installed capacity state.
 - [ ] Every enabled skill receives a plain-language value recommendation
       independent of mutation authority.
 - [ ] Evaluation and verified usage are the primary keep-or-prune evidence.
+- [ ] Per-capability 30-day decision coverage permits settled non-use with
+      recent active tails excluded, while stable unread transcripts and
+      target identity ambiguity remain blocking.
+- [ ] The existing usage receipt classifies every pending transcript and every
+      decision binds the collector watermark, decision window, exclusions,
+      relevant backlog, failures, and identity blockers used to authorize it.
+- [ ] Archive requires a current decision-grade 60-day zero result in addition
+      to 60 continuous days withdrawn.
 - [ ] Supporting occurrences, recommendations, actions, and receipts are
       presented as distinct concepts.
 - [ ] Every plugin skill and complete plugin package receives a recommendation.
@@ -1024,4 +1935,75 @@ Fail-closed rollback proof requires:
 - [ ] Rollback proof disables mutation, restores targets, and preserves
       retained history.
 - [ ] The reviewed design, implementation, and proof references are committed
+      locally; nothing is pushed.
+
+## Definition of Done: Evaluation-input bootstrap and bounded execution
+
+- [ ] The registry stores exact content-addressed suite, complete policy,
+      compilation, routing, fixture, grader, rubric, review, and tool identity
+      inputs outside installed skill roots.
+- [ ] The real 109 physical instances and 95 enabled canonical capabilities
+      project an explicit readiness state without changing any runtime root.
+- [ ] Prepare, compile, certify, unavailable evidence, authority write,
+      authority validate, current gate, portfolio current, and portfolio
+      inventory use one fail-closed external-input resolver.
+- [ ] Every ready transition binds its manifest, deterministic-validation
+      receipt, and two accepting review receipts; execution cannot select a
+      manifest from the mutable pointer or borrow readiness from another
+      manifest.
+- [ ] Run, certification, aggregate, authority, and portfolio evidence bind the
+      exact input-manifest digest; missing registry state never downgrades to a
+      sidecar or legacy gate.
+- [ ] Root-local inputs remain non-authoritative development inputs, and
+      external certification and authority write no file into an installed
+      skill root, including `.agent-created.json`; external authority
+      validation and currentness do not read an in-root authority pointer.
+- [ ] Safe authoring uses only the skill contract and allowlisted public or
+      synthetic fixtures, passes deterministic validation and two isolated
+      reviews whose exact observed models differ from the author and each
+      other, retains and revalidates exact author, repair, review-packet,
+      manifest, adapter, usage, billing, observed-model, review-set,
+      repair-lineage, and elapsed-time provenance, and records untestable
+      skills as
+      `insufficient_information`.
+- [ ] Every model-backed authoring operation is launched and consumed by the
+      trusted evaluator; no caller-supplied operation report can create a
+      manifest, review receipt, or ready transition, and deterministic provider
+      substitution is confined to disposable non-authoritative test roots.
+      Authoritative adapter launch uses a versioned allowlist-built environment
+      and a pre-authorized evaluator-owned adapter path and byte identity, so
+      inherited environment or adapter substitution refuses before a call.
+- [ ] The dashboard distinguishes Needs test cases, Test design in progress,
+      Test design rejected, Cannot test safely, Ready to test, Testing now,
+      current evaluation, stale evaluation, and lane-scoped Evaluation recovery
+      required.
+- [ ] The derived queue places the 19 settled 30-day non-use capabilities
+      first, keeps every unfinished row visible, and creates no second durable
+      queue.
+- [ ] The existing Mac mini owner processes sequentially, at most one skill per
+      four-hour run and four claimed skills per local day, under the existing
+      writer lease and halt switch.
+- [ ] Per-skill and per-day operation, normalized-token, elapsed-time,
+      process-timeout, output-byte, turn, and tool bounds fail closed; failed
+      claims remain spent and provider cost is shown only when measured.
+- [ ] Interrupted `executing` state is reconciled before another claim, and no
+      timeout, crash, refusal, invalid result, or budget exhaustion produces
+      passing evaluation or mutation authority.
+- [ ] PORT-CHK-EVAL-INPUT-01 through PORT-CHK-EVAL-INPUT-06 pass
+      deterministically.
+- [ ] The real first zero-use cohort progresses through input readiness and
+      bounded execution, or records an explicit safe inability to evaluate,
+      without private transcript content entering any case.
+- [ ] Desktop and 390-pixel browser proof shows truthful readiness, queue
+      position, budget deferral, and retained report-only controls.
+- [ ] Installed Mac mini proof confirms the unchanged sole scheduler, writer
+      lease, halt behavior, one-per-run/four-per-day limits, natural four-hour
+      execution, and recovery after an interrupted claim.
+- [ ] Rollback stops new authoring and execution, preserves all registry and
+      evaluation history, and leaves installed skill roots and scheduler
+      inventory unchanged.
+- [ ] Paired design and implementation reviews have no unresolved in-scope
+      must-fix finding.
+- [ ] Reviewed design, implementation, real receipts, browser proof, installed
+      proof, rollback proof, and durable baton references are committed
       locally; nothing is pushed.

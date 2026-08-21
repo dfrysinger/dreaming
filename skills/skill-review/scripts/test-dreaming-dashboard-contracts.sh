@@ -138,6 +138,7 @@ subprocess.run(
 suite = {"cases": [{"id": "source-case", "class": "intended"}]}
 verified = {
     "candidate_id": evaluation_candidate,
+    "input_manifest_sha256": "sha256:" + "5" * 64,
     "suite_id": "sha256:" + "1" * 64,
     "policy_id": "sha256:" + "2" * 64,
     "policy": {
@@ -169,7 +170,12 @@ aggregate = {
     "status": "pass",
     "aggregate_id": "sha256:" + "3" * 64,
 }
-aggregate_sha = "4" * 64
+aggregate_sha = hashlib.sha256(dashboard.canonical(aggregate)).hexdigest()
+aggregate_path = (
+    control / "skill-review/evaluations/v2/receipts" / f"{aggregate_sha}.json"
+)
+aggregate_path.parent.mkdir(parents=True)
+aggregate_path.write_text(json.dumps(aggregate), encoding="utf-8")
 receipt, portfolio_sha = evaluation.write_portfolio_receipt(
     skill, verified, suite, aggregate, aggregate_sha
 )
@@ -206,14 +212,26 @@ latest_path.write_text(json.dumps({
 current_envelope = json.loads((skill / ".agent-created.json").read_text())
 current_envelope["evaluation_v3_sha256"] = authority_sha
 (skill / ".agent-created.json").write_text(json.dumps(current_envelope), encoding="utf-8")
-evaluation.write_authority_transition(
-    skill,
-    evaluation_candidate,
-    "pass",
-    authority_sha,
-    aggregate_sha,
-    portfolio_sha,
+legacy_transition = {
+    "schema_version": 1,
+    "kind": "dashboard_authority_transition",
+    "effective_at": dashboard.now_iso(),
+    "skill_key": skill_key,
+    "candidate_id": evaluation_candidate,
+    "status": "pass",
+    "authority_sha256": authority_sha,
+    "aggregate_receipt_sha256": aggregate_sha,
+    "portfolio_receipt_sha256": portfolio_sha,
+    "transition_id": "sha256:" + "7" * 64,
+}
+legacy_transition_path = (
+    control
+    / "skill-review/evaluations/v2/dashboard-v1/authority-transitions"
+    / skill_key
+    / "legacy-pass.json"
 )
+legacy_transition_path.parent.mkdir(parents=True)
+legacy_transition_path.write_text(json.dumps(legacy_transition), encoding="utf-8")
 metrics = service._evaluation_portfolio()
 check(
     metrics["candidate_percent"] == 100.0
@@ -264,6 +282,110 @@ check(
     metrics["candidate_percent"] == 100.0,
     "restored latest-authority state restores capability metrics",
 )
+subject = {
+    "schema_version": 1,
+    "kind": "legacy_local_evaluation_subject_binding",
+    "subject_key": f"sha256:{skill_key}",
+    "content_path": str(skill.resolve()),
+}
+subject_authority = {
+    "schema_version": 4,
+    "kind": "cross_cli_authority",
+    "skill_path": str(skill.resolve()),
+    "subject": subject,
+    "candidate_id": evaluation_candidate,
+    "input_manifest_sha256": verified["input_manifest_sha256"],
+    "suite_id": verified["suite_id"],
+    "policy_id": verified["policy_id"],
+    "observation_plan_id": "sha256:" + "6" * 64,
+    "required_certificate_set_id": "sha256:" + "7" * 64,
+    "required_executors": ["copilot"],
+    "advisory_executors": [],
+    "aggregate_receipt_sha256": aggregate_sha,
+    "aggregate_id": aggregate["aggregate_id"],
+}
+subject_authority["authority_id"] = evaluation.identity_with(
+    "authority_id", subject_authority
+)
+subject_authority_sha = hashlib.sha256(
+    dashboard.canonical(subject_authority)
+).hexdigest()
+saved_authority = authority_path.read_bytes()
+authority_path.write_text(json.dumps(subject_authority), encoding="utf-8")
+latest_path.write_text(json.dumps({
+    "schema_version": 3,
+    "skill_path": str(skill.resolve()),
+    "subject": subject,
+    "candidate_id": evaluation_candidate,
+    "input_manifest_sha256": verified["input_manifest_sha256"],
+    "authority_path": str(authority_path.resolve()),
+    "authority_sha256": subject_authority_sha,
+}), encoding="utf-8")
+subject_transition = {
+    "schema_version": 2,
+    "kind": "dashboard_authority_transition",
+    "effective_at": dashboard.now_iso(),
+    "skill_key": skill_key,
+    "subject": subject,
+    "candidate_id": evaluation_candidate,
+    "input_manifest_sha256": verified["input_manifest_sha256"],
+    "status": "pass",
+    "authority_sha256": subject_authority_sha,
+    "aggregate_receipt_sha256": aggregate_sha,
+    "portfolio_receipt_sha256": portfolio_sha,
+}
+subject_transition["transition_id"] = evaluation.identity_with(
+    "transition_id", subject_transition
+)
+current_input = {
+    "subject": subject,
+    "candidate_id": evaluation_candidate,
+    "input_manifest_sha256": verified["input_manifest_sha256"],
+    "suite_id": verified["suite_id"],
+    "policy_id": verified["policy_id"],
+}
+service._current_evaluation_input = lambda skill_path: current_input
+check(
+    service._subject_transition_matches_current(skill, subject_transition),
+    "subject-bound dashboard authority validates against the active input",
+)
+swapped_transition = {
+    **subject_transition,
+    "subject": {**subject, "subject_key": "sha256:" + "9" * 64},
+}
+swapped_transition["transition_id"] = evaluation.identity_with(
+    "transition_id", swapped_transition
+)
+check(
+    not service._subject_transition_matches_current(skill, swapped_transition),
+    "subject-bound dashboard authority rejects a swapped subject",
+)
+stale_input = {
+    **current_input,
+    "input_manifest_sha256": "sha256:" + "8" * 64,
+}
+check(
+    not service._subject_transition_matches_current(
+        skill, subject_transition, stale_input
+    ),
+    "subject-bound dashboard authority rejects a stale input manifest",
+)
+legacy_transition_path.unlink()
+subject_transition_path = legacy_transition_path.parent / (
+    subject_transition["transition_id"].removeprefix("sha256:") + ".json"
+)
+subject_transition_path.write_text(
+    json.dumps(subject_transition), encoding="utf-8"
+)
+check(
+    service._current_transition(skill, evaluation_candidate)
+    == subject_transition,
+    "subject-bound transition loads through the dashboard current-state path",
+)
+subject_transition_path.unlink()
+legacy_transition_path.write_text(json.dumps(legacy_transition), encoding="utf-8")
+authority_path.write_bytes(saved_authority)
+latest_path.write_text(saved_latest)
 cases_path = skill / ".skill-evaluation-cases.json"
 cases_times = cases_path.stat()
 cases_path.write_text('{"changed":true}')
@@ -286,6 +408,11 @@ subprocess.run(
     check=True,
 )
 changed_candidate = service._skill_candidate(skill)
+service._current_evaluation_input = lambda skill_path: {
+    **current_input,
+    "candidate_id": changed_candidate,
+    "input_manifest_sha256": "sha256:" + "6" * 64,
+}
 other_key = "f" * 64
 other_transition = {
     "schema_version": 1,
@@ -315,6 +442,7 @@ check(
 evaluation.write_authority_transition(
     skill,
     changed_candidate,
+    "sha256:" + "6" * 64,
     "regression",
     None,
     aggregate_sha,

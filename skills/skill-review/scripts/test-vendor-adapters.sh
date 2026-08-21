@@ -17,6 +17,7 @@ cleanup() {
 trap cleanup EXIT
 
 python3 - "$ROOT" "$TMP" <<'PY'
+import argparse
 import hashlib
 import importlib.util
 import json
@@ -82,6 +83,8 @@ class VendorAdapterTest(unittest.TestCase):
         binary=None,
         max_events=None,
         max_snapshot_bytes=None,
+        model=None,
+        token_budget=None,
     ):
         source_root = {
             "copilot": self.case / "copilot",
@@ -106,6 +109,10 @@ class VendorAdapterTest(unittest.TestCase):
             invocation.extend(["--max-events", str(max_events)])
         if max_snapshot_bytes is not None:
             invocation.extend(["--max-snapshot-bytes", str(max_snapshot_bytes)])
+        if model is not None:
+            invocation.extend(["--model", model])
+        if token_budget is not None:
+            invocation.extend(["--token-budget", str(token_budget)])
         invocation.extend([command, *map(str, arguments)])
         result = subprocess.run(
             invocation,
@@ -273,9 +280,16 @@ import json, os, sys
 from pathlib import Path
 vendor = Path(sys.argv[0]).name
 args = sys.argv[1:]
-with Path(os.environ["FAKE_CLI_LOG"]).open("a") as log:
+log_path = Path(
+    os.environ.get(
+        "FAKE_CLI_LOG",
+        str(Path(sys.argv[0]).resolve().parent / "isolated-cli-invocations.jsonl"),
+    )
+)
+with log_path.open("a") as log:
     log.write(json.dumps({"vendor": vendor, "args": args}) + "\\n")
-state_path = Path(os.environ["FAKE_CLI_STATE"])
+state_value = os.environ.get("FAKE_CLI_STATE")
+state_path = Path(state_value) if state_value else Path(sys.argv[0]).resolve().parent / "isolated-state.json"
 state = json.loads(state_path.read_text()) if state_path.exists() else {}
 def write_codex_marketplace_config():
     if vendor != "codex":
@@ -291,6 +305,31 @@ def write_codex_marketplace_config():
           "",
         ])
     (codex_home / "config.toml").write_text("\\n".join(lines))
+def input_author_payload(prompt):
+    repair = "EVALUATION_INPUT_REPAIR_OPERATION" in prompt
+    packet = json.loads(
+      prompt.split("repair_packet:\\n" if repair else "authoring_packet:\\n", 1)[1]
+    )
+    cases = packet["initial_suite"]["cases"] if repair else packet["suite_template"]["cases"]
+    return {
+      "outcome": "draft",
+      "summary": "safe synthetic fixture cases",
+      "cases": [
+        {
+          "id": case["id"],
+          "task_id": f"{'repaired' if repair else 'authored'}:{case['class']}-{index:04d}",
+          "prompt": f"Complete the {'repaired ' if repair else ''}standalone {case['class']} task {index} — safely.",
+        }
+        for index, case in enumerate(cases, 1)
+      ],
+    }
+def input_review_payload(prompt):
+    json.loads(prompt.split("review_packet:\\n", 1)[1])
+    return {
+      "decision": "accept",
+      "summary": "exact manifest satisfies the safe review contract",
+      "reason": None,
+    }
 if "--version" in args:
     print(vendor + " 1.0")
     raise SystemExit()
@@ -315,6 +354,29 @@ if vendor == "codex" and args[:2] == ["login", "status"]:
     raise SystemExit()
 if vendor == "codex" and "--output-last-message" in args:
     target = Path(args[args.index("--output-last-message") + 1])
+    author_prompt = next(
+      (arg for arg in args if "EVALUATION_INPUT_AUTHOR_OPERATION" in arg
+       or "EVALUATION_INPUT_REPAIR_OPERATION" in arg), None
+    )
+    if author_prompt is not None:
+        requested_model = args[args.index("--model") + 1]
+        target.write_text(json.dumps(input_author_payload(author_prompt)))
+        print(json.dumps({
+          "type": "turn_context", "payload": {"model": requested_model},
+          "usage": {"input_tokens": 100, "output_tokens": 40, "total_tokens": 140},
+        }))
+        raise SystemExit()
+    review_prompt = next(
+      (arg for arg in args if "EVALUATION_INPUT_REVIEW_OPERATION" in arg), None
+    )
+    if review_prompt is not None:
+        requested_model = args[args.index("--model") + 1]
+        target.write_text(json.dumps(input_review_payload(review_prompt)))
+        print(json.dumps({
+          "type": "turn_context", "payload": {"model": requested_model},
+          "usage": {"input_tokens": 90, "output_tokens": 30, "total_tokens": 120},
+        }))
+        raise SystemExit()
     prompt = next((arg for arg in args if "result_schema" in arg), "")
     payload = (
         {"decision":"approve","summary":"independent fixture approval"}
@@ -326,6 +388,49 @@ if vendor == "codex" and "--output-last-message" in args:
     target.write_text(json.dumps(payload))
     raise SystemExit()
 if ("-p" in args or "--print" in args) and "plugin" not in args:
+    author_prompt = next(
+      (arg for arg in args if "EVALUATION_INPUT_AUTHOR_OPERATION" in arg
+       or "EVALUATION_INPUT_REPAIR_OPERATION" in arg), None
+    )
+    if author_prompt is not None:
+        requested_model = args[args.index("--model") + 1]
+        payload = input_author_payload(author_prompt)
+        if vendor == "copilot":
+            print(json.dumps({"events": [
+              {"type": "session.start", "data": {"model": requested_model}},
+              {"type": "result", "data": payload},
+              {"type": "session.usage_checkpoint",
+               "usage": {"input_tokens": 100, "output_tokens": 40,
+                         "total_tokens": 140}},
+            ]}))
+        else:
+            print(json.dumps({
+              "type": "system", "model": requested_model, "result": payload,
+              "usage": {"input_tokens": 100, "output_tokens": 40,
+                        "total_tokens": 140},
+            }))
+        raise SystemExit()
+    review_prompt = next(
+      (arg for arg in args if "EVALUATION_INPUT_REVIEW_OPERATION" in arg), None
+    )
+    if review_prompt is not None:
+        requested_model = args[args.index("--model") + 1]
+        payload = input_review_payload(review_prompt)
+        if vendor == "copilot":
+            print(json.dumps({"events": [
+              {"type": "session.start", "data": {"model": requested_model}},
+              {"type": "result", "data": payload},
+              {"type": "session.usage_checkpoint",
+               "usage": {"input_tokens": 90, "output_tokens": 30,
+                         "total_tokens": 120}},
+            ]}))
+        else:
+            print(json.dumps({
+              "type": "system", "model": requested_model, "result": payload,
+              "usage": {"input_tokens": 90, "output_tokens": 30,
+                        "total_tokens": 120},
+            }))
+        raise SystemExit()
     prompt = next((arg for arg in args if "result_schema" in arg), "")
     payload = (
         {"decision":"approve","summary":"independent fixture approval"}
@@ -710,10 +815,15 @@ print(json.dumps({"ok": True}))
             )
             self.assertEqual(response["completion_sentinel"], "DREAMING_REVIEW_COMPLETE")
             self.assertEqual(json.loads(result_path.read_text())["terminal_route"], "discard")
-        invocations = [
-            json.loads(line)
-            for line in Path(self.env["FAKE_CLI_LOG"]).read_text().splitlines()
-        ]
+        invocations = []
+        for log_path in (
+            Path(self.env["FAKE_CLI_LOG"]),
+            self.case / "bin/isolated-cli-invocations.jsonl",
+        ):
+            if log_path.is_file():
+                invocations.extend(
+                    json.loads(line) for line in log_path.read_text().splitlines()
+                )
         claude_run = next(
             row["args"]
             for row in invocations
@@ -733,6 +843,394 @@ print(json.dumps({"ok": True}))
         self.assertEqual(claude_run[claude_run.index("--setting-sources") + 1], "")
         self.assertIn("--settings", claude_run)
         self.assertEqual(claude_run[claude_run.index("--settings") + 1], "{}")
+
+    def test_evaluation_input_author_is_structured_bounded_and_toolless(self):
+        packet = self.case / "packet.json"
+        cases = [
+            {
+                "id": f"{case_class.replace('_', '-')}-case",
+                "class": case_class,
+                "deterministic_graders": ["objective"],
+            }
+            for case_class in (
+                "intended",
+                "related",
+                "activation_positive",
+                "activation_negative",
+            )
+        ]
+        packet.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "kind": "safe_evaluation_input_authoring_packet",
+                    "packet_id": "sha256:" + "1" * 64,
+                    "candidate_id": "sha256:" + "2" * 64,
+                    "suite_template": {"cases": cases},
+                    "compilation_contract": {
+                        "case_runtime": [
+                            {
+                                "id": case["id"],
+                                "fixture": "synthetic",
+                                "artifacts": [],
+                                "semantic": case["class"] in {"intended", "related"},
+                            }
+                            for case in cases
+                        ]
+                    },
+                }
+            )
+        )
+        unvalidated_result = self.case / "unvalidated-result.json"
+        unvalidated_draft = self.case / "unvalidated-draft.json"
+        unvalidated = self.run_adapter(
+            "copilot",
+            "evaluation-input-author",
+            "run",
+            "--operation",
+            "author",
+            "--packet",
+            packet,
+            "--result",
+            unvalidated_result,
+            "--draft-output",
+            unvalidated_draft,
+            model="fixture-author-model",
+            check=False,
+        )
+        self.assertEqual(unvalidated["error"]["code"], "missing-argument")
+        self.assertFalse(unvalidated_result.exists())
+        self.assertFalse(unvalidated_draft.exists())
+        environment_root = self.case / "author-environment"
+        environment_root.mkdir()
+        with mock.patch.dict(
+            os.environ,
+            {**self.env, "PRIVATE_AMBIENT_SECRET": "must-not-cross"},
+            clear=False,
+        ):
+            author_environment = vendor_module.evaluation_input_author_environment(
+                environment_root, self.env["DREAMING_COPILOT_BIN"]
+            )
+        self.assertNotIn("PRIVATE_AMBIENT_SECRET", author_environment)
+        self.assertEqual(
+            author_environment["HOME"], str(environment_root / "home")
+        )
+        profile = vendor_module.sandbox_profile(
+            environment_root,
+            self.env["DREAMING_COPILOT_BIN"],
+            [],
+            "isolated",
+        ).read_text()
+        self.assertIn(
+            f'(deny file-read* file-write* (subpath "{Path.home().resolve()}"))',
+            profile,
+        )
+        self.assertNotIn("Library/Keychains/login.keychain-db", profile)
+        def author_args(token_budget, result_path, draft_path):
+            return argparse.Namespace(
+                vendor="copilot",
+                operation="author",
+                packet=str(packet),
+                result=str(result_path),
+                draft_output=str(draft_path),
+                model="fixture-author-model",
+                binary=self.env["DREAMING_COPILOT_BIN"],
+                timeout=60,
+                output_bytes=100_000,
+                token_budget=token_budget,
+                deny_root=[],
+                skill_dir="validated-by-test-double",
+                suite="validated-by-test-double",
+                policy="validated-by-test-double",
+                config="validated-by-test-double",
+                routing="validated-by-test-double",
+                harness="validated-by-test-double",
+                catalog="validated-by-test-double",
+            )
+        alias_root = self.case / "adapter-alias"
+        alias_root.mkdir()
+        adapter_alias = alias_root / "dreaming-vendor-adapter.py"
+        adapter_alias.symlink_to(adapter)
+        (alias_root / "skill-evaluation.py").write_text(
+            "raise SystemExit('decoy evaluator must not run')\n"
+        )
+        validator_commands = []
+        validator_work = self.case / "validator-work"
+        validator_work.mkdir()
+
+        def validate_packet(command, *args, **kwargs):
+            validator_commands.append(command)
+            output = Path(command[command.index("--output") + 1])
+            output.write_bytes(packet.read_bytes())
+            return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+        with mock.patch.object(
+            vendor_module, "__file__", str(adapter_alias)
+        ), mock.patch.object(
+            vendor_module, "run_process_bounded", side_effect=validate_packet
+        ):
+            vendor_module.validate_evaluation_input_packet(
+                author_args(
+                    140,
+                    self.case / "anchor-result.json",
+                    self.case / "anchor-draft.json",
+                ),
+                json.loads(packet.read_text()),
+                validator_work,
+            )
+        self.assertEqual(
+            Path(validator_commands[0][1]),
+            adapter.resolve().with_name("skill-evaluation.py"),
+        )
+        result_path = self.case / "copilot-author-result.json"
+        draft_path = self.case / "copilot-draft.json"
+        with mock.patch.dict(os.environ, self.env, clear=False), mock.patch.object(
+            vendor_module, "validate_evaluation_input_packet"
+        ), self.assertRaises(SystemExit):
+            vendor_module.evaluation_input_author_run(
+                author_args(140, result_path, draft_path)
+            )
+        response = json.loads(result_path.read_text())
+        self.assertEqual(response["outcome"], "draft")
+        self.assertEqual(response["usage"]["normalized_tokens"], 140)
+        self.assertEqual(response["billing"]["status"], "unavailable")
+        self.assertIsNone(response["billing"]["cost_usd"])
+        draft = json.loads(draft_path.read_text())
+        expected_draft_id = "sha256:" + hashlib.sha256(
+            json.dumps(
+                draft, sort_keys=True, separators=(",", ":"), ensure_ascii=True
+            ).encode()
+        ).hexdigest()
+        self.assertEqual(response["draft_id"], expected_draft_id)
+        self.assertIn("—", draft["cases"][0]["prompt"])
+        self.assertEqual(draft["packet_id"], "sha256:" + "1" * 64)
+        self.assertEqual(
+            [item["id"] for item in draft["cases"]],
+            [item["id"] for item in cases],
+        )
+        self.assertEqual(
+            [item["fixture"] for item in draft["cases"]],
+            ["synthetic"] * 4,
+        )
+        for vendor in ("claude", "codex"):
+            doctor = self.run_adapter(
+                vendor, "evaluation-input-author", "doctor"
+            )
+            self.assertFalse(doctor["boundary_ready"])
+            refusal = self.run_adapter(
+                vendor,
+                "evaluation-input-author",
+                "run",
+                "--operation",
+                "author",
+                "--packet",
+                packet,
+                "--result",
+                self.case / f"{vendor}-author-result.json",
+                "--draft-output",
+                self.case / f"{vendor}-author-draft.json",
+                model="fixture-author-model",
+                check=False,
+            )
+            self.assertEqual(
+                refusal["error"]["code"], "authoring-boundary-unavailable"
+            )
+        with mock.patch.dict(os.environ, self.env, clear=False), mock.patch.object(
+            vendor_module, "validate_evaluation_input_packet"
+        ), self.assertRaises(vendor_module.AdapterError) as refusal:
+            vendor_module.evaluation_input_author_run(
+                author_args(
+                    139,
+                    self.case / "over-budget-result.json",
+                    self.case / "over-budget-draft.json",
+                )
+            )
+        self.assertEqual(refusal.exception.code, "token-limit-exceeded")
+        self.assertFalse((self.case / "over-budget-result.json").exists())
+        self.assertFalse((self.case / "over-budget-draft.json").exists())
+        invocations = []
+        for log_path in (
+            Path(self.env["FAKE_CLI_LOG"]),
+            self.case / "bin/isolated-cli-invocations.jsonl",
+        ):
+            if log_path.is_file():
+                invocations.extend(
+                    json.loads(line) for line in log_path.read_text().splitlines()
+                )
+        author_invocations = [
+            row["args"]
+            for row in invocations
+            if any(
+                "EVALUATION_INPUT_AUTHOR_OPERATION" in arg
+                for arg in row["args"]
+            )
+        ]
+        self.assertTrue(author_invocations)
+        for invocation in author_invocations:
+            self.assertIn(
+                "--available-tools=__dreaming_no_tools__", invocation
+            )
+            self.assertNotIn("--available-tools=", invocation)
+            self.assertNotIn("--allowedTools", invocation)
+
+        repair_packet = self.case / "repair-packet.json"
+        repair_packet.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "kind": "safe_evaluation_input_repair_packet",
+                    "packet_id": "sha256:" + "6" * 64,
+                    "claim_id": "sha256:" + "7" * 64,
+                    "candidate_id": "sha256:" + "2" * 64,
+                    "initial_manifest_sha256": "sha256:" + "4" * 64,
+                    "initial_validation_contract": {
+                        "receipt_sha256": "sha256:" + "5" * 64,
+                    },
+                    "initial_review_receipt_sha256s": [
+                        "sha256:" + "8" * 64,
+                        "sha256:" + "9" * 64,
+                    ],
+                    "review_set_id": "sha256:" + "a" * 64,
+                    "original_author_model": "fixture-author-model",
+                    "initial_suite": {"cases": cases},
+                    "compilation_contract": {
+                        "case_runtime": [
+                            {
+                                "id": case["id"],
+                                "fixture": "synthetic",
+                                "artifacts": [],
+                                "semantic": case["class"]
+                                in {"intended", "related"},
+                            }
+                            for case in cases
+                        ]
+                    },
+                }
+            )
+        )
+        repair_result = self.case / "copilot-repair-result.json"
+        repair_draft = self.case / "copilot-repair-draft.json"
+        repair_args = argparse.Namespace(
+            vendor="copilot",
+            operation="repair",
+            packet=str(repair_packet),
+            result=str(repair_result),
+            draft_output=str(repair_draft),
+            model="fixture-author-model",
+            binary=self.env["DREAMING_COPILOT_BIN"],
+            timeout=60,
+            output_bytes=100_000,
+            token_budget=140,
+            deny_root=[],
+            skill_dir="validated-by-test-double",
+            claim_id="sha256:" + "7" * 64,
+            manifest="sha256:" + "4" * 64,
+            validation="sha256:" + "5" * 64,
+            review=["sha256:" + "8" * 64, "sha256:" + "9" * 64],
+            original_author_model="fixture-author-model",
+            suite=None,
+            policy=None,
+            config=None,
+            routing=None,
+            harness=None,
+            catalog=None,
+        )
+        with mock.patch.dict(os.environ, self.env, clear=False), mock.patch.object(
+            vendor_module, "validate_evaluation_input_packet"
+        ), self.assertRaises(SystemExit):
+            vendor_module.evaluation_input_author_run(repair_args)
+        repair = json.loads(repair_result.read_text())
+        self.assertEqual(repair["operation"], "repair")
+        self.assertEqual(repair["model"], "fixture-author-model")
+        self.assertEqual(
+            repair["initial_manifest_sha256"], "sha256:" + "4" * 64
+        )
+        self.assertEqual(
+            repair["original_review_receipt_sha256s"],
+            ["sha256:" + "8" * 64, "sha256:" + "9" * 64],
+        )
+        self.assertEqual(
+            json.loads(repair_draft.read_text())["kind"],
+            "safe_evaluation_input_repair_draft",
+        )
+
+        review_packet = self.case / "review-packet.json"
+        review_packet.write_text(
+            json.dumps(
+                {
+                    "schema_version": 1,
+                    "kind": "safe_evaluation_input_review_packet",
+                    "packet_id": "sha256:" + "3" * 64,
+                    "candidate_id": "sha256:" + "2" * 64,
+                    "input_manifest_sha256": "sha256:" + "4" * 64,
+                    "validation_contract": {
+                        "receipt_sha256": "sha256:" + "5" * 64,
+                    },
+                    "review_contract": {"accept_only_if": ["safe"]},
+                }
+            )
+        )
+        review_result = self.case / "copilot-review-result.json"
+        review_args = argparse.Namespace(
+            vendor="copilot",
+            operation="review",
+            packet=str(review_packet),
+            result=str(review_result),
+            draft_output=None,
+            model="fixture-review-model",
+            binary=self.env["DREAMING_COPILOT_BIN"],
+            timeout=60,
+            output_bytes=100_000,
+            token_budget=120,
+            deny_root=[],
+            skill_dir="validated-by-test-double",
+            manifest="sha256:" + "4" * 64,
+            validation="sha256:" + "5" * 64,
+            suite=None,
+            policy=None,
+            config=None,
+            routing=None,
+            harness=None,
+            catalog=None,
+        )
+        with mock.patch.dict(os.environ, self.env, clear=False), mock.patch.object(
+            vendor_module, "validate_evaluation_input_packet"
+        ), self.assertRaises(SystemExit):
+            vendor_module.evaluation_input_author_run(review_args)
+        review = json.loads(review_result.read_text())
+        self.assertEqual(review["operation"], "review")
+        self.assertEqual(review["decision"], "accept")
+        self.assertEqual(review["model"], "fixture-review-model")
+        self.assertEqual(review["usage"]["normalized_tokens"], 120)
+        self.assertEqual(
+            review["input_manifest_sha256"], "sha256:" + "4" * 64
+        )
+        self.assertEqual(
+            review["validation_receipt_sha256"], "sha256:" + "5" * 64
+        )
+        self.assertEqual(
+            review["billing"]["unavailable_reason"],
+            "provider_telemetry_unavailable",
+        )
+        with self.assertRaises(vendor_module.AdapterError) as model_conflict:
+            vendor_module.native_model(
+                "copilot",
+                [
+                    {
+                        "events": [
+                            {
+                                "type": "session.start",
+                                "data": {"model": "fixture-review-model"},
+                            },
+                            {
+                                "type": "session.model_change",
+                                "data": {"model": "different-review-model"},
+                            },
+                        ]
+                    }
+                ],
+            )
+        self.assertEqual(model_conflict.exception.code, "exact-model-unproved")
 
     def test_executor_doctor_does_not_require_tomllib(self):
         blocked_stdlib = self.case / "blocked-stdlib"

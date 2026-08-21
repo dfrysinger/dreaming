@@ -67,7 +67,10 @@ def main() -> int:
         output = {"winner": "A", "criteria": [{"id": "quality", "score": 1}],
                   "evidence": json.dumps(observed, sort_keys=True)}
         Path(args.output).write_bytes(canonical(output) + b"\n")
-        emit({"response_sha256": digest(Path(args.output).read_bytes())})
+        emit({
+            "response_sha256": digest(Path(args.output).read_bytes()),
+            "execution": expected,
+        })
         return 0
     if args.command == "normalize":
         raw = Path(args.raw)

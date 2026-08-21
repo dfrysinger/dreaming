@@ -70,10 +70,37 @@ run_signal_responsive() {
 }
 run_isolated_test() {
   run_signal_responsive env -u DREAMING_ADAPTER_CONFIG \
+    -u DREAMING_ADAPTER_CONFIG_MANAGED \
+    -u DREAMING_ADAPTER_CONFIG_SHA256 \
     -u DREAMING_ADAPTER_ALLOWED_ROOT \
     -u DREAMING_CONFIG_FILE \
     -u DREAMING_CONFIG_POINTER \
     -u DREAMING_CONFIGURE_NATIVE_ADAPTERS \
+    -u DREAMING_CONFIGURE_EVALUATION_INPUT_OWNER \
+    -u DREAMING_EVALUATION_INPUT_OWNER_ENABLED \
+    -u DREAMING_EVALUATION_INPUT_AUTHOR_MODEL \
+    -u DREAMING_EVALUATION_INPUT_REVIEWER_A_MODEL \
+    -u DREAMING_EVALUATION_INPUT_REVIEWER_B_MODEL \
+    -u DREAMING_PRESERVE_ESTATE_ADAPTERS \
+    -u DREAMING_PRESERVE_OPERATIONAL_ADAPTERS \
+    -u DREAMING_ESTATE_ADAPTERS_BASELINE_SOURCE \
+    -u DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256 \
+    -u DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS \
+    -u DREAMING_REMOTE_EVALUATION_SUBJECTS_ENABLED \
+    -u DREAMING_REMOTE_SUBJECT_SSH_HOST \
+    -u DREAMING_REMOTE_SUBJECT_SSH_ADDRESS_FAMILY \
+    -u DREAMING_REMOTE_SUBJECT_SSH_BIN \
+    -u DREAMING_REMOTE_SUBJECT_SSH_PYTHON \
+    -u DREAMING_REMOTE_SUBJECT_SSH_SCRIPT \
+    -u DREAMING_REMOTE_SUBJECT_ESTATE_SCRIPT \
+    -u DREAMING_REMOTE_SUBJECT_CONTENT_POLICY \
+    -u DREAMING_REMOTE_SUBJECT_KNOWN_HOSTS_SOURCE \
+    -u DREAMING_REMOTE_SUBJECT_ORIGIN_HOST_ID \
+    -u DREAMING_REMOTE_SUBJECT_RECEIVER_ID \
+    -u DREAMING_REMOTE_SUBJECT_RECEIVER_ID_FILE \
+    -u DREAMING_REMOTE_SUBJECT_HOME \
+    -u DREAMING_REMOTE_SUBJECT_COPILOT_BIN \
+    -u DREAMING_REMOTE_SUBJECT_TIMEOUT \
     -u DREAMING_DEPS_DIR \
     -u DREAMING_EXECUTOR_TEST_ALLOW_ROOT \
     -u DREAMING_EXECUTOR_TEST_ALLOW_ROOTS \
@@ -174,19 +201,27 @@ for script in daemon-pass.sh daemon-run.sh daemon-lock.sh daemon-lock.py \
   dreaming-run.sh dreaming-state.py test-daemon-pass.sh test-dreaming-daemon.sh \
   test-process-cleanup.sh \
   dreaming-core.py test-dreaming-core.sh dreaming-estate.py \
+  remote_subject_policy.py test-remote-subject.py \
   test-dreaming-estate.sh dreaming-vendor-adapter.py \
   test-vendor-adapters.sh dreaming-dashboard.py test-dreaming-dashboard.sh \
   test-dreaming-dashboard-contracts.sh \
   evidence-envelope.py append-skill-evidence.sh mark-agent-created.sh \
   test-evidence-envelope.sh skill-evaluation.py run-skill-evaluation.sh \
   test-skill-evaluation.sh test-cross-cli-evaluation.sh \
+  build-evaluation-input-source.py test-evaluation-input-source-builder.sh \
   skill-evaluation-harness.py fake-skill-evaluation-adapter.py \
   test-skill-evaluation-harness.sh test-skill-evaluation-vendor-adapters.sh \
   test-dreaming-certification.sh; do
   [[ -x "$SCRIPT_DIR/$script" ]] && ok "executable: $script" || bad "not executable: $script"
 done
-
 ROOT_SCRIPT_DIR="$REPO/scripts"
+for script in build-remote-subject-receiver.py \
+  test-remote-subject-receiver.py; do
+  [[ -x "$ROOT_SCRIPT_DIR/$script" ]] &&
+    ok "executable: scripts/$script" ||
+    bad "not executable: scripts/$script"
+done
+
 for script in install.sh dreaming-deps.py test-shared-deps.sh \
   test-headless-roots.sh test-installer.sh test-repository-boundary.sh \
   validate-private-boundary.py test-private-boundary.py \
@@ -285,6 +320,11 @@ if run_isolated_test "$SCRIPT_DIR/test-cross-cli-evaluation.sh" >>"$RESULT" 2>&1
 else
   bad "deterministic cross-CLI evaluation checks"
 fi
+if run_isolated_test "$SCRIPT_DIR/test-evaluation-input-source-builder.sh" >>"$RESULT" 2>&1; then
+  ok "deterministic evaluation-input source-builder checks"
+else
+  bad "deterministic evaluation-input source-builder checks"
+fi
 if run_isolated_test "$SCRIPT_DIR/test-skill-evaluation-harness.sh" >>"$RESULT" 2>&1; then
   ok "deterministic trial-harness checks"
 else
@@ -339,6 +379,17 @@ if run_isolated_test "$ROOT_SCRIPT_DIR/test-ssh-estate-census.py" >>"$RESULT" 2>
   ok "deterministic SSH estate census checks"
 else
   bad "deterministic SSH estate census checks"
+fi
+if run_isolated_test "$SCRIPT_DIR/test-remote-subject.py" >>"$RESULT" 2>&1; then
+  ok "deterministic remote subject checks"
+else
+  bad "deterministic remote subject checks"
+fi
+if run_isolated_test "$ROOT_SCRIPT_DIR/test-remote-subject-receiver.py" \
+  >>"$RESULT" 2>&1; then
+  ok "deterministic remote subject receiver bundle checks"
+else
+  bad "deterministic remote subject receiver bundle checks"
 fi
 if run_isolated_test "$ROOT_SCRIPT_DIR/test-estate-action.py" >>"$RESULT" 2>&1; then
   ok "deterministic estate action authority checks"

@@ -43,6 +43,44 @@ REQUESTED_COPILOT_PUBLISHER_RECEIVER_ID_SET="${DREAMING_COPILOT_PUBLISHER_RECEIV
 REQUESTED_COPILOT_PUBLISHER_RECEIVER_ID="${DREAMING_COPILOT_PUBLISHER_RECEIVER_ID-}"
 REQUESTED_REQUIRE_REMOTE_COPILOT_PUBLISHER_SET="${DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER+x}"
 REQUESTED_REQUIRE_REMOTE_COPILOT_PUBLISHER="${DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER-}"
+REQUESTED_BRIDGE_ENV_NAMES=(
+  DREAMING_CONFIGURE_EVALUATION_INPUT_OWNER
+  DREAMING_EVALUATION_INPUT_OWNER_ENABLED
+  DREAMING_EVALUATION_INPUT_AUTHOR_MODEL
+  DREAMING_EVALUATION_INPUT_REVIEWER_A_MODEL
+  DREAMING_EVALUATION_INPUT_REVIEWER_B_MODEL
+  DREAMING_PRESERVE_ESTATE_ADAPTERS
+  DREAMING_PRESERVE_OPERATIONAL_ADAPTERS
+  DREAMING_ESTATE_ADAPTERS_BASELINE_SOURCE
+  DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256
+  DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS
+  DREAMING_REMOTE_EVALUATION_SUBJECTS_ENABLED
+  DREAMING_REMOTE_SUBJECT_SSH_HOST
+  DREAMING_REMOTE_SUBJECT_SSH_ADDRESS_FAMILY
+  DREAMING_REMOTE_SUBJECT_SSH_BIN
+  DREAMING_REMOTE_SUBJECT_SSH_PYTHON
+  DREAMING_REMOTE_SUBJECT_SSH_SCRIPT
+  DREAMING_REMOTE_SUBJECT_ESTATE_SCRIPT
+  DREAMING_REMOTE_SUBJECT_CONTENT_POLICY
+  DREAMING_REMOTE_SUBJECT_KNOWN_HOSTS_SOURCE
+  DREAMING_REMOTE_SUBJECT_ORIGIN_HOST_ID
+  DREAMING_REMOTE_SUBJECT_RECEIVER_ID
+  DREAMING_REMOTE_SUBJECT_RECEIVER_ID_FILE
+  DREAMING_REMOTE_SUBJECT_HOME
+  DREAMING_REMOTE_SUBJECT_COPILOT_BIN
+  DREAMING_REMOTE_SUBJECT_TIMEOUT
+)
+REQUESTED_BRIDGE_ENV_SET=()
+REQUESTED_BRIDGE_ENV_VALUES=()
+for name in "${REQUESTED_BRIDGE_ENV_NAMES[@]}"; do
+  if [[ -n "${!name+x}" ]]; then
+    REQUESTED_BRIDGE_ENV_SET+=(1)
+    REQUESTED_BRIDGE_ENV_VALUES+=("${!name}")
+  else
+    REQUESTED_BRIDGE_ENV_SET+=(0)
+    REQUESTED_BRIDGE_ENV_VALUES+=("")
+  fi
+done
 REQUESTED_CLAUDE_SOURCE_SSH_HOST_SET="${DREAMING_CLAUDE_SOURCE_SSH_HOST+x}"
 REQUESTED_CLAUDE_SOURCE_SSH_HOST="${DREAMING_CLAUDE_SOURCE_SSH_HOST-}"
 REQUESTED_CLAUDE_SOURCE_SSH_ADDRESS_FAMILY_SET="${DREAMING_CLAUDE_SOURCE_SSH_ADDRESS_FAMILY+x}"
@@ -112,6 +150,13 @@ if [[ -f "$DREAMING_CONFIG_FILE" ]]; then
   # shellcheck disable=SC1090
   source "$DREAMING_CONFIG_FILE"
 fi
+for index in "${!REQUESTED_BRIDGE_ENV_NAMES[@]}"; do
+  if [[ "${REQUESTED_BRIDGE_ENV_SET[$index]}" == "1" ]]; then
+    name="${REQUESTED_BRIDGE_ENV_NAMES[$index]}"
+    printf -v "$name" '%s' "${REQUESTED_BRIDGE_ENV_VALUES[$index]}"
+    export "$name"
+  fi
+done
 [[ -n "$REQUESTED_SOURCE_SSH_BIN_SET" ]] &&
   DREAMING_SOURCE_SSH_BIN="$REQUESTED_SOURCE_SSH_BIN"
 [[ -n "$REQUESTED_COPILOT_SOURCE_SSH_HOST_SET" ]] &&
@@ -186,6 +231,7 @@ DREAMING_SKILLS_ROOT="${REQUESTED_SKILLS_ROOT:-${DREAMING_SKILLS_ROOT:-$DREAMING
 DREAMING_DEPS_DIR="${REQUESTED_DEPS_DIR:-${DREAMING_DEPS_DIR:-$DREAMING_DATA_DIR/deps}}"
 DREAMING_ADAPTER_CONFIG="${REQUESTED_ADAPTER_CONFIG:-${DREAMING_ADAPTER_CONFIG:-}}"
 DREAMING_ADAPTER_CONFIG_MANAGED="${DREAMING_ADAPTER_CONFIG_MANAGED:-}"
+DREAMING_ADAPTER_CONFIG_SHA256=""
 if [[ -n "$REQUESTED_ADAPTER_CONFIG" ]]; then
   DREAMING_ADAPTER_CONFIG_MANAGED=0
 fi
@@ -246,6 +292,7 @@ export_runtime_env() {
   export DREAMING_REPO_ROOT DREAMING_SHARED_SKILLS_ROOT DREAMING_DATA_DIR
   export DREAMING_STATE_DIR DREAMING_SKILLS_ROOT DREAMING_DEPS_DIR
   export DREAMING_ADAPTER_CONFIG DREAMING_ADAPTER_CONFIG_MANAGED
+  export DREAMING_ADAPTER_CONFIG_SHA256
   export DREAMING_ENABLE_COPILOT_COMPAT
   export DREAMING_CONFIG_FILE DREAMING_CONFIG_POINTER DREAMING_RECEIPT_FILE
   export DREAMING_SHARED_BUNDLE_ID DREAMING_SHARED_SOURCE_KIND
@@ -254,6 +301,37 @@ export_runtime_env() {
   export DREAMING_DASHBOARD_HOST DREAMING_DASHBOARD_PORT
   export DREAMING_DASHBOARD_TAILNET_HOST
   export SKILLS_REPO_ROOT="${SKILLS_REPO_ROOT:-}"
+  local name
+  for name in \
+    DREAMING_CONFIGURE_EVALUATION_INPUT_OWNER \
+    DREAMING_EVALUATION_INPUT_OWNER_ENABLED \
+    DREAMING_EVALUATION_INPUT_AUTHOR_MODEL \
+    DREAMING_EVALUATION_INPUT_REVIEWER_A_MODEL \
+    DREAMING_EVALUATION_INPUT_REVIEWER_B_MODEL \
+    DREAMING_PRESERVE_ESTATE_ADAPTERS \
+    DREAMING_PRESERVE_OPERATIONAL_ADAPTERS \
+    DREAMING_ESTATE_ADAPTERS_BASELINE_SOURCE \
+    DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256 \
+    DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS \
+    DREAMING_REMOTE_EVALUATION_SUBJECTS_ENABLED \
+    DREAMING_REMOTE_SUBJECT_SSH_HOST \
+    DREAMING_REMOTE_SUBJECT_SSH_ADDRESS_FAMILY \
+    DREAMING_REMOTE_SUBJECT_SSH_BIN \
+    DREAMING_REMOTE_SUBJECT_SSH_PYTHON \
+    DREAMING_REMOTE_SUBJECT_SSH_SCRIPT \
+    DREAMING_REMOTE_SUBJECT_ESTATE_SCRIPT \
+    DREAMING_REMOTE_SUBJECT_CONTENT_POLICY \
+    DREAMING_REMOTE_SUBJECT_KNOWN_HOSTS_SOURCE \
+    DREAMING_REMOTE_SUBJECT_ORIGIN_HOST_ID \
+    DREAMING_REMOTE_SUBJECT_RECEIVER_ID \
+    DREAMING_REMOTE_SUBJECT_RECEIVER_ID_FILE \
+    DREAMING_REMOTE_SUBJECT_HOME \
+    DREAMING_REMOTE_SUBJECT_COPILOT_BIN \
+    DREAMING_REMOTE_SUBJECT_TIMEOUT; do
+    if declare -p "$name" >/dev/null 2>&1; then
+      export "$name"
+    fi
+  done
 }
 
 export_runtime_env
@@ -385,6 +463,31 @@ for name in (
     "DREAMING_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY",
     "DREAMING_COPILOT_PUBLISHER_RECEIVER_ID",
     "DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER",
+    "DREAMING_CONFIGURE_EVALUATION_INPUT_OWNER",
+    "DREAMING_EVALUATION_INPUT_OWNER_ENABLED",
+    "DREAMING_EVALUATION_INPUT_AUTHOR_MODEL",
+    "DREAMING_EVALUATION_INPUT_REVIEWER_A_MODEL",
+    "DREAMING_EVALUATION_INPUT_REVIEWER_B_MODEL",
+    "DREAMING_PRESERVE_ESTATE_ADAPTERS",
+    "DREAMING_PRESERVE_OPERATIONAL_ADAPTERS",
+    "DREAMING_ESTATE_ADAPTERS_BASELINE_SOURCE",
+    "DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256",
+    "DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS",
+    "DREAMING_REMOTE_EVALUATION_SUBJECTS_ENABLED",
+    "DREAMING_REMOTE_SUBJECT_SSH_HOST",
+    "DREAMING_REMOTE_SUBJECT_SSH_ADDRESS_FAMILY",
+    "DREAMING_REMOTE_SUBJECT_SSH_BIN",
+    "DREAMING_REMOTE_SUBJECT_SSH_PYTHON",
+    "DREAMING_REMOTE_SUBJECT_SSH_SCRIPT",
+    "DREAMING_REMOTE_SUBJECT_ESTATE_SCRIPT",
+    "DREAMING_REMOTE_SUBJECT_CONTENT_POLICY",
+    "DREAMING_REMOTE_SUBJECT_KNOWN_HOSTS_SOURCE",
+    "DREAMING_REMOTE_SUBJECT_ORIGIN_HOST_ID",
+    "DREAMING_REMOTE_SUBJECT_RECEIVER_ID",
+    "DREAMING_REMOTE_SUBJECT_RECEIVER_ID_FILE",
+    "DREAMING_REMOTE_SUBJECT_HOME",
+    "DREAMING_REMOTE_SUBJECT_COPILOT_BIN",
+    "DREAMING_REMOTE_SUBJECT_TIMEOUT",
 ):
     if name in os.environ:
         updates[name] = os.environ[name]
@@ -461,7 +564,8 @@ render() {
     "$DREAMING_REPO_ROOT" "$DREAMING_SHARED_SKILLS_ROOT" \
     "${SKILLS_REPO_ROOT:-}" "$STATE_DIR" "$LOCAL_ROOT" "$COPILOT_ROOT" \
     "$DREAMING_DATA_DIR" "$DREAMING_STATE_DIR" "$DREAMING_SKILLS_ROOT" \
-    "$DREAMING_ADAPTER_CONFIG" "$DREAMING_ENABLE_COPILOT_COMPAT" \
+    "$DREAMING_ADAPTER_CONFIG" "$DREAMING_ADAPTER_CONFIG_MANAGED" \
+    "$DREAMING_ADAPTER_CONFIG_SHA256" "$DREAMING_ENABLE_COPILOT_COMPAT" \
     "$DREAMING_ORCHESTRATOR_STATE_DIR" "$DREAMING_RECEIPT_FILE" \
     "$DREAMING_DASHBOARD_HOST" "$DREAMING_DASHBOARD_PORT" \
     "$DREAMING_DASHBOARD_TAILNET_HOST" \
@@ -484,6 +588,8 @@ import sys
     dreaming_state,
     dreaming_skills,
     adapter_config,
+    adapter_config_managed,
+    adapter_config_sha256,
     copilot_compat,
     orchestrator_state,
     receipt_file,
@@ -537,6 +643,12 @@ if adapter_config:
     adapter_env = (
         "    <key>DREAMING_ADAPTER_CONFIG</key><string>"
         + html.escape(adapter_config)
+        + "</string>\n"
+        + "    <key>DREAMING_ADAPTER_CONFIG_MANAGED</key><string>"
+        + html.escape(adapter_config_managed)
+        + "</string>\n"
+        + "    <key>DREAMING_ADAPTER_CONFIG_SHA256</key><string>"
+        + html.escape(adapter_config_sha256)
         + "</string>\n"
     )
 text = text.replace("__DREAMING_ADAPTER_CONFIG_ENV__", adapter_env)
@@ -619,6 +731,7 @@ configure_native_adapters() {
   local generated="$DREAMING_STATE_DIR/adapters.json" candidate status
   if [[ -n "$REQUESTED_ADAPTER_CONFIG" ]]; then
     DREAMING_ADAPTER_CONFIG_MANAGED=0
+    DREAMING_ADAPTER_CONFIG_SHA256=
     return 0
   fi
   if [[ "$REQUESTED_ADAPTER_DESIRED_STATE" == "1" ]]; then
@@ -626,11 +739,13 @@ configure_native_adapters() {
     DREAMING_ADAPTER_CONFIG_MANAGED=1
   elif [[ -n "$DREAMING_ADAPTER_CONFIG" ]]; then
     if [[ "$DREAMING_ADAPTER_CONFIG_MANAGED" == "0" ]]; then
+      DREAMING_ADAPTER_CONFIG_SHA256=
       return 0
     fi
     if [[ "$DREAMING_ADAPTER_CONFIG_MANAGED" != "1" ]]; then
       if [[ "$DREAMING_ADAPTER_CONFIG" != "$generated" ]]; then
         DREAMING_ADAPTER_CONFIG_MANAGED=0
+        DREAMING_ADAPTER_CONFIG_SHA256=
         return 0
       fi
       if native_adapter_is_managed "$DREAMING_ADAPTER_CONFIG"; then
@@ -639,6 +754,7 @@ configure_native_adapters() {
         status=$?
         if [[ "$status" == "1" ]]; then
           DREAMING_ADAPTER_CONFIG_MANAGED=0
+          DREAMING_ADAPTER_CONFIG_SHA256=
           return 0
         fi
         return "$status"
@@ -652,6 +768,54 @@ configure_native_adapters() {
     return 0
   fi
   export_runtime_env
+  if [[ "${DREAMING_PRESERVE_ESTATE_ADAPTERS:-0}" == "1" ]]; then
+    local baseline_source="${DREAMING_ESTATE_ADAPTERS_BASELINE_SOURCE:-}"
+    local baseline_target="$DREAMING_STATE_DIR/estate-adapters-baseline.json"
+    local expected_baseline_sha="${DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256:-}"
+    local observed_baseline_sha
+    [[ -n "$baseline_source" && -f "$baseline_source" &&
+      ! -L "$baseline_source" ]] || {
+      echo "estate adapter baseline source must be a regular file" >&2
+      return 1
+    }
+    [[ "$expected_baseline_sha" =~ ^[0-9a-f]{64}$ ]] || {
+      echo "estate adapter baseline digest must be a sha256 digest" >&2
+      return 1
+    }
+    observed_baseline_sha="$(
+      /usr/bin/shasum -a 256 "$baseline_source" |
+        /usr/bin/awk '{print $1}'
+    )"
+    [[ "$observed_baseline_sha" == "$expected_baseline_sha" ]] || {
+      echo "estate adapter baseline source digest does not match" >&2
+      return 1
+    }
+    mkdir -p "$DREAMING_STATE_DIR"
+    if [[ "$baseline_source" != "$baseline_target" ]]; then
+      cp "$baseline_source" "${baseline_target}.candidate.$$"
+      chmod 600 "${baseline_target}.candidate.$$"
+      mv "${baseline_target}.candidate.$$" "$baseline_target"
+    else
+      chmod 600 "$baseline_target"
+    fi
+  fi
+  if [[ "${DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS:-0}" == "1" ]]; then
+    local known_hosts_source="${DREAMING_REMOTE_SUBJECT_KNOWN_HOSTS_SOURCE:-}"
+    local known_hosts_target="$DREAMING_STATE_DIR/remote-subject-known-hosts"
+    [[ -n "$known_hosts_source" && -f "$known_hosts_source" &&
+      ! -L "$known_hosts_source" ]] || {
+      echo "remote subject known-hosts source must be a regular file" >&2
+      return 1
+    }
+    mkdir -p "$DREAMING_STATE_DIR"
+    if [[ "$known_hosts_source" != "$known_hosts_target" ]]; then
+      cp "$known_hosts_source" "${known_hosts_target}.candidate.$$"
+      chmod 600 "${known_hosts_target}.candidate.$$"
+      mv "${known_hosts_target}.candidate.$$" "$known_hosts_target"
+    else
+      chmod 600 "$known_hosts_target"
+    fi
+  fi
   candidate="${DREAMING_ADAPTER_CONFIG}.candidate.$$"
   rm -f "$candidate"
   if [[ -f "$DREAMING_ADAPTER_CONFIG" ]]; then
@@ -669,6 +833,10 @@ configure_native_adapters() {
     return 1
   fi
   mv "$candidate" "$DREAMING_ADAPTER_CONFIG"
+  DREAMING_ADAPTER_CONFIG_SHA256="$(
+    /usr/bin/shasum -a 256 "$DREAMING_ADAPTER_CONFIG" |
+      /usr/bin/awk '{print $1}'
+  )"
 }
 
 run_core() {

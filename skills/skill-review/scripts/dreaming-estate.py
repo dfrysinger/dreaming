@@ -4,19 +4,34 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import hashlib
 import json
 import os
 import re
+import selectors
+import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 import unicodedata
 from collections import Counter
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
+from remote_subject_policy import (
+    REMOTE_SUBJECT_SIDECARS,
+    RemoteSubjectPolicyError,
+    load_content_policy,
+    validate_text,
+)
 
 SCHEMA_VERSION = 1
 ROOT_CLASSES = {
@@ -42,8 +57,30 @@ LEGACY_POLICY_VERSION = 1
 LEGACY_PROOF_VERSION = 1
 LEGACY_PROOF_KIND = "legacy_git_creation"
 USAGE_INDEX_SCHEMA_VERSION = 1
+USAGE_PARSER_REVISION = 2
 USAGE_QUIET_SECONDS = 300
 MAX_USAGE_SESSION_ISSUES = 32
+EVALUATION_STATES = {
+    "pass",
+    "regression",
+    "inconclusive",
+    "stale",
+    "missing",
+    "input_missing",
+    "drafting",
+    "review_required",
+    "insufficient_information",
+    "ready",
+    "invalid",
+}
+MAX_EVALUATION_CASES = 100
+MAX_EVALUATION_OUTPUT_BYTES = 2_000_000
+EVALUATION_READ_CHUNK_BYTES = 65_536
+EVALUATION_TIMEOUT_SECONDS = 120
+REMOTE_SUBJECT_MAX_FILES = 512
+REMOTE_SUBJECT_MAX_FILE_BYTES = 8 * 1024 * 1024
+REMOTE_SUBJECT_MAX_TOTAL_BYTES = 32 * 1024 * 1024
+REMOTE_SUBJECT_MAX_ENCODED_BYTES = 48 * 1024 * 1024
 USAGE_ALIASES = {
     "architecture-guardrails": {
         "target": "guardrails",
@@ -265,6 +302,26 @@ PLUGIN_DEPENDENCY_CLASSES = (
     "lsp_configurations",
     "ambiguous",
 )
+DEPENDENCY_BINARY_SUFFIXES = {
+    ".gif",
+    ".ico",
+    ".jpeg",
+    ".jpg",
+    ".pdf",
+    ".png",
+    ".pyc",
+    ".webp",
+    ".zip",
+}
+RUNTIME_DEPENDENCY_WORDS_RE = re.compile(
+    r"\b(?:call|calls|delegate|delegates|invoke|invokes|launch|launches|"
+    r"own|owns|require|requires|route|routes|run|runs|use|uses)\b",
+    re.IGNORECASE,
+)
+NEGATED_DEPENDENCY_RE = re.compile(
+    r"\b(?:do\s+not|does\s+not|not(?:\s+the|\s+a|\s+an)?|without)\b",
+    re.IGNORECASE,
+)
 
 
 class EstateError(RuntimeError):
@@ -314,6 +371,227 @@ def skill_inventory(skill: Path) -> tuple[list[dict[str, str]], str]:
     if not any(item["path"] == "SKILL.md" for item in files):
         raise EstateError(f"skill has no SKILL.md: {skill}")
     return files, digest(files)
+
+
+def remote_subject_content_policy(path: Path) -> dict[str, Any]:
+    try:
+        return load_content_policy(path)
+    except RemoteSubjectPolicyError as error:
+        raise EstateError(str(error)) from error
+
+
+def validate_remote_subject_text(
+    content: bytes, relative: str, policy: dict[str, Any]
+) -> None:
+    try:
+        validate_text(content, relative, policy)
+    except RemoteSubjectPolicyError as error:
+        raise EstateError(str(error)) from error
+
+
+def read_remote_subject_file(
+    root_fd: int, relative: str
+) -> tuple[bytes, os.stat_result]:
+    path = Path(relative)
+    if (
+        not relative
+        or path.is_absolute()
+        or path.as_posix() != relative
+        or ".." in path.parts
+        or any(part in {"", ".", ".."} for part in path.parts)
+    ):
+        raise EstateError("remote subject inventory path is unsafe")
+    directory_fd = os.dup(root_fd)
+    try:
+        directory_flags = os.O_RDONLY
+        if hasattr(os, "O_DIRECTORY"):
+            directory_flags |= os.O_DIRECTORY
+        if hasattr(os, "O_NOFOLLOW"):
+            directory_flags |= os.O_NOFOLLOW
+        for part in path.parts[:-1]:
+            next_fd = os.open(part, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = next_fd
+        file_flags = os.O_RDONLY
+        if hasattr(os, "O_NOFOLLOW"):
+            file_flags |= os.O_NOFOLLOW
+        file_fd = os.open(path.parts[-1], file_flags, dir_fd=directory_fd)
+        try:
+            before = os.fstat(file_fd)
+            if not stat.S_ISREG(before.st_mode):
+                raise EstateError(f"{relative}: remote subject file is not regular")
+            if before.st_size > REMOTE_SUBJECT_MAX_FILE_BYTES:
+                raise EstateError(f"{relative}: remote subject file is too large")
+            chunks = []
+            remaining = REMOTE_SUBJECT_MAX_FILE_BYTES + 1
+            while remaining > 0:
+                chunk = os.read(file_fd, min(65_536, remaining))
+                if not chunk:
+                    break
+                chunks.append(chunk)
+                remaining -= len(chunk)
+            content = b"".join(chunks)
+            after = os.fstat(file_fd)
+            identity = (
+                "st_dev",
+                "st_ino",
+                "st_size",
+                "st_mtime_ns",
+                "st_ctime_ns",
+            )
+            if len(content) > REMOTE_SUBJECT_MAX_FILE_BYTES or any(
+                getattr(before, field) != getattr(after, field)
+                for field in identity
+            ):
+                raise EstateError(
+                    f"{relative}: remote subject file changed during read"
+                )
+            return content, after
+        finally:
+            os.close(file_fd)
+    except OSError as error:
+        raise EstateError(f"{relative}: remote subject file is unreadable") from error
+    finally:
+        os.close(directory_fd)
+
+
+def export_remote_subject(
+    census: dict[str, Any],
+    request: dict[str, Any],
+    policy: dict[str, Any],
+) -> dict[str, Any]:
+    required = {
+        "census_snapshot_sha256",
+        "origin_host_id",
+        "origin_root_id",
+        "origin_relative_path",
+        "origin_path",
+        "canonical_capability_id",
+        "origin_inventory_sha256",
+    }
+    if (
+        not isinstance(request, dict)
+        or set(request) != required
+        or any(
+            not isinstance(request.get(field), str) or not request[field]
+            for field in required
+        )
+        or not SHA256_ID_RE.fullmatch(request["census_snapshot_sha256"])
+        or not SHA256_ID_RE.fullmatch(request["canonical_capability_id"])
+        or not SHA256_ID_RE.fullmatch(request["origin_inventory_sha256"])
+        or request["origin_host_id"] != census.get("host_id")
+    ):
+        raise EstateError("remote subject request is malformed")
+    physical = census.get("physical_instances")
+    if not isinstance(physical, list):
+        raise EstateError("remote subject census inventory is malformed")
+    matches = [
+        item
+        for item in physical
+        if isinstance(item, dict)
+        and item.get("host_id") == request["origin_host_id"]
+        and item.get("root_id") == request["origin_root_id"]
+        and item.get("relative_path") == request["origin_relative_path"]
+        and item.get("absolute_path") == request["origin_path"]
+        and item.get("canonical_capability_id")
+        == request["canonical_capability_id"]
+        and item.get("inventory_sha256")
+        == request["origin_inventory_sha256"]
+    ]
+    if len(matches) != 1:
+        raise EstateError("remote subject request does not match one current skill")
+    subject = matches[0]
+    inventory = subject.get("files")
+    if (
+        not isinstance(inventory, list)
+        or not inventory
+        or len(inventory) > REMOTE_SUBJECT_MAX_FILES
+        or inventory != sorted(inventory, key=lambda item: item.get("path", ""))
+    ):
+        raise EstateError("remote subject inventory is malformed or too large")
+    root = Path(request["origin_path"])
+    directory_flags = os.O_RDONLY
+    if hasattr(os, "O_DIRECTORY"):
+        directory_flags |= os.O_DIRECTORY
+    if hasattr(os, "O_NOFOLLOW"):
+        directory_flags |= os.O_NOFOLLOW
+    try:
+        root_fd = os.open(root, directory_flags)
+    except OSError as error:
+        raise EstateError("remote subject root is unavailable") from error
+    origin_inventory = []
+    candidate_inventory = []
+    excluded = []
+    files = []
+    total_bytes = 0
+    try:
+        for item in inventory:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"path", "sha256"}
+                or not isinstance(item.get("path"), str)
+                or not HEX_SHA256_RE.fullmatch(str(item.get("sha256")))
+            ):
+                raise EstateError("remote subject inventory entry is malformed")
+            relative = item["path"]
+            content, _ = read_remote_subject_file(root_fd, relative)
+            total_bytes += len(content)
+            if total_bytes > REMOTE_SUBJECT_MAX_TOTAL_BYTES:
+                raise EstateError("remote subject content is too large")
+            content_sha = hashlib.sha256(content).hexdigest()
+            if content_sha != item["sha256"]:
+                raise EstateError(
+                    f"{relative}: remote subject inventory changed before fetch"
+                )
+            record = {
+                "path": relative,
+                "sha256": content_sha,
+                "size": len(content),
+            }
+            origin_inventory.append(record)
+            if Path(relative).name in REMOTE_SUBJECT_SIDECARS:
+                excluded.append(record)
+                continue
+            validate_remote_subject_text(content, relative, policy)
+            candidate_inventory.append(record)
+            files.append(
+                {
+                    **record,
+                    "content_base64": base64.b64encode(content).decode("ascii"),
+                }
+            )
+    finally:
+        os.close(root_fd)
+    census_inventory = [
+        {"path": item["path"], "sha256": item["sha256"]}
+        for item in origin_inventory
+    ]
+    if digest(census_inventory) != request["origin_inventory_sha256"]:
+        raise EstateError("remote subject origin inventory identity differs")
+    if not any(item["path"] == "SKILL.md" for item in candidate_inventory):
+        raise EstateError("remote subject candidate has no SKILL.md")
+    candidate_id = "sha256:" + hashlib.sha256(
+        json.dumps(
+            candidate_inventory, sort_keys=True, separators=(",", ":")
+        ).encode()
+    ).hexdigest()
+    result = {
+        "schema_version": 1,
+        "kind": "remote_evaluation_subject",
+        **request,
+        "candidate_id": candidate_id,
+        "content_policy": {
+            "schema_version": policy["schema_version"],
+            "sha256": policy["sha256"],
+        },
+        "origin_inventory": origin_inventory,
+        "candidate_inventory": candidate_inventory,
+        "excluded_sidecars": excluded,
+        "files": files,
+    }
+    if len(canonical(result)) > REMOTE_SUBJECT_MAX_ENCODED_BYTES:
+        raise EstateError("remote subject encoded response is too large")
+    return {**result, "receipt_sha256": digest(result)}
 
 
 def classification(
@@ -989,6 +1267,306 @@ def scan_root(host_id: str, root: dict[str, Any]) -> list[dict[str, Any]]:
     return instances
 
 
+def _dependency_reference_lines(
+    source: dict[str, Any],
+    target_names: set[str],
+) -> tuple[list[dict[str, str]], list[str]]:
+    skill_root = Path(source["absolute_path"])
+    references: list[dict[str, str]] = []
+    unscanned: list[str] = []
+    for inventory_item in source["files"]:
+        relative = inventory_item["path"]
+        path = skill_root / relative
+        try:
+            raw = path.read_bytes()
+        except OSError as error:
+            raise EstateError(f"cannot read dependency source: {path}") from error
+        if hashlib.sha256(raw).hexdigest() != inventory_item["sha256"]:
+            raise EstateError(f"dependency source changed during collection: {path}")
+        try:
+            content = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            if path.suffix.casefold() in DEPENDENCY_BINARY_SUFFIXES or b"\0" in raw:
+                continue
+            unscanned.append(relative)
+            continue
+        for line_number, line in enumerate(content.splitlines(), start=1):
+            for target_name in target_names:
+                if target_name == source["skill_name"]:
+                    continue
+                escaped = re.escape(target_name)
+                if re.search(
+                    rf"(?<![A-Za-z0-9._-])/"
+                    rf"(?:[A-Za-z0-9._-]+:)?{escaped}"
+                    rf"(?![A-Za-z0-9._-])",
+                    line,
+                ):
+                    references.append(
+                        {
+                            "target": target_name,
+                            "kind": "runtime_capability",
+                            "source_file": relative,
+                            "source_line": str(line_number),
+                        }
+                    )
+                if re.search(rf"\.\./{escaped}(?:/|\b)", line):
+                    references.append(
+                        {
+                            "target": target_name,
+                            "kind": "installed_content",
+                            "source_file": relative,
+                            "source_line": str(line_number),
+                        }
+                    )
+        for target_name in target_names:
+            if target_name == source["skill_name"]:
+                continue
+            token_re = re.compile(
+                rf"(?<![A-Za-z0-9._-])`{re.escape(target_name)}`"
+                rf"(?![A-Za-z0-9._-])"
+            )
+            for match in token_re.finditer(content):
+                context_start = max(0, match.start() - 180)
+                context_end = min(len(content), match.end() + 100)
+                context = " ".join(content[context_start:context_end].split())
+                before = " ".join(
+                    content[max(0, match.start() - 55) : match.start()].split()
+                )
+                if (
+                    RUNTIME_DEPENDENCY_WORDS_RE.search(context)
+                    and not NEGATED_DEPENDENCY_RE.search(before)
+                ):
+                    references.append(
+                        {
+                            "target": target_name,
+                            "kind": "runtime_capability",
+                            "source_file": relative,
+                            "source_line": str(
+                                content.count("\n", 0, match.start()) + 1
+                            ),
+                        }
+                    )
+    unique = {
+        (
+            item["target"],
+            item["kind"],
+            item["source_file"],
+            item["source_line"],
+        ): item
+        for item in references
+    }
+    return [unique[key] for key in sorted(unique)], sorted(unscanned)
+
+
+def apply_dependency_inventory(
+    physical: list[dict[str, Any]],
+    enabled_instances: list[dict[str, Any]],
+    durable_inventory: dict[str, Any] | None,
+    *,
+    source_population_complete: bool,
+) -> dict[str, Any]:
+    by_instance = {item["instance_id"]: item for item in physical}
+    enabled_by_capability: dict[str, list[dict[str, Any]]] = {}
+    names_to_capabilities: dict[str, set[str]] = {}
+    for mapping in enabled_instances:
+        if mapping.get("runtime_enabled") is not True:
+            continue
+        capability_id = mapping["canonical_capability_id"]
+        enabled_by_capability.setdefault(capability_id, []).append(mapping)
+        name = normalize_skill_name(mapping.get("runtime_name"))
+        if name is not None:
+            names_to_capabilities.setdefault(name, set()).add(capability_id)
+
+    representatives: dict[str, dict[str, Any]] = {}
+    for capability_id, mappings in enabled_by_capability.items():
+        representative = next(
+            (
+                by_instance.get(mapping["instance_id"])
+                for mapping in mappings
+                if mapping["instance_id"] in by_instance
+            ),
+            None,
+        )
+        if representative is not None:
+            representatives[capability_id] = representative
+
+    target_names = set(names_to_capabilities)
+    source_references: list[dict[str, Any]] = []
+    unscanned_source_files: list[str] = []
+    for source_capability_id, source in sorted(representatives.items()):
+        references, unscanned = _dependency_reference_lines(source, target_names)
+        unscanned_source_files.extend(
+            f"{source['skill_name']}/{relative}" for relative in unscanned
+        )
+        for reference in references:
+            for target_capability_id in sorted(
+                names_to_capabilities.get(reference["target"], set())
+            ):
+                source_references.append(
+                    {
+                        **reference,
+                        "source_capability_id": source_capability_id,
+                        "source_skill": source["skill_name"],
+                        "target_capability_id": target_capability_id,
+                    }
+                )
+
+    durable_complete = (
+        isinstance(durable_inventory, dict)
+        and durable_inventory.get("complete") is True
+        and isinstance(durable_inventory.get("dependencies"), list)
+        and isinstance(durable_inventory.get("skills"), list)
+    )
+    durable_targets: dict[str, list[str]] = {}
+    pinned_names: set[str] = set()
+    if durable_complete:
+        durable_skill_names: set[str] = set()
+        for item in durable_inventory["skills"]:
+            if not isinstance(item, dict):
+                durable_complete = False
+                break
+            name = normalize_skill_name(item.get("name"))
+            if (
+                name is None
+                or name in durable_skill_names
+                or not isinstance(item.get("pinned"), bool)
+            ):
+                durable_complete = False
+                break
+            durable_skill_names.add(name)
+            if item["pinned"]:
+                pinned_names.add(name)
+        seen_durable_targets: set[str] = set()
+        for item in durable_inventory["dependencies"]:
+            normalized = (
+                normalize_skill_name(item.get("skill"))
+                if isinstance(item, dict)
+                else None
+            )
+            sources = item.get("sources") if isinstance(item, dict) else None
+            if (
+                normalized is None
+                or normalized not in durable_skill_names
+                or normalized not in names_to_capabilities
+                or normalized in seen_durable_targets
+                or not isinstance(sources, list)
+                or not sources
+                or not all(isinstance(source, str) and source for source in sources)
+            ):
+                durable_complete = False
+                break
+            seen_durable_targets.add(normalized)
+            durable_targets[normalized] = sorted(set(sources))
+
+    blockers_by_capability: dict[str, list[dict[str, str]]] = {}
+    installed_by_capability: dict[str, list[dict[str, str]]] = {}
+    for reference in source_references:
+        row = {
+            "kind": reference["kind"],
+            "source_skill": reference["source_skill"],
+            "source_capability_id": reference["source_capability_id"],
+            "source_file": reference["source_file"],
+            "source_line": reference["source_line"],
+        }
+        destination = (
+            blockers_by_capability
+            if reference["kind"] == "runtime_capability"
+            else installed_by_capability
+        )
+        destination.setdefault(reference["target_capability_id"], []).append(row)
+
+    for target_name, sources in durable_targets.items():
+        for capability_id in names_to_capabilities.get(target_name, set()):
+            for source in sorted(set(sources)):
+                blockers_by_capability.setdefault(capability_id, []).append(
+                    {
+                        "kind": "durable_owner",
+                        "source_skill": "Scheduled or durable configuration",
+                        "source_capability_id": "",
+                        "source_file": source,
+                        "source_line": "",
+                    }
+                )
+    for target_name in pinned_names:
+        for capability_id in names_to_capabilities.get(target_name, set()):
+            blockers_by_capability.setdefault(capability_id, []).append(
+                {
+                    "kind": "explicit_pin",
+                    "source_skill": "Explicit user pin",
+                    "source_capability_id": "",
+                    "source_file": ".pinned",
+                    "source_line": "",
+                }
+            )
+    for capability_id, representative in representatives.items():
+        if representative.get("authority") == "user_protected":
+            blockers_by_capability.setdefault(capability_id, []).append(
+                {
+                    "kind": "explicit_pin",
+                    "source_skill": "Explicit user pin",
+                    "source_capability_id": "",
+                    "source_file": ".pinned",
+                    "source_line": "",
+                }
+            )
+
+    source_graph_complete = (
+        source_population_complete and not unscanned_source_files
+    )
+    inventory_complete = durable_complete and source_graph_complete
+    for capability_id, representative in representatives.items():
+        blockers = sorted(
+            blockers_by_capability.get(capability_id, []),
+            key=lambda item: (
+                item["kind"],
+                item["source_skill"],
+                item["source_file"],
+                item["source_line"],
+            ),
+        )
+        installed_dependencies = sorted(
+            installed_by_capability.get(capability_id, []),
+            key=lambda item: (
+                item["source_skill"],
+                item["source_file"],
+                item["source_line"],
+            ),
+        )
+        dependency = {
+            "state": (
+                "protected"
+                if blockers
+                else "clear"
+                if inventory_complete
+                else "incomplete"
+            ),
+            "complete": inventory_complete,
+            "blockers": blockers,
+            "installed_content_consumers": installed_dependencies,
+        }
+        for mapping in enabled_by_capability[capability_id]:
+            instance = by_instance.get(mapping["instance_id"])
+            if instance is not None:
+                instance["dependencies"] = dependency
+                instance["dependencies_complete"] = inventory_complete
+
+    return {
+        "schema_version": 1,
+        "complete": inventory_complete,
+        "durable_inventory_complete": durable_complete,
+        "source_graph_complete": source_graph_complete,
+        "unscanned_source_file_count": len(unscanned_source_files),
+        "runtime_dependency_count": sum(
+            len(items) for items in blockers_by_capability.values()
+        ),
+        "installed_content_dependency_count": sum(
+            len(items) for items in installed_by_capability.values()
+        ),
+        "protected_capability_count": len(blockers_by_capability),
+        "inventory_sha256": digest(durable_inventory),
+    }
+
+
 def validate_context(context: dict[str, Any]) -> None:
     required = {"id", "kind", "registered", "runtime_skills"}
     if not required.issubset(context):
@@ -1010,6 +1588,7 @@ def reconcile(
     contexts: list[dict[str, Any]],
     collected_at: str,
     evidence: dict[str, Any] | None = None,
+    durable_dependency_inventory: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     if not host_id:
         raise EstateError("host_id is required")
@@ -1100,6 +1679,12 @@ def reconcile(
         if context["inside_completeness_claim"]
     ]
     complete = bool(claimed) and all(context["complete"] for context in claimed)
+    dependency_summary = apply_dependency_inventory(
+        physical,
+        enabled_instances,
+        durable_dependency_inventory,
+        source_population_complete=complete,
+    )
     canonical_ids = {
         instance["canonical_capability_id"] for instance in enabled_instances
     }
@@ -1146,7 +1731,10 @@ def reconcile(
         "physical_instances": physical,
         "enabled_instances": enabled_instances,
         "unresolved_mappings": unresolved,
-        "evidence": evidence or {},
+        "evidence": {
+            **(evidence or {}),
+            "dependency_inventory": dependency_summary,
+        },
     }
     return {**snapshot, "snapshot_sha256": digest(snapshot)}
 
@@ -1181,7 +1769,7 @@ def opaque_session_id(name: str) -> str:
 def parse_usage_session(
     lines: Any, *, collected_at: datetime
 ) -> tuple[list[tuple[str, datetime]], datetime | None, list[str]]:
-    starts: dict[str, tuple[str, datetime, int]] = {}
+    starts: dict[str, tuple[str | None, datetime, int]] = {}
     completions: dict[str, tuple[bool, datetime, str | None, int]] = {}
     earliest: datetime | None = None
     issues: list[str] = []
@@ -1212,15 +1800,14 @@ def parse_usage_session(
             call_id = data.get("toolCallId")
             arguments = data.get("arguments")
             name = (
-                normalize_skill_name(arguments.get("skill"))
+                normalize_skill_name(
+                    arguments.get("skill", arguments.get("name"))
+                )
                 if isinstance(arguments, dict)
                 else None
             )
             if not isinstance(call_id, str) or not call_id:
                 raise EstateError("usage_session_invalid_skill_start")
-            if name is None:
-                issues.append("usage_session_invalid_skill_name")
-                continue
             if call_id in starts:
                 raise EstateError("usage_session_duplicate_skill_start")
             starts[call_id] = (name, timestamp, event_index)
@@ -1253,6 +1840,9 @@ def parse_usage_session(
     for call_id, (name, started_at, start_index) in starts.items():
         completion = completions.get(call_id)
         if completion is None or not completion[0]:
+            continue
+        if name is None:
+            issues.append("usage_session_invalid_skill_name")
             continue
         _, completed_at, loaded_name, completion_index = completion
         if (
@@ -1352,9 +1942,15 @@ def valid_usage_day(value: Any) -> bool:
 
 
 def validate_usage_index(value: Any) -> dict[str, Any]:
+    parser_revision = (
+        value.get("parser_revision", 1) if isinstance(value, dict) else None
+    )
     if (
         not isinstance(value, dict)
         or value.get("schema_version") != USAGE_INDEX_SCHEMA_VERSION
+        or not isinstance(parser_revision, int)
+        or isinstance(parser_revision, bool)
+        or not 1 <= parser_revision <= USAGE_PARSER_REVISION
         or not isinstance(value.get("sessions"), dict)
     ):
         raise EstateError("usage_index_invalid")
@@ -1423,6 +2019,7 @@ def validate_usage_index(value: Any) -> dict[str, Any]:
         }
     return {
         "schema_version": USAGE_INDEX_SCHEMA_VERSION,
+        "parser_revision": parser_revision,
         "sessions": sessions,
     }
 
@@ -1459,14 +2056,18 @@ def write_usage_index(path: Path, value: dict[str, Any]) -> None:
 def load_usage_index(
     path: Path | None, *, collected_at: datetime
 ) -> tuple[dict[str, Any], str]:
-    empty = {"schema_version": USAGE_INDEX_SCHEMA_VERSION, "sessions": {}}
+    empty = {
+        "schema_version": USAGE_INDEX_SCHEMA_VERSION,
+        "parser_revision": USAGE_PARSER_REVISION,
+        "sessions": {},
+    }
     if path is None or not path.exists():
         return empty, "absent"
     try:
         if path.is_symlink() or not path.is_file():
             raise EstateError("usage_index_invalid")
         raw = path.read_bytes()
-        return validate_usage_index(json.loads(raw)), "loaded"
+        index = validate_usage_index(json.loads(raw))
     except (OSError, json.JSONDecodeError, EstateError):
         stamp = collected_at.strftime("%Y%m%dT%H%M%SZ")
         suffix = hashlib.sha256(
@@ -1478,6 +2079,16 @@ def load_usage_index(
         except OSError as error:
             raise EstateError("usage_index_reject_failed") from error
         return empty, "rebuilt"
+    if index["parser_revision"] < USAGE_PARSER_REVISION:
+        index["sessions"] = {
+            session_id: entry
+            for session_id, entry in index["sessions"].items()
+            if not entry["issues"]
+        }
+        index["parser_revision"] = USAGE_PARSER_REVISION
+        write_usage_index(path, index)
+        return index, "migrated"
+    return index, "loaded"
 
 
 def usage_session_summary(
@@ -1529,8 +2140,8 @@ def collect_usage(
 ) -> dict[str, Any]:
     mappings, canonical_ids, mapping_issues = usage_name_mappings(census)
     aliases = validate_usage_aliases(USAGE_ALIASES)
-    failures: list[dict[str, str]] = []
-    pending_reasons: dict[str, str] = {}
+    failures: list[dict[str, Any]] = []
+    pending_records: dict[str, dict[str, Any]] = {}
     sessions_parsed = 0
     bytes_parsed = 0
     bound_reached: str | None = None
@@ -1538,15 +2149,58 @@ def collect_usage(
     index, index_status = load_usage_index(index_path, collected_at=collected_at)
     indexed_summaries = index["sessions"]
 
-    def fail(session: str, reason: str, *, corpus: bool = False) -> None:
+    def fail(
+        session_id: str,
+        reason: str,
+        *,
+        corpus: bool = False,
+        candidate: dict[str, Any] | None = None,
+        candidate_capability_ids: tuple[str, ...] = (),
+    ) -> str:
         nonlocal corpus_failed
         corpus_failed = corpus_failed or corpus
-        failures.append({"session_id": opaque_session_id(session), "reason": reason})
+        payload = {
+            "session_id": session_id,
+            "reason": reason,
+            "modified_at": (
+                datetime.fromtimestamp(
+                    candidate["mtime_ns"] / 1_000_000_000,
+                    timezone.utc,
+                ).isoformat()
+                if candidate is not None
+                else None
+            ),
+            "bytes": candidate["size"] if candidate is not None else None,
+            "candidate_capability_ids": list(candidate_capability_ids),
+        }
+        failure_id = digest(payload)
+        failures.append({"failure_id": failure_id, **payload})
+        return failure_id
+
+    def record_pending(
+        candidate: dict[str, Any],
+        reason: str,
+        failure_id: str | None = None,
+    ) -> None:
+        pending_records[candidate["session_id"]] = {
+            "session_id": candidate["session_id"],
+            "reason": reason,
+            "modified_at": datetime.fromtimestamp(
+                candidate["mtime_ns"] / 1_000_000_000,
+                timezone.utc,
+            ).isoformat(),
+            "bytes": candidate["size"],
+            "failure_id": failure_id,
+        }
 
     if census.get("scope", {}).get("complete") is not True:
-        fail("census", "usage_census_incomplete")
+        fail(opaque_session_id("census"), "usage_census_incomplete")
     for capability_id, reason in mapping_issues:
-        fail(f"census:{capability_id}", reason)
+        fail(
+            opaque_session_id(f"census:{capability_id}"),
+            reason,
+            candidate_capability_ids=(capability_id,),
+        )
 
     try:
         if session_root.is_symlink() or not session_root.is_dir():
@@ -1567,17 +2221,17 @@ def collect_usage(
     for session in children:
         session_id = opaque_session_id(session.name)
         if session.is_symlink():
-            fail(session.name, "session_symlink", corpus=True)
+            fail(session_id, "session_symlink", corpus=True)
             continue
         try:
             if not session.is_dir():
                 continue
         except OSError:
-            fail(session.name, "session_unreadable", corpus=True)
+            fail(session_id, "session_unreadable", corpus=True)
             continue
         events = session / "events.jsonl"
         if events.is_symlink():
-            fail(session.name, "events_symlink", corpus=True)
+            fail(session_id, "events_symlink", corpus=True)
             continue
         try:
             before = events.stat()
@@ -1589,10 +2243,10 @@ def collect_usage(
                     write_usage_index(index_path, index)
             continue
         except OSError:
-            fail(session.name, "events_unreadable", corpus=True)
+            fail(session_id, "events_unreadable", corpus=True)
             continue
         if not stat.S_ISREG(before.st_mode):
-            fail(session.name, "events_not_regular", corpus=True)
+            fail(session_id, "events_not_regular", corpus=True)
             continue
         fingerprint = usage_fingerprint(before)
         candidates.append(
@@ -1606,29 +2260,36 @@ def collect_usage(
             }
         )
 
-    pending = [
+    pending_candidates = [
         candidate
         for candidate in candidates
         if indexed_summaries.get(candidate["session_id"], {}).get("fingerprint")
         != candidate["fingerprint"]
     ]
-    pending.sort(key=lambda item: (item["mtime_ns"], item["session_id"]))
-    for candidate in pending:
-        session_name = candidate["name"]
-        session_id = candidate["session_id"]
-        before_fingerprint = candidate["fingerprint"]
+    pending_candidates.sort(key=lambda item: (item["mtime_ns"], item["session_id"]))
+    stable_pending: list[dict[str, Any]] = []
+    for candidate in pending_candidates:
         age_seconds = collected_at.timestamp() - (
             candidate["mtime_ns"] / 1_000_000_000
         )
         if quiet_seconds > 0 and age_seconds < quiet_seconds:
-            pending_reasons[session_id] = "events_recently_modified"
-            continue
+            record_pending(candidate, "events_recently_modified")
+        else:
+            stable_pending.append(candidate)
+
+    for position, candidate in enumerate(stable_pending):
+        session_id = candidate["session_id"]
+        before_fingerprint = candidate["fingerprint"]
         if sessions_parsed >= max_sessions:
             bound_reached = "max_sessions"
+            for deferred in stable_pending[position:]:
+                record_pending(deferred, "stable_budget_deferred")
             break
         oversized = candidate["size"] > max_bytes and sessions_parsed == 0
         if bytes_parsed + candidate["size"] > max_bytes and not oversized:
             bound_reached = "max_bytes"
+            for deferred in stable_pending[position:]:
+                record_pending(deferred, "stable_budget_deferred")
             break
         flags = os.O_RDONLY
         if hasattr(os, "O_NOFOLLOW"):
@@ -1653,17 +2314,33 @@ def collect_usage(
             finally:
                 os.close(descriptor)
         except EstateError as error:
-            fail(session_name, str(error), corpus=True)
-            pending_reasons[session_id] = str(error)
+            reason = str(error)
+            failure_id = fail(
+                session_id,
+                reason,
+                corpus=True,
+                candidate=candidate,
+            )
+            record_pending(candidate, reason, failure_id)
             if oversized:
                 bound_reached = "max_bytes"
+                for deferred in stable_pending[position + 1 :]:
+                    record_pending(deferred, "stable_budget_deferred")
                 break
             continue
         except OSError:
-            fail(session_name, "events_changed_or_unreadable", corpus=True)
-            pending_reasons[session_id] = "events_changed_or_unreadable"
+            reason = "events_changed_or_unreadable"
+            failure_id = fail(
+                session_id,
+                reason,
+                corpus=True,
+                candidate=candidate,
+            )
+            record_pending(candidate, reason, failure_id)
             if oversized:
                 bound_reached = "max_bytes"
+                for deferred in stable_pending[position + 1 :]:
+                    record_pending(deferred, "stable_budget_deferred")
                 break
             continue
         indexed_summaries[session_id] = usage_session_summary(
@@ -1673,10 +2350,13 @@ def collect_usage(
             before_fingerprint,
             collected_at,
         )
+        pending_records.pop(session_id, None)
         if index_path is not None:
             write_usage_index(index_path, index)
         if oversized:
             bound_reached = "max_bytes"
+            for deferred in stable_pending[position + 1 :]:
+                record_pending(deferred, "stable_budget_deferred")
             break
 
     exact_indexed = {
@@ -1697,10 +2377,16 @@ def collect_usage(
     pending_bytes = discovered_bytes - indexed_bytes
     if pending_sessions == 0:
         bound_reached = None
+    for candidate in candidates:
+        if (
+            candidate["session_id"] not in exact_indexed
+            and candidate["session_id"] not in pending_records
+        ):
+            record_pending(candidate, "stable_budget_deferred")
 
     counts: dict[str, Counter[str]] = {}
     last_used: dict[str, datetime] = {}
-    unattributed: dict[tuple[str, str], Counter[str]] = {}
+    unattributed: dict[tuple[str, str, tuple[str, ...]], Counter[str]] = {}
     earliest_retained: datetime | None = None
     for session_id, summary in indexed_summaries.items():
         if session_id not in present_sessions:
@@ -1713,7 +2399,15 @@ def collect_usage(
                 else min(earliest_retained, earliest)
             )
         for reason in summary.get("issues", []):
-            failures.append({"session_id": session_id, "reason": reason})
+            candidate = next(
+                (
+                    item
+                    for item in candidates
+                    if item["session_id"] == session_id
+                ),
+                None,
+            )
+            fail(session_id, reason, corpus=True, candidate=candidate)
         for name, usage in summary.get("usage", {}).items():
             capability_ids = mappings.get(name, set())
             attribution_reason = "direct"
@@ -1751,7 +2445,10 @@ def collect_usage(
                     if attribution_reason.startswith("alias_target_")
                     else ("unmapped" if not capability_ids else "conflicting_mapping")
                 )
-                unattributed.setdefault((name, reason), Counter()).update(windows)
+                unattributed.setdefault(
+                    (name, reason, tuple(sorted(capability_ids))),
+                    Counter(),
+                ).update(windows)
 
     corpus_complete = pending_sessions == 0 and not corpus_failed
     attribution_complete = (
@@ -1802,14 +2499,23 @@ def collect_usage(
             "bytes_parsed_this_run": bytes_parsed,
             "max_sessions": max_sessions,
             "max_bytes": max_bytes,
+            "quiet_seconds": quiet_seconds,
+            "collection_watermark": collected_at.isoformat(),
             "bound_reached": bound_reached,
             "work_budget_stopped_run": bound_reached is not None,
             "index_status": index_status,
             "pending": [
-                {"session_id": session_id, "reason": reason}
-                for session_id, reason in sorted(pending_reasons.items())
+                pending_records[session_id]
+                for session_id in sorted(pending_records)
             ],
-            "failures": failures,
+            "failures": sorted(
+                failures,
+                key=lambda item: (
+                    item["session_id"],
+                    item["reason"],
+                    item["failure_id"],
+                ),
+            ),
         },
         "canonical_usage": usage_rows,
         "unattributed": [
@@ -1820,8 +2526,11 @@ def collect_usage(
                 "uses_30d": value["uses_30d"],
                 "uses_90d": value["uses_90d"],
                 "uses_total": value["uses_total"],
+                "candidate_capability_ids": list(candidate_capability_ids),
             }
-            for (name, reason), value in sorted(unattributed.items())
+            for (name, reason, candidate_capability_ids), value in sorted(
+                unattributed.items()
+            )
         ],
     }
     return {**snapshot, "snapshot_sha256": digest(snapshot)}
@@ -3082,6 +3791,413 @@ def discover_roots(
     return list(deduplicated.values()), plugins
 
 
+def collect_durable_dependency_inventory(config: dict[str, Any]) -> dict[str, Any]:
+    inline = config.get("durable_dependency_inventory")
+    if inline is not None:
+        if not isinstance(inline, dict):
+            return {
+                "complete": False,
+                "dependencies": [],
+                "skills": [],
+                "error": "configured durable dependency inventory is not an object",
+            }
+        return inline
+    scanner = Path(
+        config.get(
+            "dependency_scanner",
+            Path(__file__).resolve().parents[2]
+            / "skill-curator/scripts/scheduled-skill-deps.py",
+        )
+    ).expanduser().resolve()
+    if not scanner.is_file():
+        return {
+            "complete": False,
+            "dependencies": [],
+            "skills": [],
+            "error": f"durable dependency scanner is unavailable: {scanner}",
+        }
+    try:
+        completed = subprocess.run(
+            [str(scanner), "--inventory"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+    except (OSError, subprocess.SubprocessError) as error:
+        return {
+            "complete": False,
+            "dependencies": [],
+            "skills": [],
+            "error": f"durable dependency scan failed: {error}",
+        }
+    if completed.returncode != 0:
+        detail = completed.stderr.strip() or f"exit {completed.returncode}"
+        return {
+            "complete": False,
+            "dependencies": [],
+            "skills": [],
+            "error": f"durable dependency scan refused: {detail}",
+        }
+    try:
+        inventory = json.loads(completed.stdout)
+    except json.JSONDecodeError as error:
+        return {
+            "complete": False,
+            "dependencies": [],
+            "skills": [],
+            "error": f"durable dependency scan returned invalid JSON: {error}",
+        }
+    if not isinstance(inventory, dict):
+        return {
+            "complete": False,
+            "dependencies": [],
+            "skills": [],
+            "error": "durable dependency scan returned a non-object",
+        }
+    return inventory
+
+
+def incomplete_evaluation() -> dict[str, Any]:
+    return {
+        "state": "invalid",
+        "status": "invalid",
+        "current": False,
+        "evaluated_at": None,
+        "receipt_sha256": None,
+        "transition_id": None,
+        "input_manifest_sha256": None,
+        "cases": [],
+    }
+
+
+def run_bounded_evaluator(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
+    try:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            start_new_session=True,
+            close_fds=True,
+        )
+    except OSError:
+        return None
+    captured = {"stdout": bytearray(), "stderr": bytearray()}
+    total = 0
+    failed = False
+    deadline = time.monotonic() + EVALUATION_TIMEOUT_SECONDS
+    selector = selectors.DefaultSelector()
+    assert process.stdout is not None
+    assert process.stderr is not None
+    selector.register(process.stdout, selectors.EVENT_READ, "stdout")
+    selector.register(process.stderr, selectors.EVENT_READ, "stderr")
+    try:
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                failed = True
+                break
+            for key, _ in selector.select(min(remaining, 0.25)):
+                data = os.read(key.fileobj.fileno(), EVALUATION_READ_CHUNK_BYTES)
+                if not data:
+                    selector.unregister(key.fileobj)
+                    continue
+                total += len(data)
+                if total > MAX_EVALUATION_OUTPUT_BYTES:
+                    failed = True
+                    break
+                captured[key.data].extend(data)
+            if failed:
+                break
+        if not failed:
+            try:
+                process.wait(timeout=max(deadline - time.monotonic(), 0))
+            except subprocess.TimeoutExpired:
+                failed = True
+    finally:
+        selector.close()
+        if failed or process.poll() is None:
+            for number in (signal.SIGTERM, signal.SIGKILL):
+                if process.poll() is not None:
+                    break
+                try:
+                    os.killpg(os.getpgid(process.pid), number)
+                except (ProcessLookupError, PermissionError, OSError):
+                    break
+                try:
+                    process.wait(timeout=2)
+                except subprocess.TimeoutExpired:
+                    continue
+        for stream in (process.stdout, process.stderr):
+            try:
+                stream.close()
+            except OSError:
+                pass
+    if failed or process.returncode is None:
+        return None
+    return subprocess.CompletedProcess(
+        argv,
+        process.returncode,
+        bytes(captured["stdout"]).decode("utf-8", errors="replace"),
+        bytes(captured["stderr"]).decode("utf-8", errors="replace"),
+    )
+
+
+def collect_evaluation_inventory(
+    config: dict[str, Any],
+    physical_instances: list[dict[str, Any]],
+    observed_at: str,
+) -> dict[str, Any]:
+    evaluator = Path(
+        config.get(
+            "evaluation_script",
+            Path(__file__).with_name("skill-evaluation.py"),
+        )
+    ).expanduser().resolve()
+    paths = sorted(
+        {
+            item["absolute_path"]
+            for item in physical_instances
+            if isinstance(item.get("absolute_path"), str)
+        }
+    )
+    if not evaluator.is_file() or evaluator.is_symlink():
+        return {
+            "complete": False,
+            "evaluator_sha256": None,
+            "evaluations": [],
+        }
+    try:
+        evaluator_sha256 = f"sha256:{file_sha256(evaluator)}"
+    except OSError:
+        return {
+            "complete": False,
+            "evaluator_sha256": None,
+            "evaluations": [],
+        }
+    completed = run_bounded_evaluator(
+        [
+            sys.executable,
+            str(evaluator),
+            "portfolio-inventory",
+            *paths,
+            "--now",
+            observed_at,
+            "--max-age-days",
+            "90",
+        ]
+    )
+    try:
+        evaluator_unchanged = (
+            evaluator.is_file()
+            and not evaluator.is_symlink()
+            and f"sha256:{file_sha256(evaluator)}" == evaluator_sha256
+        )
+    except OSError:
+        evaluator_unchanged = False
+    if completed is None or completed.returncode != 0 or not evaluator_unchanged:
+        return {
+            "complete": False,
+            "evaluator_sha256": evaluator_sha256,
+            "evaluations": [],
+        }
+    try:
+        result = json.loads(completed.stdout)
+    except json.JSONDecodeError:
+        result = None
+    if not isinstance(result, dict):
+        return {
+            "complete": False,
+            "evaluator_sha256": evaluator_sha256,
+            "evaluations": [],
+        }
+    if (
+        set(result)
+        != {"schema_version", "observed_at", "max_age_days", "evaluations"}
+        or result.get("schema_version") != 1
+        or result.get("observed_at") != observed_at
+        or result.get("max_age_days") != 90
+        or not isinstance(result.get("evaluations"), list)
+    ):
+        return {
+            "complete": False,
+            "evaluator_sha256": evaluator_sha256,
+            "evaluations": [],
+        }
+    return {
+        "complete": True,
+        "schema_version": result["schema_version"],
+        "evaluator_sha256": evaluator_sha256,
+        "observed_at": result["observed_at"],
+        "max_age_days": result["max_age_days"],
+        "evaluations": result["evaluations"],
+    }
+
+
+def valid_evaluation_case(value: Any) -> bool:
+    if not isinstance(value, dict) or set(value) != {
+        "executor",
+        "case_id",
+        "evaluation_class",
+        "candidate_valid_trials",
+        "candidate_successful_trials",
+        "control_valid_trials",
+        "control_successful_trials",
+        "comparable",
+        "exclusion_reason",
+    }:
+        return False
+    for field in ("executor", "case_id", "evaluation_class"):
+        if not isinstance(value[field], str) or not value[field]:
+            return False
+    for field in (
+        "candidate_valid_trials",
+        "candidate_successful_trials",
+        "control_valid_trials",
+        "control_successful_trials",
+    ):
+        count = value[field]
+        if isinstance(count, bool) or not isinstance(count, int) or not 0 <= count <= 3:
+            return False
+    return (
+        isinstance(value["comparable"], bool)
+        and (
+            value["exclusion_reason"] is None
+            or isinstance(value["exclusion_reason"], str)
+        )
+    )
+
+
+def apply_evaluation_inventory(
+    census: dict[str, Any],
+    inventory: dict[str, Any],
+) -> None:
+    physical = census["physical_instances"]
+    expected_paths = {
+        item["absolute_path"]
+        for item in physical
+        if isinstance(item.get("absolute_path"), str)
+    }
+    rows = inventory.get("evaluations")
+    complete = (
+        inventory.get("complete") is True
+        and inventory.get("schema_version") == 1
+        and isinstance(inventory.get("evaluator_sha256"), str)
+        and SHA256_ID_RE.fullmatch(inventory["evaluator_sha256"]) is not None
+        and inventory.get("observed_at") == census.get("collected_at")
+        and inventory.get("max_age_days") == 90
+        and isinstance(rows, list)
+    )
+    by_path: dict[str, dict[str, Any]] = {}
+    if complete:
+        for row in rows:
+            if (
+                not isinstance(row, dict)
+                or set(row) != {"skill_path", "evaluation"}
+                or not isinstance(row.get("skill_path"), str)
+                or row["skill_path"] in by_path
+                or not isinstance(row.get("evaluation"), dict)
+            ):
+                complete = False
+                break
+            evaluation = row["evaluation"]
+            if (
+                set(evaluation)
+                != {
+                    "state",
+                    "status",
+                    "current",
+                    "evaluated_at",
+                    "receipt_sha256",
+                    "transition_id",
+                    "input_manifest_sha256",
+                    "cases",
+                }
+                or not isinstance(evaluation["state"], str)
+                or evaluation["state"] not in EVALUATION_STATES
+                or not isinstance(evaluation["status"], str)
+                or not isinstance(evaluation["current"], bool)
+                or (
+                    evaluation["current"]
+                    and evaluation["state"]
+                    not in {"pass", "regression", "inconclusive"}
+                )
+                or (
+                    evaluation["evaluated_at"] is not None
+                    and not isinstance(evaluation["evaluated_at"], str)
+                )
+                or (
+                    evaluation["receipt_sha256"] is not None
+                    and (
+                        not isinstance(evaluation["receipt_sha256"], str)
+                        or HEX_SHA256_RE.fullmatch(
+                            evaluation["receipt_sha256"]
+                        )
+                        is None
+                    )
+                )
+                or (
+                    evaluation["transition_id"] is not None
+                    and (
+                        not isinstance(evaluation["transition_id"], str)
+                        or SHA256_ID_RE.fullmatch(
+                            evaluation["transition_id"]
+                        )
+                        is None
+                    )
+                )
+                or (
+                    evaluation["input_manifest_sha256"] is not None
+                    and (
+                        not isinstance(
+                            evaluation["input_manifest_sha256"], str
+                        )
+                        or SHA256_ID_RE.fullmatch(
+                            evaluation["input_manifest_sha256"]
+                        )
+                        is None
+                    )
+                )
+                or not isinstance(evaluation["cases"], list)
+                or len(evaluation["cases"]) > MAX_EVALUATION_CASES
+                or not all(valid_evaluation_case(item) for item in evaluation["cases"])
+            ):
+                complete = False
+                break
+            by_path[row["skill_path"]] = evaluation
+    if set(by_path) != expected_paths:
+        complete = False
+    counts = Counter()
+    for item in physical:
+        evaluation = (
+            dict(by_path[item["absolute_path"]])
+            if complete
+            else incomplete_evaluation()
+        )
+        item["evaluation"] = evaluation
+        item["evaluation_complete"] = complete
+        counts[evaluation["state"]] += 1
+    census.setdefault("evidence", {})["evaluation_inventory"] = {
+        "complete": complete,
+        "evaluator_sha256": (
+            inventory.get("evaluator_sha256")
+            if isinstance(inventory.get("evaluator_sha256"), str)
+            else None
+        ),
+        "observed_at": (
+            inventory.get("observed_at")
+            if isinstance(inventory.get("observed_at"), str)
+            else None
+        ),
+        "max_age_days": 90,
+        "physical_instance_count": len(physical),
+        "state_counts": {
+            state: counts.get(state, 0) for state in sorted(EVALUATION_STATES)
+        },
+    }
+
+
 def collect(config: dict[str, Any]) -> dict[str, Any]:
     host_id = config.get("host_id")
     binary = config.get("copilot_binary", "copilot")
@@ -3141,16 +4257,27 @@ def collect(config: dict[str, Any]) -> dict[str, Any]:
         version,
         enabled_plugin_names,
     )
+    durable_dependency_inventory = collect_durable_dependency_inventory(config)
+    collected_at = datetime.now(timezone.utc).isoformat()
     census = reconcile(
         host_id=host_id,
         roots=roots,
         contexts=contexts,
-        collected_at=datetime.now(timezone.utc).isoformat(),
+        collected_at=collected_at,
         evidence={
             "copilot_version": version,
             "settings_path": str(settings),
             "settings_sha256": settings_sha256,
         },
+        durable_dependency_inventory=durable_dependency_inventory,
+    )
+    apply_evaluation_inventory(
+        census,
+        collect_evaluation_inventory(
+            config,
+            census["physical_instances"],
+            collected_at,
+        ),
     )
     census["plugins"] = plugins
     census["totals"]["plugin_packages"] = len(plugins)
@@ -3162,6 +4289,18 @@ def collect(config: dict[str, Any]) -> dict[str, Any]:
     }
     census["snapshot_sha256"] = digest(snapshot)
     return census
+
+
+def collect_remote_subject(
+    config: dict[str, Any],
+    request: dict[str, Any],
+    content_policy_path: Path,
+) -> dict[str, Any]:
+    return export_remote_subject(
+        collect(config),
+        request,
+        remote_subject_content_policy(content_policy_path),
+    )
 
 
 def load_object(path: Path) -> dict[str, Any]:
@@ -3206,6 +4345,9 @@ def main() -> None:
                 contexts=source["contexts"],
                 collected_at=source.get("collected_at", "fixture"),
                 evidence=source.get("evidence"),
+                durable_dependency_inventory=source.get(
+                    "durable_dependency_inventory"
+                ),
             )
     except (EstateError, KeyError, TypeError) as error:
         print(json.dumps({"ok": False, "error": str(error)}, sort_keys=True))
