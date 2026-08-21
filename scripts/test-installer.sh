@@ -712,6 +712,63 @@ if (
 if "--request" in curator_argv:
     raise SystemExit("estate curator route must remain unarmed without a sealed request")
 PY
+FULL_BASELINE_SOURCE="$NATIVE/operational-adapters-baseline.source.json"
+cp "$NATIVE_ADAPTERS" "$FULL_BASELINE_SOURCE"
+FULL_BASELINE_SHA="$(
+  shasum -a 256 "$FULL_BASELINE_SOURCE" | awk '{print $1}'
+)"
+(
+  export DREAMING_ENABLE_COPILOT_COMPAT=0
+  export DREAMING_CONFIGURE_NATIVE_ADAPTERS=1
+  export DREAMING_SESSION_SOURCES=copilot
+  export DREAMING_REVIEW_EXECUTORS=copilot
+  export DREAMING_SKILL_TARGETS=copilot
+  export DREAMING_SOURCE_EXECUTOR_ALLOW='copilot>copilot'
+  export DREAMING_COPILOT_BIN="$FAKE_COPILOT"
+  export DREAMING_COPILOT_SOURCE_SSH_HOST='fixture@fd7a:115c:a1e0::1'
+  export DREAMING_COPILOT_SOURCE_SSH_ADDRESS_FAMILY=6
+  export DREAMING_COPILOT_SOURCE_SSH_PYTHON='/fixture/python3'
+  export DREAMING_COPILOT_SOURCE_SSH_SCRIPT='/fixture/dreaming-vendor-adapter.py'
+  export DREAMING_COPILOT_PUBLISHER_SSH_HOST='fixture-client@fd7a:115c:a1e0::3'
+  export DREAMING_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY=6
+  export DREAMING_COPILOT_PUBLISHER_RECEIVER_ID='fixture-receiver'
+  export DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER=1
+  export DREAMING_CONFIGURE_EVALUATION_INPUT_OWNER=1
+  export DREAMING_EVALUATION_INPUT_OWNER_ENABLED=1
+  export DREAMING_EVALUATION_INPUT_AUTHOR_MODEL=author-model
+  export DREAMING_EVALUATION_INPUT_REVIEWER_A_MODEL=reviewer-a-model
+  export DREAMING_EVALUATION_INPUT_REVIEWER_B_MODEL=reviewer-b-model
+  export DREAMING_PRESERVE_ESTATE_ADAPTERS=1
+  export DREAMING_PRESERVE_OPERATIONAL_ADAPTERS=1
+  export DREAMING_ESTATE_ADAPTERS_BASELINE_SOURCE="$FULL_BASELINE_SOURCE"
+  export DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256="$FULL_BASELINE_SHA"
+  export DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS=1
+  export DREAMING_REMOTE_EVALUATION_SUBJECTS_ENABLED=1
+  export DREAMING_REMOTE_SUBJECT_SSH_HOST='fixture@fd7a:115c:a1e0::1'
+  export DREAMING_REMOTE_SUBJECT_SSH_ADDRESS_FAMILY=6
+  export DREAMING_REMOTE_SUBJECT_SSH_SCRIPT='/fixture/remote-subject/ssh-estate-census.py'
+  export DREAMING_REMOTE_SUBJECT_ESTATE_SCRIPT='/fixture/remote-subject/dreaming-estate.py'
+  export DREAMING_REMOTE_SUBJECT_CONTENT_POLICY='/fixture/remote-subject/content-policy.json'
+  export DREAMING_REMOTE_SUBJECT_KNOWN_HOSTS_SOURCE="$REMOTE_KNOWN_HOSTS_SOURCE"
+  export DREAMING_REMOTE_SUBJECT_ORIGIN_HOST_ID=fixture-receiver
+  export DREAMING_REMOTE_SUBJECT_RECEIVER_ID=fixture-receiver
+  run_native install >/dev/null
+)
+python3 - "$NATIVE_ADAPTERS" "$FULL_BASELINE_SOURCE" <<'PY'
+import json
+import sys
+
+config = json.load(open(sys.argv[1], encoding="utf-8"))
+baseline = json.load(open(sys.argv[2], encoding="utf-8"))
+if config["evaluation_input_owner"]["enabled"] is not True:
+    raise SystemExit("caller owner enablement was overwritten by persisted config")
+if config["remote_evaluation_subjects"]["enabled"] is not True:
+    raise SystemExit("caller remote enablement was overwritten by persisted config")
+for key in ("sources", "executors", "publishers", "routes", "executor_order"):
+    if config.get(key) != baseline.get(key):
+        raise SystemExit(f"enabled bridge install changed existing {key}")
+PY
+echo "PASS  explicit bridge enablement overrides persisted disabled config"
 FAKE_SSH="$NATIVE/fake-ssh.py"
 SSH_ARGV_LOG="$NATIVE/ssh-argv.json"
 cat > "$FAKE_SSH" <<'PY'
@@ -795,6 +852,7 @@ import sys
 path = pathlib.Path(sys.argv[1])
 names = {
     "DREAMING_PRESERVE_ESTATE_ADAPTERS",
+    "DREAMING_PRESERVE_OPERATIONAL_ADAPTERS",
     "DREAMING_ESTATE_ADAPTERS_BASELINE_SOURCE",
     "DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256",
 }

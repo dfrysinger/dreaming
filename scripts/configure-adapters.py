@@ -881,7 +881,28 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
                 raise ConfigError(
                     f"estate adapter baseline is missing {key}"
                 )
-            config[key] = entry
+        preserved_keys = ["estate_census", "estate_curator"]
+        if environment_flag("DREAMING_PRESERVE_OPERATIONAL_ADAPTERS"):
+            preserved_keys.extend(
+                (
+                    "allow_autonomous_skill_creation",
+                    "max_autonomous_session_age_days",
+                    "max_events",
+                    "max_field_bytes",
+                    "max_reviews_per_run",
+                    "max_snapshot_bytes",
+                    "policy_version",
+                    "sources",
+                    "executors",
+                    "publishers",
+                    "retired_publishers",
+                    "routes",
+                    "executor_order",
+                )
+            )
+        for key in preserved_keys:
+            if key in baseline:
+                config[key] = baseline[key]
     configure_owner = environment_flag(
         "DREAMING_CONFIGURE_EVALUATION_INPUT_OWNER"
     )
