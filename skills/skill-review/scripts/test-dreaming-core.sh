@@ -944,7 +944,13 @@ class RuntimeTest(unittest.TestCase):
                         "reason": "events_recently_modified",
                     }
                 ],
-                "failures": [],
+                "failures": [
+                    {
+                        "session_id": "legacy-malformed-name",
+                        "modified_at": "2026-01-01T00:00:00+00:00",
+                        "reason": "usage_session_invalid_skill_name",
+                    }
+                ],
             },
             "canonical_usage": [
                 {
@@ -953,7 +959,16 @@ class RuntimeTest(unittest.TestCase):
                 }
                 for position, capability_id in enumerate(capability_ids)
             ],
-            "unattributed": [],
+            "unattributed": [
+                {
+                    "name": "retired-skill",
+                    "reason": "unmapped",
+                    "uses_30d": 0,
+                    "uses_7d": 0,
+                    "uses_90d": 1,
+                    "uses_total": 1,
+                }
+            ],
         }
         usage["snapshot_sha256"] = runtime_module.digest(usage)
         receiver = {

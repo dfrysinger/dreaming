@@ -5296,8 +5296,17 @@ def derive_evaluation_input_queue(
             if isinstance(item, dict)
             else None
         )
-        if not isinstance(candidate_ids, list) or not all(
-            isinstance(value, str) for value in candidate_ids
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("name"), str)
+            or not isinstance(item.get("reason"), str)
+            or (
+                candidate_ids is not None
+                and (
+                    not isinstance(candidate_ids, list)
+                    or not all(isinstance(value, str) for value in candidate_ids)
+                )
+            )
         ):
             raise RuntimeFailure(
                 "evaluation-input-evidence-invalid",
@@ -5309,8 +5318,16 @@ def derive_evaluation_input_queue(
             if isinstance(item, dict)
             else None
         )
-        if not isinstance(candidate_ids, list) or not all(
-            isinstance(value, str) for value in candidate_ids
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("reason"), str)
+            or (
+                candidate_ids is not None
+                and (
+                    not isinstance(candidate_ids, list)
+                    or not all(isinstance(value, str) for value in candidate_ids)
+                )
+            )
         ):
             raise RuntimeFailure(
                 "evaluation-input-evidence-invalid",
