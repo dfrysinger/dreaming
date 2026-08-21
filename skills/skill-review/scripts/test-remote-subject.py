@@ -179,6 +179,29 @@ class RemoteSubjectTest(unittest.TestCase):
         self.assertEqual(result["status"], "published")
         self.assertTrue((Path(result["candidate_root"]) / "SKILL.md").is_file())
 
+    def test_remote_snapshot_uses_evaluator_executable(self) -> None:
+        evaluator = self.root / "fixture-evaluator"
+        expected = {
+            "state": "missing",
+            "status": "missing",
+            "current": False,
+            "evaluated_at": None,
+            "receipt_sha256": None,
+            "transition_id": None,
+            "input_manifest_sha256": None,
+            "cases": [],
+        }
+        evaluator.write_text(
+            "#!/bin/sh\n"
+            f"printf '%s\\n' '{json.dumps(expected, sort_keys=True)}'\n",
+            encoding="utf-8",
+        )
+        os.chmod(evaluator, 0o700)
+        self.assertEqual(
+            core.remote_snapshot_evaluation(evaluator, str(self.skill)),
+            expected,
+        )
+
     def test_evaluator_refuses_tampered_remote_snapshot(self) -> None:
         response, request, receiver = self.response()
         result = core.publish_remote_subject_snapshot(

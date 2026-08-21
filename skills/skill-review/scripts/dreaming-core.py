@@ -2580,7 +2580,11 @@ def configured_evaluation_input_owner(
             "evaluation_input_owner content_root is not the fixed owner root",
         )
     evaluator = Path(__file__).with_name("skill-evaluation.py")
-    if evaluator.is_symlink() or not evaluator.is_file():
+    if (
+        evaluator.is_symlink()
+        or not evaluator.is_file()
+        or not os.access(evaluator, os.X_OK)
+    ):
         raise RuntimeFailure(
             "evaluation-input-owner-unsealed",
             "fixed evaluation-input owner executable is unavailable",
@@ -3602,7 +3606,6 @@ def validate_sealed_evaluation_input_packet(
         output = Path(temporary) / "packet.json"
         result = subprocess.run(
             [
-                sys.executable,
                 str(evaluator),
                 "v2-input-author-packet",
                 skill_path,
@@ -4797,7 +4800,6 @@ def remote_snapshot_evaluation(
     observed_at: str | None = None,
 ) -> dict[str, Any]:
     command = [
-        sys.executable,
         str(evaluator),
         "portfolio-current",
         candidate_root,
