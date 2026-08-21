@@ -19,7 +19,7 @@
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
-- Isolated governance preview tip: `4c9b578`
+- Isolated governance preview tip: `142bc40`
 - The first natural successor `20260818T220321Z-97940` remains retained as a
   literal `SC-010` `NOT_SUPPORTED` result. It attempted 25 reviews, completed
   24, retained one `executor-timeout`, and ended honestly as `aborted` after
@@ -208,11 +208,29 @@
   dashboard checks pass. Opus and Terra found the hybrid modern/legacy failure
   shape and byte-only pending gap; finding-scoped round-two review confirms
   both resolved with no new finding.
-- The final dashboard successor is installed behind halt from Mac mini commit
-  `24c2929e`, with rollback backup `20260821T074503Z-77877`. Its
-  generation-bound full self-test is currently running. Do not enable,
-  kickstart, or use this generation for natural-cadence evidence until that
-  exact gate passes.
+- The final sealed-legacy reader closes two-field recent-tail and mixed-reason
+  pending-byte attribution at local commits `f3b835e` and `142bc40`. All 170
+  dashboard checks pass. Finding-scoped Opus and Terra review both report the
+  mixed-reason defect resolved with no new finding.
+- Final Mac mini commit `c62467c7` is installed as activation generation
+  `20260821T084956Z-install-37390`, with rollback backup
+  `20260821T084949Z-37390`. Its generation-bound full self-test passed with
+  zero failures, activation and self-test generation stamps matched exactly,
+  and it was enabled only after that gate.
+- Immediate owner run `20260821T094419Z-91379` published current 96-row overlay
+  `sha256:504c402807c69084707990cee686bc13c85baf28c35dd3d762e38752c692d758`
+  and then retained `evaluation-input-root-invalid`. Usage remains honestly
+  incomplete: four pending sessions, one failure, 23 unattributed records, and
+  a bounded byte limit. The estate API is current and report-only.
+- Installed browser proof is retained in
+  `final-remote-evaluation-dashboard-proof.json` plus desktop 1440x900 and
+  390x844 captures. Both have nontrivial pixel spread, no overflow, no browser
+  error, and zero enabled action buttons. The `agent-auth-broker` row shows
+  MacBook origin, Mac mini execution, snapshot ready, five-plus partial uses,
+  incomplete coverage, and a disabled read-only action.
+- The final generation must now remain untouched until one natural
+  14,400-second launchd tick is terminal and retained. Fail-closed rollback
+  proof follows that cadence receipt.
 - The Dreaming-specific proof-first process is committed on the capacity
   branch as `41022d9`, and its non-conflicting skill name is committed as
   `0703693`.
