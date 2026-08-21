@@ -3604,30 +3604,36 @@ def validate_sealed_evaluation_input_packet(
         prefix="evaluation-input-packet."
     ) as temporary:
         output = Path(temporary) / "packet.json"
-        result = subprocess.run(
-            [
-                str(evaluator),
-                "v2-input-author-packet",
-                skill_path,
-                "--suite",
-                str(primary_files["suite"]),
-                "--policy",
-                str(primary_files["policy"]),
-                "--config",
-                str(primary_files["compilation"]),
-                "--routing",
-                str(primary_files["routing"]),
-                "--harness",
-                str(primary_files["harness"]),
-                "--catalog",
-                str(primary_files["catalog"]),
-                "--output",
-                str(output),
-            ],
-            check=False,
-            capture_output=True,
-            text=True,
-        )
+        try:
+            result = subprocess.run(
+                [
+                    str(evaluator),
+                    "v2-input-author-packet",
+                    skill_path,
+                    "--suite",
+                    str(primary_files["suite"]),
+                    "--policy",
+                    str(primary_files["policy"]),
+                    "--config",
+                    str(primary_files["compilation"]),
+                    "--routing",
+                    str(primary_files["routing"]),
+                    "--harness",
+                    str(primary_files["harness"]),
+                    "--catalog",
+                    str(primary_files["catalog"]),
+                    "--output",
+                    str(output),
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+        except (OSError, subprocess.SubprocessError) as error:
+            raise RuntimeFailure(
+                "evaluation-input-seal-invalid",
+                f"evaluation-input evaluator is unavailable: {error}",
+            ) from error
     if result.returncode != 0:
         raise RuntimeFailure(
             "evaluation-input-seal-invalid",
@@ -3680,7 +3686,11 @@ def seal_evaluation_input_root(
     installed_roots = tuple(installed_skill_roots)
     evaluator = Path(__file__).with_name("skill-evaluation.py")
     harness = Path(__file__).with_name("skill-evaluation-harness.py")
-    if evaluator.is_symlink() or not evaluator.is_file():
+    if (
+        evaluator.is_symlink()
+        or not evaluator.is_file()
+        or not os.access(evaluator, os.X_OK)
+    ):
         raise RuntimeFailure(
             "evaluation-input-seal-invalid",
             "evaluation-input evaluator is unavailable",
@@ -4262,7 +4272,14 @@ def evaluation_input_usage_state(
     ]
     identity_blocked = any(
         isinstance(item, dict)
-        and capability_id in item.get("candidate_capability_ids", [])
+        and (
+            capability_id in item.get("candidate_capability_ids", [])
+            or (
+                "candidate_capability_ids" not in item
+                and item.get("reason")
+                not in {"unmapped", "alias_target_missing"}
+            )
+        )
         for item in unattributed
     ) or any(item.get("candidate_capability_ids") for item in relevant_failures)
     stable_session_ids = {

@@ -971,6 +971,25 @@ class RuntimeTest(unittest.TestCase):
             ],
         }
         usage["snapshot_sha256"] = runtime_module.digest(usage)
+        legacy_conflicting_usage = json.loads(json.dumps(usage))
+        legacy_conflicting_usage["unattributed"] = [
+            {
+                "name": "ambiguous-legacy-skill",
+                "reason": "conflicting_mapping",
+                "uses_30d": 0,
+                "uses_7d": 0,
+                "uses_90d": 1,
+                "uses_total": 1,
+            }
+        ]
+        self.assertEqual(
+            runtime_module.evaluation_input_usage_state(
+                capability_ids[0],
+                legacy_conflicting_usage,
+                legacy_conflicting_usage["canonical_usage"][0],
+            ),
+            "blocked_identity",
+        )
         receiver = {
             "receiver_id": "fixture",
             "receiver_sha256": "a" * 64,
