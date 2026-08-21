@@ -1973,6 +1973,15 @@ Fail-closed rollback proof requires:
       Authoritative adapter launch uses a versioned allowlist-built environment
       and a pre-authorized evaluator-owned adapter path and byte identity, so
       inherited environment or adapter substitution refuses before a call.
+- [ ] Every changed executable or adapter completes a targeted validation
+      closure covering its stored digests, exact-byte authorizations,
+      publisher and receiver pins, and focused consumer tests before an
+      installed generation is created.
+- [ ] The exact candidate adapter configuration passes a private preflight
+      before installed self-test: required paths exist, stored byte identities
+      match, local and remote health checks pass, and estate adapters preserved
+      for rollout stability are separated from code-bound executors,
+      comparators, and publishers that must be regenerated.
 - [ ] The dashboard distinguishes Needs test cases, Test design in progress,
       Test design rejected, Cannot test safely, Ready to test, Testing now,
       current evaluation, stale evaluation, and lane-scoped Evaluation recovery

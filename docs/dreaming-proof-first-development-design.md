@@ -154,8 +154,24 @@ Replace each temporary seam deliberately:
 - document migration and rollback;
 - remove temporary data and direct-only shortcuts.
 
-Batch these changes into one coherent candidate. Use targeted tests while
-editing. Do not repeatedly run the installed full self-test.
+Build a targeted validation closure before freezing the candidate. For each
+changed executable, trust anchor, or generated configuration entry:
+
+- enumerate every exact-byte authorization, stored digest, publisher or
+  receiver pin, and focused test that consumes it;
+- run the producer checks and all focused consumer checks together;
+- generate the candidate adapter configuration in a private root;
+- exercise its required local and remote health checks against the exact paths
+  and byte identities that installation will use;
+- classify adapter groups explicitly as preserved or regenerated.
+
+Estate census and curator commands may remain preserved while executors,
+comparators, or publishers are regenerated. A single preservation switch must
+not silently retain code-bound adapter entries after their executable bytes
+change.
+
+Batch these changes into one coherent candidate. Use the complete targeted
+closure while editing. Do not repeatedly run the installed full self-test.
 
 ### 7. Freeze and validate once
 
@@ -163,16 +179,18 @@ When all known hardening work is present:
 
 1. run the targeted deterministic checks needed to produce the hardened
    candidate;
-2. freeze the candidate;
-3. install once behind halt;
-4. run the generation-bound full self-test once;
-5. enable only after it passes;
-6. pass `development-loop`'s complete live-proof gate for the current
+2. generate and exercise the candidate adapter configuration in a private
+   preflight;
+3. freeze the candidate;
+4. install once behind halt;
+5. run the generation-bound full self-test once;
+6. enable only after it passes;
+7. pass `development-loop`'s complete live-proof gate for the current
    candidate, including immediate behavior and every cadence, browser, and
    rollback checkpoint that the governing work order makes part of acceptance;
-7. run the remaining broad deterministic validation;
-8. run paired implementation review;
-9. fix material findings, rerun the affected deterministic checks, and apply
+8. run the remaining broad deterministic validation;
+9. run paired implementation review;
+10. fix material findings, rerun the affected deterministic checks, and apply
    `development-loop`'s post-review live-proof rules. Systemic and critical
    work reruns the complete final end-to-end flow on the reviewed tree.
 
@@ -189,6 +207,12 @@ design.
 - The tracer grows into production code without identity, bounds, rollback, or
   tests.
 - Broad suites run after every small edit and become the debugging loop.
+- A changed executable passes its own tests while a stored digest or remote
+  authorization still names its previous bytes.
+- A blanket adapter-preservation setting keeps stale executors or publishers
+  while protecting unrelated stable estate commands.
+- Generated adapter configuration is first exercised during enablement rather
+  than in a private preflight.
 - Review begins before anyone knows whether the behavior is useful.
 - A natural cadence requirement is confused with a need to wait during normal
   iteration.
@@ -280,6 +304,29 @@ design.
   is treated as unnecessary duplication, or the two are collapsed into one
   unsupported claim.
 
+### DREAM-FAST-CHK-09: Targeted validation closure
+
+- **Protects:** A changed producer cannot leave an exact-byte consumer pinned
+  to its previous identity.
+- **Setup:** Enumerate changed executables, stored digests, authorization
+  checks, publisher and receiver pins, and focused consumer tests.
+- **Pass:** The producer and every identified consumer pass in one targeted
+  validation set, and no retired digest remains in an active configuration.
+- **Failure:** Only the changed file's direct tests run, or installation finds
+  a stale trust anchor that targeted validation could have exercised.
+
+### DREAM-FAST-CHK-10: Adapter configuration preflight
+
+- **Protects:** Full installed self-test and enablement are not the first
+  exercise of generated adapter paths and identities.
+- **Setup:** Generate the candidate adapter configuration in a private root,
+  with adapter groups explicitly marked preserved or regenerated.
+- **Pass:** Every required executable exists, every stored digest matches, and
+  required local and remote health checks pass without changing launchd or live
+  writable state.
+- **Failure:** Enablement discovers a stale path, digest, receiver, publisher,
+  or preservation decision.
+
 ## Definition of Done: Dreaming proof-first development
 
 - [x] The `dreaming-proof-first` skill names the tracer and hardening phases
@@ -290,6 +337,10 @@ design.
 - [x] The skill requires an effectiveness decision before broad hardening.
 - [x] The skill prevents repeated full self-tests from becoming the debugging
       loop.
+- [x] The skill requires a targeted validation closure for changed executable
+      bytes, trust anchors, and generated configuration.
+- [x] The skill requires adapter-config preflight before the installed full
+      self-test.
 - [x] Mechanical skill validation passes.
 - [x] Paired review has no unresolved material finding.
 - [x] The document and skill are committed locally; nothing is pushed.
