@@ -19,7 +19,7 @@
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
-- Isolated governance preview tip: `1534cfb`
+- Isolated governance preview tip: `4c9b578`
 - The first natural successor `20260818T220321Z-97940` remains retained as a
   literal `SC-010` `NOT_SUPPORTED` result. It attempted 25 reviews, completed
   24, retained one `executor-timeout`, and ended honestly as `aborted` after
@@ -188,11 +188,31 @@
   do not block unrelated capabilities. Python compilation, eight remote
   subject tests, 47 core tests, and 164 dashboard checks pass. Independent
   Opus and Terra review completed with zero findings.
-- The reviewed projection successor is installed behind halt from Mac mini
-  commit `09705282`, with rollback backup
-  `20260821T063712Z-16967`. Its generation-bound full self-test is currently
-  running. Do not enable, kickstart, or use this generation for natural-cadence
-  evidence until that exact gate passes.
+- Projection successor generation
+  `20260821T063719Z-install-17017` passed its complete self-test with zero
+  failures and was enabled. Immediate owner run
+  `20260821T072905Z-68945` published current overlay pointer
+  `sha256:0fa2dea115bf5b15e013954f1629f7179b1b92e27bf94f97901b6cb01dd42ad9`,
+  then retained `evaluation-input-root-invalid` before claims or model work.
+  This proved pointer publication ordering, but exposed that the unchanged
+  receiver's older sealed coverage shape also omits pending-detail metadata,
+  collection watermark, and most failure fields. The dashboard therefore
+  rejected the receipt and correctly marked the pointer mismatched rather than
+  displaying unbound evidence.
+- Full sealed-legacy dashboard compatibility is committed locally through
+  `cbe9018`, `dad4849`, and `4c9b578`, and on the Mac mini as combined commit
+  `24c2929e`. The reader accepts only the exact modern or exact legacy closed
+  schemas, keeps modern failure records strict, treats unidentified failures
+  and missing pending count or byte detail as global zero-use blockers, and
+  hides compatibility bookkeeping from the API. Python compilation and 167
+  dashboard checks pass. Opus and Terra found the hybrid modern/legacy failure
+  shape and byte-only pending gap; finding-scoped round-two review confirms
+  both resolved with no new finding.
+- The final dashboard successor is installed behind halt from Mac mini commit
+  `24c2929e`, with rollback backup `20260821T074503Z-77877`. Its
+  generation-bound full self-test is currently running. Do not enable,
+  kickstart, or use this generation for natural-cadence evidence until that
+  exact gate passes.
 - The Dreaming-specific proof-first process is committed on the capacity
   branch as `41022d9`, and its non-conflicting skill name is committed as
   `0703693`.
