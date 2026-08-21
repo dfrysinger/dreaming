@@ -183,16 +183,26 @@ When all known hardening work is present:
    preflight;
 3. freeze the candidate;
 4. install once behind halt;
-5. run the generation-bound full self-test once;
-6. enable only after it passes;
-7. pass `development-loop`'s complete live-proof gate for the current
+5. inspect the rendered launch configuration before self-test and require the
+   exact frozen source root, installation-managed adapter state, and a nonempty
+   adapter digest matching the generated configuration;
+6. run the generation-bound full self-test once;
+7. enable only after it passes;
+8. pass `development-loop`'s complete live-proof gate for the current
    candidate, including immediate behavior and every cadence, browser, and
    rollback checkpoint that the governing work order makes part of acceptance;
-8. run the remaining broad deterministic validation;
-9. run paired implementation review;
-10. fix material findings, rerun the affected deterministic checks, and apply
+9. run the remaining broad deterministic validation;
+10. run paired implementation review;
+11. fix material findings, rerun the affected deterministic checks, and apply
    `development-loop`'s post-review live-proof rules. Systemic and critical
    work reruns the complete final end-to-end flow on the reviewed tree.
+
+Do not source a persisted installation environment into the installer caller
+unless every caller-owned value is intentional. When regenerating the adapter
+desired state, request that mode explicitly and verify the rendered launch
+environment reports `DREAMING_ADAPTER_CONFIG_MANAGED=1`. A caller-owned
+adapter path or stale `DREAMING_REPO_ROOT` can otherwise produce a green
+self-test for a different source tree or an unsealed owner configuration.
 
 A runtime-changing review fix creates one successor candidate. Its proof scope
 is the scope required by `development-loop`, including the complete final
@@ -213,6 +223,8 @@ design.
   while protecting unrelated stable estate commands.
 - Generated adapter configuration is first exercised during enablement rather
   than in a private preflight.
+- The installed self-test starts before the rendered launch environment proves
+  the frozen source root and digest-bound managed adapter configuration.
 - Review begins before anyone knows whether the behavior is useful.
 - A natural cadence requirement is confused with a need to wait during normal
   iteration.
@@ -326,6 +338,20 @@ design.
   writable state.
 - **Failure:** Enablement discovers a stale path, digest, receiver, publisher,
   or preservation decision.
+
+### DREAM-FAST-CHK-11: Rendered installation binding
+
+- **Protects:** A generation cannot pass the expensive self-test while running
+  a prior checkout or treating the generated adapter file as unsealed
+  caller-owned configuration.
+- **Setup:** Install the frozen candidate behind halt, before starting its
+  self-test.
+- **Pass:** The rendered owner and self-test launch environments name the exact
+  frozen source root, report installation-managed adapter state, and carry one
+  nonempty adapter digest equal to the generated adapter file.
+- **Failure:** The rendered source root differs, adapter management is disabled,
+  the digest is empty or mismatched, or persisted caller environment silently
+  overrides the frozen candidate.
 
 ## Definition of Done: Dreaming proof-first development
 
