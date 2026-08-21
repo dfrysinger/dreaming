@@ -1365,13 +1365,12 @@ class RuntimeTest(unittest.TestCase):
             "subprocess.Popen([sys.executable,'-c','import time;time.sleep(60)']);"
             "time.sleep(60)"
         )
-        halt_checks = iter([False, False, True])
         terminals = []
         halted = runtime_module.run_evaluation_input_owner_process(
             [sys.executable, "-c", child],
             owner_run_id=owner_run_id,
             claim_fence_path=claim_fence,
-            halt_check=lambda: next(halt_checks, True),
+            halt_check=claim_fence.exists,
             lease_check=lambda: True,
             terminalize=lambda claim, reason: terminals.append(
                 (claim, reason)
@@ -1394,14 +1393,13 @@ class RuntimeTest(unittest.TestCase):
             os.killpg(halted["process_group_id"], 0)
 
         claim_fence.unlink()
-        lease_checks = iter([True, True, False])
         terminals.clear()
         lock_lost = runtime_module.run_evaluation_input_owner_process(
             [sys.executable, "-c", child],
             owner_run_id=owner_run_id,
             claim_fence_path=claim_fence,
             halt_check=lambda: False,
-            lease_check=lambda: next(lease_checks, False),
+            lease_check=lambda: not claim_fence.exists(),
             terminalize=lambda claim, reason: terminals.append(
                 (claim, reason)
             ) or {},

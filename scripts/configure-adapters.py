@@ -629,11 +629,12 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
             raise ConfigError(f"existing adapter config is invalid: {output}") from error
         if isinstance(loaded, dict):
             existing = loaded
-    estate_existing = (
-        load_estate_baseline(state_dir)
-        if os.environ.get("DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256")
-        else existing
-    )
+    if environment_flag("DREAMING_PRESERVE_ESTATE_ADAPTERS"):
+        estate_existing: dict[str, object] = {}
+    elif os.environ.get("DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256"):
+        estate_existing = load_estate_baseline(state_dir)
+    else:
+        estate_existing = existing
     inherit_remote_copilot(existing, estate_existing)
     inherit_local_binaries(existing)
     configured = {
