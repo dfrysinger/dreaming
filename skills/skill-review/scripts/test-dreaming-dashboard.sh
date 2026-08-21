@@ -2078,6 +2078,25 @@ try:
         and settled["relevant_stable_backlog"]["count"] == 0,
         "recent active tails produce explicit settled 30-day zero coverage",
     )
+    legacy_byte_shortfall = json.loads(json.dumps(decision_usage))
+    legacy_byte_shortfall["_legacy_pending_count"] = 0
+    legacy_byte_shortfall["_legacy_pending_bytes"] = 190
+    byte_shortfall_blocked = (
+        dashboard.DashboardData._portfolio_usage_coverage(
+            "sha256:" + "4" * 64,
+            legacy_byte_shortfall,
+            zero_row,
+        )
+    )
+    check(
+        byte_shortfall_blocked["state"] == "blocked_stable_backlog"
+        and byte_shortfall_blocked["relevant_stable_backlog"] == {
+            "count": 1,
+            "bytes": 190,
+            "oldest_modified_at": None,
+        },
+        "legacy pending byte shortfall cannot grant settled zero-use authority",
+    )
     stable_usage = json.loads(json.dumps(decision_usage))
     stable_usage["_pending"][0]["reason"] = "stable_budget_deferred"
     blocked = dashboard.DashboardData._portfolio_usage_coverage(

@@ -5515,6 +5515,10 @@ class DashboardData:
             legacy_pending_count = 0
         if not isinstance(legacy_pending_bytes, int) or legacy_pending_bytes < 0:
             legacy_pending_bytes = 0
+        legacy_pending_blockers = max(
+            legacy_pending_count,
+            1 if legacy_pending_bytes else 0,
+        )
         relevant_failures = [
             item
             for item in usage.get("_failures", [])
@@ -5573,7 +5577,7 @@ class DashboardData:
                 state = f"complete_zero_{window_days}d"
             elif identity_blockers:
                 state = "blocked_identity"
-            elif stable or legacy_pending_count:
+            elif stable or legacy_pending_blockers:
                 state = "blocked_stable_backlog"
             else:
                 state = f"settled_zero_{window_days}d"
@@ -5602,7 +5606,7 @@ class DashboardData:
                 "bytes": sum(item.get("bytes", 0) for item in excluded),
             },
             "relevant_stable_backlog": {
-                "count": len(stable) + legacy_pending_count,
+                "count": len(stable) + legacy_pending_blockers,
                 "bytes": legacy_pending_bytes + sum(
                     item.get("bytes") or 0
                     for item in stable
