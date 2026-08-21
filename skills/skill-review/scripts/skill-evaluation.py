@@ -865,11 +865,12 @@ def policy_identity(policy: dict[str, Any]) -> str:
 
 
 def observation_plan_identity(policy: dict[str, Any], policy_id: str) -> str:
-    return f"sha256:{digest(canonical({
+    identity = {
         'schema_version': POLICY_SCHEMA_VERSION,
         'policy_id': policy_id,
         'advisory_executors': policy['advisory_executors'],
-    }))}"
+    }
+    return f"sha256:{digest(canonical(identity))}"
 
 
 def cli_version(copilot: str) -> str:
@@ -7801,14 +7802,15 @@ def required_certificate_set_identity(
     profile: str,
     certificates: list[dict[str, Any]],
 ) -> str:
-    return f"sha256:{digest(canonical({
+    identity = {
         'candidate_id': candidate,
         'input_manifest_sha256': input_manifest_sha256,
         'suite_id': suite_id,
         'policy_id': policy_id,
         'profile': profile,
         'certificate_ids': [item['certificate_id'] for item in certificates],
-    }))}"
+    }
+    return f"sha256:{digest(canonical(identity))}"
 
 
 def load_v2_inputs(skill_dir: Path, suite_path: str | None, policy_path: str | None) -> tuple[
@@ -8408,7 +8410,7 @@ def v2_run_compile(args: argparse.Namespace) -> dict[str, Any]:
         "limits": config["limits"],
         "file_inventory": file_inventory,
     }
-    manifest["run_id"] = f"sha256:{digest(canonical({
+    run_identity = {
         key: manifest[key]
         for key in (
             "schema_version", "kind", "subject", "input_manifest_sha256",
@@ -8417,7 +8419,8 @@ def v2_run_compile(args: argparse.Namespace) -> dict[str, Any]:
             "harness_executable_sha256", "tool_policy_id", "grader_set_id",
             "retention_policy_id", "limits", "file_inventory",
         )
-    }))}"
+    }
+    manifest["run_id"] = f"sha256:{digest(canonical(run_identity))}"
     atomic_write(run_dir / "manifest.json", manifest)
     return {
         "run_dir": str(run_dir),
@@ -8441,7 +8444,7 @@ def load_compiled_run(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any], di
     actual_inventory = canonical_file_inventory(run_dir, {"manifest.json"})
     if manifest.get("file_inventory") != actual_inventory:
         raise EvaluationError("compiled run file inventory was modified")
-    expected_run_id = f"sha256:{digest(canonical({
+    run_identity = {
         key: manifest.get(key)
         for key in (
             "schema_version", "kind", "subject", "input_manifest_sha256",
@@ -8450,7 +8453,8 @@ def load_compiled_run(run_dir: Path) -> tuple[dict[str, Any], dict[str, Any], di
             "harness_executable_sha256", "tool_policy_id", "grader_set_id",
             "retention_policy_id", "limits", "file_inventory",
         )
-    }))}"
+    }
+    expected_run_id = f"sha256:{digest(canonical(run_identity))}"
     if manifest.get("run_id") != expected_run_id:
         raise EvaluationError("compiled run_id is not canonical")
     return manifest, source_suite, source_policy, compilation
@@ -8763,9 +8767,10 @@ def verify_result_independently(
         or result_manifest.get("harness_executable_sha256") != harness_sha
     ):
         raise EvaluationError("result manifest differs from the current sealed run")
-    expected_result_id = f"sha256:{digest(canonical({
+    result_identity = {
         key: value for key, value in result_manifest.items() if key != 'result_id'
-    }))}"
+    }
+    expected_result_id = f"sha256:{digest(canonical(result_identity))}"
     if result_manifest.get("result_id") != expected_result_id:
         raise EvaluationError("result identity is forged or malformed")
     bundle_sha, result_id = result_bundle_identity(result_dir, result_manifest)
@@ -8820,9 +8825,10 @@ def verify_result_independently(
         if record.get("status") != "inconclusive":
             prepared = load_json(root / "prepared.json")
             prepared_digest = prepared.get("prepared_digest")
-            if prepared_digest != f"sha256:{digest(canonical({
+            prepared_identity = {
                 key: value for key, value in prepared.items() if key != 'prepared_digest'
-            }))}":
+            }
+            if prepared_digest != f"sha256:{digest(canonical(prepared_identity))}":
                 raise EvaluationError(f"trial {trial_id} prepared execution digest is invalid")
             if record.get("prepared_digest") != prepared_digest:
                 raise EvaluationError(f"trial {trial_id} did not bind the prepared execution")

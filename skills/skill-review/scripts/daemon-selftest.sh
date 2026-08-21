@@ -214,6 +214,24 @@ for script in daemon-pass.sh daemon-run.sh daemon-lock.sh daemon-lock.py \
   test-dreaming-certification.sh; do
   [[ -x "$SCRIPT_DIR/$script" ]] && ok "executable: $script" || bad "not executable: $script"
 done
+PYTHON39="${DREAMING_PYTHON39_BIN:-/Library/Developer/CommandLineTools/Library/Frameworks/Python3.framework/Versions/3.9/bin/python3.9}"
+if [[ -x "$PYTHON39" ]] && "$PYTHON39" - \
+  "$SCRIPT_DIR" \
+  "$REPO/scripts" \
+  "$REPO/skills/skill-manage/scripts" \
+  "$REPO/skills/skill-curator/scripts" <<'PY'
+from pathlib import Path
+import sys
+
+for directory in map(Path, sys.argv[1:]):
+    for path in sorted(directory.glob("*.py")):
+        compile(path.read_bytes(), str(path), "exec")
+PY
+then
+  ok "Python 3.9 runtime syntax"
+else
+  bad "Python 3.9 runtime syntax"
+fi
 ROOT_SCRIPT_DIR="$REPO/scripts"
 for script in build-remote-subject-receiver.py \
   test-remote-subject-receiver.py; do
