@@ -4821,6 +4821,8 @@ class DashboardData:
                     "_pending",
                     "_failures",
                     "_unattributed",
+                    "_legacy_pending_count",
+                    "_legacy_pending_bytes",
                 }
             },
             "remote_evaluation": {
@@ -5507,6 +5509,12 @@ class DashboardData:
             for item in pending
             if item.get("reason") != "events_recently_modified"
         ]
+        legacy_pending_count = usage.get("_legacy_pending_count", 0)
+        legacy_pending_bytes = usage.get("_legacy_pending_bytes", 0)
+        if not isinstance(legacy_pending_count, int) or legacy_pending_count < 0:
+            legacy_pending_count = 0
+        if not isinstance(legacy_pending_bytes, int) or legacy_pending_bytes < 0:
+            legacy_pending_bytes = 0
         relevant_failures = [
             item
             for item in usage.get("_failures", [])
@@ -5565,7 +5573,7 @@ class DashboardData:
                 state = f"complete_zero_{window_days}d"
             elif identity_blockers:
                 state = "blocked_identity"
-            elif stable:
+            elif stable or legacy_pending_count:
                 state = "blocked_stable_backlog"
             else:
                 state = f"settled_zero_{window_days}d"
@@ -5594,8 +5602,8 @@ class DashboardData:
                 "bytes": sum(item.get("bytes", 0) for item in excluded),
             },
             "relevant_stable_backlog": {
-                "count": len(stable),
-                "bytes": sum(
+                "count": len(stable) + legacy_pending_count,
+                "bytes": legacy_pending_bytes + sum(
                     item.get("bytes") or 0
                     for item in stable
                     if isinstance(item.get("bytes"), int)
@@ -5658,6 +5666,8 @@ class DashboardData:
             "_pending": [],
             "_failures": [],
             "_unattributed": [],
+            "_legacy_pending_count": 0,
+            "_legacy_pending_bytes": 0,
         }
         current_path = self.paths.state / "estate-usage-current.json"
         if not current_path.is_file() or current_path.is_symlink():
@@ -5745,33 +5755,48 @@ class DashboardData:
             ):
                 return unavailable
             coverage = usage.get("coverage")
+            coverage_fields = {
+                "complete",
+                "corpus_complete",
+                "attribution_complete",
+                "earliest_retained_event",
+                "discovered_sessions",
+                "discovered_bytes",
+                "indexed_sessions",
+                "indexed_bytes",
+                "pending_sessions",
+                "pending_bytes",
+                "sessions_scanned",
+                "bytes_scanned",
+                "sessions_parsed_this_run",
+                "bytes_parsed_this_run",
+                "max_sessions",
+                "max_bytes",
+                "quiet_seconds",
+                "collection_watermark",
+                "bound_reached",
+                "work_budget_stopped_run",
+                "index_status",
+                "pending",
+                "failures",
+            }
+            legacy_coverage_fields = coverage_fields - {
+                "quiet_seconds",
+                "collection_watermark",
+            }
+            coverage_keys = (
+                frozenset(coverage) if isinstance(coverage, dict) else frozenset()
+            )
+            legacy_coverage = (
+                isinstance(coverage, dict)
+                and coverage_keys == frozenset(legacy_coverage_fields)
+            )
             if (
                 not isinstance(coverage, dict)
-                or set(coverage)
-                != {
-                    "complete",
-                    "corpus_complete",
-                    "attribution_complete",
-                    "earliest_retained_event",
-                    "discovered_sessions",
-                    "discovered_bytes",
-                    "indexed_sessions",
-                    "indexed_bytes",
-                    "pending_sessions",
-                    "pending_bytes",
-                    "sessions_scanned",
-                    "bytes_scanned",
-                    "sessions_parsed_this_run",
-                    "bytes_parsed_this_run",
-                    "max_sessions",
-                    "max_bytes",
-                    "quiet_seconds",
-                    "collection_watermark",
-                    "bound_reached",
-                    "work_budget_stopped_run",
-                    "index_status",
-                    "pending",
-                    "failures",
+                or coverage_keys
+                not in {
+                    frozenset(coverage_fields),
+                    frozenset(legacy_coverage_fields),
                 }
                 or not isinstance(coverage.get("complete"), bool)
                 or not isinstance(coverage.get("corpus_complete"), bool)
@@ -5794,7 +5819,14 @@ class DashboardData:
                         "bytes_parsed_this_run",
                         "max_sessions",
                         "max_bytes",
-                        "quiet_seconds",
+                    )
+                )
+                or (
+                    "quiet_seconds" in coverage
+                    and (
+                        not isinstance(coverage.get("quiet_seconds"), int)
+                        or isinstance(coverage.get("quiet_seconds"), bool)
+                        or coverage["quiet_seconds"] < 0
                     )
                 )
                 or coverage["indexed_sessions"] + coverage["pending_sessions"]
@@ -5810,8 +5842,14 @@ class DashboardData:
                 != (coverage["bound_reached"] is not None)
                 or coverage.get("index_status")
                 not in {"absent", "loaded", "migrated", "rebuilt"}
-                or parse_time(coverage.get("collection_watermark")) is None
-                or coverage.get("collection_watermark") != usage.get("collected_at")
+                or (
+                    "collection_watermark" in coverage
+                    and (
+                        parse_time(coverage.get("collection_watermark")) is None
+                        or coverage.get("collection_watermark")
+                        != usage.get("collected_at")
+                    )
+                )
                 or not isinstance(coverage.get("pending"), list)
                 or not isinstance(coverage.get("failures"), list)
             ):
@@ -5864,10 +5902,18 @@ class DashboardData:
                 failure_fields = (
                     frozenset(failure) if isinstance(failure, dict) else frozenset()
                 )
+                legacy_failure = failure_fields == frozenset({
+                    "session_id",
+                    "reason",
+                })
                 if (
                     not isinstance(failure, dict)
                     or failure_fields
                     not in {
+                        frozenset({
+                            "session_id",
+                            "reason",
+                        }),
                         frozenset({
                             "failure_id",
                             "session_id",
@@ -5884,11 +5930,24 @@ class DashboardData:
                             "candidate_capability_ids",
                         }),
                     }
-                    or not CANDIDATE_ID_RE.fullmatch(
-                        str(failure.get("failure_id", ""))
+                    or (
+                        not legacy_failure
+                        and not CANDIDATE_ID_RE.fullmatch(
+                            str(failure.get("failure_id", ""))
+                        )
                     )
-                    or not CANDIDATE_ID_RE.fullmatch(
-                        str(failure.get("session_id", ""))
+                    or (
+                        legacy_failure
+                        and (
+                            not isinstance(failure.get("session_id"), str)
+                            or not 1 <= len(failure["session_id"]) <= 200
+                        )
+                    )
+                    or (
+                        not legacy_failure
+                        and not CANDIDATE_ID_RE.fullmatch(
+                            str(failure.get("session_id", ""))
+                        )
                     )
                     or not re.fullmatch(
                         r"[a-z0-9_]{3,100}", str(failure.get("reason", ""))
@@ -5921,14 +5980,38 @@ class DashboardData:
                     return unavailable
             pending_ids = [item["session_id"] for item in coverage["pending"]]
             failures_by_id = {
-                item["failure_id"]: item for item in coverage["failures"]
+                item["failure_id"]: item
+                for item in coverage["failures"]
+                if isinstance(item.get("failure_id"), str)
             }
+            failure_ids = [
+                item["failure_id"]
+                for item in coverage["failures"]
+                if isinstance(item.get("failure_id"), str)
+            ]
+            pending_detail_count = len(coverage["pending"])
+            pending_detail_bytes = sum(
+                item["bytes"] for item in coverage["pending"]
+            )
             if (
                 len(pending_ids) != len(set(pending_ids))
-                or len(pending_ids) != coverage["pending_sessions"]
-                or len(failures_by_id) != len(coverage["failures"])
-                or sum(item["bytes"] for item in coverage["pending"])
-                != coverage["pending_bytes"]
+                or len(failure_ids) != len(set(failure_ids))
+                or (
+                    not legacy_coverage
+                    and pending_detail_count != coverage["pending_sessions"]
+                )
+                or (
+                    legacy_coverage
+                    and pending_detail_count > coverage["pending_sessions"]
+                )
+                or (
+                    not legacy_coverage
+                    and pending_detail_bytes != coverage["pending_bytes"]
+                )
+                or (
+                    legacy_coverage
+                    and pending_detail_bytes > coverage["pending_bytes"]
+                )
                 or any(
                     item["failure_id"] is not None
                     and (
@@ -6096,7 +6179,7 @@ class DashboardData:
                 "sessions_parsed_this_run": coverage["sessions_parsed_this_run"],
                 "bytes_parsed_this_run": coverage["bytes_parsed_this_run"],
                 "bound_reached": coverage["bound_reached"],
-                "collection_watermark": coverage["collection_watermark"],
+                "collection_watermark": coverage.get("collection_watermark"),
                 "work_budget_stopped_run": coverage["work_budget_stopped_run"],
                 "index_status": coverage["index_status"],
                 "failure_count": len(coverage["failures"]),
@@ -6107,6 +6190,16 @@ class DashboardData:
                 "_pending": coverage["pending"],
                 "_failures": coverage["failures"],
                 "_unattributed": unattributed,
+                "_legacy_pending_count": (
+                    coverage["pending_sessions"] - pending_detail_count
+                    if legacy_coverage
+                    else 0
+                ),
+                "_legacy_pending_bytes": (
+                    coverage["pending_bytes"] - pending_detail_bytes
+                    if legacy_coverage
+                    else 0
+                ),
             }
         except (DashboardError, OSError, TypeError, ValueError):
             return unavailable

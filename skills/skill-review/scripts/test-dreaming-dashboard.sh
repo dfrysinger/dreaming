@@ -1839,6 +1839,52 @@ try:
         "a parser-revision migration remains a valid usage receipt",
     )
 
+    sealed_legacy_usage = json.loads(json.dumps(usage_snapshot))
+    sealed_legacy_coverage = sealed_legacy_usage["coverage"]
+    sealed_legacy_coverage.pop("quiet_seconds")
+    sealed_legacy_coverage.pop("collection_watermark")
+    sealed_legacy_coverage["complete"] = False
+    sealed_legacy_coverage["corpus_complete"] = False
+    sealed_legacy_coverage["attribution_complete"] = False
+    sealed_legacy_coverage["discovered_sessions"] += 1
+    sealed_legacy_coverage["discovered_bytes"] += 128
+    sealed_legacy_coverage["pending_sessions"] = 1
+    sealed_legacy_coverage["pending_bytes"] = 128
+    sealed_legacy_coverage["pending"] = []
+    sealed_legacy_coverage["failures"] = [{
+        "session_id": "copilot:legacy-session",
+        "reason": "usage_session_invalid_skill_name",
+    }]
+    sealed_legacy_usage["unattributed"] = [{
+        "name": "retired-skill",
+        "reason": "unmapped",
+        "uses_7d": 0,
+        "uses_30d": 0,
+        "uses_90d": 1,
+        "uses_total": 1,
+    }]
+    record_usage_variant(sealed_legacy_usage)
+    _, _, sealed_legacy_body = request("/api/v1/estate")
+    sealed_legacy_view = json.loads(sealed_legacy_body)["data"]
+    sealed_legacy_portfolio = {
+        item["skill_name"]: item
+        for item in sealed_legacy_view["portfolio_decisions"]
+    }
+    check(
+        sealed_legacy_view["usage"]["status"] == "incomplete"
+        and sealed_legacy_view["usage"]["pending_sessions"] == 1
+        and sealed_legacy_portfolio["plugin-skill"]["usage_state"]
+        == "blocked_stable_backlog"
+        and sealed_legacy_portfolio["plugin-skill"]["decision_coverage"][
+            "relevant_stable_backlog"
+        ] == {
+            "count": 2,
+            "bytes": 128,
+            "oldest_modified_at": None,
+        },
+        "sealed legacy usage without pending detail remains visible and blocks zero-use",
+    )
+
     impossible_complete_snapshot = json.loads(json.dumps(usage_snapshot))
     impossible_coverage = impossible_complete_snapshot["coverage"]
     impossible_coverage["discovered_sessions"] += 1
