@@ -5517,14 +5517,20 @@ class DashboardData:
                 or capability_id in item["candidate_capability_ids"]
             )
         ]
-        identity_blockers = sorted(
-            {
-                item["name"]
-                for item in usage.get("_unattributed", [])
-                if isinstance(item, dict)
-                and capability_id in item.get("candidate_capability_ids", [])
-            }
-        )
+        identity_blockers = sorted({
+            item["name"]
+            for item in usage.get("_unattributed", [])
+            if isinstance(item, dict)
+            and isinstance(item.get("name"), str)
+            and (
+                capability_id in item.get("candidate_capability_ids", [])
+                or (
+                    "candidate_capability_ids" not in item
+                    and item.get("reason")
+                    not in {"unmapped", "alias_target_missing"}
+                )
+            )
+        })
         identity_blockers.extend(
             sorted(
                 {
@@ -5855,16 +5861,28 @@ class DashboardData:
                 ):
                     return unavailable
             for failure in coverage["failures"]:
+                failure_fields = (
+                    frozenset(failure) if isinstance(failure, dict) else frozenset()
+                )
                 if (
                     not isinstance(failure, dict)
-                    or set(failure)
-                    != {
-                        "failure_id",
-                        "session_id",
-                        "reason",
-                        "modified_at",
-                        "bytes",
-                        "candidate_capability_ids",
+                    or failure_fields
+                    not in {
+                        frozenset({
+                            "failure_id",
+                            "session_id",
+                            "reason",
+                            "modified_at",
+                            "bytes",
+                        }),
+                        frozenset({
+                            "failure_id",
+                            "session_id",
+                            "reason",
+                            "modified_at",
+                            "bytes",
+                            "candidate_capability_ids",
+                        }),
                     }
                     or not CANDIDATE_ID_RE.fullmatch(
                         str(failure.get("failure_id", ""))
@@ -5887,12 +5905,17 @@ class DashboardData:
                             or failure["bytes"] < 0
                         )
                     )
-                    or not isinstance(
-                        failure.get("candidate_capability_ids"), list
-                    )
-                    or not all(
-                        CANDIDATE_ID_RE.fullmatch(str(value))
-                        for value in failure["candidate_capability_ids"]
+                    or (
+                        "candidate_capability_ids" in failure
+                        and (
+                            not isinstance(
+                                failure.get("candidate_capability_ids"), list
+                            )
+                            or not all(
+                                CANDIDATE_ID_RE.fullmatch(str(value))
+                                for value in failure["candidate_capability_ids"]
+                            )
+                        )
                     )
                 ):
                     return unavailable
@@ -5985,17 +6008,30 @@ class DashboardData:
             if not isinstance(unattributed, list):
                 return unavailable
             for item in unattributed:
+                item_fields = (
+                    frozenset(item) if isinstance(item, dict) else frozenset()
+                )
                 if (
                     not isinstance(item, dict)
-                    or set(item)
-                    != {
-                        "name",
-                        "reason",
-                        "uses_7d",
-                        "uses_30d",
-                        "uses_90d",
-                        "uses_total",
-                        "candidate_capability_ids",
+                    or item_fields
+                    not in {
+                        frozenset({
+                            "name",
+                            "reason",
+                            "uses_7d",
+                            "uses_30d",
+                            "uses_90d",
+                            "uses_total",
+                        }),
+                        frozenset({
+                            "name",
+                            "reason",
+                            "uses_7d",
+                            "uses_30d",
+                            "uses_90d",
+                            "uses_total",
+                            "candidate_capability_ids",
+                        }),
                     }
                     or not OBSERVED_SKILL_RE.fullmatch(str(item.get("name", "")))
                     or item.get("reason")
@@ -6005,19 +6041,28 @@ class DashboardData:
                         "alias_target_missing",
                         "alias_target_conflicting",
                     }
-                    or not isinstance(
-                        item.get("candidate_capability_ids"), list
-                    )
-                    or not all(
-                        CANDIDATE_ID_RE.fullmatch(str(value))
-                        for value in item["candidate_capability_ids"]
+                    or (
+                        "candidate_capability_ids" in item
+                        and (
+                            not isinstance(
+                                item.get("candidate_capability_ids"), list
+                            )
+                            or not all(
+                                CANDIDATE_ID_RE.fullmatch(str(value))
+                                for value in item["candidate_capability_ids"]
+                            )
+                        )
                     )
                 ):
                     return unavailable
-                if not set(item["candidate_capability_ids"]).issubset(enabled_ids):
+                if not set(item.get("candidate_capability_ids", [])).issubset(
+                    enabled_ids
+                ):
                     return unavailable
             if any(
-                not set(item["candidate_capability_ids"]).issubset(enabled_ids)
+                not set(item.get("candidate_capability_ids", [])).issubset(
+                    enabled_ids
+                )
                 for item in coverage["failures"]
             ):
                 return unavailable

@@ -7109,6 +7109,41 @@ def scheduled_run() -> dict[str, Any]:
                         "overlay_path": str(overlay_path),
                     }
                 )
+                if evaluation_input_owner_halt_path(paths).exists():
+                    report["evaluation_input"]["run"] = {
+                        "status": "halted",
+                        "selected_capability_id": None,
+                    }
+                    return report
+                if not evaluation_input_owner_lease_valid():
+                    report["evaluation_input"]["run"] = {
+                        "status": "lock_lost",
+                        "selected_capability_id": None,
+                    }
+                    report["errors"].append(
+                        {
+                            "phase": "evaluation-input-run",
+                            "code": "writer-lock-lost",
+                        }
+                    )
+                    report["ok"] = False
+                    return report
+                promote_remote_evaluation_overlay(
+                    evaluation_overlay,
+                    Path(remote_subjects["overlay_store"]),
+                    queue_evidence["census"],
+                    usage,
+                    queue_evidence["receiver"],
+                    census_receipt_sha256=queue_evidence["summary"][
+                        "receipt_sha256"
+                    ],
+                    usage_receipt_sha256=usage_summary["receipt_sha256"],
+                    enabled_capability_ids={
+                        row["capability_id"]
+                        for row in evaluation_overlay["rows"]
+                    },
+                    transport_receiver=remote_subjects["receiver"],
+                )
             derived_queue = derive_evaluation_input_queue(
                 evaluation_owner,
                 queue_evidence["census"],
@@ -7145,21 +7180,6 @@ def scheduled_run() -> dict[str, Any]:
                     )
                     report["ok"] = False
                     return report
-                promote_remote_evaluation_overlay(
-                    evaluation_overlay,
-                    Path(remote_subjects["overlay_store"]),
-                    queue_evidence["census"],
-                    usage,
-                    queue_evidence["receiver"],
-                    census_receipt_sha256=queue_evidence["summary"][
-                        "receipt_sha256"
-                    ],
-                    usage_receipt_sha256=usage_summary["receipt_sha256"],
-                    enabled_capability_ids={
-                        row["capability_id"] for row in derived_queue["rows"]
-                    },
-                    transport_receiver=remote_subjects["receiver"],
-                )
                 transport_row = next(
                     (
                         row

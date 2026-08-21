@@ -1963,6 +1963,27 @@ try:
         == "disable_candidate",
         "current regression remains visible while in-window transcript failure blocks non-use authority",
     )
+    legacy_usage_snapshot = json.loads(json.dumps(incomplete_usage_snapshot))
+    legacy_usage_snapshot["coverage"]["failures"][0].pop(
+        "candidate_capability_ids"
+    )
+    legacy_usage_snapshot["unattributed"] = [{
+        "name": "retired-skill",
+        "reason": "unmapped",
+        "uses_7d": 0,
+        "uses_30d": 0,
+        "uses_90d": 1,
+        "uses_total": 1,
+    }]
+    record_usage_variant(legacy_usage_snapshot)
+    _, _, legacy_usage_body = request("/api/v1/estate")
+    legacy_usage_view = json.loads(legacy_usage_body)["data"]
+    check(
+        legacy_usage_view["usage"]["status"] == "incomplete"
+        and legacy_usage_view["usage"]["failure_count"] == 1
+        and legacy_usage_view["usage"]["unattributed_count"] == 1,
+        "sealed legacy usage attribution remains visible without inventing candidate identities",
+    )
     decision_usage = {
         "available": True,
         "complete": False,
@@ -2040,6 +2061,29 @@ try:
         identity_blocked["state"] == "blocked_identity"
         and unrelated["state"] == "settled_zero_30d",
         "identity ambiguity blocks only candidate capabilities",
+    )
+    legacy_identity_usage = json.loads(json.dumps(decision_usage))
+    legacy_identity_usage["_pending"] = []
+    legacy_identity_usage["_unattributed"] = [{
+        "name": "ambiguous-legacy-name",
+        "reason": "conflicting_mapping",
+    }]
+    legacy_identity_blocked = dashboard.DashboardData._portfolio_usage_coverage(
+        "sha256:" + "4" * 64,
+        legacy_identity_usage,
+        zero_row,
+    )
+    legacy_unmapped_usage = json.loads(json.dumps(legacy_identity_usage))
+    legacy_unmapped_usage["_unattributed"][0]["reason"] = "unmapped"
+    legacy_unmapped = dashboard.DashboardData._portfolio_usage_coverage(
+        "sha256:" + "4" * 64,
+        legacy_unmapped_usage,
+        zero_row,
+    )
+    check(
+        legacy_identity_blocked["state"] == "blocked_identity"
+        and legacy_unmapped["state"] == "settled_zero_30d",
+        "ambiguous legacy attribution blocks zero-use while candidate-free legacy names do not",
     )
     (state / "estate-usage-current.json").write_bytes(original_usage_current)
     (state / "adapters.json").write_bytes(original_adapters)
