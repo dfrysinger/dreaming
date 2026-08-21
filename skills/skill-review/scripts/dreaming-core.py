@@ -5616,7 +5616,8 @@ def derive_evaluation_input_queue(
             except OSError:
                 resolved_skill = None
             if needs_transport:
-                pass
+                if capability_id not in indexed_content:
+                    deferral_reason = "input_not_ready"
             elif (
                 skill_path.is_symlink()
                 or resolved_skill is None
@@ -5625,7 +5626,13 @@ def derive_evaluation_input_queue(
                 or not (skill_path / "SKILL.md").is_file()
             ):
                 deferral_reason = "capability_path_unavailable"
-            elif len(physical_by_path.get(str(skill_path), set())) != 1:
+            elif (
+                (
+                    overlay_row is None
+                    or overlay_row.get("content_path") is None
+                )
+                and len(physical_by_path.get(str(skill_path), set())) != 1
+            ):
                 deferral_reason = "capability_path_ambiguous"
             elif representative.get("dependencies_complete") is not True:
                 deferral_reason = "dependency_evidence_incomplete"

@@ -1135,6 +1135,156 @@ class RuntimeTest(unittest.TestCase):
             remote_by_id[capability_ids[0]]["snapshot_state"],
             "remote_candidate_not_fetched",
         )
+        self.assertEqual(
+            remote_by_id[capability_ids[2]]["deferral_reason"],
+            "input_not_ready",
+        )
+        self.assertIsNone(
+            remote_by_id[capability_ids[2]]["runnable_phase"]
+        )
+
+        snapshot_candidate_id = "sha256:" + "8" * 64
+        snapshot_overlay = json.loads(json.dumps(overlay))
+        snapshot_row = snapshot_overlay["rows"][1]
+        remote_snapshot = (
+            self.case
+            / snapshot_row["subject_key"].removeprefix("sha256:")
+            / snapshot_candidate_id.removeprefix("sha256:")
+            / "candidate"
+        )
+        shutil.copytree(
+            Path(physical[1]["absolute_path"]),
+            remote_snapshot,
+        )
+        snapshot_row.update(
+            {
+                "candidate_id": snapshot_candidate_id,
+                "snapshot_state": "remote_candidate_snapshot_ready",
+                "content_path": str(remote_snapshot),
+                "transport_receipt_sha256": "sha256:" + "9" * 64,
+                "evaluation": {
+                    "state": "missing",
+                    "status": "",
+                    "current": False,
+                    "evaluated_at": None,
+                    "receipt_sha256": None,
+                    "transition_id": None,
+                    "input_manifest_sha256": None,
+                    "cases": [],
+                },
+            }
+        )
+        snapshot_overlay["overlay_sha256"] = runtime_module.digest(
+            {
+                key: value
+                for key, value in snapshot_overlay.items()
+                if key != "overlay_sha256"
+            }
+        )
+        snapshot_queue = runtime_module.derive_evaluation_input_queue(
+            owner,
+            census,
+            usage,
+            receiver,
+            census_receipt_sha256=census_receipt_sha256,
+            usage_receipt_sha256=usage_receipt_sha256,
+            evaluation_overlay=snapshot_overlay,
+            transport_receiver=overlay["transport_receiver"],
+        )
+        snapshot_by_id = {
+            row["capability_id"]: row for row in snapshot_queue["rows"]
+        }
+        self.assertEqual(
+            snapshot_by_id[capability_ids[1]]["runnable_phase"],
+            "authoring",
+        )
+        self.assertIsNone(
+            snapshot_by_id[capability_ids[1]]["deferral_reason"]
+        )
+        self.assertIsNotNone(
+            snapshot_by_id[capability_ids[1]]["input_manifest_sha256"]
+        )
+
+        refused_census = json.loads(json.dumps(census))
+        ambiguous_instance = json.loads(json.dumps(physical[0]))
+        ambiguous_instance["instance_id"] = "ambiguous-instance"
+        ambiguous_instance["absolute_path"] = physical[1]["absolute_path"]
+        refused_census["physical_instances"].append(ambiguous_instance)
+        refused_census.pop("snapshot_sha256")
+        refused_census["snapshot_sha256"] = runtime_module.digest(
+            refused_census
+        )
+        refused_usage = json.loads(json.dumps(usage))
+        refused_usage["census_snapshot_sha256"] = refused_census[
+            "snapshot_sha256"
+        ]
+        refused_usage.pop("snapshot_sha256")
+        refused_usage["snapshot_sha256"] = runtime_module.digest(refused_usage)
+        refused_census_receipt_sha256 = runtime_module.digest(
+            {
+                "schema_version": 1,
+                "snapshot_sha256": refused_census["snapshot_sha256"],
+                "receiver": receipt_receiver,
+                "census": refused_census,
+            }
+        )
+        refused_usage_receipt_sha256 = runtime_module.digest(
+            {
+                "schema_version": 1,
+                "snapshot_sha256": refused_usage["snapshot_sha256"],
+                "census_snapshot_sha256": refused_census["snapshot_sha256"],
+                "receiver": receipt_receiver,
+                "usage": refused_usage,
+            }
+        )
+        refused_overlay = json.loads(json.dumps(overlay))
+        refused_overlay.update(
+            {
+                "census_snapshot_sha256": refused_census["snapshot_sha256"],
+                "census_receipt_sha256": refused_census_receipt_sha256,
+                "usage_snapshot_sha256": refused_usage["snapshot_sha256"],
+                "usage_receipt_sha256": refused_usage_receipt_sha256,
+            }
+        )
+        refused_row = refused_overlay["rows"][1]
+        refused_row.update(
+            {
+                "snapshot_state": "remote_candidate_refused",
+                "snapshot_refusal": {
+                    "code": "remote_candidate_refused",
+                    "message": "synthetic refusal",
+                    "receipt_sha256": "sha256:" + "7" * 64,
+                    "observed_at": "2026-08-21T22:11:20Z",
+                },
+            }
+        )
+        refused_overlay["overlay_sha256"] = runtime_module.digest(
+            {
+                key: value
+                for key, value in refused_overlay.items()
+                if key != "overlay_sha256"
+            }
+        )
+        refused_queue = runtime_module.derive_evaluation_input_queue(
+            owner,
+            refused_census,
+            refused_usage,
+            receiver,
+            census_receipt_sha256=refused_census_receipt_sha256,
+            usage_receipt_sha256=refused_usage_receipt_sha256,
+            evaluation_overlay=refused_overlay,
+            transport_receiver=overlay["transport_receiver"],
+        )
+        refused_by_id = {
+            row["capability_id"]: row for row in refused_queue["rows"]
+        }
+        self.assertEqual(
+            refused_by_id[capability_ids[1]]["deferral_reason"],
+            "capability_path_ambiguous",
+        )
+        self.assertIsNone(
+            refused_by_id[capability_ids[1]]["runnable_phase"]
+        )
         census_without_local_evaluations = json.loads(json.dumps(census))
         census_without_local_evaluations["evidence"] = {}
         for item in census_without_local_evaluations["physical_instances"]:
