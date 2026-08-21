@@ -1885,6 +1885,20 @@ try:
         "sealed legacy usage without pending detail remains visible and blocks zero-use",
     )
 
+    hybrid_usage_snapshot = json.loads(json.dumps(usage_snapshot))
+    hybrid_usage_snapshot["coverage"]["complete"] = False
+    hybrid_usage_snapshot["coverage"]["failures"] = [{
+        "session_id": "copilot:hybrid-session",
+        "reason": "usage_session_invalid_skill_name",
+    }]
+    record_usage_variant(hybrid_usage_snapshot)
+    _, _, hybrid_usage_body = request("/api/v1/estate")
+    check(
+        json.loads(hybrid_usage_body)["data"]["usage"]["status"]
+        == "unavailable",
+        "modern coverage rejects legacy two-field failure records",
+    )
+
     impossible_complete_snapshot = json.loads(json.dumps(usage_snapshot))
     impossible_coverage = impossible_complete_snapshot["coverage"]
     impossible_coverage["discovered_sessions"] += 1

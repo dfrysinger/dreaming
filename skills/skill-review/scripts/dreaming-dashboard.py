@@ -5930,6 +5930,7 @@ class DashboardData:
                             "candidate_capability_ids",
                         }),
                     }
+                    or (legacy_failure and not legacy_coverage)
                     or (
                         not legacy_failure
                         and not CANDIDATE_ID_RE.fullmatch(
