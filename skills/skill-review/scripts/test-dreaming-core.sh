@@ -1101,6 +1101,102 @@ class RuntimeTest(unittest.TestCase):
             remote_by_id[capability_ids[0]]["snapshot_state"],
             "remote_candidate_not_fetched",
         )
+        census_without_local_evaluations = json.loads(json.dumps(census))
+        census_without_local_evaluations["evidence"] = {}
+        for item in census_without_local_evaluations["physical_instances"]:
+            item.pop("evaluation", None)
+            item.pop("evaluation_complete", None)
+        census_without_local_evaluations["snapshot_sha256"] = (
+            runtime_module.digest(
+                {
+                    key: value
+                    for key, value in census_without_local_evaluations.items()
+                    if key != "snapshot_sha256"
+                }
+            )
+        )
+        usage_without_local_evaluations = json.loads(json.dumps(usage))
+        usage_without_local_evaluations["census_snapshot_sha256"] = (
+            census_without_local_evaluations["snapshot_sha256"]
+        )
+        usage_without_local_evaluations["snapshot_sha256"] = (
+            runtime_module.digest(
+                {
+                    key: value
+                    for key, value in usage_without_local_evaluations.items()
+                    if key != "snapshot_sha256"
+                }
+            )
+        )
+        census_receipt_without_local_evaluations = runtime_module.digest(
+            {
+                "schema_version": 1,
+                "snapshot_sha256": census_without_local_evaluations[
+                    "snapshot_sha256"
+                ],
+                "receiver": receipt_receiver,
+                "census": census_without_local_evaluations,
+            }
+        )
+        usage_receipt_without_local_evaluations = runtime_module.digest(
+            {
+                "schema_version": 1,
+                "snapshot_sha256": usage_without_local_evaluations[
+                    "snapshot_sha256"
+                ],
+                "census_snapshot_sha256": census_without_local_evaluations[
+                    "snapshot_sha256"
+                ],
+                "receiver": receipt_receiver,
+                "usage": usage_without_local_evaluations,
+            }
+        )
+        overlay_without_local_evaluations = json.loads(json.dumps(overlay))
+        overlay_without_local_evaluations["census_snapshot_sha256"] = (
+            census_without_local_evaluations["snapshot_sha256"]
+        )
+        overlay_without_local_evaluations["census_receipt_sha256"] = (
+            census_receipt_without_local_evaluations
+        )
+        overlay_without_local_evaluations["usage_snapshot_sha256"] = (
+            usage_without_local_evaluations["snapshot_sha256"]
+        )
+        overlay_without_local_evaluations["usage_receipt_sha256"] = (
+            usage_receipt_without_local_evaluations
+        )
+        overlay_without_local_evaluations["overlay_sha256"] = (
+            runtime_module.digest(
+                {
+                    key: value
+                    for key, value in overlay_without_local_evaluations.items()
+                    if key != "overlay_sha256"
+                }
+            )
+        )
+        remote_queue_without_local_evaluations = (
+            runtime_module.derive_evaluation_input_queue(
+                owner,
+                census_without_local_evaluations,
+                usage_without_local_evaluations,
+                receiver,
+                census_receipt_sha256=(
+                    census_receipt_without_local_evaluations
+                ),
+                usage_receipt_sha256=usage_receipt_without_local_evaluations,
+                evaluation_overlay=overlay_without_local_evaluations,
+                transport_receiver=overlay["transport_receiver"],
+            )
+        )
+        self.assertEqual(
+            {
+                row["capability_id"]: row["runnable_phase"]
+                for row in remote_queue_without_local_evaluations["rows"]
+            },
+            {
+                row["capability_id"]: row["runnable_phase"]
+                for row in remote_queue["rows"]
+            },
+        )
         forged_overlay = json.loads(json.dumps(overlay))
         forged_overlay["rows"].pop()
         forged_overlay["overlay_sha256"] = runtime_module.digest(

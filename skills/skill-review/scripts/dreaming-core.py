@@ -5250,8 +5250,13 @@ def derive_evaluation_input_queue(
         digest(census_snapshot) != census.get("snapshot_sha256")
         or digest(usage_snapshot) != usage.get("snapshot_sha256")
         or census.get("scope", {}).get("complete") is not True
-        or census.get("evidence", {}).get("evaluation_inventory", {}).get("complete")
-        is not True
+        or (
+            evaluation_overlay is None
+            and census.get("evidence", {})
+            .get("evaluation_inventory", {})
+            .get("complete")
+            is not True
+        )
         or usage.get("census_snapshot_sha256") != census.get("snapshot_sha256")
         or usage.get("host_id") != census.get("host_id")
         or usage.get("collected_at") != census.get("collected_at")
@@ -5452,16 +5457,19 @@ def derive_evaluation_input_queue(
             if isinstance(representative, dict)
             else None
         )
-        if (
-            representative is not None
-            and (
-                representative.get("canonical_capability_id") != capability_id
-                or representative.get("evaluation_complete") is not True
-                or not isinstance(evaluation, dict)
-                or evaluation.get("state") not in EVALUATION_INPUT_QUEUE_STATES
-                or not isinstance(evaluation.get("status"), str)
-                or not isinstance(evaluation.get("current"), bool)
-                or not isinstance(evaluation.get("cases"), list)
+        if representative is not None and (
+            representative.get("canonical_capability_id") != capability_id
+            or (
+                overlay_by_capability is None
+                and (
+                    representative.get("evaluation_complete") is not True
+                    or not isinstance(evaluation, dict)
+                    or evaluation.get("state")
+                    not in EVALUATION_INPUT_QUEUE_STATES
+                    or not isinstance(evaluation.get("status"), str)
+                    or not isinstance(evaluation.get("current"), bool)
+                    or not isinstance(evaluation.get("cases"), list)
+                )
             )
         ):
             raise RuntimeFailure(
