@@ -19,7 +19,7 @@
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
-- Isolated governance preview tip: `d4b3f38`
+- Isolated governance preview tip: `1534cfb`
 - The first natural successor `20260818T220321Z-97940` remains retained as a
   literal `SC-010` `NOT_SUPPORTED` result. It attempted 25 reviews, completed
   24, retained one `executor-timeout`, and ended honestly as `aborted` after
@@ -169,6 +169,30 @@
   root is unavailable. Remote fetch and bounded progression are supported;
   final dashboard, natural-cadence, and fail-closed rollback evidence remain
   open in `live-proof-remote-subject-bridge.json`.
+- Reviewed generation `20260821T052352Z-install-53619` passed its complete
+  installed self-test with zero failures and was enabled. Immediate owner run
+  `20260821T061456Z-5756` then reproduced the intended bounded safe inability:
+  the sealed local overlay covered all 96 enabled capabilities, usage remained
+  honestly incomplete, queue derivation retained
+  `evaluation-input-root-invalid`, and no claim or model work started. The
+  browser proof exposed one remaining projection defect: the dashboard did not
+  publish the validated overlay pointer before queue readiness refused, so it
+  showed `waiting for current evaluation view` instead of the retained
+  snapshot state.
+- The projection correction is committed locally as `1534cfb` and on the Mac
+  mini as `09705282`. It promotes the already validated, receipt-bound overlay
+  behind fresh halt and writer-lease checks before queue derivation, and makes
+  dashboard parsing match the owner's conservative sealed-legacy usage
+  compatibility. Ambiguous missing attribution still blocks zero-use, while
+  constructively candidate-free `unmapped` and `alias_target_missing` records
+  do not block unrelated capabilities. Python compilation, eight remote
+  subject tests, 47 core tests, and 164 dashboard checks pass. Independent
+  Opus and Terra review completed with zero findings.
+- The reviewed projection successor is installed behind halt from Mac mini
+  commit `09705282`, with rollback backup
+  `20260821T063712Z-16967`. Its generation-bound full self-test is currently
+  running. Do not enable, kickstart, or use this generation for natural-cadence
+  evidence until that exact gate passes.
 - The Dreaming-specific proof-first process is committed on the capacity
   branch as `41022d9`, and its non-conflicting skill name is committed as
   `0703693`.
