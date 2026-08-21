@@ -1921,6 +1921,44 @@ try:
         "sealed legacy recent tails remain excluded from 30-day zero decisions",
     )
 
+    legacy_mixed_usage = json.loads(json.dumps(legacy_recent_usage))
+    legacy_mixed_coverage = legacy_mixed_usage["coverage"]
+    legacy_mixed_coverage["discovered_sessions"] += 1
+    legacy_mixed_coverage["pending_sessions"] = 2
+    legacy_mixed_coverage["pending"] = [
+        {
+            "session_id": "sha256:" + "6" * 64,
+            "reason": "events_recently_modified",
+        },
+        {
+            "session_id": "sha256:" + "7" * 64,
+            "reason": "stable_budget_deferred",
+        },
+    ]
+    record_usage_variant(legacy_mixed_usage)
+    _, _, legacy_mixed_body = request("/api/v1/estate")
+    legacy_mixed_view = json.loads(legacy_mixed_body)["data"]
+    legacy_mixed_portfolio = {
+        item["skill_name"]: item
+        for item in legacy_mixed_view["portfolio_decisions"]
+    }
+    check(
+        legacy_mixed_view["usage"]["status"] == "incomplete"
+        and legacy_mixed_portfolio["plugin-skill"]["usage_state"]
+        == "blocked_stable_backlog"
+        and legacy_mixed_portfolio["plugin-skill"]["decision_coverage"][
+            "excluded_recent"
+        ] == {"count": 1, "bytes": 0}
+        and legacy_mixed_portfolio["plugin-skill"]["decision_coverage"][
+            "relevant_stable_backlog"
+        ] == {
+            "count": 1,
+            "bytes": 128,
+            "oldest_modified_at": None,
+        },
+        "mixed legacy tails attribute aggregate bytes to a stable blocker",
+    )
+
     hybrid_usage_snapshot = json.loads(json.dumps(usage_snapshot))
     hybrid_usage_snapshot["coverage"]["complete"] = False
     hybrid_usage_snapshot["coverage"]["failures"] = [{

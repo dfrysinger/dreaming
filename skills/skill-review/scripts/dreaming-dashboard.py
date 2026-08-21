@@ -6205,7 +6205,17 @@ class DashboardData:
                 )
             )
             if all_pending_details_are_legacy:
-                normalized_pending[0]["bytes"] = coverage["pending_bytes"]
+                stable_index = next(
+                    (
+                        index
+                        for index, item in enumerate(normalized_pending)
+                        if item["reason"] != "events_recently_modified"
+                    ),
+                    0,
+                )
+                normalized_pending[stable_index]["bytes"] = coverage[
+                    "pending_bytes"
+                ]
                 pending_detail_bytes = coverage["pending_bytes"]
             return {
                 "status": "complete" if complete else "incomplete",
