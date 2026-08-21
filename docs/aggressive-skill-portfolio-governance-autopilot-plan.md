@@ -228,9 +228,25 @@
   error, and zero enabled action buttons. The `agent-auth-broker` row shows
   MacBook origin, Mac mini execution, snapshot ready, five-plus partial uses,
   incomplete coverage, and a disabled read-only action.
-- The final generation must now remain untouched until one natural
-  14,400-second launchd tick is terminal and retained. Fail-closed rollback
-  proof follows that cadence receipt.
+- Natural owner run `20260821T135325Z-4110` fired on the exact reviewed
+  generation after the untouched 14,400-second interval. It published current
+  96-row overlay
+  `sha256:3e87ebdc8c444b5ad6c6601358feb0a833b72c479598c52be327e696f8ba79e3`
+  and retained `evaluation-input-root-invalid`.
+- Rollback generation `20260821T140341Z-install-10271` passed its exact full
+  self-test with zero failures, then ran with
+  `remote_evaluation_subjects.enabled=false`. Reconcile run
+  `20260821T145808Z-63885` started no remote overlay or claim work. Retained
+  remote evidence, Mac mini skill roots, and MacBook skill roots remained
+  byte-identical; snapshot and overlay counts stayed 3 and 6; claim files
+  stayed zero; the sole scheduler remained `StartInterval=14400` with
+  `RunAtLoad=false`; and the old census receiver still succeeded through its
+  unchanged paths and pins. The dashboard reports MacBook origin, Mac mini
+  execution, and `remote_candidate_state_unavailable`.
+- The supported rollback receipt is
+  `remote-subject-rollback-proof/receipt.json`; the bridge live-proof ledger is
+  now `SUPPORTED`. Capacity natural cadence and rollback evidence are terminal,
+  so the isolated reviewed preview may now be merged into the capacity branch.
 - The Dreaming-specific proof-first process is committed on the capacity
   branch as `41022d9`, and its non-conflicting skill name is committed as
   `0703693`.
