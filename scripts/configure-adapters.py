@@ -855,7 +855,13 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
             + 30,
             "enabled": False,
         }
-    if environment_flag("DREAMING_PRESERVE_ESTATE_ADAPTERS"):
+    preserve_estate_adapters = environment_flag(
+        "DREAMING_PRESERVE_ESTATE_ADAPTERS"
+    )
+    preserve_operational_adapters = environment_flag(
+        "DREAMING_PRESERVE_OPERATIONAL_ADAPTERS"
+    )
+    if preserve_estate_adapters or preserve_operational_adapters:
         baseline_path = state_dir / "estate-adapters-baseline.json"
         if baseline_path.is_symlink() or not baseline_path.is_file():
             raise ConfigError(
@@ -875,16 +881,24 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
             raise ConfigError("estate adapter baseline is malformed") from error
         if not isinstance(baseline, dict) or baseline.get("contract_version") != 1:
             raise ConfigError("estate adapter baseline contract is invalid")
-        for key in ("estate_census", "estate_curator"):
+        required_baseline_keys = (
+            ("estate_census", "estate_curator")
+            if preserve_estate_adapters
+            else ("estate_curator",)
+        )
+        for key in required_baseline_keys:
             entry = baseline.get(key)
             if not isinstance(entry, dict):
                 raise ConfigError(
                     f"estate adapter baseline is missing {key}"
                 )
-        preserved_keys = ["estate_census", "estate_curator"]
-        if environment_flag("DREAMING_PRESERVE_OPERATIONAL_ADAPTERS"):
+        preserved_keys = []
+        if preserve_estate_adapters:
+            preserved_keys.extend(("estate_census", "estate_curator"))
+        if preserve_operational_adapters:
             preserved_keys.extend(
                 (
+                    "estate_curator",
                     "allow_autonomous_skill_creation",
                     "max_autonomous_session_age_days",
                     "max_events",
