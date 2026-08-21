@@ -3873,9 +3873,9 @@ def remote_subject_relative_path(value: Any) -> str:
 
 
 def validate_remote_subject_inventory(
-    value: Any, field: str
+    value: Any, field: str, *, allow_empty: bool = False
 ) -> list[dict[str, Any]]:
-    if not isinstance(value, list) or not value:
+    if not isinstance(value, list) or (not value and not allow_empty):
         raise RuntimeFailure("remote-candidate-invalid", f"{field} is malformed")
     result = []
     seen = set()
@@ -3983,6 +3983,7 @@ def validate_remote_subject_response(
     excluded = validate_remote_subject_inventory(
         subject.get("excluded_sidecars"),
         "remote subject excluded sidecars",
+        allow_empty=True,
     )
     if (
         sorted([*candidate, *excluded], key=lambda item: item["path"]) != origin

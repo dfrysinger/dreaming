@@ -164,6 +164,21 @@ class RemoteSubjectTest(unittest.TestCase):
             claim["skill_key"], result["subject_key"].removeprefix("sha256:")
         )
 
+    def test_publishes_subject_without_excluded_sidecars(self) -> None:
+        (self.skill / ".agent-created.json").unlink()
+        response, request, receiver = self.response()
+        self.assertEqual(response["subject"]["excluded_sidecars"], [])
+        result = core.publish_remote_subject_snapshot(
+            response,
+            request,
+            receiver,
+            POLICY,
+            self.store,
+            installed_skill_roots=[self.installed],
+        )
+        self.assertEqual(result["status"], "published")
+        self.assertTrue((Path(result["candidate_root"]) / "SKILL.md").is_file())
+
     def test_evaluator_refuses_tampered_remote_snapshot(self) -> None:
         response, request, receiver = self.response()
         result = core.publish_remote_subject_snapshot(
