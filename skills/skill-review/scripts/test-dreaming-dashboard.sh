@@ -1885,6 +1885,42 @@ try:
         "sealed legacy usage without pending detail remains visible and blocks zero-use",
     )
 
+    legacy_recent_usage = json.loads(json.dumps(usage_snapshot))
+    legacy_recent_coverage = legacy_recent_usage["coverage"]
+    legacy_recent_coverage.pop("quiet_seconds")
+    legacy_recent_coverage.pop("collection_watermark")
+    legacy_recent_coverage["complete"] = False
+    legacy_recent_coverage["corpus_complete"] = False
+    legacy_recent_coverage["attribution_complete"] = False
+    legacy_recent_coverage["discovered_sessions"] += 1
+    legacy_recent_coverage["discovered_bytes"] += 128
+    legacy_recent_coverage["pending_sessions"] = 1
+    legacy_recent_coverage["pending_bytes"] = 128
+    legacy_recent_coverage["pending"] = [{
+        "session_id": "sha256:" + "6" * 64,
+        "reason": "events_recently_modified",
+    }]
+    legacy_recent_coverage["failures"] = []
+    record_usage_variant(legacy_recent_usage)
+    _, _, legacy_recent_body = request("/api/v1/estate")
+    legacy_recent_view = json.loads(legacy_recent_body)["data"]
+    legacy_recent_portfolio = {
+        item["skill_name"]: item
+        for item in legacy_recent_view["portfolio_decisions"]
+    }
+    check(
+        legacy_recent_view["usage"]["status"] == "incomplete"
+        and legacy_recent_portfolio["plugin-skill"]["usage_state"]
+        == "settled_zero_30d"
+        and legacy_recent_portfolio["plugin-skill"]["decision_coverage"][
+            "excluded_recent"
+        ] == {"count": 1, "bytes": 128}
+        and legacy_recent_portfolio["plugin-skill"]["decision_coverage"][
+            "relevant_stable_backlog"
+        ]["count"] == 0,
+        "sealed legacy recent tails remain excluded from 30-day zero decisions",
+    )
+
     hybrid_usage_snapshot = json.loads(json.dumps(usage_snapshot))
     hybrid_usage_snapshot["coverage"]["complete"] = False
     hybrid_usage_snapshot["coverage"]["failures"] = [{
@@ -1897,6 +1933,24 @@ try:
         json.loads(hybrid_usage_body)["data"]["usage"]["status"]
         == "unavailable",
         "modern coverage rejects legacy two-field failure records",
+    )
+
+    hybrid_pending_snapshot = json.loads(json.dumps(usage_snapshot))
+    hybrid_pending_snapshot["coverage"]["complete"] = False
+    hybrid_pending_snapshot["coverage"]["pending"] = [{
+        "session_id": "sha256:" + "6" * 64,
+        "reason": "events_recently_modified",
+    }]
+    hybrid_pending_snapshot["coverage"]["discovered_sessions"] += 1
+    hybrid_pending_snapshot["coverage"]["discovered_bytes"] += 128
+    hybrid_pending_snapshot["coverage"]["pending_sessions"] = 1
+    hybrid_pending_snapshot["coverage"]["pending_bytes"] = 128
+    record_usage_variant(hybrid_pending_snapshot)
+    _, _, hybrid_pending_body = request("/api/v1/estate")
+    check(
+        json.loads(hybrid_pending_body)["data"]["usage"]["status"]
+        == "unavailable",
+        "modern coverage rejects legacy two-field pending records",
     )
 
     impossible_complete_snapshot = json.loads(json.dumps(usage_snapshot))

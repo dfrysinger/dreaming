@@ -5863,16 +5863,30 @@ class DashboardData:
             ) is None:
                 return unavailable
             for pending in coverage["pending"]:
+                pending_fields = (
+                    frozenset(pending) if isinstance(pending, dict) else frozenset()
+                )
+                legacy_pending = pending_fields == frozenset({
+                    "session_id",
+                    "reason",
+                })
                 if (
                     not isinstance(pending, dict)
-                    or set(pending)
-                    != {
-                        "session_id",
-                        "reason",
-                        "modified_at",
-                        "bytes",
-                        "failure_id",
+                    or pending_fields
+                    not in {
+                        frozenset({
+                            "session_id",
+                            "reason",
+                        }),
+                        frozenset({
+                            "session_id",
+                            "reason",
+                            "modified_at",
+                            "bytes",
+                            "failure_id",
+                        }),
                     }
+                    or (legacy_pending and not legacy_coverage)
                     or not CANDIDATE_ID_RE.fullmatch(
                         str(pending.get("session_id", ""))
                     )
@@ -5890,10 +5904,18 @@ class DashboardData:
                         "usage_session_duplicate_skill_start",
                         "usage_session_duplicate_completion",
                     }
-                    or parse_time(pending.get("modified_at")) is None
-                    or not isinstance(pending.get("bytes"), int)
-                    or isinstance(pending.get("bytes"), bool)
-                    or pending["bytes"] < 0
+                    or (
+                        not legacy_pending
+                        and parse_time(pending.get("modified_at")) is None
+                    )
+                    or (
+                        not legacy_pending
+                        and (
+                            not isinstance(pending.get("bytes"), int)
+                            or isinstance(pending.get("bytes"), bool)
+                            or pending["bytes"] < 0
+                        )
+                    )
                     or (
                         pending.get("failure_id") is not None
                         and not CANDIDATE_ID_RE.fullmatch(
@@ -5996,7 +6018,7 @@ class DashboardData:
             ]
             pending_detail_count = len(coverage["pending"])
             pending_detail_bytes = sum(
-                item["bytes"] for item in coverage["pending"]
+                item.get("bytes", 0) for item in coverage["pending"]
             )
             if (
                 len(pending_ids) != len(set(pending_ids))
@@ -6018,7 +6040,7 @@ class DashboardData:
                     and pending_detail_bytes > coverage["pending_bytes"]
                 )
                 or any(
-                    item["failure_id"] is not None
+                    item.get("failure_id") is not None
                     and (
                         item["failure_id"] not in failures_by_id
                         or any(
@@ -6164,6 +6186,27 @@ class DashboardData:
                 or unattributed
             ):
                 return unavailable
+            normalized_pending = [
+                {
+                    **item,
+                    "modified_at": item.get("modified_at"),
+                    "bytes": item.get("bytes", 0),
+                    "failure_id": item.get("failure_id"),
+                }
+                for item in coverage["pending"]
+            ]
+            all_pending_details_are_legacy = (
+                legacy_coverage
+                and pending_detail_count == coverage["pending_sessions"]
+                and pending_detail_count > 0
+                and all(
+                    frozenset(item) == frozenset({"session_id", "reason"})
+                    for item in coverage["pending"]
+                )
+            )
+            if all_pending_details_are_legacy:
+                normalized_pending[0]["bytes"] = coverage["pending_bytes"]
+                pending_detail_bytes = coverage["pending_bytes"]
             return {
                 "status": "complete" if complete else "incomplete",
                 "available": True,
@@ -6192,7 +6235,7 @@ class DashboardData:
                 "canonical_usage": canonical_usage,
                 "_receipt_sha256": current["receipt_sha256"],
                 "_snapshot_sha256": current["snapshot_sha256"],
-                "_pending": coverage["pending"],
+                "_pending": normalized_pending,
                 "_failures": coverage["failures"],
                 "_unattributed": unattributed,
                 "_legacy_pending_count": (
