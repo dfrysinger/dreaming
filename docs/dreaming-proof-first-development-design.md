@@ -26,7 +26,7 @@ cadence, or rollback proof.
 across implementation, testing, installation, review, and live proof. It does
 not change production runtime behavior by itself.
 
-Rollback is removal of the local `dreaming-development` skill and reversal of
+Rollback is removal of the local `dreaming-proof-first` skill and reversal of
 this document. The installed Dreaming generation is outside this change.
 
 ## Reuse contract
@@ -282,7 +282,7 @@ design.
 
 ## Definition of Done: Dreaming proof-first development
 
-- [x] The `dreaming-development` skill names the tracer and hardening phases
+- [x] The `dreaming-proof-first` skill names the tracer and hardening phases
       and routes final release work back through `development-loop`.
 - [x] The skill distinguishes immediate proof from natural cadence.
 - [x] The skill keeps installed mutation, scheduled ownership, and live
