@@ -77,8 +77,13 @@ if "--version" in args:
     print(vendor + " 1.0")
     raise SystemExit()
 if "--help" in args:
-    print("--plugin-dir --output-format --model --json --ignore-user-config "
-          "--available-tools --disable-builtin-mcps --no-custom-instructions "
+    available_tools = (
+        "--available-tools.invalid"
+        if os.environ.get("FIXTURE_INVALID_HELP_BOUNDARY")
+        else "--available-tools[=tools...]"
+    )
+    print("--plugin-dir --output-format --model --json --ignore-user-config " +
+          available_tools + " --disable-builtin-mcps --no-custom-instructions "
           "--no-ask-user --no-remote")
     raise SystemExit()
 if "plugin" in args:
@@ -291,6 +296,32 @@ else:
                 stderr=subprocess.PIPE,
             )
             self.binaries[vendor] = binary
+        self.invalid_help_binary = self.bin / "copilot-invalid-help"
+        invalid_help_source = (
+            "#include <unistd.h>\n#include <stdlib.h>\n"
+            "int main(int argc,char **argv){"
+            "setenv(\"FIXTURE_VENDOR\",\"copilot\",1);"
+            "setenv(\"FIXTURE_INVALID_HELP_BOUNDARY\",\"1\",1);"
+            f"setenv(\"DREAMING_EXECUTOR_TEST_ALLOW_ROOT\",\"{self.root}\",1);"
+            f"char **a=calloc(argc+2,sizeof(char*));a[0]=\"{sys.executable}\";"
+            f"a[1]=\"{cli}\";for(int i=1;i<argc;i++)a[i+1]=argv[i];"
+            f"execv(\"{sys.executable}\",a);return 127;}}\n"
+        )
+        subprocess.run(
+            [
+                "/usr/bin/clang",
+                "-x",
+                "c",
+                "-o",
+                str(self.invalid_help_binary),
+                "-",
+            ],
+            input=invalid_help_source,
+            text=True,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
 
     def base(self, vendor, timeout=10):
         return [
@@ -339,7 +370,9 @@ else:
             self.fail(result.stdout + result.stderr)
         return json.loads(result.stdout.splitlines()[-1])
 
-    def comparator_call(self, rubric_id, *args, check=True, binary=None):
+    def comparator_call(
+        self, rubric_id, *args, check=True, binary=None, extra_env=None
+    ):
         harness_home = self.root / "harness-home"
         harness_home.mkdir(exist_ok=True)
         command = [
@@ -374,6 +407,7 @@ else:
                 "HOME": str(harness_home),
                 "DREAMING_EXECUTOR_TEST_ALLOW_ROOT": str(self.root),
                 "GH_TOKEN": "fixture-token",
+                **(extra_env or {}),
             },
             text=True,
             stdout=subprocess.PIPE,
@@ -403,6 +437,14 @@ else:
         )
         self.assertTrue(doctor["healthy"])
         self.assertTrue(doctor["boundary_ready"])
+        invalid_help = self.comparator_call(
+            rubric_id,
+            "doctor",
+            check=False,
+            binary=self.invalid_help_binary,
+        )
+        self.assertNotEqual(invalid_help.returncode, 0)
+        self.assertIn("comparator-boundary-unavailable", invalid_help.stdout)
         packet = self.root / "comparison-packet.json"
         packet.write_bytes(
             canonical(

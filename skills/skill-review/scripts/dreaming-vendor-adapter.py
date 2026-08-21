@@ -3198,7 +3198,17 @@ def evaluation_comparator_doctor(args: argparse.Namespace) -> None:
         "--no-remote",
         "--output-format",
     }
-    if result.returncode != 0 or not required_flags <= set(help_text.split()):
+    available_flags = {
+        match.group(1)
+        for token in help_text.split()
+        if (
+            match := re.fullmatch(
+                r"(--[a-z0-9][a-z0-9-]*)(?:\[[^\]\s]+\]|=[^\s]+)?",
+                token,
+            )
+        )
+    }
+    if result.returncode != 0 or not required_flags <= available_flags:
         raise AdapterError(
             "comparator-boundary-unavailable",
             "Copilot no-tools comparator flags are unavailable",
