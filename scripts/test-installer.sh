@@ -1393,6 +1393,7 @@ DREAMING_REMOTE_SUBJECT_CONTENT_POLICY=/remote/receiver/policy.json \
 /usr/bin/python3 - "$REMOTE_CONFIG/state/adapters.json" <<'PY'
 import json
 import sys
+from pathlib import Path
 
 value = json.load(open(sys.argv[1], encoding="utf-8"))
 owner = value["evaluation_input_owner"]
@@ -1408,6 +1409,10 @@ assert remote["max_encoded_bytes"] == 48 * 1024 * 1024
 assert remote["snapshot_root"].endswith(
     "/state/remote-evaluation-subjects"
 )
+command_executable = Path(remote["command"][0])
+assert command_executable == Path(sys.executable).resolve()
+assert command_executable.is_file()
+assert not command_executable.is_symlink()
 assert "--fetch-subject" in remote["command"]
 assert remote["receiver"]["content_policy_sha256"]
 PY

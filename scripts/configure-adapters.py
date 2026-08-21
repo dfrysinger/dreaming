@@ -1003,7 +1003,7 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
             ).hexdigest(),
         }
         command = [
-            sys.executable,
+            str(Path(sys.executable).resolve()),
             str(proxy),
             "--fetch-subject",
             "--ssh-bin",
