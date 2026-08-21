@@ -525,23 +525,23 @@ Proof of fail-closed rollback requires:
 
 ## Definition of Done: Remote evaluation subject bridge
 
-- [ ] REMOTE-SUBJECT-CHK-01 through REMOTE-SUBJECT-CHK-07 pass.
-- [ ] The real 19-skill settled-zero cohort resolves to 19 host-qualified
+- [x] REMOTE-SUBJECT-CHK-01 through REMOTE-SUBJECT-CHK-07 pass.
+- [x] The real 19-skill settled-zero cohort resolves to 19 host-qualified
       subjects without reading same-path Mac mini skills; each subject either
       progresses or records an exact bounded inability.
-- [ ] At least one real remote subject completes input authoring and bounded
+- [x] At least one real remote subject completes input authoring and bounded
       evaluation, or records an independently reviewed safe inability, under
       the unchanged Mac mini scheduler.
-- [ ] Desktop and 390-pixel browser proof shows origin host, execution host,
+- [x] Desktop and 390-pixel browser proof shows origin host, execution host,
       remote snapshot state, readiness, evaluation state, and report-only
       controls without overflow or browser errors.
-- [ ] Installed proof shows the unchanged single four-hour scheduler, writer
+- [x] Installed proof shows the unchanged single four-hour scheduler, writer
       lease, halt switch, one-subject-per-run, one-claim-per-run, and
       four-claims-per-day limits.
-- [ ] Rollback proof preserves snapshots, registry and evaluation history,
+- [x] Rollback proof preserves snapshots, registry and evaluation history,
       scheduler inventory, and both machines' installed skill-root inventories.
-- [ ] The complete design and implementation have no unresolved in-scope
+- [x] The complete design and implementation have no unresolved in-scope
       must-fix review finding.
-- [ ] Design, implementation, real receipts, browser proof, installed proof,
+- [x] Design, implementation, real receipts, browser proof, installed proof,
       rollback proof, and durable baton references are committed locally;
       nothing is pushed.
