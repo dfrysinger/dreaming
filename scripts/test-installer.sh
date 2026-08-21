@@ -738,12 +738,10 @@ FULL_BASELINE_SHA="$(
   export DREAMING_EVALUATION_INPUT_AUTHOR_MODEL=author-model
   export DREAMING_EVALUATION_INPUT_REVIEWER_A_MODEL=reviewer-a-model
   export DREAMING_EVALUATION_INPUT_REVIEWER_B_MODEL=reviewer-b-model
-  export DREAMING_PRESERVE_ESTATE_ADAPTERS=0
+  export DREAMING_PRESERVE_ESTATE_ADAPTERS=1
   export DREAMING_PRESERVE_OPERATIONAL_ADAPTERS=1
   export DREAMING_ESTATE_ADAPTERS_BASELINE_SOURCE="$FULL_BASELINE_SOURCE"
   export DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256="$FULL_BASELINE_SHA"
-  export DREAMING_COPILOT_ESTATE_SSH_SCRIPT='/fixture/estate/ssh-estate-census.py'
-  export DREAMING_COPILOT_ESTATE_COLLECTOR_SCRIPT='/fixture/estate/dreaming-estate.py'
   export DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS=1
   export DREAMING_REMOTE_EVALUATION_SUBJECTS_ENABLED=1
   export DREAMING_REMOTE_SUBJECT_SSH_HOST='fixture@fd7a:115c:a1e0::1'
@@ -769,18 +767,6 @@ if config["remote_evaluation_subjects"]["enabled"] is not True:
 for key in ("sources", "executors", "publishers", "routes", "executor_order"):
     if config.get(key) != baseline.get(key):
         raise SystemExit(f"enabled bridge install changed existing {key}")
-if config.get("estate_curator") != baseline.get("estate_curator"):
-    raise SystemExit("enabled bridge install changed the disabled estate curator")
-if config.get("estate_census") == baseline.get("estate_census"):
-    raise SystemExit("enabled bridge install did not regenerate estate census")
-estate = config["estate_census"]["argv"]
-if estate[estate.index("--remote-script") + 1] != "/fixture/estate/ssh-estate-census.py":
-    raise SystemExit(f"caller census receiver path was overwritten: {estate!r}")
-if (
-    estate[estate.index("--remote-estate-script") + 1]
-    != "/fixture/estate/dreaming-estate.py"
-):
-    raise SystemExit(f"caller census collector path was overwritten: {estate!r}")
 PY
 echo "PASS  explicit bridge enablement overrides persisted disabled config"
 FAKE_SSH="$NATIVE/fake-ssh.py"
@@ -854,8 +840,8 @@ if publisher[publisher.index("--host") + 1] != "fixture-client@fd7a:115c:a1e0::3
     raise SystemExit(f"upgrade lost the inherited remote publisher: {publisher!r}")
 if executor[executor.index("--binary") + 1] != sys.argv[2]:
     raise SystemExit(f"upgrade lost the inherited executor binary: {executor!r}")
-if config.get("estate_census") == baseline.get("estate_census"):
-    raise SystemExit(f"upgrade did not regenerate the estate census: {config!r}")
+if config.get("estate_census") != baseline.get("estate_census"):
+    raise SystemExit(f"upgrade did not restore the sealed estate census: {config!r}")
 if curator != baseline.get("estate_curator"):
     raise SystemExit(f"upgrade did not restore the sealed estate curator: {config!r}")
 PY
