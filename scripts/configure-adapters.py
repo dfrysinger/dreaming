@@ -323,7 +323,53 @@ def argv_value(entry: object, flag: str) -> str | None:
     return argv[index + 1]
 
 
-def inherit_remote_copilot(existing: dict[str, object]) -> None:
+def strict_argv_value(
+    entry: object, flag: str, label: str, *, required: bool = True
+) -> str | None:
+    if not isinstance(entry, dict):
+        raise ConfigError(f"{label} is malformed")
+    argv = entry.get("argv")
+    if not isinstance(argv, list) or not all(isinstance(value, str) for value in argv):
+        raise ConfigError(f"{label} argv is malformed")
+    positions = [index for index, value in enumerate(argv) if value == flag]
+    if not positions:
+        if required:
+            raise ConfigError(f"{label} is missing {flag}")
+        return None
+    if len(positions) != 1 or positions[0] + 1 >= len(argv):
+        raise ConfigError(f"{label} has ambiguous {flag}")
+    value = argv[positions[0] + 1]
+    if not value or value.startswith("--"):
+        raise ConfigError(f"{label} has invalid {flag}")
+    return value
+
+
+def load_estate_baseline(state_dir: Path) -> dict[str, object]:
+    baseline_path = state_dir / "estate-adapters-baseline.json"
+    if baseline_path.is_symlink() or not baseline_path.is_file():
+        raise ConfigError("installation-owned estate adapter baseline is missing")
+    expected_baseline_sha = required_environment(
+        "DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256"
+    )
+    observed_baseline_sha = hashlib.sha256(baseline_path.read_bytes()).hexdigest()
+    if observed_baseline_sha != expected_baseline_sha:
+        raise ConfigError("estate adapter baseline digest does not match")
+    try:
+        baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ConfigError("estate adapter baseline is malformed") from error
+    if not isinstance(baseline, dict) or baseline.get("contract_version") != 1:
+        raise ConfigError("estate adapter baseline contract is invalid")
+    for key in ("estate_census", "estate_curator"):
+        if not isinstance(baseline.get(key), dict):
+            raise ConfigError(f"estate adapter baseline is missing {key}")
+    return baseline
+
+
+def inherit_remote_copilot(
+    existing: dict[str, object],
+    estate_existing: dict[str, object] | None = None,
+) -> None:
     source = existing.get("sources", {})
     source_entry = source.get("copilot") if isinstance(source, dict) else None
     source_argv = source_entry.get("argv", []) if isinstance(source_entry, dict) else []
@@ -395,29 +441,167 @@ def inherit_remote_copilot(existing: dict[str, object]) -> None:
             if name not in os.environ and value is not None:
                 os.environ[name] = value
 
-    estate_entry = existing.get("estate_census")
+    estate_source = estate_existing if estate_existing is not None else existing
+    estate_entry = estate_source.get("estate_census")
     estate_argv = (
         estate_entry.get("argv", []) if isinstance(estate_entry, dict) else []
     )
-    if isinstance(estate_argv, list) and any(
-        isinstance(value, str) and value.endswith("/scripts/ssh-estate-census.py")
-        for value in estate_argv
-    ):
+    if estate_entry is not None:
+        if not isinstance(estate_argv, list) or not any(
+            isinstance(value, str)
+            and value.endswith("/scripts/ssh-estate-census.py")
+            for value in estate_argv
+        ):
+            raise ConfigError("estate census adapter is malformed")
         estate_values = {
-            "DREAMING_COPILOT_ESTATE_SESSION_ROOT": argv_value(
-                estate_entry, "--remote-copilot-session-root"
+            "DREAMING_ESTATE_SSH_BIN": strict_argv_value(
+                estate_entry, "--ssh-bin", "estate census adapter"
             ),
-            "DREAMING_COPILOT_ESTATE_USAGE_INDEX": argv_value(
-                estate_entry, "--remote-usage-index-path"
+            "DREAMING_COPILOT_ESTATE_SSH_HOST": strict_argv_value(
+                estate_entry, "--host", "estate census adapter"
             ),
-            "DREAMING_ESTATE_USAGE_MAX_SESSIONS": argv_value(
-                estate_entry, "--usage-max-sessions"
+            "DREAMING_COPILOT_ESTATE_SSH_ADDRESS_FAMILY": strict_argv_value(
+                estate_entry,
+                "--address-family",
+                "estate census adapter",
+                required=False,
             ),
-            "DREAMING_ESTATE_USAGE_MAX_BYTES": argv_value(
-                estate_entry, "--usage-max-bytes"
+            "DREAMING_COPILOT_ESTATE_SSH_PYTHON": strict_argv_value(
+                estate_entry, "--remote-python", "estate census adapter"
+            ),
+            "DREAMING_COPILOT_ESTATE_SSH_SCRIPT": strict_argv_value(
+                estate_entry, "--remote-script", "estate census adapter"
+            ),
+            "DREAMING_COPILOT_ESTATE_COLLECTOR_SCRIPT": strict_argv_value(
+                estate_entry,
+                "--remote-estate-script",
+                "estate census adapter",
+            ),
+            "DREAMING_COPILOT_ESTATE_RECEIVER_ID_FILE": strict_argv_value(
+                estate_entry,
+                "--remote-receiver-id-file",
+                "estate census adapter",
+            ),
+            "DREAMING_COPILOT_ESTATE_BIN": strict_argv_value(
+                estate_entry,
+                "--remote-copilot-binary",
+                "estate census adapter",
+            ),
+            "DREAMING_COPILOT_ESTATE_REMOTE_HOME": strict_argv_value(
+                estate_entry, "--target-home", "estate census adapter"
+            ),
+            "DREAMING_COPILOT_ESTATE_RECEIVER_ID": strict_argv_value(
+                estate_entry,
+                "--expected-receiver-id",
+                "estate census adapter",
+            ),
+            "DREAMING_COPILOT_ESTATE_SESSION_ROOT": strict_argv_value(
+                estate_entry,
+                "--remote-copilot-session-root",
+                "estate census adapter",
+                required=False,
+            ),
+            "DREAMING_COPILOT_ESTATE_USAGE_INDEX": strict_argv_value(
+                estate_entry,
+                "--remote-usage-index-path",
+                "estate census adapter",
+            ),
+            "DREAMING_ESTATE_USAGE_MAX_SESSIONS": strict_argv_value(
+                estate_entry, "--usage-max-sessions", "estate census adapter"
+            ),
+            "DREAMING_ESTATE_USAGE_MAX_BYTES": strict_argv_value(
+                estate_entry, "--usage-max-bytes", "estate census adapter"
+            ),
+            "DREAMING_ESTATE_TIMEOUT": strict_argv_value(
+                estate_entry, "--timeout", "estate census adapter"
+            ),
+            "DREAMING_COPILOT_ESTATE_PROJECT_CONTEXTS_FILE": strict_argv_value(
+                estate_entry,
+                "--remote-project-contexts-file",
+                "estate census adapter",
+                required=False,
             ),
         }
         for name, value in estate_values.items():
+            if name not in os.environ and value is not None:
+                os.environ[name] = value
+
+    curator_entry = estate_source.get("estate_curator")
+    curator_argv = (
+        curator_entry.get("argv", []) if isinstance(curator_entry, dict) else []
+    )
+    if curator_entry is not None:
+        if not isinstance(curator_argv, list) or not any(
+            isinstance(value, str)
+            and value.endswith("/scripts/ssh-estate-curator.py")
+            for value in curator_argv
+        ):
+            raise ConfigError("estate curator adapter is malformed")
+        curator_values = {
+            "DREAMING_COPILOT_ESTATE_CURATOR_SSH_SCRIPT": strict_argv_value(
+                curator_entry, "--remote-script", "estate curator adapter"
+            ),
+            "DREAMING_COPILOT_ESTATE_CURATOR_RUNNER": strict_argv_value(
+                curator_entry,
+                "--remote-curator-runner",
+                "estate curator adapter",
+            ),
+            "DREAMING_COPILOT_ESTATE_ARCHIVE_TOOL": strict_argv_value(
+                curator_entry, "--remote-archive-tool", "estate curator adapter"
+            ),
+            "DREAMING_COPILOT_ESTATE_RESTORE_TOOL": strict_argv_value(
+                curator_entry, "--remote-restore-tool", "estate curator adapter"
+            ),
+            "DREAMING_COPILOT_ESTATE_DEPENDENCY_SCANNER": strict_argv_value(
+                curator_entry,
+                "--remote-dependency-scanner",
+                "estate curator adapter",
+            ),
+            "DREAMING_COPILOT_ESTATE_PUBLIC_ROOT": strict_argv_value(
+                curator_entry, "--remote-public-root", "estate curator adapter"
+            ),
+            "DREAMING_COPILOT_ESTATE_PERSONAL_ROOT": strict_argv_value(
+                curator_entry, "--remote-personal-root", "estate curator adapter"
+            ),
+            "DREAMING_COPILOT_ESTATE_REVIEW_STATE_DIR": strict_argv_value(
+                curator_entry,
+                "--remote-review-state-dir",
+                "estate curator adapter",
+            ),
+            "DREAMING_COPILOT_ESTATE_RUNS_DIR": strict_argv_value(
+                curator_entry, "--remote-runs-dir", "estate curator adapter"
+            ),
+            "DREAMING_COPILOT_ESTATE_CURATOR_STATE_FILE": strict_argv_value(
+                curator_entry,
+                "--remote-curator-state-file",
+                "estate curator adapter",
+            ),
+            "DREAMING_COPILOT_ESTATE_HALT_SWITCH": strict_argv_value(
+                curator_entry, "--remote-halt-switch", "estate curator adapter"
+            ),
+            "DREAMING_COPILOT_ESTATE_LOCK_DIR": strict_argv_value(
+                curator_entry, "--remote-lock-dir", "estate curator adapter"
+            ),
+            "DREAMING_COPILOT_ESTATE_OPERATION_ROOT": strict_argv_value(
+                curator_entry,
+                "--remote-operation-root",
+                "estate curator adapter",
+            ),
+            "DREAMING_COPILOT_ESTATE_RECOVERY_STATE": strict_argv_value(
+                curator_entry,
+                "--remote-recovery-state",
+                "estate curator adapter",
+            ),
+            "DREAMING_COPILOT_ESTATE_USER_CONTEXT_CWD": strict_argv_value(
+                curator_entry,
+                "--remote-user-context-cwd",
+                "estate curator adapter",
+            ),
+            "DREAMING_ESTATE_CURATOR_TIMEOUT": strict_argv_value(
+                curator_entry, "--timeout", "estate curator adapter"
+            ),
+        }
+        for name, value in curator_values.items():
             if name not in os.environ and value is not None:
                 os.environ[name] = value
 
@@ -445,7 +629,12 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
             raise ConfigError(f"existing adapter config is invalid: {output}") from error
         if isinstance(loaded, dict):
             existing = loaded
-    inherit_remote_copilot(existing)
+    estate_existing = (
+        load_estate_baseline(state_dir)
+        if os.environ.get("DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256")
+        else existing
+    )
+    inherit_remote_copilot(existing, estate_existing)
     inherit_local_binaries(existing)
     configured = {
         vendor
@@ -856,31 +1045,7 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
             "enabled": False,
         }
     if environment_flag("DREAMING_PRESERVE_ESTATE_ADAPTERS"):
-        baseline_path = state_dir / "estate-adapters-baseline.json"
-        if baseline_path.is_symlink() or not baseline_path.is_file():
-            raise ConfigError(
-                "installation-owned estate adapter baseline is missing"
-            )
-        expected_baseline_sha = required_environment(
-            "DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256"
-        )
-        observed_baseline_sha = hashlib.sha256(
-            baseline_path.read_bytes()
-        ).hexdigest()
-        if observed_baseline_sha != expected_baseline_sha:
-            raise ConfigError("estate adapter baseline digest does not match")
-        try:
-            baseline = json.loads(baseline_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
-            raise ConfigError("estate adapter baseline is malformed") from error
-        if not isinstance(baseline, dict) or baseline.get("contract_version") != 1:
-            raise ConfigError("estate adapter baseline contract is invalid")
-        for key in ("estate_census", "estate_curator"):
-            entry = baseline.get(key)
-            if not isinstance(entry, dict):
-                raise ConfigError(
-                    f"estate adapter baseline is missing {key}"
-                )
+        baseline = load_estate_baseline(state_dir)
         preserved_keys = ["estate_census", "estate_curator"]
         if environment_flag("DREAMING_PRESERVE_OPERATIONAL_ADAPTERS"):
             preserved_keys.extend(
