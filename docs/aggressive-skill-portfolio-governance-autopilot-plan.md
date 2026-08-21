@@ -19,7 +19,7 @@
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
-- Isolated governance preview tip: `0a338f5`
+- Isolated governance preview tip: `d4b3f38`
 - The first natural successor `20260818T220321Z-97940` remains retained as a
   literal `SC-010` `NOT_SUPPORTED` result. It attempted 25 reviews, completed
   24, retained one `executor-timeout`, and ended honestly as `aborted` after
@@ -148,6 +148,30 @@
   `PORT-CHK-EVAL-INPUT-01` through `PORT-CHK-EVAL-INPUT-06`, and its own
   Definition of Done. Paired Opus/Terra design review has no unresolved
   finding.
+- The remote evaluation-subject bridge is hardened on the isolated preview
+  branch through `d4b3f38`. The retained implementation sequence is
+  `3ff4d00`, `b20660f`, `0373737`, `6d3bfef`, `2c3e7e5`, `7debd2d`,
+  `8c0273c`, and `d4b3f38`. It preserves the established census pins, builds a
+  receipt-bound local evaluation overlay, resolves the transport interpreter,
+  invokes the evaluator through its installed executable, accepts sealed
+  legacy usage records conservatively, and prevents ambiguous legacy
+  attribution from granting zero-use authority. Paired Opus/Terra review
+  closed with no unresolved finding.
+- The proof-first bridge tracer crossed the real MacBook receiver boundary for
+  `agent-auth-broker`. It published exact candidate
+  `sha256:7e1f69b14dc71cabb10588d1a88ae5835afb6874a86bb19f2e9225ac855c9cd4`
+  under subject
+  `sha256:3a0c730a8cadba5738a1816792a0f778c107f8aeb13f6419d32ef693d512aade`.
+  The unchanged census plus validated overlay produced 96 exact remote rows
+  while retaining honest incomplete global usage. Queue derivation then
+  stopped before claim reservation or model execution with
+  `evaluation-input-root-invalid` because the sealed evaluation-input content
+  root is unavailable. Remote fetch and bounded progression are supported;
+  final dashboard, natural-cadence, and fail-closed rollback evidence remain
+  open in `live-proof-remote-subject-bridge.json`.
+- The Dreaming-specific proof-first process is committed on the capacity
+  branch as `41022d9`, and its non-conflicting skill name is committed as
+  `0703693`.
 - The authoritative input-registry foundation is implemented and committed
   locally on the isolated preview branch as `77fe62a`. It stores immutable
   suites, complete policies, compilation, routing, fixtures, graders, harness
