@@ -221,7 +221,8 @@ dreaming_require_roots() {
     echo "dreaming repository root is incomplete: $DREAMING_REPO_ROOT" >&2
     return 1
   }
-  [[ -d "$DREAMING_SHARED_SKILLS_ROOT/skills/writing-great-skills" &&
+  [[ -d "$DREAMING_SHARED_SKILLS_ROOT/skills/skill-create" &&
+     -d "$DREAMING_SHARED_SKILLS_ROOT/skills/writing-great-skills" &&
      -d "$DREAMING_SHARED_SKILLS_ROOT/skills/dual-review" &&
      -d "$DREAMING_SHARED_SKILLS_ROOT/skills/authenticated-browse" ]] || {
     echo "verified shared skills root is incomplete: ${DREAMING_SHARED_SKILLS_ROOT:-unset}" >&2

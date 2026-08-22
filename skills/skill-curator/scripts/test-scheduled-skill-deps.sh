@@ -9,8 +9,8 @@ TMP="$(mktemp -d "$TEST_ROOT/scheduled-deps.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 export TMPDIR="$TMP"
 SCANNER="$SCRIPT_DIR/scheduled-skill-deps.py"
-OWNED=(skill-review skill-curator memory-curator skill-create skill-manage)
-SHARED=(writing-great-skills dual-review authenticated-browse)
+OWNED=(skill-review skill-curator memory-curator skill-manage)
+SHARED=(skill-create writing-great-skills dual-review authenticated-browse)
 PUBLIC="$TMP/public"
 LOCAL="$TMP/local"
 DREAMING="$TMP/dreaming"
@@ -59,7 +59,7 @@ cat "$PROMPT"
 EOF
 chmod +x "$RUN"
 cat > "$PROMPT" <<EOF
-Read $NESTED and use /dfrysinger-dreaming:skill-create.
+Read $NESTED and use /dfrysinger-skills:skill-create.
 EOF
 cat > "$NESTED" <<EOF
 Read $SHARED_ROOT/skills/dual-review/SKILL.md and use /public-target.
@@ -94,6 +94,7 @@ payload=json.load(open(sys.argv[1]))
 deps={row["skill"]:row for row in payload["dependencies"]}
 assert {"skill-review","skill-create","dual-review","public-target"} <= set(deps)
 assert deps["skill-review"]["namespace"] == "dreaming"
+assert deps["skill-create"]["namespace"] == "shared"
 assert deps["dual-review"]["namespace"] == "shared"
 inventory={row["name"]:row for row in payload["skills"]}
 assert inventory["skill-review"]["path"].startswith(sys.argv[2])
@@ -220,7 +221,7 @@ assert payload["complete"] is True
 assert any(path.endswith("/scripts/daemon-selftest.sh") for path in payload["scanned_files"])
 assert any(path.endswith("/scripts/dreaming-dashboard.py") for path in payload["scanned_files"])
 deps={row["skill"] for row in payload["dependencies"]}
-assert {"authenticated-browse","dual-review","writing-great-skills"} <= deps
+assert {"authenticated-browse","dual-review","skill-create","writing-great-skills"} <= deps
 PY
 echo "PASS  shipped Dreaming layout scans to completion"
 

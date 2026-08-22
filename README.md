@@ -92,8 +92,8 @@ evidence, skill history, and source configuration for audit. The explicit
 targets that the migration journal proves Dreaming created; any changed or
 missing target stops before deletion.
 
-Shared dependencies are exactly `writing-great-skills`, `dual-review`, and
-`authenticated-browse`. Installation verifies a pinned file-hash receipt,
+Shared dependencies are exactly `skill-create`, `writing-great-skills`,
+`dual-review`, and `authenticated-browse`. Installation verifies a pinned file-hash receipt,
 copies only those directories, verifies the copy, and atomically selects the
 bundle. Compatible local checkouts or installed plugins avoid a network fetch;
 incompatible automatic candidates fall through to the pinned sparse checkout.

@@ -11,7 +11,7 @@ trap 'rm -rf "$TMP"' EXIT
 export TMPDIR="$TMP"
 export DREAMING_REPO_ROOT="$REPO"
 export DREAMING_SHARED_SKILLS_ROOT="$TMP/shared"
-for name in writing-great-skills dual-review authenticated-browse; do
+for name in skill-create writing-great-skills dual-review authenticated-browse; do
   mkdir -p "$DREAMING_SHARED_SKILLS_ROOT/skills/$name"
   printf -- '---\nname: %s\ndescription: Shared test fixture dependency.\n---\n' "$name" \
     > "$DREAMING_SHARED_SKILLS_ROOT/skills/$name/SKILL.md"

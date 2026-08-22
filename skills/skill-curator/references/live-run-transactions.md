@@ -94,6 +94,31 @@ report identity, provenance, and dependencies. Inventory revalidation permits
 only rows added, removed, or changed by already-authorized transaction
 operations; unrelated inventory drift refuses the next mutation.
 
+For a create, check the destination tombstone before intent and declare the
+provenance files with the package. The tombstone guard returns `0` when a
+tombstone matched and creation must stop, `1` when creation is safe, and any
+other status when the check must fail closed:
+
+```bash
+if skill-review/scripts/check-tombstone.sh <destination>; then
+  exit 1
+else
+  tombstone_status=$?
+  [ "$tombstone_status" -eq 1 ] || exit "$tombstone_status"
+fi
+scripts/curator-run.py intent \
+  --run "$RUN_ID" --kind commit --root local --action create \
+  --skill <destination> --paths \
+    <destination>/SKILL.md \
+    <destination>/.agent-created \
+    <destination>/.agent-created.json
+```
+
+After shared `/skill-create` writes the package, run
+`skill-review/scripts/mark-agent-created.sh` with the authorized task key and
+`--created-by skill-curator`. The scoped commit refuses a create whose marker
+or evidence envelope is missing.
+
 ## Archive
 
 `archive-skill.sh` records intent and completion itself when the run id is in

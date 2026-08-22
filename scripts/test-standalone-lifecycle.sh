@@ -28,7 +28,7 @@ DEST="$TMP/LaunchAgents"
 SOURCE="$TMP/shared-source"
 mkdir -p "$HOME_DIR" "$DEST"
 
-for name in writing-great-skills dual-review authenticated-browse; do
+for name in skill-create writing-great-skills dual-review authenticated-browse; do
   mkdir -p "$SOURCE/skills/$name"
   printf -- '---\nname: %s\ndescription: Standalone lifecycle fixture.\n---\n' "$name" \
     > "$SOURCE/skills/$name/SKILL.md"

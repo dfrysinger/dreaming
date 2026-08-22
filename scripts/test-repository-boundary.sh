@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-owned=(skill-review skill-curator memory-curator skill-create skill-manage)
-shared=(writing-great-skills dual-review authenticated-browse)
+owned=(skill-review skill-curator memory-curator skill-manage)
+shared=(skill-create writing-great-skills dual-review authenticated-browse)
 
 for name in "${owned[@]}"; do
   [[ -f "$ROOT/skills/$name/SKILL.md" ]] || {
@@ -18,7 +18,7 @@ for name in "${shared[@]}"; do
   }
 done
 if grep -R -n -E \
-  '~/code/skills/skills/(skill-review|skill-curator|memory-curator|skill-create|skill-manage)(/|`|$)' \
+  '~/code/skills/skills/(skill-review|skill-curator|memory-curator|skill-manage)(/|`|$)' \
   "$ROOT/skills" "$ROOT/docs" "$ROOT/scripts" --exclude='test-repository-boundary.sh'; then
   echo "own-path hardcode crosses the repository boundary" >&2
   exit 1

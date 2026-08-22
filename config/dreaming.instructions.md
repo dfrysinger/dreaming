@@ -5,7 +5,8 @@ user's main `copilot-instructions.md`.
 
 ## Tier 1 — foreground proposal
 
-After a task, propose `/skill-create` only when all of these are true:
+After a task, propose `/dfrysinger-skills:skill-create` only when all of these
+are true:
 
 1. the work produced a reusable procedure with at least three non-obvious steps;
 2. the procedure is likely to be useful again;

@@ -50,8 +50,8 @@ It does NOT consolidate or archive the library at scale — that is
   `~/code/skills/` is read-only to autonomous runs.
 - `session_store_sql` tool (read-only cross-session history) — the sweep's
   session counter/scorer.
-- The sibling skills `skill-create` and `skill-manage` (used for the actual
-  writes) are installed.
+- Shared `skill-create` and the sibling `skill-manage` skill (used for the
+  actual writes) are installed.
 
 ## The binding contract
 

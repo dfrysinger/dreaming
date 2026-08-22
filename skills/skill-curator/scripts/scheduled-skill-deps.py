@@ -19,10 +19,9 @@ OWNED = {
     "skill-review",
     "skill-curator",
     "memory-curator",
-    "skill-create",
     "skill-manage",
 }
-SHARED = {"writing-great-skills", "dual-review", "authenticated-browse"}
+SHARED = {"skill-create", "writing-great-skills", "dual-review", "authenticated-browse"}
 BUILTIN_SLASH_COMMANDS = {
     "allow-all",
     "autopilot",

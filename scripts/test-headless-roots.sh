@@ -8,7 +8,7 @@ TMP="$(mktemp -d "$TEST_ROOT/headless-roots.XXXXXX")"
 trap 'rm -rf "$TMP"' EXIT
 export TMPDIR="$TMP"
 SHARED="$TMP/shared"
-for name in writing-great-skills dual-review authenticated-browse; do
+for name in skill-create writing-great-skills dual-review authenticated-browse; do
   mkdir -p "$SHARED/skills/$name"
   printf -- '---\nname: %s\ndescription: Headless fixture shared dependency.\n---\n' "$name" \
     > "$SHARED/skills/$name/SKILL.md"

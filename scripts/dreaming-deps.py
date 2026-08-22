@@ -17,6 +17,7 @@ from typing import Any
 PROTOCOL_VERSION = 1
 PLUGIN_NAME = "dfrysinger-skills"
 SHARED_SKILLS = (
+    "skill-create",
     "writing-great-skills",
     "dual-review",
     "authenticated-browse",

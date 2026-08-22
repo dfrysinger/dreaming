@@ -8,7 +8,7 @@ TMP="$(mktemp -d "$TEST_ROOT/shared-deps.XXXXXX")"
 trap 'chmod -R u+w "$TMP" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 export TMPDIR="$TMP"
 TOOL="$REPO_ROOT/scripts/dreaming-deps.py"
-SKILLS=(writing-great-skills dual-review authenticated-browse)
+SKILLS=(skill-create writing-great-skills dual-review authenticated-browse)
 passes=0
 
 pass() { echo "PASS  $*"; passes=$((passes + 1)); }
@@ -66,10 +66,10 @@ OUT="$CASE/out.json"
 "$TOOL" materialize > "$OUT"
 grep -q '"source_kind": "explicit"' "$OUT" || fail "explicit source was not selected"
 BUNDLE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$OUT")"
-[[ "$(find "$BUNDLE/skills" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" == "3" ]] ||
+[[ "$(find "$BUNDLE/skills" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')" == "4" ]] ||
   fail "bundle copied an unexpected skill directory"
 "$TOOL" verify "$BUNDLE" >/dev/null
-pass "explicit source materializes exactly three verified skills"
+pass "explicit source materializes exactly four verified skills"
 
 new_case canonical
 export DREAMING_CANONICAL_SKILLS_ROOT="$SOURCE"
@@ -128,7 +128,7 @@ export DREAMING_SPARSE_REPO_URL="$SOURCE"
 grep -q '"source_kind": "sparse"' "$CASE/out.json" ||
   fail "sparse source was not selected"
 BUNDLE="$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["bundle"])' "$CASE/out.json")"
-[[ "$(find "$BUNDLE/skills" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d ' ')" == "3" ]] ||
+[[ "$(find "$BUNDLE/skills" -mindepth 1 -maxdepth 1 -type d -print | wc -l | tr -d ' ')" == "4" ]] ||
   fail "sparse bundle contains unrelated skills"
 pass "pinned sparse fallback checks out exact dependency paths"
 

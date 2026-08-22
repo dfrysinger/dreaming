@@ -22,7 +22,7 @@ For **creating** a new skill from scratch, use `/skill-create` instead.
 ## Prerequisites
 
 - macOS (scripts use `mv`, `git`, standard POSIX tools).
-- Two skill roots (see `/skill-create` for the model):
+- Two skill roots managed by Dreaming:
   - PUBLIC repo `~/code/skills/` (clone of `dfrysinger/skills`, pushable)
   - LOCAL native `~/.copilot/skills/` (local git repo, NO remote; agent-managed)
 - `find-skill.sh`, `archive-skill.sh`, `restore-skill.sh`, and `promote-skill.sh`
@@ -107,8 +107,8 @@ Moves `~/.copilot/skills/<name>` into `~/code/skills/skills/<name>`, strips the
 `plugin.json`, validates, and commits BOTH repos. USER-RUN ONLY — the
 unattended daemon never promotes.
 
-**Clear the publishability gate first** (`skill-create`, PUBLIC procedure step
-0): `~/code/skills` is a public GitHub repo, so a skill naming an
+**Clear the Dreaming publishability gate first:** `~/code/skills` is a public
+GitHub repo, so a skill naming an
 employer-internal codebase, repo, org, host, team, or person stays LOCAL. A
 local skill earned its detail from private work, so this gate bites hardest
 exactly here.
@@ -140,7 +140,10 @@ scripts/rename-skill.sh <old-name> <new-name>     # add --no-commit to inspect f
 
 It refuses a name that is taken or malformed, rewrites only the forms that name a skill (backticked mentions, `skills/<name>/` paths, `/dfrysinger-skills:<name>`, and `[<name>](…)` links) so prose containing the same words survives, re-registers the skill in the manifest, validates, and fails if any stale reference is left. Prose that describes a *process* rather than naming a skill is the caller's judgment call — after `dual-review` was briefly renamed, phrases like "note dual-reviewed in the commit message" were correct to leave alone.
 
-Before choosing the new name, run `scripts/check-name-prefix.sh <new-name>`; `skill-create` rule 7 covers what makes a name good.
+Before choosing the new name, run `scripts/check-name-prefix.sh <new-name>`.
+Prefer a short, distinct name whose leading word reaches a user-invoked skill
+in three or four autocomplete keystrokes; avoid names that collide with the CLI
+commands they drive.
 
 **Complete when** the script reports the rename, the version is bumped, the PUBLIC repo is pushed, and the plugin cache is re-synced. Until that sync, other sessions still hold the old name.
 

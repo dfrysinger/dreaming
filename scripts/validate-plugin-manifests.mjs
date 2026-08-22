@@ -5,12 +5,11 @@ import { resolve } from "node:path";
 
 const root = resolve(import.meta.dirname, "..");
 const expectedName = "dfrysinger-dreaming";
-const expectedVersion = "1.0.1";
+const expectedVersion = "1.0.2";
 const expectedSkills = [
   "skill-review",
   "skill-curator",
   "memory-curator",
-  "skill-create",
   "skill-manage",
 ].sort();
 
@@ -47,11 +46,11 @@ const directories = (await readdir(resolve(root, "skills"), { withFileTypes: tru
   .filter((entry) => entry.isDirectory() && !entry.name.startsWith("."))
   .map((entry) => entry.name)
   .sort();
-assert(JSON.stringify(directories) === JSON.stringify(expectedSkills), "repository must contain exactly five owned skills");
+assert(JSON.stringify(directories) === JSON.stringify(expectedSkills), "repository must contain exactly four owned skills");
 assert(
   JSON.stringify([...claude.skills].map((path) => path.replace("./skills/", "")).sort()) ===
     JSON.stringify(expectedSkills),
-  "Claude/Copilot manifest must export exactly the five owned skills",
+  "Claude/Copilot manifest must export exactly the four owned skills",
 );
 for (const directory of directories) {
   const path = resolve(root, "skills", directory, "SKILL.md");

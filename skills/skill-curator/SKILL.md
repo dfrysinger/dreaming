@@ -148,7 +148,17 @@ orchestrator bypasses it because one shared cadence governs all three passes.
    authorization receipt, freezes dependency decisions, records both root
    identities and unrelated dirty paths, and acquires the shared writer lease.
 7. For each destination patch or umbrella create, call `curator-run.py intent`
-   before editing. Then:
+   before editing. For a create, first run
+   `skill-review/scripts/check-tombstone.sh <destination>` and stop when a
+   tombstone exists; declare `SKILL.md`, `.agent-created`, and
+   `.agent-created.json` in the intent. Then:
+   - Use shared `/skill-create` to author a new umbrella.
+   - For a new umbrella, run
+     `skill-review/scripts/mark-agent-created.sh <destination> <session-id>
+     curator-live --task-key <authorized-task-key> --independence verified
+     --evidence-kind curator-consolidation --summary <privacy-safe-summary>
+     --routing-reason <report-reason> --created-by skill-curator` before
+     validation. The transaction's parent writer lease remains authoritative.
    - Use `/skill-manage patch` to add the absorbed content as a labeled section in `<into>/SKILL.md` (or as a `references/<from>.md` file if it's session-specific detail).
    - If `<from>` has support files (`references/`, `templates/`, `scripts/`, `assets/`), re-home them into `<into>`'s matching subdirs and rewrite the destination paths in `<into>/SKILL.md`. Never leave dangling references.
    - Author distinct source and sibling cases for the changed umbrella and run
