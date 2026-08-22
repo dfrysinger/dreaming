@@ -178,6 +178,9 @@ model-operation budgets is reached. High-confidence reusable profiles are
 prioritized for full review. One-off and no-learning sessions are recorded
 without consuming a full review attempt.
 
+The first production bound is `max_profiles_per_run=100`, independently capped
+at 500 by configuration validation. `max_reviews_per_run` remains capped at 25.
+
 The first backfill processes recent stable sessions first. After catch-up, only
 new or changed source revisions require profiling.
 
@@ -290,12 +293,12 @@ history.
 ## Definition of Done
 
 - [ ] The MacBook Pro and Mac mini topology is named consistently.
-- [ ] Task profiling reuses the existing authenticated session-source snapshot
+- [x] Task profiling reuses the existing authenticated session-source snapshot
       path and creates no second transcript transport.
-- [ ] An LLM, without skill-library context, identifies task opportunities and
+- [x] An LLM, without skill-library context, identifies task opportunities and
       reusable procedures from bounded real transcripts.
-- [ ] Retained observations bind exact snapshot and event identities.
-- [ ] Verified independent observations can cross the existing recurrence gate.
+- [x] Retained observations bind exact snapshot and event identities.
+- [x] Verified independent observations can cross the existing recurrence gate.
 - [ ] One recurring opportunity produces a real shadow candidate or existing
       skill repair from its transcript evidence.
 - [ ] Triggering, task-performance, and overall-regression evaluations pass for
@@ -304,7 +307,7 @@ history.
       evaluation, and deployment authority.
 - [ ] Missed triggering produces description repair, while settled absence of
       use and opportunity produces reversible retirement.
-- [ ] Lightweight profiling throughput is independent of the 25 full-review
+- [x] Lightweight profiling throughput is independent of the 25 full-review
       attempt limit.
 - [ ] Installed proof covers bounded profiling, halt, sole-scheduler ownership,
       one natural run, rollback, and restore.

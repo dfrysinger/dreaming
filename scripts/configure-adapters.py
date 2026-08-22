@@ -764,6 +764,9 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
         "max_reviews_per_run": positive_integer(
             "DREAMING_MAX_REVIEWS_PER_RUN", "25"
         ),
+        "max_profiles_per_run": positive_integer(
+            "DREAMING_MAX_PROFILES_PER_RUN", "100"
+        ),
         "max_snapshot_bytes": positive_integer(
             "DREAMING_MAX_SNAPSHOT_BYTES", "100000"
         ),
@@ -1055,6 +1058,7 @@ def configure(output: Path, repo_root: Path, state_dir: Path) -> dict[str, objec
                     "max_autonomous_session_age_days",
                     "max_events",
                     "max_field_bytes",
+                    "max_profiles_per_run",
                     "max_reviews_per_run",
                     "max_snapshot_bytes",
                     "policy_version",

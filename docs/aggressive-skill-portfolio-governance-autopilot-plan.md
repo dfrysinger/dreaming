@@ -887,6 +887,14 @@
   proved the same procedure fingerprint transitions from `collecting` to
   `ready_for_draft` with two distinct task keys and sessions. Production
   reviewer-to-profile matching and the independent profiling queue remain next.
+- Lightweight profiling now has an independent scheduled-run budget:
+  `max_profiles_per_run` defaults to 100 and is configuration-capped at 500,
+  while `max_reviews_per_run` remains capped at 25. Profile receipts are indexed
+  by exact session revision and executor, so settled work is not reprofiled.
+  A 52-session deterministic run profiled all 52 sessions on its first tick
+  while full review remained bounded to 25, then reused the profile index on the
+  next two ticks as reviews drained 25 and two. This resolves the original
+  throughput concern without making expensive full reviews unbounded.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now

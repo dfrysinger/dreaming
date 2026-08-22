@@ -2007,6 +2007,8 @@ class RuntimeTest(unittest.TestCase):
         )
         report = json.loads(result.stdout)
         self.assertTrue(report["ok"])
+        self.assertEqual(len(report["profiles"]), 2)
+        self.assertEqual(report["deferred_profiles"], 0)
         self.assertEqual(len(report["reviews"]), 1)
         self.assertEqual(report["reviews"][0]["session_id"], "fake:one")
         self.assertEqual(report["reviews"][0]["executor"], "fake-executor")
@@ -2078,6 +2080,7 @@ class RuntimeTest(unittest.TestCase):
             {
                 "contract_version": 1,
                 "max_reviews_per_run": 25,
+                "max_profiles_per_run": 100,
                 "routes": ["fake>fake-executor"],
                 "executor_order": ["fake-executor"],
                 "sources": {
@@ -2128,8 +2131,18 @@ class RuntimeTest(unittest.TestCase):
                 check=True,
             )
             report = json.loads(result.stdout)
-            observed.append((len(report["reviews"]), report["deferred_reviews"]))
-        self.assertEqual(observed, [(25, 27), (25, 2), (2, 0)])
+            observed.append(
+                (
+                    len(report["profiles"]),
+                    report["deferred_profiles"],
+                    len(report["reviews"]),
+                    report["deferred_reviews"],
+                )
+            )
+        self.assertEqual(
+            observed,
+            [(52, 0, 25, 27), (0, 0, 25, 2), (0, 0, 2, 0)],
+        )
         ledger = json.loads(
             (Path(environment["DREAMING_STATE_DIR"]) / "review-ledger.json").read_text()
         )
@@ -2143,6 +2156,17 @@ class RuntimeTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeFailure, "max_reviews_per_run"):
             runtime_module.configured_runtime_settings(
                 {"max_reviews_per_run": 26}
+            )
+
+    def test_profile_limit_is_independent_and_bounded(self) -> None:
+        settings = runtime_module.configured_runtime_settings(
+            {"max_reviews_per_run": 25, "max_profiles_per_run": 100}
+        )
+        self.assertEqual(settings["max_reviews_per_run"], 25)
+        self.assertEqual(settings["max_profiles_per_run"], 100)
+        with self.assertRaisesRegex(RuntimeFailure, "max_profiles_per_run"):
+            runtime_module.configured_runtime_settings(
+                {"max_profiles_per_run": 501}
             )
 
     def test_support_file_paths_are_canonical_nonconflicting_files(self) -> None:

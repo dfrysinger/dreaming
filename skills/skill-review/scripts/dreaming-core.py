@@ -487,6 +487,10 @@ class RuntimePaths:
         return self.data / "task-profiles" / "v1"
 
     @property
+    def task_profile_index(self) -> Path:
+        return self.state / "task-profile-index.json"
+
+    @property
     def bundles(self) -> Path:
         return self.data / "bundles"
 
@@ -1475,6 +1479,38 @@ class DreamingRuntime:
                 )
         else:
             atomic_json(receipt_path, receipt)
+        profile_key = digest(
+            {
+                "qualified_session_id": reviewed_identity[
+                    "qualified_session_id"
+                ],
+                "source_revision": reviewed_identity["source_revision"],
+                "executor": executor_id,
+            }
+        )
+        index = self._state(self.paths.task_profile_index, {})
+        if not isinstance(index, dict):
+            raise RuntimeFailure(
+                "task-profile-index-invalid",
+                str(self.paths.task_profile_index),
+            )
+        entry = {
+            "qualified_session_id": reviewed_identity[
+                "qualified_session_id"
+            ],
+            "source_revision": reviewed_identity["source_revision"],
+            "executor": executor_id,
+            "receipt_sha256": receipt["receipt_sha256"],
+            "profile_set_id": receipt["profile_set_id"],
+            "receipt": str(receipt_path),
+        }
+        existing = index.get(profile_key)
+        if existing is not None and existing != entry:
+            raise RuntimeFailure(
+                "task-profile-index-collision", profile_key
+            )
+        index[profile_key] = entry
+        self._write(self.paths.task_profile_index, index)
         return {
             "status": "profiled",
             "receipt": str(receipt_path),
@@ -1482,6 +1518,47 @@ class DreamingRuntime:
             "profile_set_id": receipt["profile_set_id"],
             "profile_count": len(receipt["profiles"]),
         }
+
+    def has_task_profile(
+        self,
+        qualified_session_id: str,
+        source_revision: str,
+        executor_id: str,
+    ) -> bool:
+        index = self._state(self.paths.task_profile_index, {})
+        if not isinstance(index, dict):
+            raise RuntimeFailure(
+                "task-profile-index-invalid",
+                str(self.paths.task_profile_index),
+            )
+        profile_key = digest(
+            {
+                "qualified_session_id": qualified_session_id,
+                "source_revision": source_revision,
+                "executor": executor_id,
+            }
+        )
+        entry = index.get(profile_key)
+        if entry is None:
+            return False
+        if (
+            not isinstance(entry, dict)
+            or entry.get("qualified_session_id") != qualified_session_id
+            or entry.get("source_revision") != source_revision
+            or entry.get("executor") != executor_id
+            or not isinstance(entry.get("receipt"), str)
+        ):
+            raise RuntimeFailure(
+                "task-profile-index-invalid", profile_key
+            )
+        receipt_path = Path(entry["receipt"])
+        receipt = read_json(receipt_path, {})
+        return (
+            receipt.get("receipt_sha256") == entry.get("receipt_sha256")
+            and receipt.get("profile_set_id") == entry.get("profile_set_id")
+            and receipt_path.stem
+            == str(entry.get("receipt_sha256", "")).removeprefix("sha256:")
+        )
 
     def _apply_autonomous_admission_policy(
         self,
@@ -7127,6 +7204,7 @@ def configured_runtime_settings(config: dict[str, Any]) -> dict[str, Any]:
         "page_size": 100,
         "max_pages_per_run": 100,
         "max_reviews_per_run": 25,
+        "max_profiles_per_run": 100,
         "max_snapshot_bytes": 100_000,
         "max_events": 2_000,
         "max_field_bytes": 64_000,
@@ -7164,6 +7242,11 @@ def configured_runtime_settings(config: dict[str, Any]) -> dict[str, Any]:
             raise RuntimeFailure(
                 "invalid-adapter-config",
                 f"{name} must not exceed 25",
+            )
+        if name == "max_profiles_per_run" and value > 500:
+            raise RuntimeFailure(
+                "invalid-adapter-config",
+                f"{name} must not exceed 500",
             )
         settings[name] = value
     return settings
@@ -7356,6 +7439,8 @@ def scheduled_run() -> dict[str, Any]:
         "adapter_config": str(config_path),
         "adapters": adapter_reports,
         "discovery": {},
+        "profiles": [],
+        "deferred_profiles": 0,
         "reviews": [],
         "deferred_reviews": 0,
         "publication": [],
@@ -7788,6 +7873,51 @@ def scheduled_run() -> dict[str, Any]:
         return report
 
     queue = read_json(paths.queue, [])
+    profile_attempts = 0
+    for item in queue:
+        if item.get("status") != "queued":
+            continue
+        source_name = item.get("source")
+        source = sources.get(source_name)
+        executor_name = next(
+            (
+                name
+                for name in executor_order
+                if name in executors and (source_name, name) in routes
+            ),
+            None,
+        )
+        if source is None or executor_name is None:
+            continue
+        if core.has_task_profile(
+            item["qualified_session_id"],
+            item["source_revision"],
+            executor_name,
+        ):
+            continue
+        if profile_attempts >= settings["max_profiles_per_run"]:
+            report["deferred_profiles"] += 1
+            continue
+        profile_attempts += 1
+        try:
+            result = core.profile(
+                source_name,
+                source,
+                item["qualified_session_id"],
+                executor_name,
+                executors[executor_name],
+            )
+            report["profiles"].append(
+                {"session_id": item["qualified_session_id"], **result}
+            )
+        except RuntimeFailure as error:
+            report["errors"].append(
+                {
+                    "phase": "profile",
+                    "session_id": item.get("qualified_session_id"),
+                    "code": error.code,
+                }
+            )
     review_attempts = 0
     for item in queue:
         if item.get("status") != "queued":

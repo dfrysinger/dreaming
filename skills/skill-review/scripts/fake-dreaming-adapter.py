@@ -38,6 +38,10 @@ def canonical(value: Any) -> bytes:
     ).encode()
 
 
+def digest(value: Any) -> str:
+    return "sha256:" + hashlib.sha256(canonical(value)).hexdigest()
+
+
 def emit(value: dict[str, Any], status: int = 0) -> None:
     print(json.dumps(value, sort_keys=True))
     raise SystemExit(status)
@@ -155,6 +159,32 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
         emit({"ok": True, "executor_version": state.get("executor_version", "fake-1")})
     if args.command == "run":
         snapshot = load(Path(args.snapshot), {})
+        if args.mode == "profile":
+            session_id = snapshot.get("identity", {}).get(
+                "qualified_session_id"
+            )
+            snapshot_sha256 = digest(snapshot)
+            profiles: list[dict[str, Any]] = []
+            result = {
+                "status": "ok",
+                "mutation_started": False,
+                "completion_sentinel": "DREAMING_TASK_PROFILE_COMPLETE",
+                "schema_version": 1,
+                "kind": "llm_task_opportunity_profile",
+                "snapshot_sha256": snapshot_sha256,
+                "qualified_session_id": session_id,
+                "profile_set_id": digest(
+                    {
+                        "snapshot_sha256": snapshot_sha256,
+                        "qualified_session_id": session_id,
+                        "profiles": profiles,
+                    }
+                ),
+                "profiles": profiles,
+                "model": "fake-profile-model",
+            }
+            save(Path(args.result), result)
+            emit({"ok": True, **result})
         if snapshot.get("packet_kind") == "draft_review":
             result = {
                 "status": "ok",
@@ -281,6 +311,7 @@ def parser() -> argparse.ArgumentParser:
     run = sub.add_parser("run")
     run.add_argument("--snapshot", required=True)
     run.add_argument("--result", required=True)
+    run.add_argument("--mode", choices=("review", "profile"), default="review")
     install = sub.add_parser("install")
     install.add_argument("--bundle", required=True)
     install.add_argument("--bundle-id", required=True)
