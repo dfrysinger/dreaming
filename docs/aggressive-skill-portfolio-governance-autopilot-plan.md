@@ -877,6 +877,16 @@
   was retained under a private data root and reproduced exactly on replay.
   The replay adapters are private tracer seams, not production code. Verified
   recurrence and the independent profiling queue remain next.
+- Profile receipts now feed the existing candidate lifecycle through
+  `collect-profile-candidate`. The core revalidates the receipt, task, profile,
+  procedure, and profile-set identities, converts the task into a
+  writer-lease-protected `independence=verified` observation, and preserves the
+  existing immutable shadow package and recurrence gates. The real historical
+  tmux migration profile was retained as one verified collecting observation.
+  A separately labeled pair of fresh synthetic independent-task receipts then
+  proved the same procedure fingerprint transitions from `collecting` to
+  `ready_for_draft` with two distinct task keys and sessions. Production
+  reviewer-to-profile matching and the independent profiling queue remain next.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now

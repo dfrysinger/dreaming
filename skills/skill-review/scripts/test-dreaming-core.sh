@@ -3534,6 +3534,119 @@ elif command == "run":
             ),
             receipt["receipt_sha256"],
         )
+        package = self.case / "profile-package"
+        package.mkdir()
+        (package / "SKILL.md").write_text(
+            "---\nname: retained-procedure\n"
+            "description: Retain a recurring reusable procedure\n---\n"
+            "# Retained procedure\n"
+        )
+        profile_id = receipt["profiles"][0]["profile_id"]
+        lock_environment = {
+            **os.environ,
+            "SKILLS_STATE_DIR": str(self.paths.state),
+            "SKILLS_NOW_EPOCH": str(self.clock),
+        }
+        token = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "daemon-lock.py"),
+                "acquire",
+                "--mode",
+                "session",
+                "--owner",
+                "test-profile-candidate",
+            ],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            env=lock_environment,
+        ).stdout.strip()
+        prior_token = os.environ.get("SKILLS_LOCK_TOKEN")
+        prior_state = os.environ.get("SKILLS_STATE_DIR")
+        os.environ["SKILLS_LOCK_TOKEN"] = token
+        os.environ["SKILLS_STATE_DIR"] = str(self.paths.state)
+        try:
+            collecting = core.collect_profile_candidate(
+                receipt_path,
+                profile_id,
+                package,
+                "retained-procedure",
+            )
+            self.assertEqual(collecting["state"], "collecting")
+            second = json.loads(json.dumps(receipt))
+            second["qualified_session_id"] = "fake:two"
+            second["observed_at"] = datetime.fromtimestamp(
+                20, timezone.utc
+            ).isoformat()
+            second_profile = second["profiles"][0]
+            model_profile = {
+                key: value
+                for key, value in second_profile.items()
+                if key
+                not in {"task_key", "profile_id", "procedure_fingerprint"}
+            }
+            second_profile["task_key"] = runtime_module.digest(
+                {
+                    "qualified_session_id": "fake:two",
+                    "source_event_ids": second_profile["source_event_ids"],
+                }
+            )
+            second_profile["profile_id"] = runtime_module.digest(
+                {"qualified_session_id": "fake:two", **model_profile}
+            )
+            second["profile_set_id"] = runtime_module.digest(
+                {
+                    "snapshot_sha256": second["snapshot_sha256"],
+                    "qualified_session_id": "fake:two",
+                    "profiles": second["profiles"],
+                }
+            )
+            second_body = {
+                key: value
+                for key, value in second.items()
+                if key != "receipt_sha256"
+            }
+            second["receipt_sha256"] = runtime_module.digest(second_body)
+            second_path = (
+                self.paths.task_profile_receipts
+                / f"{second['receipt_sha256'].removeprefix('sha256:')}.json"
+            )
+            runtime_module.atomic_json(second_path, second)
+            ready = core.collect_profile_candidate(
+                second_path,
+                second_profile["profile_id"],
+                package,
+                "retained-procedure",
+            )
+            self.assertEqual(ready["state"], "ready_for_draft")
+            self.assertEqual(ready["recommendation"], "ready_for_draft")
+            record = core._candidate_lifecycle_call(
+                "read", ready["lifecycle_id"]
+            )
+            self.assertEqual(
+                [item["independence"] for item in record["evidence"]],
+                ["verified", "verified"],
+            )
+        finally:
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_DIR / "daemon-lock.py"),
+                    "release",
+                    token,
+                ],
+                check=True,
+                env=lock_environment,
+            )
+            if prior_token is None:
+                os.environ.pop("SKILLS_LOCK_TOKEN", None)
+            else:
+                os.environ["SKILLS_LOCK_TOKEN"] = prior_token
+            if prior_state is None:
+                os.environ.pop("SKILLS_STATE_DIR", None)
+            else:
+                os.environ["SKILLS_STATE_DIR"] = prior_state
 
     def test_completed_transaction_self_heals_before_session_fence(self) -> None:
         fixture = self.source_fixture([self.session("one", 10)])

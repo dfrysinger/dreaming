@@ -1618,17 +1618,6 @@ class DreamingRuntime:
         reviewed_identity: dict[str, Any],
     ) -> dict[str, Any]:
         artifact = result["artifact"]
-        candidate_root = (self.paths.data / "candidates" / "v1").resolve()
-        skills_root = self.paths.skills.resolve()
-        if (
-            candidate_root == skills_root
-            or candidate_root in skills_root.parents
-            or skills_root in candidate_root.parents
-        ):
-            raise RuntimeFailure(
-                "candidate-lifecycle-failed",
-                "candidate storage must be isolated from the skill discovery root",
-            )
         procedure = self._candidate_procedure(artifact)
         observed = parse_time(reviewed_identity["updated_at"])
         if observed is None:
@@ -1684,40 +1673,71 @@ class DreamingRuntime:
         ) as temporary:
             package = Path(temporary)
             atomic_text(package / "SKILL.md", artifact["skill_markdown"])
-            procedure_path = package.parent / f".{package.name}-procedure.json"
-            observation_path = package.parent / f".{package.name}-observation.json"
-            try:
-                atomic_json(procedure_path, procedure)
-                atomic_json(observation_path, observation)
-                command = [
-                    "collect",
-                    "--procedure",
-                    str(procedure_path),
-                    "--observation",
-                    str(observation_path),
-                    "--package",
-                    str(package),
-                    "--proposed-name",
-                    artifact["skill_name"],
-                ]
-                if lifecycle_id is not None:
-                    command.extend(
-                        [
-                            "--lifecycle-id",
-                            lifecycle_id,
-                            "--match-outcome",
-                            "same",
-                            "--expected-version",
-                            str(expected_version),
-                            "--expected-record-sha256",
-                            expected_identity,
-                        ]
-                    )
-                collected = self._candidate_lifecycle_call(*command)
-            finally:
-                procedure_path.unlink(missing_ok=True)
-                observation_path.unlink(missing_ok=True)
+            return self._collect_candidate_observation(
+                artifact["skill_name"],
+                procedure,
+                observation,
+                package,
+                lifecycle_id=lifecycle_id,
+                expected_version=expected_version,
+                expected_identity=expected_identity,
+            )
 
+    def _collect_candidate_observation(
+        self,
+        proposed_name: str,
+        procedure: dict[str, Any],
+        observation: dict[str, Any],
+        package: Path,
+        *,
+        lifecycle_id: str | None = None,
+        expected_version: int | None = None,
+        expected_identity: str | None = None,
+    ) -> dict[str, Any]:
+        candidate_root = (self.paths.data / "candidates" / "v1").resolve()
+        skills_root = self.paths.skills.resolve()
+        if (
+            candidate_root == skills_root
+            or candidate_root in skills_root.parents
+            or skills_root in candidate_root.parents
+        ):
+            raise RuntimeFailure(
+                "candidate-lifecycle-failed",
+                "candidate storage must be isolated from the skill discovery root",
+            )
+        procedure_path = package.parent / f".{package.name}-procedure.json"
+        observation_path = package.parent / f".{package.name}-observation.json"
+        try:
+            atomic_json(procedure_path, procedure)
+            atomic_json(observation_path, observation)
+            command = [
+                "collect",
+                "--procedure",
+                str(procedure_path),
+                "--observation",
+                str(observation_path),
+                "--package",
+                str(package),
+                "--proposed-name",
+                proposed_name,
+            ]
+            if lifecycle_id is not None:
+                command.extend(
+                    [
+                        "--lifecycle-id",
+                        lifecycle_id,
+                        "--match-outcome",
+                        "same",
+                        "--expected-version",
+                        str(expected_version),
+                        "--expected-record-sha256",
+                        str(expected_identity),
+                    ]
+                )
+            collected = self._candidate_lifecycle_call(*command)
+        finally:
+            procedure_path.unlink(missing_ok=True)
+            observation_path.unlink(missing_ok=True)
         evaluated = self._candidate_lifecycle_call(
             "evaluate",
             collected["lifecycle_id"],
@@ -1735,6 +1755,157 @@ class DreamingRuntime:
             "shadow_only": True,
             "state": evaluated["state"],
         }
+
+    def collect_profile_candidate(
+        self,
+        receipt_path: Path,
+        profile_id: str,
+        package: Path,
+        proposed_name: str,
+    ) -> dict[str, Any]:
+        receipt = read_json(receipt_path, {})
+        receipt_sha256 = receipt.get("receipt_sha256")
+        receipt_body = {
+            key: value
+            for key, value in receipt.items()
+            if key != "receipt_sha256"
+        }
+        expected_receipt_keys = {
+            "schema_version",
+            "kind",
+            "profile_set_id",
+            "snapshot_sha256",
+            "source_revision",
+            "qualified_session_id",
+            "observed_at",
+            "executor",
+            "executor_identity",
+            "model",
+            "profiles",
+            "receipt_sha256",
+        }
+        if (
+            not isinstance(receipt, dict)
+            or set(receipt) != expected_receipt_keys
+            or receipt.get("schema_version") != 1
+            or receipt.get("kind") != "task_profile_receipt"
+            or not isinstance(receipt_sha256, str)
+            or digest(receipt_body) != receipt_sha256
+            or receipt_path.stem != receipt_sha256.removeprefix("sha256:")
+            or not isinstance(receipt.get("profiles"), list)
+        ):
+            raise RuntimeFailure(
+                "task-profile-receipt-invalid", str(receipt_path)
+            )
+        for item in receipt["profiles"]:
+            if not isinstance(item, dict):
+                raise RuntimeFailure(
+                    "task-profile-receipt-invalid", "profile shape"
+                )
+            model_profile = {
+                key: value
+                for key, value in item.items()
+                if key
+                not in {"task_key", "profile_id", "procedure_fingerprint"}
+            }
+            procedure = item.get("procedure")
+            if (
+                item.get("task_key")
+                != digest(
+                    {
+                        "qualified_session_id": receipt[
+                            "qualified_session_id"
+                        ],
+                        "source_event_ids": item.get("source_event_ids"),
+                    }
+                )
+                or item.get("profile_id")
+                != digest(
+                    {
+                        "qualified_session_id": receipt[
+                            "qualified_session_id"
+                        ],
+                        **model_profile,
+                    }
+                )
+                or item.get("procedure_fingerprint")
+                != (digest(procedure) if isinstance(procedure, dict) else None)
+            ):
+                raise RuntimeFailure(
+                    "task-profile-receipt-invalid", "profile identity"
+                )
+        if receipt.get("profile_set_id") != digest(
+            {
+                "snapshot_sha256": receipt.get("snapshot_sha256"),
+                "qualified_session_id": receipt.get(
+                    "qualified_session_id"
+                ),
+                "profiles": receipt["profiles"],
+            }
+        ):
+            raise RuntimeFailure(
+                "task-profile-receipt-invalid", "profile set identity"
+            )
+        profile = next(
+            (
+                item
+                for item in receipt["profiles"]
+                if isinstance(item, dict)
+                and item.get("profile_id") == profile_id
+            ),
+            None,
+        )
+        if (
+            profile is None
+            or profile.get("reuse_value") != "reusable-procedure"
+            or not isinstance(profile.get("procedure"), dict)
+            or not isinstance(profile.get("procedure_fingerprint"), str)
+            or not isinstance(profile.get("task_key"), str)
+            or not isinstance(profile.get("abstract_summary"), str)
+        ):
+            raise RuntimeFailure(
+                "task-profile-receipt-invalid", profile_id
+            )
+        procedure = {
+            "schema_version": 1,
+            **profile["procedure"],
+            "match_fingerprint": profile["procedure_fingerprint"],
+        }
+        observation = {
+            "task_key": profile["task_key"],
+            "session_id": receipt["qualified_session_id"],
+            "observed_at": receipt["observed_at"],
+            "independence": "verified",
+            "summary": profile["abstract_summary"],
+            "procedure_fingerprint": profile["procedure_fingerprint"],
+        }
+        listing = self._candidate_lifecycle_call("list")
+        lifecycle_id = None
+        expected_version = None
+        expected_identity = None
+        for item in listing.get("records", []):
+            record = self._candidate_lifecycle_call(
+                "read", item["lifecycle_id"]
+            )
+            if (
+                record.get("proposed_name") == proposed_name
+                and record.get("procedure") == procedure
+                and record.get("state")
+                in {"collecting", "ready_for_draft", "expired", "rejected"}
+            ):
+                lifecycle_id = record["lifecycle_id"]
+                expected_version = record["record_version"]
+                expected_identity = candidate_record_digest(record)
+                break
+        return self._collect_candidate_observation(
+            proposed_name,
+            procedure,
+            observation,
+            package,
+            lifecycle_id=lifecycle_id,
+            expected_version=expected_version,
+            expected_identity=expected_identity,
+        )
 
     def _validated_draft_review(self, result: dict[str, Any]) -> dict[str, Any]:
         if result.get("status") != "ok":
@@ -7887,6 +8058,31 @@ def profile_session(
     }
 
 
+def collect_profile_candidate(
+    receipt_path: Path,
+    profile_id: str,
+    package: Path,
+    proposed_name: str,
+) -> dict[str, Any]:
+    paths = default_paths()
+    core = DreamingRuntime(paths, [])
+    result = core.collect_profile_candidate(
+        receipt_path,
+        profile_id,
+        package,
+        proposed_name,
+    )
+    return {
+        "ok": True,
+        "runtime": "dreaming-core",
+        "command": "collect-profile-candidate",
+        "receipt": str(receipt_path),
+        "profile_id": profile_id,
+        "proposed_name": proposed_name,
+        **result,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command")
@@ -7910,6 +8106,11 @@ def build_parser() -> argparse.ArgumentParser:
     profile.add_argument("--source", required=True)
     profile.add_argument("--session", required=True)
     profile.add_argument("--executor")
+    collect_profile = subcommands.add_parser("collect-profile-candidate")
+    collect_profile.add_argument("--receipt", required=True)
+    collect_profile.add_argument("--profile-id", required=True)
+    collect_profile.add_argument("--package", required=True)
+    collect_profile.add_argument("--proposed-name", required=True)
     return parser
 
 
@@ -7957,6 +8158,13 @@ def main() -> None:
                 args.source,
                 args.session,
                 args.executor,
+            )
+        elif args.command == "collect-profile-candidate":
+            report = collect_profile_candidate(
+                Path(args.receipt),
+                args.profile_id,
+                Path(args.package),
+                args.proposed_name,
             )
         else:
             report = selftest(require_config=args.command == "doctor")
