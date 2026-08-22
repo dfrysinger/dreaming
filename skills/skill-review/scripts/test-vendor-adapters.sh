@@ -225,6 +225,72 @@ class VendorAdapterTest(unittest.TestCase):
             "malformed-executor-result",
         )
 
+    def test_review_receives_validated_task_profile_context(self):
+        snapshot_value = {
+            "identity": {
+                "qualified_session_id": "copilot:profiled-review",
+            },
+            "events": [
+                {"source_event_id": "event-1"},
+                {"source_event_id": "event-2"},
+            ],
+        }
+        snapshot = self.case / "profiled-review-snapshot.json"
+        snapshot.write_text(json.dumps(snapshot_value))
+        profile = {
+            "source_event_ids": ["event-1", "event-2"],
+            "task_type": "document-reusable-procedure",
+            "abstract_summary": "Turn completed work into a reusable procedure.",
+            "reuse_value": "reusable-procedure",
+            "procedure": {
+                "trigger": "A completed task contains a reusable procedure.",
+                "outcome": "The procedure is captured for reuse.",
+                "actions": ["Identify the task.", "Capture the procedure."],
+                "exclusions": ["Do not copy source-specific details."],
+            },
+            "confidence": "high",
+            "sensitive_source": False,
+            "task_state": "completed",
+            "task_key": "sha256:" + "1" * 64,
+            "profile_id": "sha256:" + "2" * 64,
+            "procedure_fingerprint": "sha256:" + "3" * 64,
+        }
+        receipt_body = {
+            "kind": "task_profile_receipt",
+            "snapshot_sha256": vendor_module.sha(snapshot_value),
+            "qualified_session_id": "copilot:profiled-review",
+            "profile_set_id": "sha256:" + "4" * 64,
+            "profiles": [profile],
+        }
+        receipt = {
+            **receipt_body,
+            "receipt_sha256": vendor_module.sha(receipt_body),
+        }
+        receipt_path = self.case / "profile-receipt.json"
+        receipt_path.write_text(json.dumps(receipt))
+        self.run_adapter(
+            "copilot",
+            "review-executor",
+            "run",
+            "--snapshot",
+            snapshot,
+            "--result",
+            self.case / "profiled-review-result.json",
+            "--task-profile-receipt",
+            receipt_path,
+        )
+        invocations = [
+            json.loads(line)
+            for line in Path(self.env["FAKE_CLI_LOG"]).read_text().splitlines()
+        ]
+        prompt_args = invocations[-1]["args"]
+        prompt = json.loads(prompt_args[prompt_args.index("-p") + 1])
+        context = prompt["task_profile_context"]
+        self.assertEqual(
+            context["receipt_sha256"], receipt["receipt_sha256"]
+        )
+        self.assertEqual(context["profiles"], [profile])
+
     def _write_sources(self):
         copilot = self.case / "copilot/session"
         copilot.mkdir(parents=True)

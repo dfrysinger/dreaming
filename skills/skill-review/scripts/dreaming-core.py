@@ -2735,6 +2735,11 @@ class DreamingRuntime:
                     / f"{result_name}-{hashlib.sha256(current['source_revision'].encode()).hexdigest()}-{executor_name}.json"
                 )
                 result_path.parent.mkdir(parents=True, exist_ok=True)
+                task_profile_receipt = self.task_profile_receipt_for(
+                    qualified_session_id,
+                    reviewed_identity["source_revision"],
+                    executor_id,
+                )
                 self._write_transaction(
                     qualified_session_id,
                     reviewed_identity["source_revision"],
@@ -2748,8 +2753,19 @@ class DreamingRuntime:
                     },
                 )
                 try:
+                    run_arguments: dict[str, Any] = {
+                        "snapshot": snapshot_path,
+                        "result": result_path,
+                    }
+                    if (
+                        task_profile_receipt is not None
+                        and executor.supports(TASK_PROFILE_CAPABILITY)
+                    ):
+                        run_arguments["task_profile_receipt"] = (
+                            task_profile_receipt
+                        )
                     result = executor.call(
-                        "run", snapshot=snapshot_path, result=result_path
+                        "run", **run_arguments
                     )
                 except RuntimeFailure:
                     self._clear_transaction(
@@ -2775,11 +2791,6 @@ class DreamingRuntime:
                     result,
                     snapshot_path,
                     reviewed_identity,
-                )
-                task_profile_receipt = self.task_profile_receipt_for(
-                    qualified_session_id,
-                    reviewed_identity["source_revision"],
-                    executor_id,
                 )
                 result = self._apply_autonomous_admission_policy(
                     result,
@@ -7556,6 +7567,33 @@ def configured_runtime_settings(config: dict[str, Any]) -> dict[str, Any]:
     return settings
 
 
+def configured_runtime(
+    paths: RuntimePaths,
+    routes: Iterable[tuple[str, str]],
+    config: dict[str, Any],
+    *,
+    parent_run_id: str | None = None,
+) -> DreamingRuntime:
+    settings = configured_runtime_settings(config)
+    return DreamingRuntime(
+        paths,
+        routes,
+        policy_version=settings["policy_version"],
+        overlap_seconds=settings["overlap_seconds"],
+        quiet_retry_seconds=settings["quiet_retry_seconds"],
+        max_snapshot_bytes=settings["max_snapshot_bytes"],
+        max_events=settings["max_events"],
+        max_field_bytes=settings["max_field_bytes"],
+        max_autonomous_session_age_days=settings[
+            "max_autonomous_session_age_days"
+        ],
+        allow_autonomous_skill_creation=settings[
+            "allow_autonomous_skill_creation"
+        ],
+        parent_run_id=parent_run_id,
+    )
+
+
 def configured_estate_census(config: dict[str, Any]) -> dict[str, Any] | None:
     entry = config.get("estate_census")
     if entry is None:
@@ -7711,22 +7749,11 @@ def scheduled_run() -> dict[str, Any]:
     sources = adapters["session-source"]
     executors = adapters["review-executor"]
     settings = configured_runtime_settings(config)
-    core = DreamingRuntime(
+    core = configured_runtime(
         paths,
         routes,
-        policy_version=settings["policy_version"],
-        overlap_seconds=settings["overlap_seconds"],
-        quiet_retry_seconds=settings["quiet_retry_seconds"],
-        max_snapshot_bytes=settings["max_snapshot_bytes"],
-        max_events=settings["max_events"],
-        max_field_bytes=settings["max_field_bytes"],
-        max_autonomous_session_age_days=settings[
-            "max_autonomous_session_age_days"
-        ],
-        allow_autonomous_skill_creation=settings[
-            "allow_autonomous_skill_creation"
-        ],
         parent_run_id=os.environ.get("DREAMING_PARENT_RUN_ID") or None,
+        config=config,
     )
     legacy_ledger = config.get("legacy_ledger_path") or os.environ.get(
         "DREAMING_LEGACY_LEDGER"
@@ -8439,7 +8466,7 @@ def enqueue_session(source_name: str, qualified_session_id: str) -> dict[str, An
     if source is None:
         raise RuntimeFailure("source-not-configured", source_name)
     routes = configured_routes(config)
-    core = DreamingRuntime(paths, routes)
+    core = configured_runtime(paths, routes, config)
     session = source.call("inspect", session=qualified_session_id)["session"]
     validate_identity(session, source_name)
     admission = core._admit(session)
@@ -8497,7 +8524,7 @@ def profile_session(
         ]
         code = relevant[0]["code"] if relevant else "executor-not-configured"
         raise RuntimeFailure(str(code), executor_name)
-    core = DreamingRuntime(paths, routes)
+    core = configured_runtime(paths, routes, config)
     result = core.profile(
         source_name,
         source,

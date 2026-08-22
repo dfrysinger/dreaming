@@ -1829,7 +1829,10 @@ def task_profile_prompt(snapshot: dict[str, Any]) -> str:
     return json.dumps(packet, sort_keys=True)
 
 
-def review_prompt(snapshot: dict[str, Any]) -> str:
+def review_prompt(
+    snapshot: dict[str, Any],
+    task_profile_context: dict[str, Any] | None = None,
+) -> str:
     if snapshot.get("packet_kind") == "draft_review":
         return json.dumps(
             {
@@ -1865,7 +1868,11 @@ def review_prompt(snapshot: dict[str, Any]) -> str:
             "into an unsupported atomicity or recovery claim."
             " For skill and support-file outcomes, cite the exact supporting "
             "snapshot source_event_id values in evidence_event_ids. For every "
-            "other outcome, return an empty evidence_event_ids array."
+            "other outcome, return an empty evidence_event_ids array. When "
+            "task_profile_context is present, it is candidate-blind semantic "
+            "evidence already validated against this exact snapshot. Use it to "
+            "understand the reusable task and procedure before routing; do not "
+            "require the profile itself to prove independent recurrence."
         ),
         "policy": {
             "reuse_order": [
@@ -1886,6 +1893,11 @@ def review_prompt(snapshot: dict[str, Any]) -> str:
         "result_schema": review_result_schema(),
         "context": review_context(),
         "snapshot": snapshot,
+        **(
+            {"task_profile_context": task_profile_context}
+            if task_profile_context is not None
+            else {}
+        ),
     }
     return json.dumps(packet, sort_keys=True)
 
@@ -1941,7 +1953,52 @@ def executor_run(args: argparse.Namespace) -> None:
     ):
         raise AdapterError("snapshot-invalid", args.snapshot)
     binary = selected_executable(args.vendor, args.binary)
-    prompt = task_profile_prompt(snapshot) if profile_mode else review_prompt(snapshot)
+    task_profile_context = None
+    if not profile_mode and args.task_profile_receipt:
+        receipt = load_json(Path(args.task_profile_receipt))
+        if not isinstance(receipt, dict):
+            raise AdapterError(
+                "task-profile-receipt-invalid",
+                args.task_profile_receipt,
+            )
+        receipt_sha256 = receipt.get("receipt_sha256")
+        receipt_body = {
+            key: value
+            for key, value in receipt.items()
+            if key != "receipt_sha256"
+        }
+        identity = snapshot.get("identity")
+        profiles = receipt.get("profiles")
+        if (
+            receipt.get("kind") != "task_profile_receipt"
+            or not isinstance(receipt_sha256, str)
+            or sha(receipt_body) != receipt_sha256
+            or receipt.get("snapshot_sha256") != sha(snapshot)
+            or not isinstance(identity, dict)
+            or receipt.get("qualified_session_id")
+            != identity.get("qualified_session_id")
+            or not isinstance(profiles, list)
+        ):
+            raise AdapterError(
+                "task-profile-receipt-invalid",
+                args.task_profile_receipt,
+            )
+        reusable_profiles = [
+            profile
+            for profile in profiles
+            if isinstance(profile, dict)
+            and profile.get("reuse_value") == "reusable-procedure"
+        ]
+        task_profile_context = {
+            "receipt_sha256": receipt_sha256,
+            "profile_set_id": receipt.get("profile_set_id"),
+            "profiles": reusable_profiles,
+        }
+    prompt = (
+        task_profile_prompt(snapshot)
+        if profile_mode
+        else review_prompt(snapshot, task_profile_context)
+    )
     with tempfile.TemporaryDirectory(prefix=f"dreaming-{args.vendor}-") as work:
         work_path = Path(work).resolve()
         environment = executor_environment(args.vendor, work_path, binary)
@@ -6002,6 +6059,7 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--harness")
     run.add_argument("--catalog")
     run.add_argument("--mode", choices=("review", "profile"), default="review")
+    run.add_argument("--task-profile-receipt")
     prepare = sub.add_parser("prepare")
     prepare.add_argument("--trial", required=True)
     normalize = sub.add_parser("normalize")

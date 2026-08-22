@@ -937,6 +937,21 @@
   supplying bounded same-revision profile context before reviewer routing and
   rerunning this exact session. No installed, dashboard, or evaluation work is
   justified before that boundary is effective.
+- The bounded same-revision profile handoff is now effective. Core resolves the
+  managed profile receipt before review, profile-capable executors receive it
+  as optional context, and the vendor boundary revalidates its content address,
+  exact snapshot, and qualified session before including reusable procedures
+  in the reviewer prompt. Manual profile, enqueue, and scheduled commands also
+  share configured runtime construction, preventing policy-version drift in
+  snapshot identity. A fresh model attempt under policy version 2 was retained
+  as a strict `task profile event order` refusal; the proof therefore replayed
+  the prior real model profile through a labelled private adapter seam rather
+  than weakening canonical evidence ordering. The production reviewer then
+  explicitly recognized the reusable digest procedure and existing umbrella
+  skill, and correctly discarded mutation because one historical session does
+  not establish independent recurrence. This proves the reviewer/profile
+  boundary; candidate creation now waits for a genuinely independent matching
+  digest observation.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now

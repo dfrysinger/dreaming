@@ -264,6 +264,20 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
             emit({"ok": True, **result})
         if "events" not in snapshot:
             fail("snapshot-invalid", args.snapshot)
+        if state.get("require_task_profile_context"):
+            if not args.task_profile_receipt:
+                fail("task-profile-receipt-required", args.adapter_id)
+            receipt = load(Path(args.task_profile_receipt), {})
+            if (
+                receipt.get("kind") != "task_profile_receipt"
+                or receipt.get("snapshot_sha256") != digest(snapshot)
+                or not any(
+                    isinstance(profile, dict)
+                    and profile.get("reuse_value") == "reusable-procedure"
+                    for profile in receipt.get("profiles", [])
+                )
+            ):
+                fail("task-profile-receipt-invalid", args.adapter_id)
         mutate_fixture = state.get("mutate_source_fixture")
         if mutate_fixture:
             source_fixture = Path(mutate_fixture)
@@ -376,6 +390,7 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--snapshot", required=True)
     run.add_argument("--result", required=True)
     run.add_argument("--mode", choices=("review", "profile"), default="review")
+    run.add_argument("--task-profile-receipt")
     install = sub.add_parser("install")
     install.add_argument("--bundle", required=True)
     install.add_argument("--bundle-id", required=True)

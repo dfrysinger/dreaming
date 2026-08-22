@@ -2262,6 +2262,7 @@ class RuntimeTest(unittest.TestCase):
             "mixed-profile-adapters.json",
             {
                 "contract_version": 1,
+                "policy_version": 7,
                 "routes": [
                     "fake>alpha-legacy",
                     "fake>zeta-profiler",
@@ -2327,6 +2328,18 @@ class RuntimeTest(unittest.TestCase):
             Path(json.loads(result.stdout)["receipt"]).read_text()
         )
         self.assertEqual(receipt["executor"], "zeta-profiler")
+        snapshot = json.loads(
+            (
+                self.case
+                / "mixed-data"
+                / "snapshots"
+                / (
+                    receipt["snapshot_sha256"].removeprefix("sha256:")
+                    + ".json"
+                )
+            ).read_text()
+        )
+        self.assertEqual(snapshot["route"]["policy_version"], 7)
 
     def test_support_file_paths_are_canonical_nonconflicting_files(self) -> None:
         core = self.core(set())
@@ -3206,6 +3219,7 @@ elif sys.argv[1] == "run":
                 "terminal_route": "skill",
                 "summary": "A reusable fixture procedure was demonstrated",
                 "routing_reason": "The procedure has ordered reusable steps",
+                "require_task_profile_context": True,
                 "task_profiles": [
                     {
                         "source_event_ids": ["one-event-1"],
