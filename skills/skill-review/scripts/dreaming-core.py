@@ -41,6 +41,10 @@ from remote_subject_policy import (
     load_content_policy,
     validate_text,
 )
+from task_profile_receipt import (
+    TaskProfileReceiptError,
+    validate_task_profile_receipt,
+)
 
 CONTRACT_VERSION = 1
 TASK_PROFILE_CAPABILITY = "task-profile-v1"
@@ -1626,11 +1630,6 @@ class DreamingRuntime:
                     "task-profile-index-invalid",
                     str(self.paths.task_profile_index),
                 )
-            existing = index.get(profile_key)
-            if existing is not None and existing != entry:
-                raise RuntimeFailure(
-                    "task-profile-index-collision", profile_key
-                )
             index[profile_key] = entry
             self._write(self.paths.task_profile_index, index)
         return {
@@ -1646,6 +1645,9 @@ class DreamingRuntime:
         qualified_session_id: str,
         source_revision: str,
         executor_id: str,
+        *,
+        snapshot_path: Path | None = None,
+        executor_identity: dict[str, Any] | None = None,
     ) -> Path | None:
         index = self._state(self.paths.task_profile_index, {})
         if not isinstance(index, dict):
@@ -1735,6 +1737,27 @@ class DreamingRuntime:
             raise RuntimeFailure(
                 "task-profile-index-invalid", profile_key
             )
+        if snapshot_path is not None:
+            if executor_identity is None:
+                raise RuntimeFailure(
+                    "task-profile-index-invalid", "executor identity required"
+                )
+            snapshot = read_json(snapshot_path, {})
+            try:
+                validate_task_profile_receipt(
+                    receipt,
+                    snapshot,
+                    receipt_path=receipt_path,
+                    expected_executor=executor_id,
+                    expected_executor_identity=executor_identity,
+                )
+            except TaskProfileReceiptError as error:
+                if error.reason == "snapshot-sha256":
+                    return None
+                raise RuntimeFailure(
+                    "task-profile-index-invalid",
+                    f"{profile_key}: {error.reason}",
+                ) from error
         return receipt_path
 
     def _matching_task_profile(
@@ -2735,10 +2758,22 @@ class DreamingRuntime:
                     / f"{result_name}-{hashlib.sha256(current['source_revision'].encode()).hexdigest()}-{executor_name}.json"
                 )
                 result_path.parent.mkdir(parents=True, exist_ok=True)
-                task_profile_receipt = self.task_profile_receipt_for(
-                    qualified_session_id,
-                    reviewed_identity["source_revision"],
-                    executor_id,
+                profile_capable = executor.supports(TASK_PROFILE_CAPABILITY)
+                task_profile_receipt = (
+                    self.task_profile_receipt_for(
+                        qualified_session_id,
+                        reviewed_identity["source_revision"],
+                        executor_id,
+                        snapshot_path=snapshot_path,
+                        executor_identity=executor.identity,
+                    )
+                    if profile_capable
+                    else None
+                )
+                task_profile_delivery = (
+                    "delivered"
+                    if task_profile_receipt is not None
+                    else "unavailable" if profile_capable else "unsupported"
                 )
                 self._write_transaction(
                     qualified_session_id,
@@ -2750,23 +2785,33 @@ class DreamingRuntime:
                         "executor": executor_id,
                         "result_path": str(result_path),
                         "started_at": attempt_started_at,
+                        "task_profile_delivery": task_profile_delivery,
+                        **(
+                            {
+                                "task_profile_receipt_sha256": (
+                                    "sha256:" + task_profile_receipt.stem
+                                )
+                            }
+                            if task_profile_receipt is not None
+                            else {}
+                        ),
                     },
                 )
                 try:
-                    run_arguments: dict[str, Any] = {
-                        "snapshot": snapshot_path,
-                        "result": result_path,
-                    }
-                    if (
-                        task_profile_receipt is not None
-                        and executor.supports(TASK_PROFILE_CAPABILITY)
-                    ):
-                        run_arguments["task_profile_receipt"] = (
-                            task_profile_receipt
+                    if task_profile_receipt is None:
+                        result = executor.call(
+                            "run",
+                            snapshot=snapshot_path,
+                            result=result_path,
                         )
-                    result = executor.call(
-                        "run", **run_arguments
-                    )
+                    else:
+                        result = executor.call(
+                            "run",
+                            snapshot=snapshot_path,
+                            result=result_path,
+                            task_profile_receipt=task_profile_receipt,
+                            task_profile_executor=executor_id,
+                        )
                 except RuntimeFailure:
                     self._clear_transaction(
                         qualified_session_id,
@@ -2807,6 +2852,16 @@ class DreamingRuntime:
                     "terminal_route": result.get("terminal_route"),
                     "mutation_started": False,
                     "started_at": attempt_started_at,
+                    "task_profile_delivery": task_profile_delivery,
+                    **(
+                        {
+                            "task_profile_receipt_sha256": (
+                                "sha256:" + task_profile_receipt.stem
+                            )
+                        }
+                        if task_profile_receipt is not None
+                        else {}
+                    ),
                     **(
                         {"parent_run_id": self.parent_run_id}
                         if self.parent_run_id
@@ -7511,20 +7566,30 @@ def configured_routes(config: dict[str, Any]) -> set[tuple[str, str]]:
     return routes
 
 
-def configured_runtime_settings(config: dict[str, Any]) -> dict[str, Any]:
-    defaults = {
+def configured_runtime_settings(
+    config: dict[str, Any],
+    *,
+    include_scheduler: bool = True,
+) -> dict[str, Any]:
+    runtime_defaults = {
         "policy_version": 2,
         "overlap_seconds": 300,
         "quiet_retry_seconds": 300,
-        "page_size": 100,
-        "max_pages_per_run": 100,
-        "max_reviews_per_run": 25,
-        "max_profiles_per_run": 100,
         "max_snapshot_bytes": 100_000,
         "max_events": 2_000,
         "max_field_bytes": 64_000,
         "max_autonomous_session_age_days": 30,
         "allow_autonomous_skill_creation": False,
+    }
+    scheduler_defaults = {
+        "page_size": 100,
+        "max_pages_per_run": 100,
+        "max_reviews_per_run": 25,
+        "max_profiles_per_run": 100,
+    }
+    defaults = {
+        **runtime_defaults,
+        **(scheduler_defaults if include_scheduler else {}),
     }
     settings: dict[str, Any] = {}
     for name, default in defaults.items():
@@ -7574,7 +7639,7 @@ def configured_runtime(
     *,
     parent_run_id: str | None = None,
 ) -> DreamingRuntime:
-    settings = configured_runtime_settings(config)
+    settings = configured_runtime_settings(config, include_scheduler=False)
     return DreamingRuntime(
         paths,
         routes,
@@ -8241,12 +8306,27 @@ def scheduled_run() -> dict[str, Any]:
             )
             continue
         try:
-            if core.task_profile_receipt_for(
+            existing_receipt = core.task_profile_receipt_for(
                 item["qualified_session_id"],
                 item["source_revision"],
                 executor_name,
-            ) is not None:
-                continue
+            )
+            if existing_receipt is not None:
+                snapshot_path, _reviewed_identity = core.render_snapshot(
+                    source_name,
+                    source,
+                    executor_name,
+                    item["qualified_session_id"],
+                )
+                existing_receipt = core.task_profile_receipt_for(
+                    item["qualified_session_id"],
+                    item["source_revision"],
+                    executor_name,
+                    snapshot_path=snapshot_path,
+                    executor_identity=executors[executor_name].identity,
+                )
+                if existing_receipt is not None:
+                    continue
             if profile_attempts >= settings["max_profiles_per_run"]:
                 report["deferred_profiles"] += 1
                 continue

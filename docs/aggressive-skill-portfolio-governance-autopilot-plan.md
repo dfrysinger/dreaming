@@ -952,6 +952,20 @@
   not establish independent recurrence. This proves the reviewer/profile
   boundary; candidate creation now waits for a genuinely independent matching
   digest observation.
+- Adversarial review of immutable diff `7cda1a1..3e586f2` is closed: 27 of 30
+  deduplicated findings were confirmed. The successor hardening centralizes
+  full receipt validation at consuming boundaries, refreshes stale
+  same-revision receipts when snapshot policy changes, binds delivery to the
+  exact executor contract, omits profile arguments for legacy executors,
+  records delivery status and receipt identity per attempt, and keeps manual
+  commands independent of scheduler-only limits. Fifty-eight focused core
+  checks and 31 vendor-adapter checks pass. The exact private production
+  reviewer tracer retained a fresh executor-bound receipt, but its model rerun
+  is currently blocked by expired attended Copilot authentication; the prior
+  successful model result remains historical evidence rather than being
+  relabeled as current proof. No fallback executor is claimed to receive
+  another executor's receipt: each executor may consume only its own matching
+  receipt, otherwise it runs without profile context.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now

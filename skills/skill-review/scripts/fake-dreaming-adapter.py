@@ -278,6 +278,8 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                 )
             ):
                 fail("task-profile-receipt-invalid", args.adapter_id)
+        if state.get("reject_task_profile_receipt") and args.task_profile_receipt:
+            fail("unexpected-task-profile-receipt", args.adapter_id)
         mutate_fixture = state.get("mutate_source_fixture")
         if mutate_fixture:
             source_fixture = Path(mutate_fixture)
@@ -391,6 +393,7 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--result", required=True)
     run.add_argument("--mode", choices=("review", "profile"), default="review")
     run.add_argument("--task-profile-receipt")
+    run.add_argument("--task-profile-executor")
     install = sub.add_parser("install")
     install.add_argument("--bundle", required=True)
     install.add_argument("--bundle-id", required=True)

@@ -305,7 +305,7 @@ history.
 
 ## Definition of Done
 
-- [ ] The MacBook Pro and Mac mini topology is named consistently.
+- [x] The MacBook Pro and Mac mini topology is named consistently.
 - [x] Task profiling reuses the existing authenticated session-source snapshot
       path and creates no second transcript transport.
 - [x] An LLM, without skill-library context, identifies task opportunities and

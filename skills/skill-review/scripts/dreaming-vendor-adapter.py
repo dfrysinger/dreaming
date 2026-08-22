@@ -23,6 +23,15 @@ import unicodedata
 from pathlib import Path
 from typing import Any, Iterable
 
+SCRIPT_DIR = str(Path(__file__).resolve().parent)
+if SCRIPT_DIR not in sys.path:
+    sys.path.insert(0, SCRIPT_DIR)
+
+from task_profile_receipt import (
+    TaskProfileReceiptError,
+    validate_task_profile_receipt,
+)
+
 PROTOCOLS = {
     "session-source": (
         "dreaming.session-source",
@@ -1807,7 +1816,7 @@ def task_profile_result_schema() -> dict[str, Any]:
 
 
 def task_profile_prompt(snapshot: dict[str, Any]) -> str:
-    packet = {
+    packet: dict[str, Any] = {
         "task": (
             "Identify the distinct user tasks in this bounded normalized session "
             "and profile whether each contains a reusable procedure. You are "
@@ -1893,12 +1902,9 @@ def review_prompt(
         "result_schema": review_result_schema(),
         "context": review_context(),
         "snapshot": snapshot,
-        **(
-            {"task_profile_context": task_profile_context}
-            if task_profile_context is not None
-            else {}
-        ),
     }
+    if task_profile_context is not None:
+        packet["task_profile_context"] = task_profile_context
     return json.dumps(packet, sort_keys=True)
 
 
@@ -1955,45 +1961,40 @@ def executor_run(args: argparse.Namespace) -> None:
     binary = selected_executable(args.vendor, args.binary)
     task_profile_context = None
     if not profile_mode and args.task_profile_receipt:
-        receipt = load_json(Path(args.task_profile_receipt))
-        if not isinstance(receipt, dict):
-            raise AdapterError(
-                "task-profile-receipt-invalid",
-                args.task_profile_receipt,
-            )
-        receipt_sha256 = receipt.get("receipt_sha256")
-        receipt_body = {
-            key: value
-            for key, value in receipt.items()
-            if key != "receipt_sha256"
-        }
-        identity = snapshot.get("identity")
-        profiles = receipt.get("profiles")
+        receipt_path = Path(args.task_profile_receipt)
         if (
-            receipt.get("kind") != "task_profile_receipt"
-            or not isinstance(receipt_sha256, str)
-            or sha(receipt_body) != receipt_sha256
-            or receipt.get("snapshot_sha256") != sha(snapshot)
-            or not isinstance(identity, dict)
-            or receipt.get("qualified_session_id")
-            != identity.get("qualified_session_id")
-            or not isinstance(profiles, list)
+            not args.task_profile_executor
+            or receipt_path.is_symlink()
+            or not receipt_path.is_file()
         ):
             raise AdapterError(
                 "task-profile-receipt-invalid",
-                args.task_profile_receipt,
+                f"{args.task_profile_receipt}: receipt-path",
             )
-        reusable_profiles = [
-            profile
-            for profile in profiles
-            if isinstance(profile, dict)
-            and profile.get("reuse_value") == "reusable-procedure"
-        ]
-        task_profile_context = {
-            "receipt_sha256": receipt_sha256,
-            "profile_set_id": receipt.get("profile_set_id"),
-            "profiles": reusable_profiles,
+        receipt = load_json(receipt_path)
+        protocol, capabilities = PROTOCOLS["review-executor"]
+        executor_identity = {
+            "ok": True,
+            "protocol": protocol,
+            "version": 1,
+            "adapter_id": args.vendor,
+            "capabilities": capabilities,
         }
+        try:
+            validated_context = validate_task_profile_receipt(
+                receipt,
+                snapshot,
+                receipt_path=receipt_path,
+                expected_executor=args.task_profile_executor,
+                expected_executor_identity=executor_identity,
+            )
+        except TaskProfileReceiptError as error:
+            raise AdapterError(
+                "task-profile-receipt-invalid",
+                f"{args.task_profile_receipt}: {error.reason}",
+            ) from error
+        if validated_context["profiles"]:
+            task_profile_context = validated_context
     prompt = (
         task_profile_prompt(snapshot)
         if profile_mode
@@ -6060,6 +6061,7 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--catalog")
     run.add_argument("--mode", choices=("review", "profile"), default="review")
     run.add_argument("--task-profile-receipt")
+    run.add_argument("--task-profile-executor")
     prepare = sub.add_parser("prepare")
     prepare.add_argument("--trial", required=True)
     normalize = sub.add_parser("normalize")

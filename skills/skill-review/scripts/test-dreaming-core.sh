@@ -2169,6 +2169,121 @@ class RuntimeTest(unittest.TestCase):
                 {"max_profiles_per_run": 501}
             )
 
+    def test_manual_runtime_ignores_scheduler_only_limits(self) -> None:
+        runtime = runtime_module.configured_runtime(
+            self.paths,
+            {("fake", "executor")},
+            {
+                "policy_version": 7,
+                "max_reviews_per_run": 26,
+                "max_profiles_per_run": 501,
+            },
+        )
+        self.assertEqual(runtime.policy_version, 7)
+        with self.assertRaisesRegex(RuntimeFailure, "max_reviews_per_run"):
+            runtime_module.configured_runtime_settings(
+                {"max_reviews_per_run": 26}
+            )
+
+    def test_stale_task_profile_receipt_is_replaced(self) -> None:
+        source_fixture = self.source_fixture([self.session("one", 1)])
+        executor_fixture = self.write("profile-refresh-executor.json", {})
+        source = self.adapter("session-source", "fake", source_fixture)
+        executor = self.adapter(
+            "review-executor", "profile-refresh-executor", executor_fixture
+        )
+        first_core = DreamingRuntime(
+            self.paths,
+            {("fake", "profile-refresh-executor")},
+            policy_version=2,
+            now=lambda: self.clock,
+        )
+        first = first_core.profile(
+            "fake",
+            source,
+            "fake:one",
+            "profile-refresh-executor",
+            executor,
+        )
+        refreshed_core = DreamingRuntime(
+            self.paths,
+            {("fake", "profile-refresh-executor")},
+            policy_version=7,
+            now=lambda: self.clock,
+        )
+        snapshot_path, identity = refreshed_core.render_snapshot(
+            "fake",
+            source,
+            "profile-refresh-executor",
+            "fake:one",
+        )
+        self.assertIsNone(
+            refreshed_core.task_profile_receipt_for(
+                "fake:one",
+                identity["source_revision"],
+                "profile-refresh-executor",
+                snapshot_path=snapshot_path,
+                executor_identity=executor.identity,
+            )
+        )
+        refreshed = refreshed_core.profile(
+            "fake",
+            source,
+            "fake:one",
+            "profile-refresh-executor",
+            executor,
+        )
+        self.assertNotEqual(
+            refreshed["receipt_sha256"], first["receipt_sha256"]
+        )
+        self.assertEqual(
+            refreshed_core.task_profile_receipt_for(
+                "fake:one",
+                identity["source_revision"],
+                "profile-refresh-executor",
+                snapshot_path=snapshot_path,
+                executor_identity=executor.identity,
+            ),
+            Path(refreshed["receipt"]),
+        )
+
+    def test_legacy_executor_is_not_given_indexed_profile_receipt(self) -> None:
+        source_fixture = self.source_fixture([self.session("one", 1)])
+        executor_fixture = self.write("capability-change-executor.json", {})
+        source = self.adapter("session-source", "fake", source_fixture)
+        capable = self.adapter(
+            "review-executor", "capability-change-executor", executor_fixture
+        )
+        core = self.core({("fake", "capability-change-executor")})
+        core.profile(
+            "fake",
+            source,
+            "fake:one",
+            "capability-change-executor",
+            capable,
+        )
+        fixture = json.loads(executor_fixture.read_text())
+        fixture["capabilities"] = [
+            "source-blind",
+            "mutation-fence",
+            "completion-sentinel",
+        ]
+        fixture["reject_task_profile_receipt"] = True
+        executor_fixture.write_text(json.dumps(fixture))
+        legacy = self.adapter(
+            "review-executor", "capability-change-executor", executor_fixture
+        )
+        result = core.review(
+            "fake",
+            source,
+            "fake:one",
+            [("capability-change-executor", legacy)],
+        )
+        self.assertEqual(result["status"], "accepted")
+        attempt = json.loads(self.paths.attempts.read_text())[-1]
+        self.assertEqual(attempt["task_profile_delivery"], "unsupported")
+        self.assertNotIn("task_profile_receipt_sha256", attempt)
+
     def test_legacy_review_executor_is_not_used_for_profiling(self) -> None:
         source_fixture = self.source_fixture([self.session("one", 1)])
         executor_fixture = self.write(
