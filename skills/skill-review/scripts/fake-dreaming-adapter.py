@@ -27,7 +27,7 @@ ROLE_PROTOCOLS = {
             "source-blind",
             "mutation-fence",
             "completion-sentinel",
-            "task-profile-v1",
+            "task-profile-v2",
         ],
     ),
     "skill-publisher": (

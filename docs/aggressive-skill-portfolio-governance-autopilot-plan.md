@@ -912,7 +912,7 @@
   requires exact ordered review/profile evidence, isolates candidate staging
   and sidecars, retries and backfills reviewed rows under the independent
   profile cap, serializes profile-index updates, and negotiates profile mode
-  through optional `task-profile-v1` capability while preserving legacy review
+  through optional `task-profile-v2` capability while preserving legacy review
   executors. Genuine second-session recurrence replaces the fabricated fixture;
   hostile executor, tampered receipt, unmanaged receipt, profile deferral,
   backfill, and match-diagnostic coverage is retained. Fifty-three core checks
@@ -953,19 +953,28 @@
   boundary; candidate creation now waits for a genuinely independent matching
   digest observation.
 - Adversarial review of immutable diff `7cda1a1..3e586f2` is closed: 27 of 30
-  deduplicated findings were confirmed. The successor hardening centralizes
-  full receipt validation at consuming boundaries, refreshes stale
-  same-revision receipts when snapshot policy changes, binds delivery to the
-  exact executor contract, omits profile arguments for legacy executors,
-  records delivery status and receipt identity per attempt, and keeps manual
-  commands independent of scheduler-only limits. Fifty-eight focused core
-  checks and 31 vendor-adapter checks pass. The exact private production
-  reviewer tracer retained a fresh executor-bound receipt, but its model rerun
-  is currently blocked by expired attended Copilot authentication; the prior
-  successful model result remains historical evidence rather than being
-  relabeled as current proof. No fallback executor is claimed to receive
-  another executor's receipt: each executor may consume only its own matching
-  receipt, otherwise it runs without profile context.
+  deduplicated findings were confirmed. The finding-level report is retained at
+  `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/profile-review-dcr-3e586f2/REPORT.md`.
+  Successor review of `3e586f2..1a35e25` is also closed: 33 of 35 candidates
+  were confirmed and two were rejected, with the exact candidate judgments at
+  `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/profile-fix-dcr-1a35e25/`.
+  The current successor fix uses one shared profile-contract validator when
+  minting and consuming delivery receipts; the managed-candidate store retains
+  its separate store-ownership checks. Executor identity or snapshot drift
+  makes a receipt refreshable, while malformed receipt/index metadata remains
+  fail-closed. Only `task-profile-v2` executors receive the paired receipt and
+  executor arguments; legacy executors receive neither. Every retained attempt
+  records delivery status, including failures, and records receipt identity
+  whenever one was selected. Scheduler receipt revalidation is limited to
+  queued work and consumes the independent profile budget before remote render
+  calls. Fifty-nine focused core checks and 33 vendor-adapter checks pass. The
+  exact private production reviewer tracer retained a fresh executor-bound
+  receipt, but its model rerun is currently blocked by expired attended
+  Copilot authentication; the prior successful model result remains historical
+  evidence rather than being relabeled as current proof.
+- The run's single hourly charter re-brief is active as schedule `#5`. Keep it
+  live through recurrence, evaluation, installed proof, rollback, and restore;
+  stop it only when the task-opportunity Definition of Done is complete.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now

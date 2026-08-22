@@ -2141,7 +2141,7 @@ class RuntimeTest(unittest.TestCase):
             )
         self.assertEqual(
             observed,
-            [(20, 32, 25, 27), (20, 12, 25, 2), (12, 0, 2, 0)],
+            [(20, 32, 25, 27), (20, 7, 25, 2), (2, 0, 2, 0)],
         )
         ledger = json.loads(
             (Path(environment["DREAMING_STATE_DIR"]) / "review-ledger.json").read_text()
@@ -2245,6 +2245,65 @@ class RuntimeTest(unittest.TestCase):
                 executor_identity=executor.identity,
             ),
             Path(refreshed["receipt"]),
+        )
+        with self.assertRaisesRegex(
+            RuntimeFailure, "task-profile-binding-invalid"
+        ):
+            refreshed_core.task_profile_receipt_for(
+                "fake:one",
+                identity["source_revision"],
+                "profile-refresh-executor",
+                snapshot_path=snapshot_path,
+            )
+
+    def test_executor_identity_drift_refreshes_task_profile_receipt(self) -> None:
+        source_fixture = self.source_fixture([self.session("one", 1)])
+        executor_fixture = self.write("profile-identity-refresh.json", {})
+        source = self.adapter("session-source", "fake", source_fixture)
+        executor = self.adapter(
+            "review-executor", "profile-identity-refresh", executor_fixture
+        )
+        core = self.core({("fake", "profile-identity-refresh")})
+        first = core.profile(
+            "fake",
+            source,
+            "fake:one",
+            "profile-identity-refresh",
+            executor,
+        )
+        fixture = json.loads(executor_fixture.read_text())
+        fixture["capabilities"] = [
+            *executor.identity["capabilities"],
+            "new-compatible-capability",
+        ]
+        executor_fixture.write_text(json.dumps(fixture))
+        upgraded = self.adapter(
+            "review-executor", "profile-identity-refresh", executor_fixture
+        )
+        snapshot_path, identity = core.render_snapshot(
+            "fake",
+            source,
+            "profile-identity-refresh",
+            "fake:one",
+        )
+        self.assertIsNone(
+            core.task_profile_receipt_for(
+                "fake:one",
+                identity["source_revision"],
+                "profile-identity-refresh",
+                snapshot_path=snapshot_path,
+                executor_identity=upgraded.identity,
+            )
+        )
+        refreshed = core.profile(
+            "fake",
+            source,
+            "fake:one",
+            "profile-identity-refresh",
+            upgraded,
+        )
+        self.assertNotEqual(
+            refreshed["receipt_sha256"], first["receipt_sha256"]
         )
 
     def test_legacy_executor_is_not_given_indexed_profile_receipt(self) -> None:
@@ -2949,6 +3008,10 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(result["executor"], "second")
         self.assertEqual(result["terminal_route"], "discard")
         self.assertFalse(result["artifact_mutated"])
+        attempts = json.loads(self.paths.attempts.read_text())
+        self.assertEqual(attempts[0]["status"], "failed-before-mutation")
+        self.assertEqual(attempts[0]["task_profile_delivery"], "unavailable")
+        self.assertEqual(attempts[1]["task_profile_delivery"], "unavailable")
         self.assertEqual(
             core.review(
                 "fake", source, "fake:one", [("first", first), ("second", second)]
@@ -3417,6 +3480,12 @@ elif sys.argv[1] == "run":
             else:
                 os.environ["SKILLS_STATE_DIR"] = prior_state
         shadow = result["policy_deferred"]["shadow_candidate"]
+        attempt = json.loads(self.paths.attempts.read_text())[-1]
+        self.assertEqual(attempt["task_profile_delivery"], "delivered")
+        self.assertEqual(
+            attempt["task_profile_receipt_sha256"],
+            profiled["receipt_sha256"],
+        )
         self.assertEqual(shadow["profile_match"], "matched")
         self.assertEqual(shadow["independence"], "verified")
         self.assertEqual(
@@ -4031,7 +4100,7 @@ if command == "contract":
     print(json.dumps({"ok": True, "protocol": "dreaming.review-executor",
         "version": 1, "adapter_id": "profiler", "capabilities":
         ["source-blind", "mutation-fence", "completion-sentinel",
-         "task-profile-v1"]}))
+         "task-profile-v2"]}))
 elif command == "doctor":
     print(json.dumps({"ok": True, "healthy": True, "boundary_ready": True}))
 elif command == "run":

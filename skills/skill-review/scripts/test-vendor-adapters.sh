@@ -493,6 +493,168 @@ class VendorAdapterTest(unittest.TestCase):
                     result["error"]["message"],
                 )
 
+    def test_review_rejects_missing_executor_and_malformed_snapshot_identity(self):
+        (
+            snapshot_path,
+            snapshot,
+            receipt_path,
+            receipt,
+            _reusable_profile,
+        ) = self._task_profile_review_fixture()
+        missing_executor = self.run_adapter(
+            "copilot",
+            "review-executor",
+            "run",
+            "--snapshot",
+            snapshot_path,
+            "--result",
+            self.case / "missing-profile-executor.json",
+            "--task-profile-receipt",
+            receipt_path,
+            check=False,
+        )
+        self.assertFalse(missing_executor["ok"])
+        self.assertTrue(
+            missing_executor["error"]["message"].endswith("executor-required")
+        )
+
+        snapshot["identity"].pop("qualified_session_id")
+        snapshot_path.write_text(json.dumps(snapshot))
+        receipt["qualified_session_id"] = None
+        receipt["snapshot_sha256"] = vendor_module.sha(snapshot)
+        receipt["profile_set_id"] = vendor_module.sha(
+            {
+                "snapshot_sha256": receipt["snapshot_sha256"],
+                "qualified_session_id": None,
+                "profiles": receipt["profiles"],
+            }
+        )
+        body = {
+            key: value
+            for key, value in receipt.items()
+            if key != "receipt_sha256"
+        }
+        receipt["receipt_sha256"] = vendor_module.sha(body)
+        receipt_path.unlink()
+        receipt_path = (
+            self.case
+            / f"{receipt['receipt_sha256'].removeprefix('sha256:')}.json"
+        )
+        receipt_path.write_text(json.dumps(receipt))
+        malformed = self.run_adapter(
+            "copilot",
+            "review-executor",
+            "run",
+            "--snapshot",
+            snapshot_path,
+            "--result",
+            self.case / "malformed-profile-identity.json",
+            "--task-profile-receipt",
+            receipt_path,
+            "--task-profile-executor",
+            "copilot",
+            check=False,
+        )
+        self.assertFalse(malformed["ok"])
+        self.assertTrue(
+            malformed["error"]["message"].endswith("qualified-session-id")
+        )
+
+    def test_review_rejects_anti_substitution_receipt_failures(self):
+        def run_invalid(snapshot_path, receipt_path, reason):
+            result = self.run_adapter(
+                "copilot",
+                "review-executor",
+                "run",
+                "--snapshot",
+                snapshot_path,
+                "--result",
+                self.case / f"invalid-anti-substitution-{reason}.json",
+                "--task-profile-receipt",
+                receipt_path,
+                "--task-profile-executor",
+                "copilot",
+                check=False,
+            )
+            self.assertFalse(result["ok"])
+            self.assertTrue(
+                result["error"]["message"].endswith(reason),
+                result["error"]["message"],
+            )
+
+        snapshot_path, _, receipt_path, receipt, _ = (
+            self._task_profile_review_fixture()
+        )
+        receipt["observed_at"] = "tampered"
+        receipt_path.write_text(json.dumps(receipt))
+        run_invalid(snapshot_path, receipt_path, "receipt-sha256")
+
+        snapshot_path, _, receipt_path, receipt, _ = (
+            self._task_profile_review_fixture()
+        )
+        receipt["observed_at"] = "2026-01-01T00:00:01Z"
+        body = {
+            key: value
+            for key, value in receipt.items()
+            if key != "receipt_sha256"
+        }
+        receipt["receipt_sha256"] = vendor_module.sha(body)
+        receipt_path.write_text(json.dumps(receipt))
+        run_invalid(snapshot_path, receipt_path, "receipt-filename")
+
+        snapshot_path, _, receipt_path, receipt, _ = (
+            self._task_profile_review_fixture()
+        )
+        receipt["profiles"][0]["source_event_ids"] = ["missing-event"]
+        body = {
+            key: value
+            for key, value in receipt.items()
+            if key != "receipt_sha256"
+        }
+        receipt["receipt_sha256"] = vendor_module.sha(body)
+        receipt_path.unlink()
+        receipt_path = (
+            self.case
+            / f"{receipt['receipt_sha256'].removeprefix('sha256:')}.json"
+        )
+        receipt_path.write_text(json.dumps(receipt))
+        run_invalid(snapshot_path, receipt_path, "profile-evidence")
+
+        snapshot_path, _, receipt_path, receipt, _ = (
+            self._task_profile_review_fixture()
+        )
+        receipt["profiles"] = [
+            receipt["profiles"][0],
+            dict(receipt["profiles"][0]),
+        ]
+        receipt["profile_set_id"] = vendor_module.sha(
+            {
+                "snapshot_sha256": receipt["snapshot_sha256"],
+                "qualified_session_id": receipt["qualified_session_id"],
+                "profiles": receipt["profiles"],
+            }
+        )
+        body = {
+            key: value
+            for key, value in receipt.items()
+            if key != "receipt_sha256"
+        }
+        receipt["receipt_sha256"] = vendor_module.sha(body)
+        receipt_path.unlink()
+        receipt_path = (
+            self.case
+            / f"{receipt['receipt_sha256'].removeprefix('sha256:')}.json"
+        )
+        receipt_path.write_text(json.dumps(receipt))
+        run_invalid(snapshot_path, receipt_path, "duplicate-profile-identity")
+
+        snapshot_path, _, receipt_path, _, _ = (
+            self._task_profile_review_fixture()
+        )
+        symlink_path = self.case / "receipt-link.json"
+        symlink_path.symlink_to(receipt_path)
+        run_invalid(snapshot_path, symlink_path, "receipt-path")
+
     def _write_sources(self):
         copilot = self.case / "copilot/session"
         copilot.mkdir(parents=True)

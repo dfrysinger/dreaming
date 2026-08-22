@@ -193,7 +193,7 @@ The first backfill processes recent stable sessions first. After catch-up, only
 new or changed source revisions require profiling.
 
 Profile mode is an optional review-executor capability named
-`task-profile-v1`. A valid legacy review executor remains eligible for ordinary
+`task-profile-v2`. A valid legacy review executor remains eligible for ordinary
 review but is never called with profile arguments unless it advertises that
 capability.
 

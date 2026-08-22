@@ -48,7 +48,7 @@ PROTOCOLS = {
             "source-blind",
             "mutation-fence",
             "completion-sentinel",
-            "task-profile-v1",
+            "task-profile-v2",
         ],
     ),
     "skill-evaluation-executor": (
@@ -89,6 +89,17 @@ PROTOCOLS = {
         ["content-addressed-bundle", "ownership-safe-remove", "exact-inventory"],
     ),
 }
+
+
+def adapter_identity(role: str, vendor: str) -> dict[str, Any]:
+    protocol, capabilities = PROTOCOLS[role]
+    return {
+        "ok": True,
+        "protocol": protocol,
+        "version": 1,
+        "adapter_id": vendor,
+        "capabilities": capabilities,
+    }
 EVENT_KINDS = {
     "user_message",
     "assistant_message",
@@ -1962,24 +1973,18 @@ def executor_run(args: argparse.Namespace) -> None:
     task_profile_context = None
     if not profile_mode and args.task_profile_receipt:
         receipt_path = Path(args.task_profile_receipt)
-        if (
-            not args.task_profile_executor
-            or receipt_path.is_symlink()
-            or not receipt_path.is_file()
-        ):
+        if not args.task_profile_executor:
+            raise AdapterError(
+                "task-profile-receipt-invalid",
+                f"{args.task_profile_receipt}: executor-required",
+            )
+        if receipt_path.is_symlink() or not receipt_path.is_file():
             raise AdapterError(
                 "task-profile-receipt-invalid",
                 f"{args.task_profile_receipt}: receipt-path",
             )
         receipt = load_json(receipt_path)
-        protocol, capabilities = PROTOCOLS["review-executor"]
-        executor_identity = {
-            "ok": True,
-            "protocol": protocol,
-            "version": 1,
-            "adapter_id": args.vendor,
-            "capabilities": capabilities,
-        }
+        executor_identity = adapter_identity("review-executor", args.vendor)
         try:
             validated_context = validate_task_profile_receipt(
                 receipt,
@@ -6093,16 +6098,7 @@ def main() -> None:
         if args.command == "contract":
             if args.contract_role != args.role:
                 raise AdapterError("role-mismatch", args.contract_role)
-            protocol, capabilities = PROTOCOLS[args.role]
-            emit(
-                {
-                    "ok": True,
-                    "protocol": protocol,
-                    "version": 1,
-                    "adapter_id": args.vendor,
-                    "capabilities": capabilities,
-                }
-            )
+            emit(adapter_identity(args.role, args.vendor))
         if args.role == "session-source":
             source_command(args)
         if args.role == "review-executor":

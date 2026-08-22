@@ -11,10 +11,12 @@ through natural cadence, browser evidence, rollback, and restore.
 Follow
 `docs/task-opportunity-evidence-autopilot-charter.md`. Keep the plan's Current
 baton and proof references accurate. First finish adversarial review of the
-immutable `7cda1a1..3e586f2` diff and apply only confirmed findings in
-successor commits. Then obtain genuine independent recurrence rather than
-forcing the existing digest observation into a candidate. Use the charter's
-required process skills only in the phases they own.
+receipt-hardening successor diff `3e586f2..1a35e25` and apply its confirmed
+must-fix findings in a successor commit. The immutable
+`7cda1a1..3e586f2` review is already closed and must not be repeated. Then
+obtain genuine independent recurrence rather than forcing the existing digest
+observation into a candidate. Use the charter's required process skills only
+in the phases they own.
 
 Do not add a second transcript transport or scheduled owner. Do not replace
 LLM semantic interpretation with deterministic classification. Do not treat

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any
+from typing import Any, Never
 
 
 class TaskProfileReceiptError(ValueError):
@@ -24,7 +24,7 @@ def _digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(_canonical(value)).hexdigest()
 
 
-def _reject(reason: str) -> None:
+def _reject(reason: str) -> Never:
     raise TaskProfileReceiptError(reason)
 
 
@@ -76,14 +76,17 @@ def validate_task_profile_receipt(
     events = snapshot.get("events")
     if not isinstance(identity, dict) or not isinstance(events, list):
         _reject("snapshot-shape")
+    qualified_session_id = identity.get("qualified_session_id")
+    source_revision = identity.get("source_revision")
+    if not isinstance(qualified_session_id, str) or not qualified_session_id:
+        _reject("qualified-session-id")
+    if not isinstance(source_revision, str) or not source_revision:
+        _reject("source-revision")
     if receipt.get("snapshot_sha256") != _digest(snapshot):
         _reject("snapshot-sha256")
-    if (
-        receipt.get("qualified_session_id")
-        != identity.get("qualified_session_id")
-    ):
+    if receipt.get("qualified_session_id") != qualified_session_id:
         _reject("qualified-session-id")
-    if receipt.get("source_revision") != identity.get("source_revision"):
+    if receipt.get("source_revision") != source_revision:
         _reject("source-revision")
     if receipt.get("executor") != expected_executor:
         _reject("executor")
@@ -193,13 +196,13 @@ def validate_task_profile_receipt(
         }
         expected_task_key = _digest(
             {
-                "qualified_session_id": identity["qualified_session_id"],
+                "qualified_session_id": qualified_session_id,
                 "source_event_ids": event_ids,
             }
         )
         expected_profile_id = _digest(
             {
-                "qualified_session_id": identity["qualified_session_id"],
+                "qualified_session_id": qualified_session_id,
                 **model_profile,
             }
         )
@@ -226,7 +229,7 @@ def validate_task_profile_receipt(
     expected_profile_set_id = _digest(
         {
             "snapshot_sha256": receipt["snapshot_sha256"],
-            "qualified_session_id": identity["qualified_session_id"],
+            "qualified_session_id": qualified_session_id,
             "profiles": profiles,
         }
     )

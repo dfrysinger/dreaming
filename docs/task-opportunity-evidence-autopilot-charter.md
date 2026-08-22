@@ -47,9 +47,9 @@ a candidate from one occurrence merely to advance the run.
 ### Context skill
 
 - `self-compact` owns every same-session compaction. Before compacting, persist
-  the current baton and proof references, confirm this hourly reminder remains
-  live, and use the skill's verified continuation protocol. Never use a bare
-  compact.
+  the current baton and proof references, confirm the single hourly
+  unattended-run reminder identified in the Current baton remains live, and
+  use the skill's verified continuation protocol. Never use a bare compact.
 
 ## Autonomy mandate
 
