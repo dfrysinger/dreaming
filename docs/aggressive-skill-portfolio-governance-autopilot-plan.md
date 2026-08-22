@@ -958,17 +958,17 @@
   Successor review of `3e586f2..1a35e25` is also closed: 33 of 35 candidates
   were confirmed and two were rejected, with the exact candidate judgments at
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/profile-fix-dcr-1a35e25/`.
-  The current successor fix uses one shared profile-contract validator when
-  minting and consuming delivery receipts; the managed-candidate store retains
-  its separate store-ownership checks. Executor identity or snapshot drift
-  makes a receipt refreshable, while malformed receipt/index metadata remains
-  fail-closed. Only `task-profile-v2` executors receive the paired receipt and
-  executor arguments; legacy executors receive neither. Every retained attempt
-  records delivery status, including failures, and records receipt identity
-  whenever one was selected. Scheduler receipt revalidation is limited to
-  queued work and consumes the independent profile budget before remote render
-  calls. Fifty-nine focused core checks and 33 vendor-adapter checks pass. The
-  exact private production reviewer tracer retained a fresh executor-bound
+  Local successor commit `41292a9` uses one shared profile-contract validator
+  when minting and consuming delivery receipts; the managed-candidate store
+  retains its separate store-ownership checks. Executor identity or snapshot
+  drift makes a receipt refreshable, while malformed receipt/index metadata
+  remains fail-closed. Only `task-profile-v2` executors receive the paired
+  receipt and executor arguments; legacy executors receive neither. Every
+  retained attempt records delivery status, including failures, and records
+  receipt identity whenever one was selected. Scheduler receipt revalidation
+  is limited to queued work and consumes the independent profile budget before
+  remote render calls. Fifty-nine focused core checks and 33 vendor-adapter
+  checks pass. The exact private production reviewer tracer retained a fresh executor-bound
   receipt, but its model rerun is currently blocked by expired attended
   Copilot authentication; the prior successful model result remains historical
   evidence rather than being relabeled as current proof.
