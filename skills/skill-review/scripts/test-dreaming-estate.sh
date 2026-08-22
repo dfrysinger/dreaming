@@ -11,6 +11,7 @@ export PYTHONDONTWRITEBYTECODE=1
 exec /usr/bin/env python3 - "$SCRIPT_DIR" <<'PY'
 from __future__ import annotations
 
+import copy
 import importlib.util
 import json
 import os
@@ -21,6 +22,7 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 SCRIPT_DIR = Path(sys.argv[1]).resolve()
@@ -34,6 +36,16 @@ module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 sys.modules[spec.name] = module
 spec.loader.exec_module(module)
+
+RECEIVER_PATH = REPO / "scripts" / "ssh-estate-census.py"
+receiver_spec = importlib.util.spec_from_file_location(
+    "ssh_estate_census_test",
+    RECEIVER_PATH,
+)
+receiver_module = importlib.util.module_from_spec(receiver_spec)
+assert receiver_spec.loader is not None
+sys.modules[receiver_spec.name] = receiver_module
+receiver_spec.loader.exec_module(receiver_module)
 
 
 class EstateCensusTest(unittest.TestCase):
@@ -1799,7 +1811,7 @@ class EstateCensusTest(unittest.TestCase):
         self.assertEqual(changed["coverage"]["sessions_parsed_this_run"], 1)
         self.assertEqual(changed["canonical_usage"][0]["uses_total"], 4)
 
-    def test_usage_index_migration_reparses_only_sessions_with_issues(self) -> None:
+    def test_usage_index_migration_reparses_for_opportunity_evidence(self) -> None:
         capability_id = "sha256:" + "8" * 64
         collected_at = datetime(2026, 8, 18, 12, tzinfo=timezone.utc)
         root = self.case / "sessions"
@@ -1881,11 +1893,513 @@ class EstateCensusTest(unittest.TestCase):
             index_path=index,
         )
         self.assertEqual(migrated["coverage"]["index_status"], "migrated")
-        self.assertEqual(migrated["coverage"]["sessions_parsed_this_run"], 1)
+        self.assertEqual(migrated["coverage"]["sessions_parsed_this_run"], 2)
         self.assertEqual(migrated["canonical_usage"][0]["uses_total"], 2)
         stored = json.loads(index.read_text(encoding="utf-8"))
         self.assertEqual(
             stored["parser_revision"], module.USAGE_PARSER_REVISION
+        )
+
+    def test_opportunity_reuses_usage_corpus_without_leaking_text(self) -> None:
+        capability_id = "sha256:" + "1" * 64
+        sentinel = "PRIVATE-OPPORTUNITY-SENTINEL"
+        events = self.write_usage_events(
+            "opportunity",
+            [
+                {
+                    "type": "user.message",
+                    "timestamp": "2026-08-17T09:00:00+00:00",
+                    "data": {
+                        "delivery": "steering",
+                        "content": (
+                            "<system_reminder>spreadsheet</system_reminder>"
+                        ),
+                    },
+                },
+                {
+                    "type": "user.message",
+                    "timestamp": "2026-08-17T10:00:00+00:00",
+                    "data": {
+                        "delivery": "idle",
+                        "content": f"Create an xlsx workbook {sentinel}",
+                    },
+                },
+                {
+                    "type": "user.message",
+                    "timestamp": "2026-08-17T11:00:00+00:00",
+                    "data": {
+                        "delivery": "queued",
+                        "content": "Create a spreadsheet and a pptx",
+                    },
+                },
+            ],
+        )
+        stamp = datetime(2026, 8, 17, 12, tzinfo=timezone.utc).timestamp()
+        os.utime(events, (stamp, stamp))
+        usage, opportunity = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            self.case / "sessions",
+            collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
+            max_sessions=10,
+            max_bytes=100_000,
+            quiet_seconds=0,
+            include_opportunity=True,
+        )
+        self.assertEqual(
+            opportunity["source_usage_snapshot_sha256"],
+            usage["snapshot_sha256"],
+        )
+        self.assertEqual(
+            opportunity["collection_watermark"],
+            usage["coverage"]["collection_watermark"],
+        )
+        self.assertEqual(opportunity["stable_episode_count"], 2)
+        self.assertEqual(opportunity["classified_episode_count"], 1)
+        self.assertEqual(opportunity["unclassified_episode_count"], 1)
+        self.assertEqual(
+            opportunity["categories"],
+            [
+                {
+                    "category_id": "spreadsheet",
+                    "episode_count": 1,
+                    "distinct_session_count": 1,
+                    "distinct_day_count": 1,
+                    "completed_count": 0,
+                    "last_observed_at": "2026-08-17T10:00:00+00:00",
+                }
+            ],
+        )
+        self.assertEqual(
+            opportunity["uncertainty"][0]["possible_category_ids"],
+            ["presentation", "spreadsheet"],
+        )
+        self.assertNotIn(
+            sentinel,
+            json.dumps(opportunity, sort_keys=True),
+        )
+
+    def test_opportunity_deduplicates_steering_and_keeps_delegated_tasks(
+        self,
+    ) -> None:
+        capability_id = "sha256:" + "3" * 64
+        index = self.case / "state" / "usage-index.json"
+        events = self.write_usage_events(
+            "episodes",
+            [
+                {
+                    "type": "user.message",
+                    "timestamp": "2026-08-17T09:00:00+00:00",
+                    "data": {
+                        "delivery": "idle",
+                        "parentAgentTaskId": "delegated-task",
+                        "content": "Create an xlsx workbook",
+                    },
+                },
+                {
+                    "type": "user.message",
+                    "timestamp": "2026-08-17T09:01:00+00:00",
+                    "data": {
+                        "delivery": "steering",
+                        "parentAgentTaskId": "delegated-task",
+                        "content": "Please retry that spreadsheet",
+                    },
+                },
+                {
+                    "type": "assistant.message",
+                    "timestamp": "2026-08-17T09:02:00+00:00",
+                    "data": {"content": "Workbook complete", "toolRequests": []},
+                },
+                {
+                    "type": "user.message",
+                    "timestamp": "2026-08-17T10:00:00+00:00",
+                    "data": {
+                        "delivery": "idle",
+                        "content": "Create a slide deck",
+                    },
+                },
+                {
+                    "type": "assistant.message",
+                    "timestamp": "2026-08-17T10:02:00+00:00",
+                    "data": {"content": "Slides complete", "toolRequests": []},
+                },
+                {
+                    "type": "user.message",
+                    "timestamp": "2026-08-17T11:00:00+00:00",
+                    "data": {
+                        "delivery": "idle",
+                        "content": (
+                            '<skill-context name="xlsx">'
+                            "Create a spreadsheet"
+                            "</skill-context>"
+                        ),
+                    },
+                },
+            ],
+        )
+        stamp = datetime(2026, 8, 17, 12, tzinfo=timezone.utc).timestamp()
+        os.utime(events, (stamp, stamp))
+
+        _, opportunity = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            self.case / "sessions",
+            collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
+            max_sessions=10,
+            max_bytes=100_000,
+            quiet_seconds=0,
+            index_path=index,
+            include_opportunity=True,
+        )
+
+        self.assertEqual(opportunity["stable_episode_count"], 2)
+        self.assertEqual(opportunity["classified_episode_count"], 2)
+        self.assertEqual(
+            [
+                (
+                    item["category_id"],
+                    item["episode_count"],
+                    item["completed_count"],
+                )
+                for item in opportunity["categories"]
+            ],
+            [("presentation", 1, 1), ("spreadsheet", 1, 1)],
+        )
+        cached_usage, cached_opportunity = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            self.case / "sessions",
+            collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
+            max_sessions=10,
+            max_bytes=100_000,
+            quiet_seconds=0,
+            index_path=index,
+            include_opportunity=True,
+        )
+        self.assertEqual(cached_usage["coverage"]["index_status"], "loaded")
+        self.assertEqual(cached_usage["coverage"]["sessions_parsed_this_run"], 0)
+        self.assertEqual(
+            cached_opportunity["stable_episode_count"],
+            opportunity["stable_episode_count"],
+        )
+        self.assertEqual(
+            cached_opportunity["categories"],
+            opportunity["categories"],
+        )
+        self.assertEqual(
+            cached_opportunity["uncertainty"],
+            opportunity["uncertainty"],
+        )
+
+    def test_opportunity_snapshot_validation_fails_closed(self) -> None:
+        capability_id = "sha256:" + "4" * 64
+        events = self.write_usage_events(
+            "validation",
+            [
+                {
+                    "type": "user.message",
+                    "timestamp": "2026-08-17T10:00:00+00:00",
+                    "data": {
+                        "delivery": "idle",
+                        "content": "Create an xlsx workbook",
+                    },
+                }
+            ],
+        )
+        stamp = datetime(2026, 8, 17, 12, tzinfo=timezone.utc).timestamp()
+        os.utime(events, (stamp, stamp))
+        census = self.usage_census([("fixture-skill", capability_id)])
+        usage, opportunity = module.collect_usage(
+            census,
+            self.case / "sessions",
+            collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
+            max_sessions=10,
+            max_bytes=100_000,
+            quiet_seconds=0,
+            include_opportunity=True,
+        )
+        module.validate_task_opportunity_snapshot(
+            opportunity,
+            census,
+            usage,
+        )
+
+        invalid_values = []
+        unknown_field = copy.deepcopy(opportunity)
+        unknown_field["transcript_text"] = "private"
+        invalid_values.append(unknown_field)
+        unknown_category = copy.deepcopy(opportunity)
+        unknown_category["categories"][0]["category_id"] = "unknown"
+        unknown_category["snapshot_sha256"] = module.digest(
+            {
+                key: value
+                for key, value in unknown_category.items()
+                if key != "snapshot_sha256"
+            }
+        )
+        invalid_values.append(unknown_category)
+        inconsistent_total = copy.deepcopy(opportunity)
+        inconsistent_total["classified_episode_count"] = 2
+        inconsistent_total["stable_episode_count"] = 2
+        inconsistent_total["snapshot_sha256"] = module.digest(
+            {
+                key: value
+                for key, value in inconsistent_total.items()
+                if key != "snapshot_sha256"
+            }
+        )
+        invalid_values.append(inconsistent_total)
+        mismatched_usage = copy.deepcopy(opportunity)
+        mismatched_usage["coverage"]["pending_sessions"] = 1
+        mismatched_usage["snapshot_sha256"] = module.digest(
+            {
+                key: value
+                for key, value in mismatched_usage.items()
+                if key != "snapshot_sha256"
+            }
+        )
+        invalid_values.append(mismatched_usage)
+        boolean_version = copy.deepcopy(opportunity)
+        boolean_version["schema_version"] = True
+        boolean_version["snapshot_sha256"] = module.digest(
+            {
+                key: value
+                for key, value in boolean_version.items()
+                if key != "snapshot_sha256"
+            }
+        )
+        invalid_values.append(boolean_version)
+        zero_distinct = copy.deepcopy(opportunity)
+        zero_distinct["categories"][0]["distinct_session_count"] = 0
+        zero_distinct["snapshot_sha256"] = module.digest(
+            {
+                key: value
+                for key, value in zero_distinct.items()
+                if key != "snapshot_sha256"
+            }
+        )
+        invalid_values.append(zero_distinct)
+        invalid_failure_id = copy.deepcopy(opportunity)
+        invalid_failure_id["failure_ids"] = [{}]
+        invalid_failure_id["snapshot_sha256"] = module.digest(
+            {
+                key: value
+                for key, value in invalid_failure_id.items()
+                if key != "snapshot_sha256"
+            }
+        )
+        invalid_values.append(invalid_failure_id)
+        invalid_possible_category = copy.deepcopy(opportunity)
+        invalid_possible_category["stable_episode_count"] = 2
+        invalid_possible_category["unclassified_episode_count"] = 1
+        invalid_possible_category["uncertainty"] = [
+            {
+                "episode_id": "sha256:" + "6" * 64,
+                "possible_category_ids": [{}],
+                "out_of_scope": False,
+            }
+        ]
+        invalid_possible_category["snapshot_sha256"] = module.digest(
+            {
+                key: value
+                for key, value in invalid_possible_category.items()
+                if key != "snapshot_sha256"
+            }
+        )
+        invalid_values.append(invalid_possible_category)
+        naive_window = copy.deepcopy(opportunity)
+        naive_window["window_start"] = "2026-07-18T18:00:00"
+        naive_window["snapshot_sha256"] = module.digest(
+            {
+                key: value
+                for key, value in naive_window.items()
+                if key != "snapshot_sha256"
+            }
+        )
+        invalid_values.append(naive_window)
+
+        for invalid in invalid_values:
+            with self.subTest(invalid=invalid):
+                with self.assertRaisesRegex(
+                    module.EstateError,
+                    "opportunity_snapshot_invalid",
+                ):
+                    module.validate_task_opportunity_snapshot(
+                        invalid,
+                        census,
+                        usage,
+                    )
+
+    def test_receiver_validates_opportunity_before_transport(self) -> None:
+        capability_id = "sha256:" + "5" * 64
+        events = self.write_usage_events(
+            "receiver",
+            [
+                {
+                    "type": "user.message",
+                    "timestamp": "2026-08-17T10:00:00+00:00",
+                    "data": {
+                        "delivery": "idle",
+                        "content": "Create an xlsx workbook",
+                    },
+                }
+            ],
+        )
+        stamp = datetime(2026, 8, 17, 12, tzinfo=timezone.utc).timestamp()
+        os.utime(events, (stamp, stamp))
+        census = self.usage_census([("fixture-skill", capability_id)])
+        usage, opportunity = module.collect_usage(
+            census,
+            self.case / "sessions",
+            collected_at=datetime(2026, 8, 17, 18, tzinfo=timezone.utc),
+            max_sessions=10,
+            max_bytes=100_000,
+            quiet_seconds=0,
+            include_opportunity=True,
+        )
+        bundle = {
+            "census": census,
+            "usage": usage,
+            "opportunity": opportunity,
+        }
+
+        class FakeCollector:
+            EstateError = module.EstateError
+
+            @staticmethod
+            def collect_bundle(_config: dict) -> dict:
+                return bundle
+
+            validate_task_opportunity_snapshot = staticmethod(
+                module.validate_task_opportunity_snapshot
+            )
+
+        args = SimpleNamespace(
+            estate_script=str(MODULE_PATH),
+            target_host_id="fixture-macbook",
+            target_home=str(self.case),
+            user_context_cwd=None,
+            copilot_binary="/fixture/copilot",
+            copilot_session_root=None,
+            usage_max_sessions=10,
+            usage_max_bytes=100_000,
+            usage_index_path=str(self.case / "usage-index.json"),
+            project_contexts_file=None,
+        )
+        emitted = []
+        with (
+            mock.patch.object(
+                receiver_module,
+                "receiver_identity",
+                return_value={
+                    "receiver_id": "fixture",
+                    "receiver_sha256": "a" * 64,
+                    "collector_sha256": "b" * 64,
+                },
+            ),
+            mock.patch.object(
+                receiver_module,
+                "load_collector",
+                return_value=FakeCollector,
+            ),
+            mock.patch.object(
+                receiver_module,
+                "emit",
+                side_effect=lambda value: emitted.append(value),
+            ),
+        ):
+            receiver_module.receive(args)
+        self.assertEqual(emitted[0]["opportunity"], opportunity)
+
+        malformed = copy.deepcopy(opportunity)
+        malformed["transcript_text"] = "private"
+        bundle["opportunity"] = malformed
+        with (
+            mock.patch.object(
+                receiver_module,
+                "receiver_identity",
+                return_value={
+                    "receiver_id": "fixture",
+                    "receiver_sha256": "a" * 64,
+                    "collector_sha256": "b" * 64,
+                },
+            ),
+            mock.patch.object(
+                receiver_module,
+                "load_collector",
+                return_value=FakeCollector,
+            ),
+            self.assertRaisesRegex(
+                receiver_module.CensusError,
+                "opportunity_snapshot_invalid",
+            ),
+        ):
+            receiver_module.receive(args)
+
+    def test_opportunity_prioritizes_recent_stable_work_during_catchup(
+        self,
+    ) -> None:
+        capability_id = "sha256:" + "2" * 64
+        collected_at = datetime(2026, 8, 17, 18, tzinfo=timezone.utc)
+        old = self.write_usage_events(
+            "old",
+            [
+                self.usage_event(
+                    "tool.execution_start",
+                    "2026-06-01T10:00:00+00:00",
+                    call_id="old",
+                ),
+                self.usage_event(
+                    "tool.execution_complete",
+                    "2026-06-01T10:00:01+00:00",
+                    call_id="old",
+                ),
+            ],
+        )
+        recent = self.write_usage_events(
+            "recent",
+            [
+                {
+                    "type": "user.message",
+                    "timestamp": "2026-08-17T10:00:00+00:00",
+                    "data": {
+                        "delivery": "idle",
+                        "content": "Create an xlsx workbook",
+                    },
+                }
+            ],
+        )
+        os.utime(
+            old,
+            (
+                collected_at.timestamp() - (31 * 24 * 60 * 60),
+                collected_at.timestamp() - (31 * 24 * 60 * 60),
+            ),
+        )
+        os.utime(
+            recent,
+            (
+                collected_at.timestamp() - 3600,
+                collected_at.timestamp() - 3600,
+            ),
+        )
+
+        usage, opportunity = module.collect_usage(
+            self.usage_census([("fixture-skill", capability_id)]),
+            self.case / "sessions",
+            collected_at=collected_at,
+            max_sessions=1,
+            max_bytes=100_000,
+            quiet_seconds=0,
+            include_opportunity=True,
+        )
+
+        self.assertEqual(usage["coverage"]["bound_reached"], "max_sessions")
+        self.assertEqual(opportunity["stable_episode_count"], 1)
+        self.assertEqual(
+            opportunity["categories"][0]["category_id"],
+            "spreadsheet",
+        )
+        self.assertEqual(
+            usage["coverage"]["pending"][0]["session_id"],
+            module.opaque_session_id("old"),
         )
 
     def test_usage_index_streams_oversized_session_then_moves_beyond_it(self) -> None:

@@ -18,7 +18,7 @@ import tempfile
 import time
 import unicodedata
 from collections import Counter
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -57,9 +57,152 @@ LEGACY_POLICY_VERSION = 1
 LEGACY_PROOF_VERSION = 1
 LEGACY_PROOF_KIND = "legacy_git_creation"
 USAGE_INDEX_SCHEMA_VERSION = 1
-USAGE_PARSER_REVISION = 2
+USAGE_PARSER_REVISION = 5
 USAGE_QUIET_SECONDS = 300
 MAX_USAGE_SESSION_ISSUES = 32
+MAX_OPPORTUNITY_EPISODES_PER_SESSION = 4096
+MAX_OPPORTUNITY_RECEIPT_EPISODES = 100_000
+MAX_OPPORTUNITY_TEXT_BYTES = 64_000
+TASK_OPPORTUNITY_TAXONOMY = {
+    "schema_version": 1,
+    "kind": "task_opportunity_taxonomy",
+    "categories": [
+        {
+            "category_id": "3d-printing",
+            "patterns": [
+                r"\b3d print(?:er|ing)?\b",
+                r"\bbambu(?: lab)?\b",
+                r"\bfilament\b",
+                r"\borca ?slicer\b",
+                r"\bspaghetti failure\b",
+            ],
+        },
+        {
+            "category_id": "canvas-extension",
+            "patterns": [
+                r"\bcanvas extension\b",
+                r"\bcustom canvas extension\b",
+            ],
+        },
+        {
+            "category_id": "cloud-agent-customization",
+            "patterns": [
+                r"\bcustomize (?:a )?cloud agent\b",
+                r"\bcloud agent setup\b",
+            ],
+        },
+        {
+            "category_id": "diagramming",
+            "patterns": [
+                r"\bexcalidraw\b",
+                r"\barchitecture diagram\b",
+                r"\bsequence diagram\b",
+                r"\bflowchart\b",
+            ],
+        },
+        {
+            "category_id": "entitlements",
+            "patterns": [
+                r"\bentitlement(?:s)? (?:repo|change|file)\b",
+                r"\bldap/apps\b",
+                r"\baccess[- ]change pr\b",
+            ],
+        },
+        {
+            "category_id": "expense-report",
+            "patterns": [
+                r"\bexpense report\b",
+                r"\bfile (?:an? )?expense\b",
+                r"\bsubmit (?:an? )?expense\b",
+                r"\breimburs(?:e|ement|able).{0,40}\breceipt\b",
+            ],
+        },
+        {
+            "category_id": "issue-kanban",
+            "patterns": [
+                r"\bkanban (?:board|canvas)\b",
+                r"\bgithub issue board\b",
+                r"\bproject board\b",
+            ],
+        },
+        {
+            "category_id": "managed-service-policy",
+            "patterns": [
+                r"\bmanaged service policy\b",
+                r"\blaunchdaemon policy\b",
+                r"\blaunchagent policy\b",
+                r"\bmdm[- ]managed service\b",
+            ],
+        },
+        {
+            "category_id": "microsoft-loop",
+            "patterns": [
+                r"\bmicrosoft loop\b",
+                r"\bloop workspace\b",
+                r"\bloop page\b",
+            ],
+        },
+        {
+            "category_id": "photos-library",
+            "patterns": [
+                r"\bphotos library\b",
+                r"\bapple photos\b",
+                r"\bicloud photos\b",
+                r"\bphotos\.sqlite\b",
+            ],
+        },
+        {
+            "category_id": "presentation",
+            "patterns": [
+                r"\bpowerpoint\b",
+                r"\bslide deck\b",
+                r"\bpptx\b",
+                r"\bcreate (?:a )?presentation\b",
+            ],
+        },
+        {
+            "category_id": "spreadsheet",
+            "patterns": [
+                r"\bexcel (?:file|sheet|workbook)\b",
+                r"\bspreadsheet\b",
+                r"\bxlsx\b",
+                r"\bworkbook\b",
+            ],
+        },
+        {
+            "category_id": "terminal-scrollback",
+            "patterns": [
+                r"\bterminal scrollback\b",
+                r"\btmux scroll(?:ing|back)\b",
+                r"\boutput (?:is )?cut off in (?:the )?terminal\b",
+            ],
+        },
+        {
+            "category_id": "vscode-diff",
+            "patterns": [
+                r"\bvscode diff\b",
+                r"\bvisual studio code diff\b",
+            ],
+        },
+        {
+            "category_id": "word-document",
+            "patterns": [
+                r"\bword document\b",
+                r"\bword doc\b",
+                r"\bdocx\b",
+            ],
+        },
+    ],
+}
+TASK_OPPORTUNITY_WRAPPER_RE = re.compile(
+    r"<(?P<tag>system_reminder|system_notification|skill-context|"
+    r"available_skills)\b[^>]*>.*?</(?P=tag)>",
+    re.IGNORECASE | re.DOTALL,
+)
+TASK_OPPORTUNITY_CONTEXT_PREFIXES = (
+    "You are continuing work from session ",
+    "Some of the conversation history has been summarized",
+)
 EVALUATION_STATES = {
     "pass",
     "regression",
@@ -1766,13 +1909,352 @@ def opaque_session_id(name: str) -> str:
     return "sha256:" + hashlib.sha256(name.encode("utf-8")).hexdigest()
 
 
+def task_opportunity_taxonomy_id() -> str:
+    return digest(TASK_OPPORTUNITY_TAXONOMY)
+
+
+def task_opportunity_classifier_id() -> str:
+    return digest(
+        {
+            "kind": "deterministic_task_opportunity_classifier",
+            "parser_revision": USAGE_PARSER_REVISION,
+            "taxonomy_id": task_opportunity_taxonomy_id(),
+        }
+    )
+
+
+def classify_task_opportunity(
+    text: str,
+) -> tuple[str | None, list[str], bool]:
+    normalized = unicodedata.normalize("NFC", text).casefold()
+    matches = [
+        category["category_id"]
+        for category in TASK_OPPORTUNITY_TAXONOMY["categories"]
+        if any(
+            re.search(pattern, normalized, re.IGNORECASE | re.DOTALL)
+            for pattern in category["patterns"]
+        )
+    ]
+    if len(matches) == 1:
+        return matches[0], [], False
+    if matches:
+        return None, sorted(matches), False
+    return None, [], True
+
+
+def validate_task_opportunity_snapshot(
+    opportunity: dict[str, Any],
+    census: dict[str, Any],
+    usage: dict[str, Any],
+) -> None:
+    expected_keys = {
+        "schema_version",
+        "kind",
+        "host_id",
+        "collected_at",
+        "census_snapshot_sha256",
+        "source_usage_snapshot_sha256",
+        "taxonomy_id",
+        "classifier_id",
+        "collection_watermark",
+        "window_start",
+        "window_end",
+        "stable_episode_count",
+        "classified_episode_count",
+        "unclassified_episode_count",
+        "excluded_recent",
+        "relevant_stable_backlog",
+        "failure_ids",
+        "uncertainty",
+        "categories",
+        "coverage",
+        "snapshot_sha256",
+    }
+    if not isinstance(opportunity, dict) or set(opportunity) != expected_keys:
+        raise EstateError("opportunity_snapshot_invalid")
+    snapshot_sha256 = opportunity["snapshot_sha256"]
+    snapshot = {
+        key: value
+        for key, value in opportunity.items()
+        if key != "snapshot_sha256"
+    }
+    if (
+        type(opportunity["schema_version"]) is not int
+        or opportunity["schema_version"] != 1
+        or opportunity["kind"] != "task_opportunity_snapshot"
+        or not isinstance(snapshot_sha256, str)
+        or digest(snapshot) != snapshot_sha256
+        or opportunity["host_id"] != census.get("host_id")
+        or opportunity["collected_at"] != census.get("collected_at")
+        or opportunity["census_snapshot_sha256"]
+        != census.get("snapshot_sha256")
+        or opportunity["source_usage_snapshot_sha256"]
+        != usage.get("snapshot_sha256")
+        or opportunity["taxonomy_id"] != task_opportunity_taxonomy_id()
+        or opportunity["classifier_id"] != task_opportunity_classifier_id()
+        or opportunity["collection_watermark"]
+        != usage.get("coverage", {}).get("collection_watermark")
+    ):
+        raise EstateError("opportunity_snapshot_invalid")
+    collected_at = parse_usage_time(opportunity["collected_at"])
+    window_start = parse_usage_time(opportunity["window_start"])
+    window_end = parse_usage_time(opportunity["window_end"])
+    if (
+        collected_at is None
+        or window_start is None
+        or window_end != collected_at
+        or window_end - window_start != timedelta(days=30)
+    ):
+        raise EstateError("opportunity_snapshot_invalid")
+
+    counts = [
+        opportunity["stable_episode_count"],
+        opportunity["classified_episode_count"],
+        opportunity["unclassified_episode_count"],
+    ]
+    if (
+        any(
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+            for value in counts
+        )
+        or counts[0] > MAX_OPPORTUNITY_RECEIPT_EPISODES
+        or counts[1] + counts[2] != counts[0]
+    ):
+        raise EstateError("opportunity_snapshot_invalid")
+
+    usage_coverage = usage.get("coverage")
+    coverage = opportunity["coverage"]
+    excluded = opportunity["excluded_recent"]
+    backlog = opportunity["relevant_stable_backlog"]
+    if (
+        not isinstance(usage_coverage, dict)
+        or not isinstance(coverage, dict)
+        or set(coverage)
+        != {
+            "complete",
+            "source_usage_complete",
+            "corpus_complete",
+            "pending_sessions",
+            "pending_bytes",
+            "bound_reached",
+        }
+        or not isinstance(excluded, dict)
+        or set(excluded) != {"count", "bytes"}
+        or not isinstance(backlog, dict)
+        or set(backlog) != {"count", "bytes"}
+    ):
+        raise EstateError("opportunity_snapshot_invalid")
+    for value in (
+        excluded["count"],
+        excluded["bytes"],
+        backlog["count"],
+        backlog["bytes"],
+        coverage["pending_sessions"],
+        coverage["pending_bytes"],
+    ):
+        if (
+            not isinstance(value, int)
+            or isinstance(value, bool)
+            or value < 0
+        ):
+            raise EstateError("opportunity_snapshot_invalid")
+    if (
+        not isinstance(coverage["complete"], bool)
+        or not isinstance(coverage["source_usage_complete"], bool)
+        or not isinstance(coverage["corpus_complete"], bool)
+        or coverage["complete"] is not usage_coverage.get("corpus_complete")
+        or coverage["corpus_complete"]
+        is not usage_coverage.get("corpus_complete")
+        or coverage["source_usage_complete"]
+        is not usage_coverage.get("complete")
+        or coverage["pending_sessions"]
+        != usage_coverage.get("pending_sessions")
+        or coverage["pending_bytes"] != usage_coverage.get("pending_bytes")
+        or coverage["bound_reached"] != usage_coverage.get("bound_reached")
+        or excluded["count"] + backlog["count"]
+        != coverage["pending_sessions"]
+        or excluded["bytes"] + backlog["bytes"] != coverage["pending_bytes"]
+    ):
+        raise EstateError("opportunity_snapshot_invalid")
+
+    failure_ids = opportunity["failure_ids"]
+    expected_failure_ids = sorted(
+        item["failure_id"]
+        for item in usage_coverage.get("failures", [])
+        if isinstance(item, dict) and isinstance(item.get("failure_id"), str)
+    )
+    if (
+        not isinstance(failure_ids, list)
+        or any(not isinstance(value, str) for value in failure_ids)
+        or failure_ids != sorted(set(failure_ids))
+        or failure_ids != expected_failure_ids
+        or any(not SHA256_ID_RE.fullmatch(value) for value in failure_ids)
+    ):
+        raise EstateError("opportunity_snapshot_invalid")
+
+    category_ids = {
+        category["category_id"]
+        for category in TASK_OPPORTUNITY_TAXONOMY["categories"]
+    }
+    categories = opportunity["categories"]
+    if not isinstance(categories, list) or len(categories) > len(category_ids):
+        raise EstateError("opportunity_snapshot_invalid")
+    seen_categories: set[str] = set()
+    category_total = 0
+    for category in categories:
+        if (
+            not isinstance(category, dict)
+            or set(category)
+            != {
+                "category_id",
+                "episode_count",
+                "distinct_session_count",
+                "distinct_day_count",
+                "completed_count",
+                "last_observed_at",
+            }
+            or not isinstance(category["category_id"], str)
+            or category["category_id"] not in category_ids
+            or category["category_id"] in seen_categories
+        ):
+            raise EstateError("opportunity_snapshot_invalid")
+        seen_categories.add(category["category_id"])
+        numeric = [
+            category["episode_count"],
+            category["distinct_session_count"],
+            category["distinct_day_count"],
+            category["completed_count"],
+        ]
+        observed_at = parse_usage_time(category["last_observed_at"])
+        if (
+            any(
+                not isinstance(value, int)
+                or isinstance(value, bool)
+                or value < 0
+                for value in numeric
+            )
+            or numeric[0] < 1
+            or numeric[1] < 1
+            or numeric[2] < 1
+            or numeric[1] > numeric[0]
+            or numeric[2] > numeric[0]
+            or numeric[3] > numeric[0]
+            or observed_at is None
+            or observed_at < window_start
+            or observed_at > window_end
+        ):
+            raise EstateError("opportunity_snapshot_invalid")
+        category_total += numeric[0]
+    if category_total != opportunity["classified_episode_count"]:
+        raise EstateError("opportunity_snapshot_invalid")
+
+    uncertainty = opportunity["uncertainty"]
+    if (
+        not isinstance(uncertainty, list)
+        or len(uncertainty) != opportunity["unclassified_episode_count"]
+    ):
+        raise EstateError("opportunity_snapshot_invalid")
+    seen_episodes: set[str] = set()
+    for episode in uncertainty:
+        if (
+            not isinstance(episode, dict)
+            or set(episode)
+            != {"episode_id", "possible_category_ids", "out_of_scope"}
+            or not isinstance(episode["episode_id"], str)
+            or not SHA256_ID_RE.fullmatch(episode["episode_id"])
+            or episode["episode_id"] in seen_episodes
+            or not isinstance(episode["possible_category_ids"], list)
+            or any(
+                not isinstance(category_id, str)
+                for category_id in episode["possible_category_ids"]
+            )
+            or episode["possible_category_ids"]
+            != sorted(set(episode["possible_category_ids"]))
+            or any(
+                category_id not in category_ids
+                for category_id in episode["possible_category_ids"]
+            )
+            or not isinstance(episode["out_of_scope"], bool)
+            or bool(episode["possible_category_ids"])
+            == episode["out_of_scope"]
+        ):
+            raise EstateError("opportunity_snapshot_invalid")
+        seen_episodes.add(episode["episode_id"])
+
+
+def merge_task_opportunity_projection(
+    episode: dict[str, Any],
+    category_id: str | None,
+    possible_category_ids: list[str],
+    out_of_scope: bool,
+) -> None:
+    categories = set(episode["possible_category_ids"])
+    if isinstance(episode["category_id"], str):
+        categories.add(episode["category_id"])
+    categories.update(possible_category_ids)
+    if isinstance(category_id, str):
+        categories.add(category_id)
+    if len(categories) == 1:
+        episode["category_id"] = next(iter(categories))
+        episode["possible_category_ids"] = []
+        episode["out_of_scope"] = False
+    elif categories:
+        episode["category_id"] = None
+        episode["possible_category_ids"] = sorted(categories)
+        episode["out_of_scope"] = False
+    else:
+        episode["category_id"] = None
+        episode["possible_category_ids"] = []
+        episode["out_of_scope"] = (
+            episode["out_of_scope"] and out_of_scope
+        )
+
+
 def parse_usage_session(
-    lines: Any, *, collected_at: datetime
-) -> tuple[list[tuple[str, datetime]], datetime | None, list[str]]:
+    lines: Any,
+    *,
+    collected_at: datetime,
+    session_id: str,
+) -> tuple[
+    list[tuple[str, datetime]],
+    datetime | None,
+    list[str],
+    list[dict[str, Any]],
+]:
     starts: dict[str, tuple[str | None, datetime, int]] = {}
     completions: dict[str, tuple[bool, datetime, str | None, int]] = {}
     earliest: datetime | None = None
     issues: list[str] = []
+    opportunities: list[dict[str, Any]] = []
+    current_opportunity: dict[str, Any] | None = None
+    opportunity_window_start = collected_at.timestamp() - (30 * 24 * 60 * 60)
+
+    def finish_opportunity() -> None:
+        nonlocal current_opportunity
+        if current_opportunity is None:
+            return
+        if len(opportunities) >= MAX_OPPORTUNITY_EPISODES_PER_SESSION:
+            issues.append("opportunity_episode_count_limit")
+            current_opportunity = None
+            return
+        identity = {
+            "session_id": session_id,
+            "start_event_index": current_opportunity.pop("start_event_index"),
+            "end_event_index": current_opportunity.pop("end_event_index"),
+            "started_at": current_opportunity["observed_at"],
+            "terminal_at": current_opportunity.pop("terminal_at"),
+            "taxonomy_id": task_opportunity_taxonomy_id(),
+        }
+        opportunities.append(
+            {
+                "episode_id": digest(identity),
+                **current_opportunity,
+            }
+        )
+        current_opportunity = None
+
     for event_index, raw_line in enumerate(lines):
         try:
             line = raw_line.decode("utf-8")
@@ -1794,6 +2276,54 @@ def parse_usage_session(
         earliest = timestamp if earliest is None else min(earliest, timestamp)
         event_type = event.get("type")
         data = event.get("data")
+        if event_type == "user.message" and isinstance(data, dict):
+            if data.get("delivery") not in {"idle", "queued", "steering"}:
+                continue
+            if timestamp.timestamp() < opportunity_window_start:
+                continue
+            text = data.get("content") or data.get("transformedContent")
+            if not isinstance(text, str):
+                continue
+            text = TASK_OPPORTUNITY_WRAPPER_RE.sub(" ", text).strip()
+            if not text or text.startswith(TASK_OPPORTUNITY_CONTEXT_PREFIXES):
+                continue
+            if len(text.encode("utf-8")) > MAX_OPPORTUNITY_TEXT_BYTES:
+                issues.append("opportunity_episode_text_limit")
+                continue
+            category_id, possible_category_ids, out_of_scope = (
+                classify_task_opportunity(text)
+            )
+            if data.get("delivery") == "steering" and current_opportunity:
+                current_opportunity["end_event_index"] = event_index
+                merge_task_opportunity_projection(
+                    current_opportunity,
+                    category_id,
+                    possible_category_ids,
+                    out_of_scope,
+                )
+            else:
+                finish_opportunity()
+                current_opportunity = {
+                    "start_event_index": event_index,
+                    "end_event_index": event_index,
+                    "observed_at": timestamp.isoformat(),
+                    "category_id": category_id,
+                    "possible_category_ids": possible_category_ids,
+                    "out_of_scope": out_of_scope,
+                    "completed": False,
+                    "terminal_at": None,
+                }
+        elif (
+            event_type == "assistant.message"
+            and isinstance(data, dict)
+            and current_opportunity is not None
+            and isinstance(data.get("content"), str)
+            and data["content"].strip()
+            and not data.get("toolRequests")
+        ):
+            current_opportunity["completed"] = True
+            current_opportunity["terminal_at"] = timestamp.isoformat()
+            current_opportunity["end_event_index"] = event_index
         if event_type == "tool.execution_start" and isinstance(data, dict):
             if str(data.get("toolName", "")).casefold() != "skill":
                 continue
@@ -1831,6 +2361,7 @@ def parse_usage_session(
                 loaded_name,
                 event_index,
             )
+    finish_opportunity()
     successful: list[tuple[str, datetime]] = []
     if any(
         success and loaded_name is not None and call_id not in starts
@@ -1853,7 +2384,7 @@ def parse_usage_session(
             issues.append("usage_session_unverified_skill_completion")
             continue
         successful.append((name, completed_at))
-    return successful, earliest, sorted(set(issues))
+    return successful, earliest, sorted(set(issues)), opportunities
 
 
 def usage_name_mappings(
@@ -1986,7 +2517,12 @@ def validate_usage_index(value: Any) -> dict[str, Any]:
         ):
             raise EstateError("usage_index_invalid")
         usage = entry.get("usage")
-        if not isinstance(usage, dict):
+        opportunity = (
+            entry.get("opportunity", [])
+            if parser_revision < 3
+            else entry.get("opportunity")
+        )
+        if not isinstance(usage, dict) or not isinstance(opportunity, list):
             raise EstateError("usage_index_invalid")
         validated_usage: dict[str, Any] = {}
         for name, summary in usage.items():
@@ -2010,10 +2546,57 @@ def validate_usage_index(value: Any) -> dict[str, Any]:
                 "daily": dict(sorted(daily.items())),
                 "last_successful_invocation": last,
             }
+        validated_opportunity = []
+        for episode in opportunity:
+            if (
+                not isinstance(episode, dict)
+                or set(episode)
+                != {
+                    "episode_id",
+                    "observed_at",
+                    "category_id",
+                    "possible_category_ids",
+                    "out_of_scope",
+                    "completed",
+                }
+                or not SHA256_ID_RE.fullmatch(str(episode.get("episode_id")))
+                or parse_usage_time(episode.get("observed_at")) is None
+                or (
+                    episode.get("category_id") is not None
+                    and not isinstance(episode.get("category_id"), str)
+                )
+                or not isinstance(episode.get("possible_category_ids"), list)
+                or not all(
+                    isinstance(item, str)
+                    for item in episode["possible_category_ids"]
+                )
+                or not isinstance(episode.get("out_of_scope"), bool)
+                or not isinstance(episode.get("completed"), bool)
+            ):
+                raise EstateError("usage_index_invalid")
+            category_id = episode["category_id"]
+            possible = sorted(set(episode["possible_category_ids"]))
+            if (
+                (category_id is not None)
+                == (bool(possible) or episode["out_of_scope"])
+                or (possible and episode["out_of_scope"])
+            ):
+                raise EstateError("usage_index_invalid")
+            validated_opportunity.append(
+                {
+                    "episode_id": episode["episode_id"],
+                    "observed_at": episode["observed_at"],
+                    "category_id": category_id,
+                    "possible_category_ids": possible,
+                    "out_of_scope": episode["out_of_scope"],
+                    "completed": episode["completed"],
+                }
+            )
         sessions[session_id] = {
             "fingerprint": {name: fingerprint[name] for name in sorted(fingerprint)},
             "earliest_event": earliest,
             "usage": validated_usage,
+            "opportunity": validated_opportunity,
             "issues": sorted(set(issues)),
             "checkpointed_at": checkpointed,
         }
@@ -2080,11 +2663,7 @@ def load_usage_index(
             raise EstateError("usage_index_reject_failed") from error
         return empty, "rebuilt"
     if index["parser_revision"] < USAGE_PARSER_REVISION:
-        index["sessions"] = {
-            session_id: entry
-            for session_id, entry in index["sessions"].items()
-            if not entry["issues"]
-        }
+        index["sessions"] = {}
         index["parser_revision"] = USAGE_PARSER_REVISION
         write_usage_index(path, index)
         return index, "migrated"
@@ -2095,6 +2674,7 @@ def usage_session_summary(
     successful: list[tuple[str, datetime]],
     earliest: datetime | None,
     issues: list[str],
+    opportunity: list[dict[str, Any]],
     fingerprint: dict[str, int],
     collected_at: datetime,
 ) -> dict[str, Any]:
@@ -2123,6 +2703,7 @@ def usage_session_summary(
             }
             for name, summary in sorted(usage.items())
         },
+        "opportunity": opportunity,
         "issues": sorted(set(issues))[:MAX_USAGE_SESSION_ISSUES],
         "checkpointed_at": collected_at.isoformat(),
     }
@@ -2137,7 +2718,8 @@ def collect_usage(
     max_bytes: int,
     index_path: Path | None = None,
     quiet_seconds: int = USAGE_QUIET_SECONDS,
-) -> dict[str, Any]:
+    include_opportunity: bool = False,
+) -> Any:
     mappings, canonical_ids, mapping_issues = usage_name_mappings(census)
     aliases = validate_usage_aliases(USAGE_ALIASES)
     failures: list[dict[str, Any]] = []
@@ -2266,7 +2848,26 @@ def collect_usage(
         if indexed_summaries.get(candidate["session_id"], {}).get("fingerprint")
         != candidate["fingerprint"]
     ]
-    pending_candidates.sort(key=lambda item: (item["mtime_ns"], item["session_id"]))
+    opportunity_window_start_ns = int(
+        (collected_at.timestamp() - (30 * 24 * 60 * 60)) * 1_000_000_000
+    )
+    pending_candidates.sort(
+        key=lambda item: (
+            (
+                0
+                if include_opportunity
+                and item["mtime_ns"] >= opportunity_window_start_ns
+                else 1
+            ),
+            (
+                -item["mtime_ns"]
+                if include_opportunity
+                and item["mtime_ns"] >= opportunity_window_start_ns
+                else item["mtime_ns"]
+            ),
+            item["session_id"],
+        )
+    )
     stable_pending: list[dict[str, Any]] = []
     for candidate in pending_candidates:
         age_seconds = collected_at.timestamp() - (
@@ -2305,8 +2906,15 @@ def collect_usage(
                 sessions_parsed += 1
                 bytes_parsed += candidate["size"]
                 with os.fdopen(descriptor, "rb", closefd=False) as handle:
-                    successful, session_earliest, session_issues = (
-                        parse_usage_session(handle, collected_at=collected_at)
+                    (
+                        successful,
+                        session_earliest,
+                        session_issues,
+                        session_opportunity,
+                    ) = parse_usage_session(
+                        handle,
+                        collected_at=collected_at,
+                        session_id=session_id,
                     )
                 after = os.fstat(descriptor)
                 if usage_fingerprint(after) != before_fingerprint:
@@ -2347,6 +2955,7 @@ def collect_usage(
             successful,
             session_earliest,
             session_issues,
+            session_opportunity,
             before_fingerprint,
             collected_at,
         )
@@ -2533,7 +3142,129 @@ def collect_usage(
             )
         ],
     }
-    return {**snapshot, "snapshot_sha256": digest(snapshot)}
+    usage = {**snapshot, "snapshot_sha256": digest(snapshot)}
+    category_counts: dict[str, dict[str, Any]] = {}
+    uncertainty: list[dict[str, Any]] = []
+    stable_episode_count = 0
+    classified_episode_count = 0
+    window_start = collected_at.timestamp() - (30 * 24 * 60 * 60)
+    for session_id, summary in sorted(indexed_summaries.items()):
+        if session_id not in exact_indexed:
+            continue
+        for episode in summary.get("opportunity", []):
+            observed_at = parse_usage_time(episode.get("observed_at"))
+            if (
+                observed_at is None
+                or observed_at.timestamp() < window_start
+                or observed_at > collected_at
+            ):
+                continue
+            stable_episode_count += 1
+            category_id = episode.get("category_id")
+            if isinstance(category_id, str):
+                classified_episode_count += 1
+                current = category_counts.setdefault(
+                    category_id,
+                    {
+                        "episode_count": 0,
+                        "completed_count": 0,
+                        "session_ids": set(),
+                        "days": set(),
+                        "last_observed_at": observed_at,
+                    },
+                )
+                current["episode_count"] += 1
+                current["completed_count"] += int(
+                    episode.get("completed") is True
+                )
+                current["session_ids"].add(session_id)
+                current["days"].add(observed_at.date().isoformat())
+                current["last_observed_at"] = max(
+                    current["last_observed_at"], observed_at
+                )
+            else:
+                uncertainty.append(
+                    {
+                        "episode_id": episode["episode_id"],
+                        "possible_category_ids": episode[
+                            "possible_category_ids"
+                        ],
+                        "out_of_scope": episode["out_of_scope"],
+                    }
+                )
+    recent_pending = [
+        item
+        for item in usage["coverage"]["pending"]
+        if item.get("reason") == "events_recently_modified"
+    ]
+    stable_backlog = [
+        item
+        for item in usage["coverage"]["pending"]
+        if item.get("reason") != "events_recently_modified"
+    ]
+    opportunity_snapshot = {
+        "schema_version": 1,
+        "kind": "task_opportunity_snapshot",
+        "host_id": census.get("host_id"),
+        "collected_at": census.get("collected_at"),
+        "census_snapshot_sha256": census.get("snapshot_sha256"),
+        "source_usage_snapshot_sha256": usage["snapshot_sha256"],
+        "taxonomy_id": task_opportunity_taxonomy_id(),
+        "classifier_id": task_opportunity_classifier_id(),
+        "collection_watermark": usage["coverage"]["collection_watermark"],
+        "window_start": datetime.fromtimestamp(
+            window_start, timezone.utc
+        ).isoformat(),
+        "window_end": collected_at.isoformat(),
+        "stable_episode_count": stable_episode_count,
+        "classified_episode_count": classified_episode_count,
+        "unclassified_episode_count": (
+            stable_episode_count - classified_episode_count
+        ),
+        "excluded_recent": {
+            "count": len(recent_pending),
+            "bytes": sum(int(item.get("bytes") or 0) for item in recent_pending),
+        },
+        "relevant_stable_backlog": {
+            "count": len(stable_backlog),
+            "bytes": sum(int(item.get("bytes") or 0) for item in stable_backlog),
+        },
+        "failure_ids": sorted(
+            item["failure_id"]
+            for item in usage["coverage"]["failures"]
+            if isinstance(item.get("failure_id"), str)
+        ),
+        "uncertainty": sorted(
+            uncertainty,
+            key=lambda item: item["episode_id"],
+        ),
+        "categories": [
+            {
+                "category_id": category_id,
+                "episode_count": value["episode_count"],
+                "distinct_session_count": len(value["session_ids"]),
+                "distinct_day_count": len(value["days"]),
+                "completed_count": value["completed_count"],
+                "last_observed_at": value["last_observed_at"].isoformat(),
+            }
+            for category_id, value in sorted(category_counts.items())
+        ],
+        "coverage": {
+            "complete": usage["coverage"]["corpus_complete"],
+            "source_usage_complete": usage["coverage"]["complete"],
+            "corpus_complete": usage["coverage"]["corpus_complete"],
+            "pending_sessions": usage["coverage"]["pending_sessions"],
+            "pending_bytes": usage["coverage"]["pending_bytes"],
+            "bound_reached": usage["coverage"]["bound_reached"],
+        },
+    }
+    opportunity = {
+        **opportunity_snapshot,
+        "snapshot_sha256": digest(opportunity_snapshot),
+    }
+    if include_opportunity:
+        validate_task_opportunity_snapshot(opportunity, census, usage)
+    return (usage, opportunity) if include_opportunity else usage
 
 
 def collect_bundle(config: dict[str, Any]) -> dict[str, Any]:
@@ -2562,16 +3293,19 @@ def collect_bundle(config: dict[str, Any]) -> dict[str, Any]:
         or max_bytes < 1
     ):
         raise EstateError("usage bounds must be positive integers")
+    usage, opportunity = collect_usage(
+        census,
+        session_root,
+        collected_at=collected_at,
+        max_sessions=max_sessions,
+        max_bytes=max_bytes,
+        index_path=index_path,
+        include_opportunity=True,
+    )
     return {
         "census": census,
-        "usage": collect_usage(
-            census,
-            session_root,
-            collected_at=collected_at,
-            max_sessions=max_sessions,
-            max_bytes=max_bytes,
-            index_path=index_path,
-        ),
+        "usage": usage,
+        "opportunity": opportunity,
     }
 
 
