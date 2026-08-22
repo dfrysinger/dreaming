@@ -35,7 +35,12 @@ PROTOCOLS = {
     ),
     "review-executor": (
         "dreaming.review-executor",
-        ["source-blind", "mutation-fence", "completion-sentinel"],
+        [
+            "source-blind",
+            "mutation-fence",
+            "completion-sentinel",
+            "task-profile-v1",
+        ],
     ),
     "skill-evaluation-executor": (
         "dreaming.skill-evaluation-executor",
@@ -1728,21 +1733,23 @@ def review_result_schema() -> dict[str, Any]:
 
 
 def task_profile_result_schema() -> dict[str, Any]:
+    bounded_text = {"type": "string", "minLength": 1, "maxLength": 4000}
     procedure = {
         "type": ["object", "null"],
         "properties": {
-            "trigger": {"type": "string"},
-            "outcome": {"type": "string"},
+            "trigger": bounded_text,
+            "outcome": bounded_text,
             "actions": {
                 "type": "array",
-                "items": {"type": "string"},
+                "items": bounded_text,
                 "minItems": 1,
-                "maxItems": 20,
+                "maxItems": 16,
             },
             "exclusions": {
                 "type": "array",
-                "items": {"type": "string"},
-                "maxItems": 20,
+                "items": bounded_text,
+                "minItems": 1,
+                "maxItems": 16,
             },
         },
         "required": ["trigger", "outcome", "actions", "exclusions"],
@@ -1757,8 +1764,8 @@ def task_profile_result_schema() -> dict[str, Any]:
                 "minItems": 1,
                 "maxItems": 20,
             },
-            "task_type": {"type": "string"},
-            "abstract_summary": {"type": "string"},
+            "task_type": bounded_text,
+            "abstract_summary": bounded_text,
             "reuse_value": {
                 "enum": [
                     "reusable-procedure",
@@ -2130,6 +2137,7 @@ def executor_run(args: argparse.Namespace) -> None:
             if any(
                 not isinstance(profile.get(field), str)
                 or not profile[field].strip()
+                or len(profile[field].encode("utf-8")) > 4_000
                 for field in ("task_type", "abstract_summary")
             ):
                 raise AdapterError(
@@ -2151,16 +2159,25 @@ def executor_run(args: argparse.Namespace) -> None:
                     any(
                         not isinstance(procedure.get(field), str)
                         or not procedure[field].strip()
+                        or len(procedure[field].encode("utf-8")) > 4_000
                         for field in ("trigger", "outcome")
                     )
                     or not isinstance(actions, list)
                     or not actions
-                    or len(actions) > 20
-                    or any(not isinstance(value, str) or not value.strip() for value in actions)
-                    or not isinstance(exclusions, list)
-                    or len(exclusions) > 20
+                    or len(actions) > 16
                     or any(
-                        not isinstance(value, str) or not value.strip()
+                        not isinstance(value, str)
+                        or not value.strip()
+                        or len(value.encode("utf-8")) > 4_000
+                        for value in actions
+                    )
+                    or not isinstance(exclusions, list)
+                    or not exclusions
+                    or len(exclusions) > 16
+                    or any(
+                        not isinstance(value, str)
+                        or not value.strip()
+                        or len(value.encode("utf-8")) > 4_000
                         for value in exclusions
                     )
                 ):

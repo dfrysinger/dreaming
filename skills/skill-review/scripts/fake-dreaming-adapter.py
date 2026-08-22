@@ -23,7 +23,12 @@ ROLE_PROTOCOLS = {
     ),
     "review-executor": (
         "dreaming.review-executor",
-        ["source-blind", "mutation-fence", "completion-sentinel"],
+        [
+            "source-blind",
+            "mutation-fence",
+            "completion-sentinel",
+            "task-profile-v1",
+        ],
     ),
     "skill-publisher": (
         "dreaming.skill-publisher",
@@ -228,6 +233,7 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                 "profiles": profiles,
                 "model": "fake-profile-model",
             }
+            result.update(state.get("task_profile_result_overrides", {}))
             save(Path(args.result), result)
             emit({"ok": True, **result})
         if snapshot.get("packet_kind") == "draft_review":
@@ -371,6 +377,8 @@ def main() -> None:
         if args.contract_role != args.role:
             fail("role-mismatch", args.contract_role)
         protocol, capabilities = ROLE_PROTOCOLS[args.role]
+        fixture_state = load(Path(args.fixture), {})
+        capabilities = fixture_state.get("capabilities", capabilities)
         emit(
             {
                 "ok": True,

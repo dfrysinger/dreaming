@@ -904,6 +904,20 @@
   legacy `unverified` observation. Fifty core checks pass, including both the
   verified bridge and the fallback. One recent real reviewer-to-profile result
   and evaluation remain next.
+- Adversarial review of the LLM opportunity implementation confirmed 55
+  findings. The first hardening slice now aligns profile procedure bounds with
+  the candidate lifecycle, validates semantic values and UTF-8 sizes again at
+  the core boundary, rejects duplicate identities, treats deleted and resumed
+  queue rows as normal outcomes, derives and revalidates managed receipts,
+  requires exact ordered review/profile evidence, isolates candidate staging
+  and sidecars, retries and backfills reviewed rows under the independent
+  profile cap, serializes profile-index updates, and negotiates profile mode
+  through optional `task-profile-v1` capability while preserving legacy review
+  executors. Genuine second-session recurrence replaces the fabricated fixture;
+  hostile executor, tampered receipt, unmanaged receipt, profile deferral,
+  backfill, and match-diagnostic coverage is retained. Fifty-three core checks
+  and 28 vendor-adapter checks pass. Finding-scoped review closure and one real
+  reviewer-to-profile result remain next.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now

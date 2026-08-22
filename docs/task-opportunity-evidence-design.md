@@ -75,6 +75,14 @@ all content identities. Model-produced hashes are never trusted.
 This pass is candidate-blind so existing skills cannot manufacture evidence that
 their own category occurred.
 
+`confidence`, `sensitive_source`, and `task_state` are retained evidence and
+prioritization signals, not automatic rejection thresholds. A failed or
+unresolved task can still demonstrate a useful recovery procedure, and a
+sensitive source can still yield an abstract procedure without retaining source
+text. Any future hard admission rule for these fields requires an explicit
+design change backed by observed failures; deterministic code must not invent a
+semantic threshold.
+
 ### 2. Retain independent opportunity evidence
 
 Each accepted profile becomes an immutable opportunity observation bound to:
@@ -183,6 +191,11 @@ at 500 by configuration validation. `max_reviews_per_run` remains capped at 25.
 
 The first backfill processes recent stable sessions first. After catch-up, only
 new or changed source revisions require profiling.
+
+Profile mode is an optional review-executor capability named
+`task-profile-v1`. A valid legacy review executor remains eligible for ordinary
+review but is never called with profile arguments unless it advertises that
+capability.
 
 ## Deterministic responsibilities
 

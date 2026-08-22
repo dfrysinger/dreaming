@@ -30,9 +30,10 @@
     "commands": {
       "version": "returns {executor_version}",
       "doctor": "returns {healthy:true,boundary_ready:true}",
-      "run": "accepts --snapshot, --result, and optional --mode review|profile; writes a structured result and emits the same result"
+      "run": "accepts --snapshot and --result; executors advertising task-profile-v1 also accept optional --mode review|profile; writes a structured result and emits the same result"
     },
-    "required_capabilities": ["source-blind", "mutation-fence", "completion-sentinel"]
+    "required_capabilities": ["source-blind", "mutation-fence", "completion-sentinel"],
+    "optional_capabilities": ["task-profile-v1"]
   },
   "skill-evaluation-executor": {
     "commands": {

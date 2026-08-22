@@ -2080,7 +2080,7 @@ class RuntimeTest(unittest.TestCase):
             {
                 "contract_version": 1,
                 "max_reviews_per_run": 25,
-                "max_profiles_per_run": 100,
+                "max_profiles_per_run": 20,
                 "routes": ["fake>fake-executor"],
                 "executor_order": ["fake-executor"],
                 "sources": {
@@ -2141,7 +2141,7 @@ class RuntimeTest(unittest.TestCase):
             )
         self.assertEqual(
             observed,
-            [(52, 0, 25, 27), (0, 0, 25, 2), (0, 0, 2, 0)],
+            [(20, 32, 25, 27), (20, 12, 25, 2), (12, 0, 2, 0)],
         )
         ledger = json.loads(
             (Path(environment["DREAMING_STATE_DIR"]) / "review-ledger.json").read_text()
@@ -2168,6 +2168,82 @@ class RuntimeTest(unittest.TestCase):
             runtime_module.configured_runtime_settings(
                 {"max_profiles_per_run": 501}
             )
+
+    def test_legacy_review_executor_is_not_used_for_profiling(self) -> None:
+        source_fixture = self.source_fixture([self.session("one", 1)])
+        executor_fixture = self.write(
+            "legacy-executor.json",
+            {
+                "mode": "success",
+                "capabilities": [
+                    "source-blind",
+                    "mutation-fence",
+                    "completion-sentinel",
+                ],
+            },
+        )
+        config = self.write(
+            "legacy-adapters.json",
+            {
+                "contract_version": 1,
+                "routes": ["fake>legacy-executor"],
+                "executor_order": ["legacy-executor"],
+                "sources": {
+                    "fake": {
+                        "argv": [
+                            sys.executable,
+                            str(FAKE),
+                            "--fixture",
+                            str(source_fixture),
+                            "--adapter-id",
+                            "fake",
+                            "--role",
+                            "session-source",
+                        ]
+                    }
+                },
+                "executors": {
+                    "legacy-executor": {
+                        "argv": [
+                            sys.executable,
+                            str(FAKE),
+                            "--fixture",
+                            str(executor_fixture),
+                            "--adapter-id",
+                            "legacy-executor",
+                            "--role",
+                            "review-executor",
+                        ]
+                    }
+                },
+                "publishers": {},
+            },
+        )
+        result = subprocess.run(
+            [sys.executable, str(RUNTIME_PATH), "run"],
+            env={
+                **os.environ,
+                "DREAMING_ADAPTER_CONFIG": str(config),
+                "DREAMING_DATA_DIR": str(self.case / "legacy-data"),
+                "DREAMING_STATE_DIR": str(self.case / "legacy-state"),
+            },
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        report = json.loads(result.stdout)
+        self.assertEqual(report["profiles"], [])
+        self.assertEqual(
+            report["profile_skips"],
+            [
+                {
+                    "session_id": "fake:one",
+                    "code": "no-profile-capable-executor",
+                }
+            ],
+        )
+        self.assertEqual(len(report["reviews"]), 1)
 
     def test_support_file_paths_are_canonical_nonconflicting_files(self) -> None:
         core = self.core(set())
@@ -3049,6 +3125,7 @@ elif sys.argv[1] == "run":
                 "routing_reason": "The procedure has ordered reusable steps",
                 "task_profiles": [
                     {
+                        "source_event_ids": ["one-event-1"],
                         "task_type": "retain-fixture-procedure",
                         "abstract_summary": (
                             "Retain a reusable procedure from completed work."
@@ -3128,6 +3205,14 @@ elif sys.argv[1] == "run":
             else:
                 os.environ["SKILLS_STATE_DIR"] = prior_state
         shadow = result["policy_deferred"]["shadow_candidate"]
+        self.assertEqual(shadow["profile_match"], "matched")
+        self.assertEqual(shadow["independence"], "verified")
+        self.assertEqual(
+            shadow["profile_id"],
+            json.loads(Path(profiled["receipt"]).read_text())["profiles"][0][
+                "profile_id"
+            ],
+        )
         record = core._candidate_lifecycle_call(
             "read", shadow["lifecycle_id"]
         )
@@ -3140,6 +3225,75 @@ elif sys.argv[1] == "run":
                 "match_fingerprint": runtime_module.digest(procedure),
             },
         )
+
+    def test_profile_matching_reports_no_match_and_ambiguity(self) -> None:
+        fixture = self.source_fixture([self.session("one", 10)])
+        source = self.adapter("session-source", "fake", fixture)
+        procedure = {
+            "trigger": "A reusable fixture procedure is demonstrated.",
+            "outcome": "The fixture procedure is retained.",
+            "actions": ["Identify the procedure."],
+            "exclusions": ["Do not copy source-specific details."],
+        }
+        executor_fixture = self.write(
+            "profile-match.json",
+            {
+                "task_profiles": [
+                    {
+                        "source_event_ids": ["one-event-1"],
+                        "task_type": "retain-fixture-procedure",
+                        "abstract_summary": "Retain a reusable procedure.",
+                        "reuse_value": "reusable-procedure",
+                        "procedure": procedure,
+                    }
+                ]
+            },
+        )
+        executor = self.adapter(
+            "review-executor", "exec", executor_fixture
+        )
+        core = self.core({("fake", "exec")})
+        profiled = core.profile(
+            "fake", source, "fake:one", "exec", executor
+        )
+        receipt_path = Path(profiled["receipt"])
+        reviewed_identity = source.call(
+            "inspect", session="fake:one"
+        )["session"]
+        no_match, no_match_status = core._matching_task_profile(
+            {
+                "transcript_context": {},
+                "evidence_event_ids": ["one-event-2"],
+            },
+            receipt_path,
+            reviewed_identity,
+        )
+        self.assertIsNone(no_match)
+        self.assertEqual(no_match_status, "no-exact-match")
+
+        receipt = json.loads(receipt_path.read_text())
+        receipt["profiles"].append(json.loads(json.dumps(receipt["profiles"][0])))
+        receipt_body = {
+            key: value
+            for key, value in receipt.items()
+            if key != "receipt_sha256"
+        }
+        receipt["receipt_sha256"] = runtime_module.digest(receipt_body)
+        ambiguous_path = (
+            self.paths.task_profile_receipts
+            / f"{receipt['receipt_sha256'].removeprefix('sha256:')}.json"
+        )
+        ambiguous_path.write_text(json.dumps(receipt))
+        ambiguous, ambiguous_status = core._matching_task_profile(
+            {
+                "transcript_context": {},
+                "evidence_event_ids": ["one-event-1"],
+            },
+            ambiguous_path,
+            reviewed_identity,
+        )
+        self.assertIsNone(ambiguous)
+        self.assertEqual(ambiguous_status, "ambiguous")
 
     def test_shadow_candidate_recurrence_accepts_non_ascii_text(self) -> None:
         core = DreamingRuntime(
@@ -3588,7 +3742,9 @@ elif command == "run":
         self.assertEqual(response["terminal_route"], "discard")
 
     def test_task_profile_receipt_is_immutable_and_identity_bound(self) -> None:
-        fixture = self.source_fixture([self.session("one", 10)])
+        fixture = self.source_fixture(
+            [self.session("one", 10), self.session("two", 20)]
+        )
         source = self.adapter("session-source", "fake", fixture)
         script = self.case / "profile-executor.py"
         script.write_text(
@@ -3602,7 +3758,8 @@ command = sys.argv[1]
 if command == "contract":
     print(json.dumps({"ok": True, "protocol": "dreaming.review-executor",
         "version": 1, "adapter_id": "profiler", "capabilities":
-        ["source-blind", "mutation-fence", "completion-sentinel"]}))
+        ["source-blind", "mutation-fence", "completion-sentinel",
+         "task-profile-v1"]}))
 elif command == "doctor":
     print(json.dumps({"ok": True, "healthy": True, "boundary_ready": True}))
 elif command == "run":
@@ -3669,6 +3826,32 @@ elif command == "run":
             ),
             receipt["receipt_sha256"],
         )
+        original_receipt = receipt_path.read_bytes()
+        tampered_receipt = json.loads(original_receipt)
+        tampered_receipt["profiles"][0]["abstract_summary"] = "tampered"
+        receipt_path.write_text(json.dumps(tampered_receipt))
+        with self.assertRaisesRegex(
+            RuntimeFailure, "task-profile-receipt-invalid"
+        ):
+            core.collect_profile_candidate(
+                receipt_path,
+                receipt["profiles"][0]["profile_id"],
+                self.case,
+                "retained-procedure",
+            )
+        receipt_path.write_bytes(original_receipt)
+
+        unmanaged_path = self.case / receipt_path.name
+        unmanaged_path.write_bytes(original_receipt)
+        with self.assertRaisesRegex(
+            RuntimeFailure, "task-profile-receipt-invalid"
+        ):
+            core.collect_profile_candidate(
+                unmanaged_path,
+                receipt["profiles"][0]["profile_id"],
+                self.case,
+                "retained-procedure",
+            )
         package = self.case / "profile-package"
         package.mkdir()
         (package / "SKILL.md").write_text(
@@ -3709,45 +3892,12 @@ elif command == "run":
                 "retained-procedure",
             )
             self.assertEqual(collecting["state"], "collecting")
-            second = json.loads(json.dumps(receipt))
-            second["qualified_session_id"] = "fake:two"
-            second["observed_at"] = datetime.fromtimestamp(
-                20, timezone.utc
-            ).isoformat()
-            second_profile = second["profiles"][0]
-            model_profile = {
-                key: value
-                for key, value in second_profile.items()
-                if key
-                not in {"task_key", "profile_id", "procedure_fingerprint"}
-            }
-            second_profile["task_key"] = runtime_module.digest(
-                {
-                    "qualified_session_id": "fake:two",
-                    "source_event_ids": second_profile["source_event_ids"],
-                }
+            second_result = core.profile(
+                "fake", source, "fake:two", "profiler", executor
             )
-            second_profile["profile_id"] = runtime_module.digest(
-                {"qualified_session_id": "fake:two", **model_profile}
-            )
-            second["profile_set_id"] = runtime_module.digest(
-                {
-                    "snapshot_sha256": second["snapshot_sha256"],
-                    "qualified_session_id": "fake:two",
-                    "profiles": second["profiles"],
-                }
-            )
-            second_body = {
-                key: value
-                for key, value in second.items()
-                if key != "receipt_sha256"
-            }
-            second["receipt_sha256"] = runtime_module.digest(second_body)
-            second_path = (
-                self.paths.task_profile_receipts
-                / f"{second['receipt_sha256'].removeprefix('sha256:')}.json"
-            )
-            runtime_module.atomic_json(second_path, second)
+            second_path = Path(second_result["receipt"])
+            second_receipt = json.loads(second_path.read_text())
+            second_profile = second_receipt["profiles"][0]
             ready = core.collect_profile_candidate(
                 second_path,
                 second_profile["profile_id"],
@@ -3782,6 +3932,70 @@ elif command == "run":
                 os.environ.pop("SKILLS_STATE_DIR", None)
             else:
                 os.environ["SKILLS_STATE_DIR"] = prior_state
+
+    def test_task_profile_rejects_hostile_executor_results(self) -> None:
+        source_fixture = self.source_fixture([self.session("one", 10)])
+        source = self.adapter("session-source", "fake", source_fixture)
+        procedure = {
+            "trigger": "A task has a reusable procedure.",
+            "outcome": "The procedure is retained.",
+            "actions": ["Identify the task."],
+            "exclusions": ["Do not copy source-specific details."],
+        }
+        valid_profile = {
+            "task_type": "retain-reusable-procedure",
+            "abstract_summary": "Retain a reusable procedure.",
+            "reuse_value": "reusable-procedure",
+            "procedure": procedure,
+        }
+        cases = {
+            "bad-sentinel": {
+                "task_profiles": [valid_profile],
+                "task_profile_result_overrides": {
+                    "completion_sentinel": "WRONG"
+                },
+            },
+            "unhashable-event-id": {
+                "task_profiles": [
+                    {**valid_profile, "source_event_ids": [{"bad": "id"}]}
+                ]
+            },
+            "invalid-procedure": {
+                "task_profiles": [
+                    {
+                        **valid_profile,
+                        "procedure": {**procedure, "exclusions": []},
+                    }
+                ]
+            },
+            "duplicate-task": {
+                "task_profiles": [valid_profile, valid_profile]
+            },
+        }
+        for name, fixture_body in cases.items():
+            with self.subTest(name=name):
+                executor_fixture = self.write(
+                    f"{name}-executor.json", fixture_body
+                )
+                executor = self.adapter(
+                    "review-executor", "exec", executor_fixture
+                )
+                core = DreamingRuntime(
+                    self.paths,
+                    {("fake", "exec")},
+                    allow_autonomous_skill_creation=False,
+                    now=lambda: self.clock,
+                )
+                with self.assertRaisesRegex(
+                    RuntimeFailure, "task-profile-invalid"
+                ):
+                    core.profile(
+                        "fake", source, "fake:one", "exec", executor
+                    )
+                self.assertEqual(
+                    list(self.paths.task_profile_receipts.glob("*.json")),
+                    [],
+                )
 
     def test_completed_transaction_self_heals_before_session_fence(self) -> None:
         fixture = self.source_fixture([self.session("one", 10)])
