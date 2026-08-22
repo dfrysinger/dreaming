@@ -34,6 +34,32 @@ It does NOT consolidate or archive the library at scale — that is
 > autonomous loop is re-expressed for Copilot CLI. Full credit and the
 > verbatim-vs-adapted breakdown: [`references/NOTICE.md`](./references/NOTICE.md).
 
+## Dreaming design principles
+
+- Use an LLM to understand transcript meaning. The conversations were already
+  addressed to an LLM and are retained as plain text on the user's MacBook Pro.
+  Dreaming may send bounded transcript snapshots through its existing
+  authenticated source path to the user's Mac mini for model analysis.
+- Treat both computers as one personal Dreaming system. The MacBook Pro owns
+  source transcripts and receives deployed skills. The Mac mini owns scheduling,
+  model analysis, evidence, evaluation, and deployment decisions.
+- Use deterministic code for boundaries, identities, accounting, replay, and
+  validation. Do not use deterministic text rules as the primary way to infer
+  task meaning unless the user explicitly approves that design.
+- Prove the smallest useful learning loop before adding security or hostile-actor
+  hardening beyond the existing two-machine boundary. Harden the behavior after
+  it works end to end.
+- Keep the product loop direct: an LLM finds tasks where a skill could have
+  helped, evidence accumulates across independent tasks, qualifying evidence and
+  its transcript context produce a draft skill, evaluation checks triggering and
+  task performance plus overall regressions, and a passing skill is deployed.
+  A deployed skill that is unused is retired; a skill with matching opportunities
+  that does not trigger is repaired.
+- New transcript work must reuse the existing session-source snapshot and review
+  path. Add another transcript transport, corpus walker, or interpretation lane
+  only after the user explicitly agrees that the existing path cannot carry the
+  behavior.
+
 ## When to use
 
 - **dispatch** (primary) — the main agent dispatches a `skill-review` subagent

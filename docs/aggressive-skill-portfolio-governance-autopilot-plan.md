@@ -847,44 +847,15 @@
   checks. No installed generation, launchd state, halt state, or live writable
   state changed. Structured refusal projection, one real report-only subject,
   rollback, and live proof remain gated.
-- Task-opportunity evidence is reviewed and committed on the capacity branch as
-  `3a00fc0`. It keeps usage, opportunity, and evaluation as independent
-  evidence, classifies task episodes on the origin host without candidate
-  visibility, and binds privacy-preserving opportunity receipts to later
-  evaluation and creation decisions.
-- The task-opportunity origin and transport slice is implemented on the
-  capacity branch with parser revision 5. Opportunity and usage now share one
-  settled transcript pass and durable index; recent 30-day work is prioritized
-  during migration without dropping older pending work. Task episodes retain
-  delegated requests, merge steering into the active episode, exclude injected
-  system and rotation payloads, and emit only opaque identities, timestamps,
-  category IDs, counts, and source digests. A private full-corpus run indexed
-  2,347 stable sessions and 21.6 GB with zero stable backlog or projection
-  failure. It found 17 classified episodes across diagramming, issue-kanban,
-  managed-service-policy, Microsoft Loop, Photos library, spreadsheet, and
-  terminal-scrollback categories.
-- The reviewed collector is
-  `sha256:07ee7e16ea3913221540d4a7db278be1d9883109b3c53f399dbc6a1a7bba5706`;
-  the unchanged SSH receiver is
-  `sha256:507f011d2b86e9fabe57b4d35f07f5e9f8968253d12876268da5d562a68e0125`.
-  A direct post-review run loaded the private index and parsed only four newly
-  settled sessions. A following Mac mini-to-MacBook run loaded the same index,
-  parsed zero sessions and zero bytes, preserved all seven category and
-  completion totals, and reported no failure or budget stop. The exact
-  temporary Mac mini receiver was removed afterward. Retained results are
-  `opportunity-real-receiver-v5-reviewed.json` and
-  `opportunity-real-mac-mini-transport-v5-reviewed.json` in this session's
-  private files directory.
-- Origin and receiver checks pass 67 cases; owner admission checks pass 49
-  cases. Discovery review found and fixed index self-rejection, cache-dependent
-  completion counts, boolean schema admission, impossible nonempty aggregates,
-  malformed values escaping as type errors, and equal-time current-receipt
-  replacement. Finding-scoped Opus and Terra verification resolved every prior
-  finding with no remaining material defect. No installed generation, launchd
-  state, halt state, live writable index, dashboard, or mutation route changed.
-  Exact category-to-capability mapping, per-capability opportunity state, the
-  recommendation matrix, and dashboard presentation remain the next
-  report-only slice.
+- The task-opportunity design is pivoting from origin-host deterministic
+  classification to candidate-blind LLM task profiling over the existing
+  bounded MacBook Pro-to-Mac mini session snapshot path. The experimental
+  second opportunity transport from `56f45a6` is withdrawn by a normal revert,
+  while the established census and usage paths remain. The next proof-first
+  slice is one real transcript becoming a validated retained task profile and
+  verified recurrence observation before dashboard or retirement integration.
+  Lightweight profiling will have a separate bounded queue so the existing 25
+  expensive full-review attempts do not cap transcript opportunity discovery.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now

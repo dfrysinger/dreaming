@@ -127,19 +127,6 @@ def receive(args: argparse.Namespace) -> None:
         if not isinstance(bundle["usage"], dict):
             raise CensusError("collector returned invalid usage")
         result["usage"] = bundle["usage"]
-    if "opportunity" in bundle:
-        if not isinstance(bundle["opportunity"], dict):
-            raise CensusError("collector returned invalid opportunity")
-        validator = getattr(
-            collector, "validate_task_opportunity_snapshot", None
-        )
-        if not callable(validator) or "usage" not in bundle:
-            raise CensusError("collector cannot validate opportunity")
-        try:
-            validator(bundle["opportunity"], bundle["census"], bundle["usage"])
-        except collector.EstateError as error:
-            raise CensusError(str(error)) from error
-        result["opportunity"] = bundle["opportunity"]
     emit(result)
 
 
