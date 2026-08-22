@@ -2194,12 +2194,48 @@ class DreamingRuntime:
         reviewers: list[tuple[str, ExecutableAdapter]],
     ) -> list[dict[str, Any]]:
         selected = reviewers[:2] if len(reviewers) > 1 else reviewers * 2
+        artifact = result["artifact"]
+        existing_artifact = None
+        if artifact["operation"] in {"patch", "support_file"}:
+            skill_path = self.paths.skills / artifact["skill_name"] / "SKILL.md"
+            if skill_path.is_symlink() or not skill_path.is_file():
+                raise RuntimeFailure("skill-missing", artifact["skill_name"])
+            existing_markdown = skill_path.read_text(encoding="utf-8")
+            existing_frontmatter = re.match(
+                r"^---\n(.*?)\n---\n", existing_markdown, re.S
+            )
+            proposed_frontmatter = re.match(
+                r"^---\n(.*?)\n---\n", artifact["skill_markdown"], re.S
+            )
+            if existing_frontmatter is None or proposed_frontmatter is None:
+                raise RuntimeFailure("patch-content-loss", artifact["skill_name"])
+            existing_keys = set(
+                re.findall(r"(?m)^([A-Za-z0-9_-]+):", existing_frontmatter.group(1))
+            )
+            proposed_keys = set(
+                re.findall(r"(?m)^([A-Za-z0-9_-]+):", proposed_frontmatter.group(1))
+            )
+            existing_headings = set(
+                re.findall(r"(?m)^#{1,6}\s+\S.*$", existing_markdown)
+            )
+            proposed_headings = set(
+                re.findall(r"(?m)^#{1,6}\s+\S.*$", artifact["skill_markdown"])
+            )
+            if not existing_keys.issubset(proposed_keys) or not existing_headings.issubset(
+                proposed_headings
+            ):
+                raise RuntimeFailure("patch-content-loss", artifact["skill_name"])
+            existing_artifact = {
+                "skill_name": artifact["skill_name"],
+                "skill_markdown": existing_markdown,
+            }
         packet = {
             "contract_version": CONTRACT_VERSION,
             "packet_kind": "draft_review",
             "source_revision": reviewed_identity["source_revision"],
             "snapshot_digest": reviewed_identity["snapshot_digest"],
             "proposing_executor": proposing_executor,
+            "existing_artifact": existing_artifact,
             "proposal": {
                 "terminal_route": result["terminal_route"],
                 "summary": result["summary"],

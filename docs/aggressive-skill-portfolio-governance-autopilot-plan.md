@@ -1003,6 +1003,24 @@
   because the existing rotation workflow already covers the observed
   procedure. The failed attempts remain retained in `state-v8/review-attempts.json`;
   no artifact or installed mutation occurred.
+- Candidate-blind profiles of two independent session-continuity failures then
+  identified a plausible uncovered recovery procedure: verify the authoritative
+  predecessor from session evidence before continuing, then rotate with an
+  explicit corrected seed. Receipts
+  `sha256:b7519e85482d2dd89ea6630b8f12feba4d0efa379131dce037958fa0d71f4b18`
+  and
+  `sha256:b237b8eba7799496b4b8bbb0392feab046c470df24d8e20a54f96696e9ec9254`
+  are retained in the private `data-v13` tracer. The real reviewer first
+  proposed new shadow skill `agent-session-continuity`, then on a retry proposed
+  a `macos-agent-shell` repair. The private repair never committed: its draft
+  replaced the entire existing skill with a short patch section, and the
+  legacy evidence envelope failed closed. This exposed a more important
+  pre-mutation defect: draft reviewers did not receive the existing artifact
+  they were judging. Core now binds the exact existing `SKILL.md` into patch
+  review and rejects removal of existing frontmatter keys or headings before
+  model review or mutation. Sixty focused core checks and 33 vendor-adapter
+  checks pass. The candidate remains report-only and not yet admitted; no
+  installed or user-owned skill changed.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now

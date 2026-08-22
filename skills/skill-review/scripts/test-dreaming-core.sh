@@ -3952,6 +3952,82 @@ elif sys.argv[1] == "run":
         self.assertTrue(result["artifact_mutated"])
         self.assertEqual((skill / "SKILL.md").read_text(), updated_markdown)
         self.assertNotEqual(result["artifact_commit"], starting_head)
+        review_packet = next(
+            value
+            for value in (
+                json.loads(path.read_text())
+                for path in (self.paths.state / "draft-reviews").glob("*.json")
+            )
+            if value.get("packet_kind") == "draft_review"
+        )
+        self.assertEqual(
+            review_packet["existing_artifact"],
+            {
+                "skill_name": "existing-procedure",
+                "skill_markdown": original_markdown,
+            },
+        )
+
+    def test_patch_rejects_structural_content_loss_before_mutation(self) -> None:
+        fixture = self.source_fixture([self.session("one", 900)])
+        source = self.adapter("session-source", "fake", fixture)
+        self.init_skills_repo()
+        skill = self.paths.skills / "existing-procedure"
+        skill.mkdir()
+        original_markdown = (
+            "---\nname: existing-procedure\n"
+            "description: Run the existing fixture procedure\n"
+            "platforms: [macos]\n---\n"
+            "# Existing procedure\n\n## Preserve this section\n\nOriginal guidance.\n"
+        )
+        (skill / "SKILL.md").write_text(original_markdown)
+        subprocess.run(
+            ["git", "-C", str(self.paths.skills), "add", "existing-procedure"],
+            check=True,
+        )
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(self.paths.skills),
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "-q",
+                "-m",
+                "add existing skill",
+            ],
+            check=True,
+        )
+        executor_fixture = self.write(
+            "destructive-patch.json",
+            {
+                "mode": "success",
+                "terminal_route": "skill",
+                "artifact": {
+                    "operation": "patch",
+                    "skill_name": "existing-procedure",
+                    "skill_markdown": (
+                        "---\nname: existing-procedure\n"
+                        "description: Replace the existing fixture procedure\n---\n"
+                        "# Replacement\n"
+                    ),
+                    "support_files": [],
+                },
+            },
+        )
+        executor = self.adapter("review-executor", "exec", executor_fixture)
+        with self.assertRaisesRegex(RuntimeFailure, "patch-content-loss"):
+            DreamingRuntime(
+                self.paths,
+                {("fake", "exec")},
+                allow_autonomous_skill_creation=False,
+                now=lambda: self.clock,
+            ).review("fake", source, "fake:one", [("exec", executor)])
+        self.assertEqual((skill / "SKILL.md").read_text(), original_markdown)
+        self.assertEqual(json.loads(self.paths.transactions.read_text()), {})
 
     def test_skill_result_commits_artifact_and_source_routing_evidence(self) -> None:
         fixture = self.source_fixture([self.session("one", 10)])

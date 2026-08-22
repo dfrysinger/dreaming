@@ -1896,7 +1896,10 @@ def review_prompt(
                     "Independently review this proposed durable artifact. Apply the "
                     "supplied dual-review and writing protocols. Reject private data, "
                     "unsupported claims, unsafe instructions, weak reuse value, or an "
-                    "artifact that does not match its route. Use no tools or external "
+                    "artifact that does not match its route. When existing_artifact is "
+                    "present, the proposal is a complete replacement candidate: compare "
+                    "it against that exact baseline and reject deletion of unrelated "
+                    "content, frontmatter, or procedures. Use no tools or external "
                     "knowledge. Return JSON matching result_schema."
                 ),
                 "result_schema": {
