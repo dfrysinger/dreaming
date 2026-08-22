@@ -922,6 +922,21 @@
   closure was corrected with hostile receipt coverage; 55 core checks and 28
   vendor-adapter checks now pass. One real reviewer-to-profile result remains
   next.
+- A private production-source and production-reviewer tracer retained recent
+  real digest profile receipt
+  `sha256:c361ec4c2ec93f1d14960ea3f4cda52abe231646fd6336da866187280ce72eb3`
+  with reusable profile
+  `sha256:dd2f0e572fab0905a9770f9e08141825f3374ea0c5f1fedb10bec91c1e6f34e4`.
+  The ordinary reviewer then discarded the exact same revision with empty
+  evidence because it considered the observed sharding workaround one-off and
+  lacking recurrence. This is an honest inconclusive end-to-end result and
+  exposed a specific design divergence: the reviewed opportunity design says
+  the full reviewer receives the validated task profile before routing, while
+  the current runtime looks up that profile only after the reviewer has already
+  returned a create artifact. The next private tracer is therefore limited to
+  supplying bounded same-revision profile context before reviewer routing and
+  rerunning this exact session. No installed, dashboard, or evaluation work is
+  justified before that boundary is effective.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now
