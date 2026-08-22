@@ -975,6 +975,22 @@
 - The run's single hourly charter re-brief is active as schedule `#5`. Keep it
   live through recurrence, evaluation, installed proof, rollback, and restore;
   stop it only when the task-opportunity Definition of Done is complete.
+- Genuine recurrence is now proven through two independent, candidate-blind
+  Codex profiles of dedicated AI-digest runs. Session
+  `copilot:007f26f7-ddd3-49d5-bac4-fc5f0ac60201` retained receipt
+  `sha256:b6f9ec996a3b26fef153dbf976ee7ce03ccbb1a7bf4737959748af40a6e53144`;
+  session `copilot:40c025c6-73c6-41f2-a3ad-30263a623104` retained receipt
+  `sha256:c8d983d73e9ccb6f4376a564c2afc78be891f1971fed892858f4e2ae17b74976`.
+  Both independently classified the recurring generate, validate, archive,
+  publish, email, seen-state, and notification workflow as a reusable
+  procedure. Candidate-aware review consumed the first receipt with delivery
+  evidence in `state-v6/review-attempts.json` and routed to `discard`: the
+  existing `ai-news-digest` skill already covers the procedure and the session
+  introduced no distinct reusable technique. This is positive recurrence and
+  negative mutation evidence, not a forced repair. The real tracer also exposed
+  two Codex strict-schema defects; local commit `9b4e558` adds explicit JSON
+  types and constrains evidence IDs to the exact bounded snapshot. The next
+  mutation proof must use a recurrent opportunity with a real uncovered gap.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now
