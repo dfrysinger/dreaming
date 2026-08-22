@@ -1727,6 +1727,101 @@ def review_result_schema() -> dict[str, Any]:
     }
 
 
+def task_profile_result_schema() -> dict[str, Any]:
+    procedure = {
+        "type": ["object", "null"],
+        "properties": {
+            "trigger": {"type": "string"},
+            "outcome": {"type": "string"},
+            "actions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 20,
+            },
+            "exclusions": {
+                "type": "array",
+                "items": {"type": "string"},
+                "maxItems": 20,
+            },
+        },
+        "required": ["trigger", "outcome", "actions", "exclusions"],
+        "additionalProperties": False,
+    }
+    profile = {
+        "type": "object",
+        "properties": {
+            "source_event_ids": {
+                "type": "array",
+                "items": {"type": "string"},
+                "minItems": 1,
+                "maxItems": 20,
+            },
+            "task_type": {"type": "string"},
+            "abstract_summary": {"type": "string"},
+            "reuse_value": {
+                "enum": [
+                    "reusable-procedure",
+                    "one-off",
+                    "no-durable-learning",
+                ]
+            },
+            "procedure": procedure,
+            "confidence": {"enum": ["low", "medium", "high"]},
+            "sensitive_source": {"type": "boolean"},
+            "task_state": {"enum": ["completed", "failed", "unresolved"]},
+        },
+        "required": [
+            "source_event_ids",
+            "task_type",
+            "abstract_summary",
+            "reuse_value",
+            "procedure",
+            "confidence",
+            "sensitive_source",
+            "task_state",
+        ],
+        "additionalProperties": False,
+    }
+    return {
+        "type": "object",
+        "properties": {
+            "schema_version": {"const": 1},
+            "kind": {"const": "llm_task_opportunity_profile"},
+            "profiles": {
+                "type": "array",
+                "items": profile,
+                "maxItems": 8,
+            },
+        },
+        "required": ["schema_version", "kind", "profiles"],
+        "additionalProperties": False,
+    }
+
+
+def task_profile_prompt(snapshot: dict[str, Any]) -> str:
+    packet = {
+        "task": (
+            "Identify the distinct user tasks in this bounded normalized session "
+            "and profile whether each contains a reusable procedure. You are "
+            "candidate-blind: no skill catalog is supplied, so infer task meaning "
+            "only from the snapshot. Use no tools or external knowledge. Abstract "
+            "away private names, repositories, URLs, credentials, host identifiers, "
+            "network addresses, and source-specific paths. Cite exact ordered "
+            "snapshot source_event_id values. Return JSON matching result_schema."
+        ),
+        "policy": {
+            "procedure_required_for": ["reusable-procedure"],
+            "procedure_forbidden_for": ["one-off", "no-durable-learning"],
+            "split_distinct_user_outcomes": True,
+            "do_not_infer_completion_without_evidence": True,
+        },
+        "result_schema": task_profile_result_schema(),
+        "snapshot": snapshot,
+    }
+    return json.dumps(packet, sort_keys=True)
+
+
 def review_prompt(snapshot: dict[str, Any]) -> str:
     if snapshot.get("packet_kind") == "draft_review":
         return json.dumps(
@@ -1793,7 +1888,7 @@ def parse_model_result(text: str) -> dict[str, Any]:
         if isinstance(value, dict):
             if isinstance(value.get("terminal_route"), str) or isinstance(
                 value.get("decision"), str
-            ):
+            ) or value.get("kind") == "llm_task_opportunity_profile":
                 return value
             for nested in value.values():
                 found = find(nested)
@@ -1827,7 +1922,10 @@ def parse_model_result(text: str) -> dict[str, Any]:
 
 def executor_run(args: argparse.Namespace) -> None:
     snapshot = load_json(Path(args.snapshot))
+    profile_mode = args.mode == "profile"
     draft_review = (
+        not profile_mode
+        and
         isinstance(snapshot, dict)
         and snapshot.get("packet_kind") == "draft_review"
     )
@@ -1836,12 +1934,15 @@ def executor_run(args: argparse.Namespace) -> None:
     ):
         raise AdapterError("snapshot-invalid", args.snapshot)
     binary = selected_executable(args.vendor, args.binary)
-    prompt = review_prompt(snapshot)
+    prompt = task_profile_prompt(snapshot) if profile_mode else review_prompt(snapshot)
     with tempfile.TemporaryDirectory(prefix=f"dreaming-{args.vendor}-") as work:
         work_path = Path(work).resolve()
         environment = executor_environment(args.vendor, work_path, binary)
         schema = work_path / "result-schema.json"
         active_schema = (
+            task_profile_result_schema()
+            if profile_mode
+            else
             {
                 "type": "object",
                 "properties": {
@@ -1936,6 +2037,181 @@ def executor_run(args: argparse.Namespace) -> None:
             )
         text = output.read_text(encoding="utf-8") if output.exists() else result.stdout
         model_result = parse_model_result(text)
+    if profile_mode:
+        if (
+            set(model_result) != {"schema_version", "kind", "profiles"}
+            or
+            model_result.get("schema_version") != 1
+            or model_result.get("kind") != "llm_task_opportunity_profile"
+            or not isinstance(model_result.get("profiles"), list)
+            or len(model_result["profiles"]) > 8
+        ):
+            raise AdapterError("malformed-executor-result", "task profile envelope")
+        events = snapshot.get("events")
+        available: dict[str, int] = {}
+        for index, event in enumerate(events):
+            event_id = event.get("source_event_id") if isinstance(event, dict) else None
+            if not isinstance(event_id, str) or not event_id or event_id in available:
+                raise AdapterError("snapshot-invalid", "source event identity")
+            available[event_id] = index
+        identity = snapshot.get("identity")
+        qualified_session_id = (
+            identity.get("qualified_session_id")
+            if isinstance(identity, dict)
+            else None
+        )
+        if not isinstance(qualified_session_id, str) or not qualified_session_id:
+            raise AdapterError("snapshot-invalid", "qualified session identity")
+        profiles: list[dict[str, Any]] = []
+        for profile in model_result["profiles"]:
+            expected_profile_keys = {
+                "source_event_ids",
+                "task_type",
+                "abstract_summary",
+                "reuse_value",
+                "procedure",
+                "confidence",
+                "sensitive_source",
+                "task_state",
+            }
+            if not isinstance(profile, dict) or set(profile) != expected_profile_keys:
+                raise AdapterError("malformed-executor-result", "task profile")
+            event_ids = profile.get("source_event_ids")
+            procedure = profile.get("procedure")
+            reuse_value = profile.get("reuse_value")
+            if (
+                not isinstance(event_ids, list)
+                or not event_ids
+                or len(event_ids) > 20
+                or len(event_ids) != len(set(event_ids))
+                or any(not isinstance(value, str) or not value for value in event_ids)
+            ):
+                raise AdapterError(
+                    "malformed-executor-result", "task profile event IDs"
+                )
+            if any(value not in available for value in event_ids):
+                raise AdapterError(
+                    "malformed-executor-result", "task profile event absent"
+                )
+            if event_ids != sorted(event_ids, key=available.__getitem__):
+                raise AdapterError(
+                    "malformed-executor-result", "task profile event order"
+                )
+            if reuse_value not in {
+                "reusable-procedure",
+                "one-off",
+                "no-durable-learning",
+            }:
+                raise AdapterError(
+                    "malformed-executor-result", "task profile reuse value"
+                )
+            if (reuse_value == "reusable-procedure") is not isinstance(
+                procedure, dict
+            ):
+                raise AdapterError(
+                    "malformed-executor-result", "task profile procedure presence"
+                )
+            if profile.get("confidence") not in {"low", "medium", "high"}:
+                raise AdapterError(
+                    "malformed-executor-result", "task profile confidence"
+                )
+            if type(profile.get("sensitive_source")) is not bool:
+                raise AdapterError(
+                    "malformed-executor-result", "task profile sensitivity"
+                )
+            if profile.get("task_state") not in {
+                "completed",
+                "failed",
+                "unresolved",
+            }:
+                raise AdapterError(
+                    "malformed-executor-result", "task profile state"
+                )
+            if any(
+                not isinstance(profile.get(field), str)
+                or not profile[field].strip()
+                for field in ("task_type", "abstract_summary")
+            ):
+                raise AdapterError(
+                    "malformed-executor-result", "task profile text"
+                )
+            if isinstance(procedure, dict):
+                if set(procedure) != {
+                    "trigger",
+                    "outcome",
+                    "actions",
+                    "exclusions",
+                }:
+                    raise AdapterError(
+                        "malformed-executor-result", "task profile procedure"
+                    )
+                actions = procedure.get("actions")
+                exclusions = procedure.get("exclusions")
+                if (
+                    any(
+                        not isinstance(procedure.get(field), str)
+                        or not procedure[field].strip()
+                        for field in ("trigger", "outcome")
+                    )
+                    or not isinstance(actions, list)
+                    or not actions
+                    or len(actions) > 20
+                    or any(not isinstance(value, str) or not value.strip() for value in actions)
+                    or not isinstance(exclusions, list)
+                    or len(exclusions) > 20
+                    or any(
+                        not isinstance(value, str) or not value.strip()
+                        for value in exclusions
+                    )
+                ):
+                    raise AdapterError(
+                        "malformed-executor-result", "task profile procedure"
+                    )
+            task_key = sha(
+                {
+                    "qualified_session_id": qualified_session_id,
+                    "source_event_ids": event_ids,
+                }
+            )
+            retained = {
+                **profile,
+                "task_key": task_key,
+                "profile_id": sha(
+                    {
+                        "qualified_session_id": qualified_session_id,
+                        **profile,
+                    }
+                ),
+                "procedure_fingerprint": (
+                    sha(procedure) if isinstance(procedure, dict) else None
+                ),
+            }
+            profiles.append(retained)
+        snapshot_sha256 = sha(snapshot)
+        profile_set_id = sha(
+            {
+                "snapshot_sha256": snapshot_sha256,
+                "qualified_session_id": qualified_session_id,
+                "profiles": profiles,
+            }
+        )
+        final = {
+            "status": "ok",
+            "mutation_started": False,
+            "completion_sentinel": "DREAMING_TASK_PROFILE_COMPLETE",
+            "schema_version": 1,
+            "kind": "llm_task_opportunity_profile",
+            "snapshot_sha256": snapshot_sha256,
+            "qualified_session_id": qualified_session_id,
+            "profile_set_id": profile_set_id,
+            "profiles": profiles,
+            "model": os.environ.get(
+                f"DREAMING_{args.vendor.upper()}_REVIEW_MODEL",
+                f"{args.vendor}-default",
+            ),
+        }
+        atomic_json(Path(args.result), final)
+        emit({"ok": True, **final})
     if draft_review:
         if model_result.get("decision") not in {"approve", "reject"}:
             raise AdapterError("malformed-executor-result", "decision")
@@ -5704,6 +5980,7 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--routing")
     run.add_argument("--harness")
     run.add_argument("--catalog")
+    run.add_argument("--mode", choices=("review", "profile"), default="review")
     prepare = sub.add_parser("prepare")
     prepare.add_argument("--trial", required=True)
     normalize = sub.add_parser("normalize")

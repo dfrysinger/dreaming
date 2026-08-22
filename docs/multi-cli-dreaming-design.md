@@ -376,7 +376,7 @@ Each executor implements:
 
 ```text
 review-executor doctor
-review-executor run --snapshot <path> --result <path>
+review-executor run --snapshot <path> --result <path> [--mode review|profile]
 review-executor version
 ```
 

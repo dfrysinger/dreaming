@@ -137,6 +137,94 @@ class VendorAdapterTest(unittest.TestCase):
         self.assertNotIn("COPILOT_HOME", environment)
         self.assertEqual(environment["HOME"], str(work / "home"))
 
+    def test_task_profile_mode_is_candidate_blind(self):
+        snapshot = self.case / "profile-snapshot.json"
+        snapshot.write_text(
+            json.dumps(
+                {
+                    "identity": {
+                        "qualified_session_id": "copilot:profile-fixture",
+                    },
+                    "events": [
+                        {
+                            "source_event_id": "event-1",
+                            "role": "user",
+                            "content": "make this a reusable procedure",
+                        },
+                        {
+                            "source_event_id": "event-2",
+                            "role": "assistant",
+                            "content": "done",
+                        },
+                    ]
+                }
+            )
+        )
+        result_path = self.case / "profile-result.json"
+        result = self.run_adapter(
+            "copilot",
+            "review-executor",
+            "run",
+            "--snapshot",
+            snapshot,
+            "--result",
+            result_path,
+            "--mode",
+            "profile",
+        )
+        self.assertEqual(result["kind"], "llm_task_opportunity_profile")
+        self.assertEqual(result["completion_sentinel"], "DREAMING_TASK_PROFILE_COMPLETE")
+        self.assertEqual(result["profiles"][0]["source_event_ids"], ["event-1", "event-2"])
+        self.assertTrue(result["profiles"][0]["task_key"].startswith("sha256:"))
+        self.assertTrue(result["profiles"][0]["profile_id"].startswith("sha256:"))
+        self.assertTrue(result["profile_set_id"].startswith("sha256:"))
+        invocations = [
+            json.loads(line)
+            for line in Path(self.env["FAKE_CLI_LOG"]).read_text().splitlines()
+        ]
+        prompt_args = invocations[-1]["args"]
+        prompt = json.loads(prompt_args[prompt_args.index("-p") + 1])
+        self.assertNotIn("context", prompt)
+        self.assertNotIn("skills", json.dumps(prompt))
+        self.assertEqual(
+            prompt["result_schema"]["properties"]["kind"]["const"],
+            "llm_task_opportunity_profile",
+        )
+
+    def test_task_profile_mode_rejects_reordered_evidence(self):
+        snapshot = self.case / "profile-snapshot.json"
+        snapshot.write_text(
+            json.dumps(
+                {
+                    "identity": {
+                        "qualified_session_id": "copilot:profile-fixture",
+                    },
+                    "events": [
+                        {"source_event_id": "event-1"},
+                        {"source_event_id": "event-2"},
+                    ],
+                }
+            )
+        )
+        result = self.run_adapter(
+            "copilot",
+            "review-executor",
+            "run",
+            "--snapshot",
+            snapshot,
+            "--result",
+            self.case / "profile-result.json",
+            "--mode",
+            "profile",
+            check=False,
+            environment={**self.env, "FAKE_TASK_PROFILE_REVERSE": "1"},
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["error"]["code"],
+            "malformed-executor-result",
+        )
+
     def _write_sources(self):
         copilot = self.case / "copilot/session"
         copilot.mkdir(parents=True)
@@ -330,6 +418,36 @@ def input_review_payload(prompt):
       "summary": "exact manifest satisfies the safe review contract",
       "reason": None,
     }
+def task_profile_payload(prompt):
+    packet = json.loads(prompt)
+    assert "context" not in packet
+    assert "skills" not in prompt
+    event_ids = [
+      event["source_event_id"]
+      for event in packet["snapshot"]["events"]
+      if event.get("source_event_id")
+    ]
+    if os.environ.get("FAKE_TASK_PROFILE_REVERSE") == "1":
+        event_ids.reverse()
+    return {
+      "schema_version": 1,
+      "kind": "llm_task_opportunity_profile",
+      "profiles": [{
+        "source_event_ids": event_ids[:2],
+        "task_type": "document-reusable-procedure",
+        "abstract_summary": "Turn completed work into a reusable procedure.",
+        "reuse_value": "reusable-procedure",
+        "procedure": {
+          "trigger": "A completed task contains a reusable procedure.",
+          "outcome": "The procedure is captured for reuse.",
+          "actions": ["Identify the task outcome.", "Capture the ordered procedure."],
+          "exclusions": ["Do not copy source-specific details."],
+        },
+        "confidence": "high",
+        "sensitive_source": False,
+        "task_state": "completed",
+      }],
+    }
 if "--version" in args:
     print(vendor + " 1.0")
     raise SystemExit()
@@ -378,6 +496,9 @@ if vendor == "codex" and "--output-last-message" in args:
         }))
         raise SystemExit()
     prompt = next((arg for arg in args if "result_schema" in arg), "")
+    if "llm_task_opportunity_profile" in prompt:
+        target.write_text(json.dumps(task_profile_payload(prompt)))
+        raise SystemExit()
     payload = (
         {"decision":"approve","summary":"independent fixture approval"}
         if "draft_review" in prompt
@@ -432,6 +553,9 @@ if ("-p" in args or "--print" in args) and "plugin" not in args:
             }))
         raise SystemExit()
     prompt = next((arg for arg in args if "result_schema" in arg), "")
+    if "llm_task_opportunity_profile" in prompt:
+        print(json.dumps({"result":task_profile_payload(prompt)}))
+        raise SystemExit()
     payload = (
         {"decision":"approve","summary":"independent fixture approval"}
         if "draft_review" in prompt

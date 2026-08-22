@@ -856,6 +856,17 @@
   verified recurrence observation before dashboard or retirement integration.
   Lightweight profiling will have a separate bounded queue so the existing 25
   expensive full-review attempts do not cap transcript opportunity discovery.
+- The first LLM task-profile tracer is effective. The production review adapter
+  now has a candidate-blind, tool-free `profile` mode with no skill catalog,
+  bounded output, exact ordered source-event validation, and owner-computed
+  snapshot, task, profile, procedure, and profile-set identities. A real bounded
+  Copilot transcript produced retained profile set
+  `sha256:6fda099741b31baf16287cd48e6a7089094b438cd5e3191ac1db66bf663f47dc`
+  for a reusable tmux-configuration migration procedure. The local Copilot
+  loader currently requires a private tracer-only home allowance under the
+  executor sandbox; that compatibility seam remains explicitly deferred and is
+  not part of installed configuration. Core-owned immutable profile storage,
+  verified recurrence, and the independent profiling queue remain next.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now
