@@ -3452,6 +3452,89 @@ elif command == "run":
         )
         self.assertEqual(response["terminal_route"], "discard")
 
+    def test_task_profile_receipt_is_immutable_and_identity_bound(self) -> None:
+        fixture = self.source_fixture([self.session("one", 10)])
+        source = self.adapter("session-source", "fake", fixture)
+        script = self.case / "profile-executor.py"
+        script.write_text(
+            """#!/usr/bin/env python3
+import hashlib, json, pathlib, sys
+def digest(value):
+    raw = json.dumps(value, sort_keys=True, separators=(",", ":"),
+                     ensure_ascii=False).encode()
+    return "sha256:" + hashlib.sha256(raw).hexdigest()
+command = sys.argv[1]
+if command == "contract":
+    print(json.dumps({"ok": True, "protocol": "dreaming.review-executor",
+        "version": 1, "adapter_id": "profiler", "capabilities":
+        ["source-blind", "mutation-fence", "completion-sentinel"]}))
+elif command == "doctor":
+    print(json.dumps({"ok": True, "healthy": True, "boundary_ready": True}))
+elif command == "run":
+    snapshot = json.loads(pathlib.Path(
+        sys.argv[sys.argv.index("--snapshot") + 1]).read_text())
+    event_ids = [event["source_event_id"] for event in snapshot["events"][:2]]
+    procedure = {"trigger": "A task has a reusable procedure.",
+        "outcome": "The procedure is retained.",
+        "actions": ["Identify the task.", "Retain the procedure."],
+        "exclusions": ["Do not copy source-specific details."]}
+    model_profile = {"source_event_ids": event_ids,
+        "task_type": "retain-reusable-procedure",
+        "abstract_summary": "Retain a reusable procedure from completed work.",
+        "reuse_value": "reusable-procedure", "procedure": procedure,
+        "confidence": "high", "sensitive_source": False,
+        "task_state": "completed"}
+    session_id = snapshot["identity"]["qualified_session_id"]
+    profile = {**model_profile,
+        "task_key": digest({"qualified_session_id": session_id,
+                            "source_event_ids": event_ids}),
+        "profile_id": digest({"qualified_session_id": session_id,
+                              **model_profile}),
+        "procedure_fingerprint": digest(procedure)}
+    snapshot_sha = digest(snapshot)
+    profile_set = digest({"snapshot_sha256": snapshot_sha,
+        "qualified_session_id": session_id, "profiles": [profile]})
+    result = {"status": "ok", "mutation_started": False,
+        "completion_sentinel": "DREAMING_TASK_PROFILE_COMPLETE",
+        "schema_version": 1, "kind": "llm_task_opportunity_profile",
+        "snapshot_sha256": snapshot_sha,
+        "qualified_session_id": session_id,
+        "profile_set_id": profile_set, "profiles": [profile],
+        "model": "fixture-profile-model"}
+    pathlib.Path(sys.argv[sys.argv.index("--result") + 1]).write_text(
+        json.dumps(result))
+    print(json.dumps({"ok": True, **result}))
+"""
+        )
+        script.chmod(0o755)
+        executor = ExecutableAdapter(
+            [sys.executable, str(script)],
+            "review-executor",
+        )
+        core = self.core({("fake", "profiler")})
+        first = core.profile(
+            "fake", source, "fake:one", "profiler", executor
+        )
+        second = core.profile(
+            "fake", source, "fake:one", "profiler", executor
+        )
+        self.assertEqual(first, second)
+        receipt_path = Path(first["receipt"])
+        receipt = json.loads(receipt_path.read_text())
+        self.assertEqual(receipt["receipt_sha256"], first["receipt_sha256"])
+        self.assertEqual(receipt["qualified_session_id"], "fake:one")
+        self.assertEqual(receipt["profiles"][0]["task_state"], "completed")
+        self.assertEqual(
+            runtime_module.digest(
+                {
+                    key: value
+                    for key, value in receipt.items()
+                    if key != "receipt_sha256"
+                }
+            ),
+            receipt["receipt_sha256"],
+        )
+
     def test_completed_transaction_self_heals_before_session_fence(self) -> None:
         fixture = self.source_fixture([self.session("one", 10)])
         source = self.adapter("session-source", "fake", fixture)

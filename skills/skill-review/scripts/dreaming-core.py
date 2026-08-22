@@ -483,6 +483,10 @@ class RuntimePaths:
         return self.state / "review-evidence.json"
 
     @property
+    def task_profile_receipts(self) -> Path:
+        return self.data / "task-profiles" / "v1"
+
+    @property
     def bundles(self) -> Path:
         return self.data / "bundles"
 
@@ -1243,6 +1247,240 @@ class DreamingRuntime:
             "snapshot_sha256": snapshot_sha256,
             "source_revision": reviewed_identity["source_revision"],
             "event_ids": requested,
+        }
+
+    def _validated_task_profile_receipt(
+        self,
+        result: dict[str, Any],
+        snapshot_path: Path,
+        reviewed_identity: dict[str, Any],
+        executor_id: str,
+        executor_identity: dict[str, Any],
+    ) -> dict[str, Any]:
+        expected_result_keys = {
+            "status",
+            "mutation_started",
+            "completion_sentinel",
+            "schema_version",
+            "kind",
+            "snapshot_sha256",
+            "qualified_session_id",
+            "profile_set_id",
+            "profiles",
+            "model",
+        }
+        if (
+            set(result) != expected_result_keys
+            or result.get("status") != "ok"
+            or result.get("mutation_started") is not False
+            or result.get("completion_sentinel")
+            != "DREAMING_TASK_PROFILE_COMPLETE"
+            or result.get("schema_version") != 1
+            or result.get("kind") != "llm_task_opportunity_profile"
+            or result.get("qualified_session_id")
+            != reviewed_identity["qualified_session_id"]
+            or not isinstance(result.get("model"), str)
+            or not result["model"]
+        ):
+            raise RuntimeFailure(
+                "task-profile-invalid", "executor result contract"
+            )
+        snapshot = read_json(snapshot_path, {})
+        snapshot_sha256 = digest(snapshot)
+        if (
+            result.get("snapshot_sha256") != snapshot_sha256
+            or snapshot_path.stem != snapshot_sha256.removeprefix("sha256:")
+        ):
+            raise RuntimeFailure(
+                "task-profile-invalid", "snapshot identity"
+            )
+        events = snapshot.get("events")
+        if not isinstance(events, list):
+            raise RuntimeFailure("task-profile-invalid", "snapshot events")
+        available: dict[str, int] = {}
+        for index, event in enumerate(events):
+            event_id = event.get("source_event_id") if isinstance(event, dict) else None
+            if not isinstance(event_id, str) or not event_id or event_id in available:
+                raise RuntimeFailure(
+                    "task-profile-invalid", "snapshot event identity"
+                )
+            available[event_id] = index
+        profiles = result.get("profiles")
+        if not isinstance(profiles, list) or len(profiles) > 8:
+            raise RuntimeFailure("task-profile-invalid", "profile collection")
+        expected_profile_keys = {
+            "source_event_ids",
+            "task_type",
+            "abstract_summary",
+            "reuse_value",
+            "procedure",
+            "confidence",
+            "sensitive_source",
+            "task_state",
+            "task_key",
+            "profile_id",
+            "procedure_fingerprint",
+        }
+        for profile in profiles:
+            if not isinstance(profile, dict) or set(profile) != expected_profile_keys:
+                raise RuntimeFailure("task-profile-invalid", "profile shape")
+            event_ids = profile.get("source_event_ids")
+            if (
+                not isinstance(event_ids, list)
+                or not event_ids
+                or len(event_ids) > 20
+                or len(event_ids) != len(set(event_ids))
+                or any(value not in available for value in event_ids)
+                or event_ids != sorted(event_ids, key=available.__getitem__)
+            ):
+                raise RuntimeFailure("task-profile-invalid", "profile evidence")
+            model_profile = {
+                key: value
+                for key, value in profile.items()
+                if key
+                not in {"task_key", "profile_id", "procedure_fingerprint"}
+            }
+            procedure = profile.get("procedure")
+            expected_task_key = digest(
+                {
+                    "qualified_session_id": reviewed_identity[
+                        "qualified_session_id"
+                    ],
+                    "source_event_ids": event_ids,
+                }
+            )
+            expected_profile_id = digest(
+                {
+                    "qualified_session_id": reviewed_identity[
+                        "qualified_session_id"
+                    ],
+                    **model_profile,
+                }
+            )
+            expected_procedure_fingerprint = (
+                digest(procedure) if isinstance(procedure, dict) else None
+            )
+            if (
+                profile.get("task_key") != expected_task_key
+                or profile.get("profile_id") != expected_profile_id
+                or profile.get("procedure_fingerprint")
+                != expected_procedure_fingerprint
+            ):
+                raise RuntimeFailure("task-profile-invalid", "profile identity")
+        expected_profile_set_id = digest(
+            {
+                "snapshot_sha256": snapshot_sha256,
+                "qualified_session_id": reviewed_identity[
+                    "qualified_session_id"
+                ],
+                "profiles": profiles,
+            }
+        )
+        if result.get("profile_set_id") != expected_profile_set_id:
+            raise RuntimeFailure("task-profile-invalid", "profile set identity")
+        observed = parse_time(reviewed_identity.get("updated_at"))
+        if observed is None:
+            raise RuntimeFailure("task-profile-invalid", "source observation time")
+        receipt = {
+            "schema_version": 1,
+            "kind": "task_profile_receipt",
+            "profile_set_id": expected_profile_set_id,
+            "snapshot_sha256": snapshot_sha256,
+            "source_revision": reviewed_identity["source_revision"],
+            "qualified_session_id": reviewed_identity["qualified_session_id"],
+            "observed_at": observed.astimezone(timezone.utc).isoformat(),
+            "executor": executor_id,
+            "executor_identity": executor_identity,
+            "model": result["model"],
+            "profiles": profiles,
+        }
+        return {
+            **receipt,
+            "receipt_sha256": digest(receipt),
+        }
+
+    def profile(
+        self,
+        source_name: str,
+        source: ExecutableAdapter,
+        qualified_session_id: str,
+        executor_id: str,
+        executor: ExecutableAdapter,
+    ) -> dict[str, Any]:
+        if not self._route_allowed(source_name, executor_id):
+            raise RuntimeFailure("route-denied", f"{source_name}>{executor_id}")
+        doctor = executor.call("doctor")
+        if not doctor.get("healthy") or not doctor.get("boundary_ready"):
+            raise RuntimeFailure("executor-boundary-unavailable", executor_id)
+        current = source.call(
+            "inspect", session=qualified_session_id
+        )["session"]
+        validate_identity(current, source_name)
+        if current["completion_state"] not in {"terminal", "quiet"}:
+            raise RuntimeFailure(
+                "task-profile-unsettled", qualified_session_id
+            )
+        snapshot_path, reviewed_identity = self.render_snapshot(
+            source_name,
+            source,
+            executor_id,
+            qualified_session_id,
+        )
+        result_name = hashlib.sha256(
+            qualified_session_id.encode("utf-8")
+        ).hexdigest()
+        executor_name = hashlib.sha256(executor_id.encode("utf-8")).hexdigest()
+        result_path = (
+            self.paths.state
+            / "profile-results"
+            / f"{result_name}-{hashlib.sha256(current['source_revision'].encode()).hexdigest()}-{executor_name}.json"
+        )
+        result_path.parent.mkdir(parents=True, exist_ok=True)
+        response = executor.call(
+            "run",
+            snapshot=snapshot_path,
+            result=result_path,
+            mode="profile",
+        )
+        if not result_path.exists():
+            raise RuntimeFailure("missing-task-profile-result", executor_id)
+        file_result = read_json(result_path, {})
+        if file_result != {
+            key: value for key, value in response.items() if key != "ok"
+        }:
+            raise RuntimeFailure("result-channel-mismatch", executor_id)
+        receipt = self._validated_task_profile_receipt(
+            file_result,
+            snapshot_path,
+            reviewed_identity,
+            executor_id,
+            executor.identity,
+        )
+        latest = source.call(
+            "inspect", session=qualified_session_id
+        )["session"]
+        validate_identity(latest, source_name)
+        if not same_revision(reviewed_identity, latest):
+            raise RuntimeFailure(
+                "task-profile-stale", qualified_session_id
+            )
+        receipt_path = (
+            self.paths.task_profile_receipts
+            / f"{receipt['receipt_sha256'].removeprefix('sha256:')}.json"
+        )
+        if receipt_path.exists():
+            if read_json(receipt_path, {}) != receipt:
+                raise RuntimeFailure(
+                    "task-profile-collision", str(receipt_path)
+                )
+        else:
+            atomic_json(receipt_path, receipt)
+        return {
+            "status": "profiled",
+            "receipt": str(receipt_path),
+            "receipt_sha256": receipt["receipt_sha256"],
+            "profile_set_id": receipt["profile_set_id"],
+            "profile_count": len(receipt["profiles"]),
         }
 
     def _apply_autonomous_admission_policy(
@@ -7589,6 +7827,66 @@ def enqueue_session(source_name: str, qualified_session_id: str) -> dict[str, An
     }
 
 
+def profile_session(
+    source_name: str,
+    qualified_session_id: str,
+    executor_name: str | None,
+) -> dict[str, Any]:
+    paths = default_paths()
+    config = load_adapter_config(default_adapter_config(paths))
+    adapters, _reports, errors = configured_adapters_tolerant(config)
+    source = adapters["session-source"].get(source_name)
+    if source is None:
+        relevant = [
+            error
+            for error in errors
+            if error.get("role") == "session-source"
+            and error.get("adapter") == source_name
+        ]
+        code = relevant[0]["code"] if relevant else "source-not-configured"
+        raise RuntimeFailure(str(code), source_name)
+    executors = adapters["review-executor"]
+    routes = configured_routes(config)
+    if executor_name is None:
+        candidates = sorted(
+            name
+            for name in executors
+            if (source_name, name) in routes
+        )
+        if not candidates:
+            raise RuntimeFailure(
+                "route-denied", f"{source_name}>review-executor"
+            )
+        executor_name = candidates[0]
+    executor = executors.get(executor_name)
+    if executor is None:
+        relevant = [
+            error
+            for error in errors
+            if error.get("role") == "review-executor"
+            and error.get("adapter") == executor_name
+        ]
+        code = relevant[0]["code"] if relevant else "executor-not-configured"
+        raise RuntimeFailure(str(code), executor_name)
+    core = DreamingRuntime(paths, routes)
+    result = core.profile(
+        source_name,
+        source,
+        qualified_session_id,
+        executor_name,
+        executor,
+    )
+    return {
+        "ok": True,
+        "runtime": "dreaming-core",
+        "command": "profile",
+        "source": source_name,
+        "session_id": qualified_session_id,
+        "executor": executor_name,
+        **result,
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command")
@@ -7608,6 +7906,10 @@ def build_parser() -> argparse.ArgumentParser:
     enqueue = subcommands.add_parser("enqueue")
     enqueue.add_argument("--source", required=True)
     enqueue.add_argument("--session", required=True)
+    profile = subcommands.add_parser("profile")
+    profile.add_argument("--source", required=True)
+    profile.add_argument("--session", required=True)
+    profile.add_argument("--executor")
     return parser
 
 
@@ -7650,6 +7952,12 @@ def main() -> None:
             }
         elif args.command == "enqueue":
             report = enqueue_session(args.source, args.session)
+        elif args.command == "profile":
+            report = profile_session(
+                args.source,
+                args.session,
+                args.executor,
+            )
         else:
             report = selftest(require_config=args.command == "doctor")
         print(json.dumps(report, sort_keys=True))

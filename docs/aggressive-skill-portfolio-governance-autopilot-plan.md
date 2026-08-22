@@ -867,6 +867,16 @@
   executor sandbox; that compatibility seam remains explicitly deferred and is
   not part of installed configuration. Core-owned immutable profile storage,
   verified recurrence, and the independent profiling queue remain next.
+- Core-owned profile retention is now implemented and privately proven. The
+  `dreaming-core.py profile` command reuses configured source and executor
+  routes, requires a settled source revision, independently recomputes every
+  snapshot, task, profile, procedure, and profile-set identity, rechecks the
+  source revision after the model operation, and writes an idempotent
+  content-addressed receipt. Real transcript-derived profile receipt
+  `sha256:1449d4726d9c6d7604d7fa8dbdb0bbb3face3268b9fec589344de2189be23a7b`
+  was retained under a private data root and reproduced exactly on replay.
+  The replay adapters are private tracer seams, not production code. Verified
+  recurrence and the independent profiling queue remain next.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now
