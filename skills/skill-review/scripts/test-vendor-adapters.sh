@@ -190,6 +190,19 @@ class VendorAdapterTest(unittest.TestCase):
             prompt["result_schema"]["properties"]["kind"]["const"],
             "llm_task_opportunity_profile",
         )
+        self.assertEqual(
+            prompt["result_schema"]["properties"]["schema_version"]["type"],
+            "integer",
+        )
+        profile_schema = prompt["result_schema"]["properties"]["profiles"][
+            "items"
+        ]["properties"]
+        for field in ("reuse_value", "confidence", "task_state"):
+            self.assertEqual(profile_schema[field]["type"], "string")
+        self.assertEqual(
+            profile_schema["source_event_ids"]["items"]["enum"],
+            ["event-1", "event-2"],
+        )
 
     def test_task_profile_mode_rejects_reordered_evidence(self):
         snapshot = self.case / "profile-snapshot.json"

@@ -1752,8 +1752,21 @@ def review_result_schema() -> dict[str, Any]:
     }
 
 
-def task_profile_result_schema() -> dict[str, Any]:
+def task_profile_result_schema(
+    snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     bounded_text = {"type": "string", "minLength": 1, "maxLength": 1000}
+    event_id_schema: dict[str, Any] = {"type": "string"}
+    if snapshot is not None:
+        event_ids = [
+            event.get("source_event_id")
+            for event in snapshot.get("events", [])
+            if isinstance(event, dict)
+            and isinstance(event.get("source_event_id"), str)
+            and event["source_event_id"]
+        ]
+        if event_ids:
+            event_id_schema["enum"] = event_ids
     procedure = {
         "type": ["object", "null"],
         "properties": {
@@ -1780,13 +1793,14 @@ def task_profile_result_schema() -> dict[str, Any]:
         "properties": {
             "source_event_ids": {
                 "type": "array",
-                "items": {"type": "string"},
+                "items": event_id_schema,
                 "minItems": 1,
                 "maxItems": 20,
             },
             "task_type": bounded_text,
             "abstract_summary": bounded_text,
             "reuse_value": {
+                "type": "string",
                 "enum": [
                     "reusable-procedure",
                     "one-off",
@@ -1794,9 +1808,15 @@ def task_profile_result_schema() -> dict[str, Any]:
                 ]
             },
             "procedure": procedure,
-            "confidence": {"enum": ["low", "medium", "high"]},
+            "confidence": {
+                "type": "string",
+                "enum": ["low", "medium", "high"],
+            },
             "sensitive_source": {"type": "boolean"},
-            "task_state": {"enum": ["completed", "failed", "unresolved"]},
+            "task_state": {
+                "type": "string",
+                "enum": ["completed", "failed", "unresolved"],
+            },
         },
         "required": [
             "source_event_ids",
@@ -1813,8 +1833,11 @@ def task_profile_result_schema() -> dict[str, Any]:
     return {
         "type": "object",
         "properties": {
-            "schema_version": {"const": 1},
-            "kind": {"const": "llm_task_opportunity_profile"},
+            "schema_version": {"type": "integer", "const": 1},
+            "kind": {
+                "type": "string",
+                "const": "llm_task_opportunity_profile",
+            },
             "profiles": {
                 "type": "array",
                 "items": profile,
@@ -1843,7 +1866,7 @@ def task_profile_prompt(snapshot: dict[str, Any]) -> str:
             "split_distinct_user_outcomes": True,
             "do_not_infer_completion_without_evidence": True,
         },
-        "result_schema": task_profile_result_schema(),
+        "result_schema": task_profile_result_schema(snapshot),
         "snapshot": snapshot,
     }
     return json.dumps(packet, sort_keys=True)
@@ -2010,7 +2033,7 @@ def executor_run(args: argparse.Namespace) -> None:
         environment = executor_environment(args.vendor, work_path, binary)
         schema = work_path / "result-schema.json"
         active_schema = (
-            task_profile_result_schema()
+            task_profile_result_schema(snapshot)
             if profile_mode
             else
             {
