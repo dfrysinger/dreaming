@@ -847,6 +847,50 @@
   checks. No installed generation, launchd state, halt state, or live writable
   state changed. Structured refusal projection, one real report-only subject,
   rollback, and live proof remain gated.
+- Task-opportunity evidence is reviewed and committed on the capacity branch as
+  `3a00fc0`. It keeps usage, opportunity, and evaluation as independent
+  evidence, classifies task episodes on the origin host without candidate
+  visibility, and binds privacy-preserving opportunity receipts to later
+  evaluation and creation decisions.
+- The remote evaluation-input installation path is hardened through capacity
+  commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
+  Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now
+  preserves authenticated remote estate topology while regenerating local
+  code-bound paths and digests. Private adapter preflight and rendered launch
+  checks prevent a generation from testing a prior checkout or an unsealed
+  caller-owned adapter file.
+- Immediate owner run `20260821T221120Z-41238` reached the remote evaluation
+  overlay but stopped before claim reservation with
+  `remote-candidate-invalid`. Its retained queue showed the exact defect: 95
+  capabilities without sealed inputs were transport-runnable, while the sealed
+  snapshot-ready `agent-auth-broker` row was deferred because its immutable
+  Mac mini snapshot path was not a raw MacBook census path.
+- Queue progression is corrected and reviewed at capacity commit `0f027f3`,
+  transferred without remotes to Mac mini commit `bdeabdb7`. Remote transport
+  now requires an indexed sealed input, an exact snapshot-ready overlay path
+  may proceed to authoring, and refused or local rows retain the raw census
+  ambiguity gate. All 47 core checks pass. Paired Opus/Terra review closed one
+  refused-row fail-closed finding with no remaining finding.
+- Frozen checkout `dreaming-install-bdeabdb7` passed private managed-adapter
+  preflight with exact remote census totals of 110 physical instances, 96
+  canonical capabilities, and zero unresolved runtime skills. Rendered owner
+  and self-test environments bind the frozen checkout, managed adapter digest
+  `2f1b524d7e2c1b60753a4070b0a23d25941141191db6aacee3fcbfe2dc715abc`,
+  and the canonical adapter path. Activation generation
+  `20260821T225413Z-install-65347` passed its generation-bound full self-test
+  with zero failures and enabled only after that gate. The sole scheduled owner
+  remains `StartInterval=14400` with `RunAtLoad=false`.
+- Immediate owner run `20260821T234937Z-22751` completed successfully on that
+  generation. Its same-run queue contained 96 rows: the sealed
+  `agent-auth-broker` capability was the only authoring-runnable row and the
+  other 95 were explicitly `input_not_ready`; no transport row ran. Claim
+  `sha256:a0b2922b009116e9381b45f90f112bec6640eb8fd57a38fe64342493bb5f2900`
+  bound the exact remote subject and candidate, then published terminal
+  readiness transition
+  `sha256:5228a57eca95d7fe93b20cc2dc3719cbebca0e9051a74385c7a63b3cc49f4e85`
+  as `insufficient_information`. This is the first real scheduled-owner
+  authoring claim and an honest terminal result; it does not claim the
+  capability is ready.
 - Governance work remaining: bootstrap the sealed inputs for the real zero-use
   cohort through the reviewed remote-subject bridge, progress that cohort
   through reviewed readiness, then execute the evaluation queue under explicit
