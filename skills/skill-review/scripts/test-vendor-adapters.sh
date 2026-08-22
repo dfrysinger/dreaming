@@ -1365,8 +1365,21 @@ print(json.dumps({"ok": True}))
         skill_schema = vendor_module.review_result_schema()["properties"][
             "artifact"
         ]["properties"]["skill_markdown"]
-        self.assertIn("pattern", skill_schema)
+        self.assertNotIn("pattern", skill_schema)
+        self.assertEqual(skill_schema["minLength"], 1)
         self.assertIn("frontmatter", skill_schema["description"])
+        review_schema = vendor_module.review_result_schema(
+            {
+                "events": [
+                    {"source_event_id": "event-1"},
+                    {"source_event_id": "event-2"},
+                ]
+            }
+        )
+        self.assertEqual(
+            review_schema["properties"]["evidence_event_ids"]["items"],
+            {"type": "string", "enum": ["event-1", "event-2"]},
+        )
         snapshot = self.case / "snapshot.json"
         snapshot.write_text(json.dumps({"events": []}))
         for vendor in ("copilot", "claude", "codex"):

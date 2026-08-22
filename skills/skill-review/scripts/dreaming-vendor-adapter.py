@@ -1684,7 +1684,20 @@ def review_context() -> dict[str, Any]:
     return context
 
 
-def review_result_schema() -> dict[str, Any]:
+def review_result_schema(
+    snapshot: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    event_id_schema: dict[str, Any] = {"type": "string"}
+    if snapshot is not None:
+        event_ids = [
+            event.get("source_event_id")
+            for event in snapshot.get("events", [])
+            if isinstance(event, dict)
+            and isinstance(event.get("source_event_id"), str)
+            and event["source_event_id"]
+        ]
+        if event_ids:
+            event_id_schema["enum"] = event_ids
     artifact = {
         "type": ["object", "null"],
         "properties": {
@@ -1692,7 +1705,7 @@ def review_result_schema() -> dict[str, Any]:
             "skill_name": {"type": "string"},
             "skill_markdown": {
                 "type": "string",
-                "pattern": "^---\\nname: [a-z0-9]+(?:-[a-z0-9]+)*\\ndescription: \\S",
+                "minLength": 1,
                 "description": (
                     "Complete SKILL.md content. It must start with YAML "
                     "frontmatter whose name exactly matches skill_name and "
@@ -1737,7 +1750,7 @@ def review_result_schema() -> dict[str, Any]:
             "artifact": artifact,
             "evidence_event_ids": {
                 "type": "array",
-                "items": {"type": "string"},
+                "items": event_id_schema,
                 "maxItems": 20,
             },
         },
@@ -1933,7 +1946,7 @@ def review_prompt(
                 "factual_memory",
             ],
         },
-        "result_schema": review_result_schema(),
+        "result_schema": review_result_schema(snapshot),
         "context": review_context(),
         "snapshot": snapshot,
     }
@@ -2046,7 +2059,7 @@ def executor_run(args: argparse.Namespace) -> None:
                 "additionalProperties": False,
             }
             if draft_review
-            else review_result_schema()
+            else review_result_schema(snapshot)
         )
         schema.write_text(json.dumps(active_schema), encoding="utf-8")
         output = work_path / "last-message.json"

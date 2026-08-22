@@ -991,6 +991,18 @@
   two Codex strict-schema defects; local commit `9b4e558` adds explicit JSON
   types and constrains evidence IDs to the exact bounded snapshot. The next
   mutation proof must use a recurrent opportunity with a real uncovered gap.
+- A second private candidate-aware tracer reviewed the retained session-rotation
+  profile receipt
+  `sha256:c0c63febbdbeefb9a76974b24c1d71a66adf799080d2a9b468c85db9213dcd3d`.
+  Two initial Codex attempts failed closed because the review-result schema's
+  frontmatter regex produced only the literal `---\nname: ` prefix and allowed
+  invented evidence IDs. The corrected boundary removes that generative regex,
+  retains deterministic artifact validation, and constrains review evidence to
+  exact snapshot event IDs. All 33 vendor-adapter checks pass. The rerun
+  delivered the exact profile receipt and correctly routed to `discard`
+  because the existing rotation workflow already covers the observed
+  procedure. The failed attempts remain retained in `state-v8/review-attempts.json`;
+  no artifact or installed mutation occurred.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now
