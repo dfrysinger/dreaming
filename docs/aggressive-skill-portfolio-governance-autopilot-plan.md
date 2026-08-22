@@ -916,8 +916,12 @@
   executors. Genuine second-session recurrence replaces the fabricated fixture;
   hostile executor, tampered receipt, unmanaged receipt, profile deferral,
   backfill, and match-diagnostic coverage is retained. Fifty-three core checks
-  and 28 vendor-adapter checks pass. Finding-scoped review closure and one real
-  reviewer-to-profile result remain next.
+  and 28 vendor-adapter checks passed before closure. Paired Opus/Terra
+  finding-scoped review resolved every prior material finding. One
+  low-likelihood malformed-receipt error-boundary regression found during
+  closure was corrected with hostile receipt coverage; 55 core checks and 28
+  vendor-adapter checks now pass. One real reviewer-to-profile result remains
+  next.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now

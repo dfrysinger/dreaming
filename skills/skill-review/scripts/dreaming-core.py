@@ -1374,6 +1374,10 @@ class DreamingRuntime:
                     reuse_value == "reusable-procedure"
                 )
                 is not isinstance(procedure, dict)
+                or (
+                    reuse_value != "reusable-procedure"
+                    and procedure is not None
+                )
             ):
                 raise RuntimeFailure("task-profile-invalid", "profile semantics")
             if isinstance(procedure, dict):
@@ -1510,6 +1514,9 @@ class DreamingRuntime:
                 or error.message != qualified_session_id
             ):
                 raise
+            self._mark_queue(
+                qualified_session_id, expected_revision, "deleted"
+            )
             return {"status": "deleted"}
         validate_identity(current, source_name)
         if (
@@ -1560,9 +1567,21 @@ class DreamingRuntime:
             executor_id,
             executor.identity,
         )
-        latest = source.call(
-            "inspect", session=qualified_session_id
-        )["session"]
+        try:
+            latest = source.call(
+                "inspect", session=qualified_session_id
+            )["session"]
+        except RuntimeFailure as error:
+            if (
+                expected_revision is None
+                or error.code != "session-missing"
+                or error.message != qualified_session_id
+            ):
+                raise
+            self._mark_queue(
+                qualified_session_id, expected_revision, "deleted"
+            )
+            return {"status": "deleted"}
         validate_identity(latest, source_name)
         if not same_revision(reviewed_identity, latest):
             raise RuntimeFailure(
@@ -1644,15 +1663,19 @@ class DreamingRuntime:
         entry = index.get(profile_key)
         if entry is None:
             return None
+        entry_keys = {
+            "qualified_session_id",
+            "source_revision",
+            "executor",
+            "receipt_sha256",
+            "profile_set_id",
+        }
         if (
             not isinstance(entry, dict)
-            or set(entry)
-            != {
-                "qualified_session_id",
-                "source_revision",
-                "executor",
-                "receipt_sha256",
-                "profile_set_id",
+            or frozenset(entry)
+            not in {
+                frozenset(entry_keys),
+                frozenset(entry_keys | {"receipt"}),
             }
             or entry.get("qualified_session_id") != qualified_session_id
             or entry.get("source_revision") != source_revision
@@ -1666,6 +1689,17 @@ class DreamingRuntime:
             self.paths.task_profile_receipts
             / f"{entry['receipt_sha256'].removeprefix('sha256:')}.json"
         )
+        legacy_receipt = entry.get("receipt")
+        if (
+            legacy_receipt is not None
+            and (
+                not isinstance(legacy_receipt, str)
+                or Path(legacy_receipt).name != receipt_path.name
+            )
+        ):
+            raise RuntimeFailure(
+                "task-profile-index-invalid", profile_key
+            )
         receipt = read_json(receipt_path, {})
         if not isinstance(receipt, dict):
             raise RuntimeFailure(
@@ -1737,6 +1771,16 @@ class DreamingRuntime:
                 "task-profile-receipt-invalid", str(receipt_path)
             )
         evidence = result.get("evidence_event_ids")
+        receipt_snapshot = receipt.get("snapshot_sha256")
+        if (
+            context.get("snapshot_sha256")
+            != (
+                receipt_snapshot.removeprefix("sha256:")
+                if isinstance(receipt_snapshot, str)
+                else None
+            )
+        ):
+            return None, "snapshot-mismatch"
         if not isinstance(evidence, list) or not evidence:
             return None, "review-evidence-unavailable"
         matches = [
@@ -1896,17 +1940,7 @@ class DreamingRuntime:
         profile_match: str = "receipt-unavailable",
     ) -> dict[str, Any]:
         artifact = result["artifact"]
-        candidate_root = (self.paths.data / "candidates" / "v1").resolve()
-        skills_root = self.paths.skills.resolve()
-        if (
-            candidate_root == skills_root
-            or candidate_root in skills_root.parents
-            or skills_root in candidate_root.parents
-        ):
-            raise RuntimeFailure(
-                "candidate-lifecycle-failed",
-                "candidate storage must be isolated from the skill discovery root",
-            )
+        self._assert_candidate_root_isolated()
         observed = parse_time(reviewed_identity["updated_at"])
         if observed is None:
             raise RuntimeFailure(
@@ -2010,6 +2044,19 @@ class DreamingRuntime:
                 ),
             }
 
+    def _assert_candidate_root_isolated(self) -> None:
+        candidate_root = (self.paths.data / "candidates" / "v1").resolve()
+        skills_root = self.paths.skills.resolve()
+        if (
+            candidate_root == skills_root
+            or candidate_root in skills_root.parents
+            or skills_root in candidate_root.parents
+        ):
+            raise RuntimeFailure(
+                "candidate-lifecycle-failed",
+                "candidate storage must be isolated from the skill discovery root",
+            )
+
     def _collect_candidate_observation(
         self,
         proposed_name: str,
@@ -2021,6 +2068,7 @@ class DreamingRuntime:
         expected_version: int | None = None,
         expected_identity: str | None = None,
     ) -> dict[str, Any]:
+        self._assert_candidate_root_isolated()
         with tempfile.TemporaryDirectory(
             prefix=".candidate-inputs-", dir=package.parent
         ) as temporary:
@@ -8429,11 +8477,14 @@ def profile_session(
         candidates = sorted(
             name
             for name in executors
-            if (source_name, name) in routes
+            if (
+                (source_name, name) in routes
+                and executors[name].supports(TASK_PROFILE_CAPABILITY)
+            )
         )
         if not candidates:
             raise RuntimeFailure(
-                "route-denied", f"{source_name}>review-executor"
+                "no-profile-capable-executor", source_name
             )
         executor_name = candidates[0]
     executor = executors.get(executor_name)

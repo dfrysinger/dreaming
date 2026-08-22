@@ -2245,6 +2245,89 @@ class RuntimeTest(unittest.TestCase):
         )
         self.assertEqual(len(report["reviews"]), 1)
 
+    def test_profile_command_selects_profile_capable_executor(self) -> None:
+        source_fixture = self.source_fixture([self.session("one", 1)])
+        legacy_fixture = self.write(
+            "alpha-legacy.json",
+            {
+                "capabilities": [
+                    "source-blind",
+                    "mutation-fence",
+                    "completion-sentinel",
+                ],
+            },
+        )
+        profiler_fixture = self.write("zeta-profiler.json", {})
+        config = self.write(
+            "mixed-profile-adapters.json",
+            {
+                "contract_version": 1,
+                "routes": [
+                    "fake>alpha-legacy",
+                    "fake>zeta-profiler",
+                ],
+                "executor_order": ["alpha-legacy", "zeta-profiler"],
+                "sources": {
+                    "fake": {
+                        "argv": [
+                            sys.executable,
+                            str(FAKE),
+                            "--fixture",
+                            str(source_fixture),
+                            "--adapter-id",
+                            "fake",
+                            "--role",
+                            "session-source",
+                        ]
+                    }
+                },
+                "executors": {
+                    name: {
+                        "argv": [
+                            sys.executable,
+                            str(FAKE),
+                            "--fixture",
+                            str(fixture),
+                            "--adapter-id",
+                            name,
+                            "--role",
+                            "review-executor",
+                        ]
+                    }
+                    for name, fixture in (
+                        ("alpha-legacy", legacy_fixture),
+                        ("zeta-profiler", profiler_fixture),
+                    )
+                },
+                "publishers": {},
+            },
+        )
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(RUNTIME_PATH),
+                "profile",
+                "--source",
+                "fake",
+                "--session",
+                "fake:one",
+            ],
+            env={
+                **os.environ,
+                "DREAMING_ADAPTER_CONFIG": str(config),
+                "DREAMING_DATA_DIR": str(self.case / "mixed-data"),
+                "DREAMING_STATE_DIR": str(self.case / "mixed-state"),
+            },
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        receipt = json.loads(
+            Path(json.loads(result.stdout)["receipt"]).read_text()
+        )
+        self.assertEqual(receipt["executor"], "zeta-profiler")
+
     def test_support_file_paths_are_canonical_nonconflicting_files(self) -> None:
         core = self.core(set())
         result = {
@@ -3257,12 +3340,17 @@ elif sys.argv[1] == "run":
             "fake", source, "fake:one", "exec", executor
         )
         receipt_path = Path(profiled["receipt"])
+        receipt = json.loads(receipt_path.read_text())
         reviewed_identity = source.call(
             "inspect", session="fake:one"
         )["session"]
         no_match, no_match_status = core._matching_task_profile(
             {
-                "transcript_context": {},
+                "transcript_context": {
+                    "snapshot_sha256": receipt[
+                        "snapshot_sha256"
+                    ].removeprefix("sha256:")
+                },
                 "evidence_event_ids": ["one-event-2"],
             },
             receipt_path,
@@ -3270,8 +3358,59 @@ elif sys.argv[1] == "run":
         )
         self.assertIsNone(no_match)
         self.assertEqual(no_match_status, "no-exact-match")
-
-        receipt = json.loads(receipt_path.read_text())
+        snapshot_mismatch, snapshot_mismatch_status = (
+            core._matching_task_profile(
+                {
+                    "transcript_context": {
+                        "snapshot_sha256": "0" * 64
+                    },
+                    "evidence_event_ids": ["one-event-1"],
+                },
+                receipt_path,
+                reviewed_identity,
+            )
+        )
+        self.assertIsNone(snapshot_mismatch)
+        self.assertEqual(
+            snapshot_mismatch_status, "snapshot-mismatch"
+        )
+        invalid_snapshot_receipt = json.loads(json.dumps(receipt))
+        invalid_snapshot_receipt["snapshot_sha256"] = None
+        invalid_snapshot_body = {
+            key: value
+            for key, value in invalid_snapshot_receipt.items()
+            if key != "receipt_sha256"
+        }
+        invalid_snapshot_receipt["receipt_sha256"] = runtime_module.digest(
+            invalid_snapshot_body
+        )
+        invalid_snapshot_path = (
+            self.paths.task_profile_receipts
+            / (
+                invalid_snapshot_receipt["receipt_sha256"]
+                .removeprefix("sha256:")
+                + ".json"
+            )
+        )
+        invalid_snapshot_path.write_text(json.dumps(invalid_snapshot_receipt))
+        invalid_snapshot, invalid_snapshot_status = (
+            core._matching_task_profile(
+                {
+                    "transcript_context": {
+                        "snapshot_sha256": receipt[
+                            "snapshot_sha256"
+                        ].removeprefix("sha256:")
+                    },
+                    "evidence_event_ids": ["one-event-1"],
+                },
+                invalid_snapshot_path,
+                reviewed_identity,
+            )
+        )
+        self.assertIsNone(invalid_snapshot)
+        self.assertEqual(
+            invalid_snapshot_status, "snapshot-mismatch"
+        )
         receipt["profiles"].append(json.loads(json.dumps(receipt["profiles"][0])))
         receipt_body = {
             key: value
@@ -3286,7 +3425,11 @@ elif sys.argv[1] == "run":
         ambiguous_path.write_text(json.dumps(receipt))
         ambiguous, ambiguous_status = core._matching_task_profile(
             {
-                "transcript_context": {},
+                "transcript_context": {
+                    "snapshot_sha256": receipt["snapshot_sha256"].removeprefix(
+                        "sha256:"
+                    )
+                },
                 "evidence_event_ids": ["one-event-1"],
             },
             ambiguous_path,
@@ -3826,6 +3969,22 @@ elif command == "run":
             ),
             receipt["receipt_sha256"],
         )
+        profile_index = json.loads(
+            self.paths.task_profile_index.read_text()
+        )
+        profile_entry = next(iter(profile_index.values()))
+        profile_entry["receipt"] = str(receipt_path)
+        runtime_module.atomic_json(
+            self.paths.task_profile_index, profile_index
+        )
+        self.assertEqual(
+            core.task_profile_receipt_for(
+                receipt["qualified_session_id"],
+                receipt["source_revision"],
+                receipt["executor"],
+            ),
+            receipt_path,
+        )
         original_receipt = receipt_path.read_bytes()
         tampered_receipt = json.loads(original_receipt)
         tampered_receipt["profiles"][0]["abstract_summary"] = "tampered"
@@ -3848,6 +4007,25 @@ elif command == "run":
         ):
             core.collect_profile_candidate(
                 unmanaged_path,
+                receipt["profiles"][0]["profile_id"],
+                self.case,
+                "retained-procedure",
+            )
+        overlapping_core = DreamingRuntime(
+            RuntimePaths(
+                self.paths.state,
+                self.paths.data,
+                self.paths.data / "candidates" / "v1",
+            ),
+            {("fake", "profiler")},
+            now=lambda: self.clock,
+        )
+        with self.assertRaisesRegex(
+            RuntimeFailure,
+            "candidate storage must be isolated",
+        ):
+            overlapping_core.collect_profile_candidate(
+                receipt_path,
                 receipt["profiles"][0]["profile_id"],
                 self.case,
                 "retained-procedure",
@@ -3968,6 +4146,15 @@ elif command == "run":
                     }
                 ]
             },
+            "non-reusable-procedure": {
+                "task_profiles": [
+                    {
+                        **valid_profile,
+                        "reuse_value": "one-off",
+                        "procedure": "not allowed",
+                    }
+                ]
+            },
             "duplicate-task": {
                 "task_profiles": [valid_profile, valid_profile]
             },
@@ -3996,6 +4183,35 @@ elif command == "run":
                     list(self.paths.task_profile_receipts.glob("*.json")),
                     [],
                 )
+
+    def test_profile_marks_session_deleted_after_model_run(self) -> None:
+        source_fixture = self.source_fixture([self.session("one", 10)])
+        source = self.adapter("session-source", "fake", source_fixture)
+        executor_fixture = self.write(
+            "delete-after-profile.json",
+            {"delete_source_fixture": str(source_fixture)},
+        )
+        executor = self.adapter(
+            "review-executor", "exec", executor_fixture
+        )
+        core = self.core({("fake", "exec")})
+        current = source.call("inspect", session="fake:one")["session"]
+        core._admit(current)
+        result = core.profile(
+            "fake",
+            source,
+            "fake:one",
+            "exec",
+            executor,
+            expected_revision=current["source_revision"],
+        )
+        self.assertEqual(result, {"status": "deleted"})
+        queue = json.loads(self.paths.queue.read_text())
+        self.assertEqual(queue[0]["status"], "deleted")
+        self.assertEqual(
+            list(self.paths.task_profile_receipts.glob("*.json")),
+            [],
+        )
 
     def test_completed_transaction_self_heals_before_session_fence(self) -> None:
         fixture = self.source_fixture([self.session("one", 10)])

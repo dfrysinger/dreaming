@@ -1733,7 +1733,7 @@ def review_result_schema() -> dict[str, Any]:
 
 
 def task_profile_result_schema() -> dict[str, Any]:
-    bounded_text = {"type": "string", "minLength": 1, "maxLength": 4000}
+    bounded_text = {"type": "string", "minLength": 1, "maxLength": 1000}
     procedure = {
         "type": ["object", "null"],
         "properties": {
@@ -2115,6 +2115,10 @@ def executor_run(args: argparse.Namespace) -> None:
             if (reuse_value == "reusable-procedure") is not isinstance(
                 procedure, dict
             ):
+                raise AdapterError(
+                    "malformed-executor-result", "task profile procedure presence"
+                )
+            if reuse_value != "reusable-procedure" and procedure is not None:
                 raise AdapterError(
                     "malformed-executor-result", "task profile procedure presence"
                 )

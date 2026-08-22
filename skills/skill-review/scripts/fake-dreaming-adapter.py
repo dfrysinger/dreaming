@@ -234,6 +234,19 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                 "model": "fake-profile-model",
             }
             result.update(state.get("task_profile_result_overrides", {}))
+            delete_source_fixture = state.get("delete_source_fixture")
+            if delete_source_fixture:
+                source_fixture = Path(delete_source_fixture)
+                source_state = load(source_fixture, {})
+                source_state["sessions"] = [
+                    session
+                    for session in source_state.get("sessions", [])
+                    if (
+                        f"{source_state.get('source')}:{session.get('native_session_id')}"
+                        != session_id
+                    )
+                ]
+                save(source_fixture, source_state)
             save(Path(args.result), result)
             emit({"ok": True, **result})
         if snapshot.get("packet_kind") == "draft_review":
