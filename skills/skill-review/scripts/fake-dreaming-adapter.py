@@ -165,6 +165,51 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
             )
             snapshot_sha256 = digest(snapshot)
             profiles: list[dict[str, Any]] = []
+            for template in state.get("task_profiles", []):
+                source_event_ids = template.get(
+                    "source_event_ids",
+                    [
+                        event["source_event_id"]
+                        for event in snapshot.get("events", [])
+                    ],
+                )
+                model_profile = {
+                    "source_event_ids": source_event_ids,
+                    "task_type": template["task_type"],
+                    "abstract_summary": template["abstract_summary"],
+                    "reuse_value": template["reuse_value"],
+                    "procedure": template.get("procedure"),
+                    "confidence": template.get("confidence", "high"),
+                    "sensitive_source": template.get(
+                        "sensitive_source", False
+                    ),
+                    "task_state": template.get(
+                        "task_state", "completed"
+                    ),
+                }
+                procedure = model_profile["procedure"]
+                profiles.append(
+                    {
+                        **model_profile,
+                        "task_key": digest(
+                            {
+                                "qualified_session_id": session_id,
+                                "source_event_ids": source_event_ids,
+                            }
+                        ),
+                        "profile_id": digest(
+                            {
+                                "qualified_session_id": session_id,
+                                **model_profile,
+                            }
+                        ),
+                        "procedure_fingerprint": (
+                            digest(procedure)
+                            if isinstance(procedure, dict)
+                            else None
+                        ),
+                    }
+                )
             result = {
                 "status": "ok",
                 "mutation_started": False,

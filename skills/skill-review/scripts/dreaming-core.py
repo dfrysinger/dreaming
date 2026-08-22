@@ -1525,6 +1525,21 @@ class DreamingRuntime:
         source_revision: str,
         executor_id: str,
     ) -> bool:
+        return (
+            self.task_profile_receipt_for(
+                qualified_session_id,
+                source_revision,
+                executor_id,
+            )
+            is not None
+        )
+
+    def task_profile_receipt_for(
+        self,
+        qualified_session_id: str,
+        source_revision: str,
+        executor_id: str,
+    ) -> Path | None:
         index = self._state(self.paths.task_profile_index, {})
         if not isinstance(index, dict):
             raise RuntimeFailure(
@@ -1540,7 +1555,7 @@ class DreamingRuntime:
         )
         entry = index.get(profile_key)
         if entry is None:
-            return False
+            return None
         if (
             not isinstance(entry, dict)
             or entry.get("qualified_session_id") != qualified_session_id
@@ -1553,17 +1568,69 @@ class DreamingRuntime:
             )
         receipt_path = Path(entry["receipt"])
         receipt = read_json(receipt_path, {})
-        return (
+        valid = (
             receipt.get("receipt_sha256") == entry.get("receipt_sha256")
             and receipt.get("profile_set_id") == entry.get("profile_set_id")
             and receipt_path.stem
             == str(entry.get("receipt_sha256", "")).removeprefix("sha256:")
         )
+        if not valid:
+            raise RuntimeFailure(
+                "task-profile-index-invalid", profile_key
+            )
+        return receipt_path
+
+    def _matching_task_profile(
+        self,
+        result: dict[str, Any],
+        receipt_path: Path | None,
+        reviewed_identity: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if receipt_path is None:
+            return None
+        receipt = read_json(receipt_path, {})
+        receipt_sha256 = receipt.get("receipt_sha256")
+        receipt_body = {
+            key: value
+            for key, value in receipt.items()
+            if key != "receipt_sha256"
+        }
+        context = result.get("transcript_context")
+        if (
+            not isinstance(receipt, dict)
+            or not isinstance(receipt_sha256, str)
+            or digest(receipt_body) != receipt_sha256
+            or receipt_path.stem != receipt_sha256.removeprefix("sha256:")
+            or receipt.get("qualified_session_id")
+            != reviewed_identity["qualified_session_id"]
+            or receipt.get("source_revision")
+            != reviewed_identity["source_revision"]
+            or not isinstance(context, dict)
+            or receipt.get("snapshot_sha256")
+            != f"sha256:{context.get('snapshot_sha256')}"
+        ):
+            raise RuntimeFailure(
+                "task-profile-receipt-invalid", str(receipt_path)
+            )
+        evidence = result.get("evidence_event_ids")
+        if not isinstance(evidence, list) or not evidence:
+            return None
+        evidence_set = set(evidence)
+        matches = [
+            profile
+            for profile in receipt.get("profiles", [])
+            if isinstance(profile, dict)
+            and profile.get("reuse_value") == "reusable-procedure"
+            and isinstance(profile.get("source_event_ids"), list)
+            and evidence_set.issubset(set(profile["source_event_ids"]))
+        ]
+        return matches[0] if len(matches) == 1 else None
 
     def _apply_autonomous_admission_policy(
         self,
         result: dict[str, Any],
         reviewed_identity: dict[str, Any],
+        task_profile_receipt: Path | None = None,
     ) -> dict[str, Any]:
         artifact = result.get("artifact")
         if not isinstance(artifact, dict):
@@ -1587,9 +1654,15 @@ class DreamingRuntime:
             return result
         shadow_candidate = None
         if reason == "autonomous-create-requires-recurrence":
+            matched_profile = self._matching_task_profile(
+                result,
+                task_profile_receipt,
+                reviewed_identity,
+            )
             shadow_candidate = self._collect_shadow_candidate(
                 result,
                 reviewed_identity,
+                matched_profile,
             )
         deferred = dict(result)
         deferred_context = deferred.get("transcript_context")
@@ -1693,27 +1766,56 @@ class DreamingRuntime:
         self,
         result: dict[str, Any],
         reviewed_identity: dict[str, Any],
+        task_profile: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         artifact = result["artifact"]
-        procedure = self._candidate_procedure(artifact)
         observed = parse_time(reviewed_identity["updated_at"])
         if observed is None:
             raise RuntimeFailure(
                 "candidate-lifecycle-failed",
                 "reviewed source updated_at is invalid",
             )
-        task_key = (
-            "task:"
-            + hashlib.sha256(
-                reviewed_identity["qualified_session_id"].encode("utf-8")
-            ).hexdigest()
-        )
+        if task_profile is None:
+            procedure = self._candidate_procedure(artifact)
+            task_key = (
+                "task:"
+                + hashlib.sha256(
+                    reviewed_identity["qualified_session_id"].encode("utf-8")
+                ).hexdigest()
+            )
+            independence = "unverified"
+            summary = result["summary"]
+        else:
+            profile_procedure = task_profile.get("procedure")
+            if (
+                not isinstance(profile_procedure, dict)
+                or not isinstance(
+                    task_profile.get("procedure_fingerprint"), str
+                )
+                or not isinstance(task_profile.get("task_key"), str)
+                or not isinstance(
+                    task_profile.get("abstract_summary"), str
+                )
+            ):
+                raise RuntimeFailure(
+                    "task-profile-receipt-invalid", "matched profile"
+                )
+            procedure = {
+                "schema_version": 1,
+                **profile_procedure,
+                "match_fingerprint": task_profile[
+                    "procedure_fingerprint"
+                ],
+            }
+            task_key = task_profile["task_key"]
+            independence = "verified"
+            summary = task_profile["abstract_summary"]
         observation = {
             "task_key": task_key,
             "session_id": reviewed_identity["qualified_session_id"],
             "observed_at": observed.astimezone(timezone.utc).isoformat(),
-            "independence": "unverified",
-            "summary": result["summary"],
+            "independence": independence,
+            "summary": summary,
             "procedure_fingerprint": procedure["match_fingerprint"],
         }
 
@@ -2478,9 +2580,15 @@ class DreamingRuntime:
                     snapshot_path,
                     reviewed_identity,
                 )
+                task_profile_receipt = self.task_profile_receipt_for(
+                    qualified_session_id,
+                    reviewed_identity["source_revision"],
+                    executor_id,
+                )
                 result = self._apply_autonomous_admission_policy(
                     result,
                     reviewed_identity,
+                    task_profile_receipt,
                 )
                 attempt = {
                     "session_id": qualified_session_id,

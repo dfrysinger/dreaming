@@ -895,6 +895,15 @@
   while full review remained bounded to 25, then reused the profile index on the
   next two ticks as reviews drained 25 and two. This resolves the original
   throughput concern without making expensive full reviews unbounded.
+- The existing skill reviewer now consumes same-revision task-profile evidence
+  without a second authoring path. For a create result, core requires the
+  reviewer's exact transcript evidence to identify one unambiguous reusable
+  profile from the candidate-blind receipt. The shadow candidate then inherits
+  that profile's procedure fingerprint, task key, and
+  `independence=verified`; absent or ambiguous matches retain the conservative
+  legacy `unverified` observation. Fifty core checks pass, including both the
+  verified bridge and the fallback. One recent real reviewer-to-profile result
+  and evaluation remain next.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now

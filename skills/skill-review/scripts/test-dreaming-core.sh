@@ -3030,6 +3030,117 @@ elif sys.argv[1] == "run":
             ),
         )
 
+    def test_profiled_create_uses_verified_task_observation(self) -> None:
+        fixture = self.source_fixture([self.session("one", 10)])
+        source = self.adapter("session-source", "fake", fixture)
+        self.init_skills_repo()
+        procedure = {
+            "trigger": "A reusable fixture procedure is demonstrated.",
+            "outcome": "The fixture procedure is retained.",
+            "actions": ["Identify the procedure.", "Retain its ordered steps."],
+            "exclusions": ["Do not copy source-specific details."],
+        }
+        executor_fixture = self.write(
+            "profiled-create.json",
+            {
+                "mode": "success",
+                "terminal_route": "skill",
+                "summary": "A reusable fixture procedure was demonstrated",
+                "routing_reason": "The procedure has ordered reusable steps",
+                "task_profiles": [
+                    {
+                        "task_type": "retain-fixture-procedure",
+                        "abstract_summary": (
+                            "Retain a reusable procedure from completed work."
+                        ),
+                        "reuse_value": "reusable-procedure",
+                        "procedure": procedure,
+                    }
+                ],
+                "artifact": {
+                    "operation": "create",
+                    "skill_name": "profiled-procedure",
+                    "skill_markdown": (
+                        "---\nname: profiled-procedure\n"
+                        "description: Run the profiled fixture procedure\n---\n"
+                        "# Profiled procedure\n"
+                    ),
+                    "support_files": [],
+                },
+            },
+        )
+        executor = self.adapter("review-executor", "exec", executor_fixture)
+        core = DreamingRuntime(
+            self.paths,
+            {("fake", "exec")},
+            allow_autonomous_skill_creation=False,
+            now=lambda: self.clock,
+        )
+        profiled = core.profile(
+            "fake", source, "fake:one", "exec", executor
+        )
+        self.assertEqual(profiled["profile_count"], 1)
+        lock_environment = {
+            **os.environ,
+            "SKILLS_STATE_DIR": str(self.paths.state),
+            "SKILLS_NOW_EPOCH": str(self.clock),
+        }
+        token = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "daemon-lock.py"),
+                "acquire",
+                "--mode",
+                "session",
+                "--owner",
+                "test-profiled-create",
+            ],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            env=lock_environment,
+        ).stdout.strip()
+        prior_token = os.environ.get("SKILLS_LOCK_TOKEN")
+        prior_state = os.environ.get("SKILLS_STATE_DIR")
+        os.environ["SKILLS_LOCK_TOKEN"] = token
+        os.environ["SKILLS_STATE_DIR"] = str(self.paths.state)
+        try:
+            result = core.review(
+                "fake", source, "fake:one", [("exec", executor)]
+            )
+        finally:
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_DIR / "daemon-lock.py"),
+                    "release",
+                    token,
+                ],
+                check=True,
+                env=lock_environment,
+            )
+            if prior_token is None:
+                os.environ.pop("SKILLS_LOCK_TOKEN", None)
+            else:
+                os.environ["SKILLS_LOCK_TOKEN"] = prior_token
+            if prior_state is None:
+                os.environ.pop("SKILLS_STATE_DIR", None)
+            else:
+                os.environ["SKILLS_STATE_DIR"] = prior_state
+        shadow = result["policy_deferred"]["shadow_candidate"]
+        record = core._candidate_lifecycle_call(
+            "read", shadow["lifecycle_id"]
+        )
+        self.assertEqual(record["evidence"][0]["independence"], "verified")
+        self.assertEqual(
+            record["procedure"],
+            {
+                "schema_version": 1,
+                **procedure,
+                "match_fingerprint": runtime_module.digest(procedure),
+            },
+        )
+
     def test_shadow_candidate_recurrence_accepts_non_ascii_text(self) -> None:
         core = DreamingRuntime(
             self.paths,
