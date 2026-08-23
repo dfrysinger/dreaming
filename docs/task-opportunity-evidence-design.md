@@ -202,8 +202,13 @@ model-operation budgets is reached. High-confidence reusable profiles are
 prioritized for full review. One-off and no-learning sessions are recorded
 without consuming a full review attempt.
 
-The first production bound is `max_profiles_per_run=100`, independently capped
-at 500 by configuration validation. `max_reviews_per_run` remains capped at 25.
+The first production bounds are `max_profiles_per_run=100`, independently
+capped at 500 by configuration validation, and
+`max_profile_elapsed_seconds=600`, capped at 1,800. The profiler stops starting
+new model operations when either bound is reached and carries the remaining
+queue into the next natural run. The enclosing pass has a one-hour backstop so
+an in-flight profile can finish and the ordinary review and publication phases
+can still settle. `max_reviews_per_run` remains capped at 25.
 
 The first backfill processes recent stable sessions first. After catch-up, only
 new or changed source revisions require profiling.

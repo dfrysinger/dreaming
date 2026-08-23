@@ -35,9 +35,20 @@ export DREAMING_CURATOR_RUNNER="$FAKE_RECONCILER"
 export FAKE_RECONCILE_LOG="$RECONCILE_LOG"
 export DREAMING_ADAPTER_CONFIG="$CASE/adapters.json"
 export DREAMING_REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+export DREAMING_SHARED_SKILLS_ROOT="$CASE/shared"
+export DREAMING_RECEIPT_FILE="$CASE/shared-receipt.json"
 export DREAMING_PASS_MAX_SECS=30
 export DREAMING_PASS_GRACE_SECS=0
 export SKILLS_CURATOR_RUNS_DIR="$CASE/curator-runs"
+for name in skill-create writing-great-skills dual-review authenticated-browse; do
+  mkdir -p "$DREAMING_SHARED_SKILLS_ROOT/skills/$name"
+  printf -- '---\nname: %s\ndescription: Shared test dependency.\n---\n' "$name" \
+    > "$DREAMING_SHARED_SKILLS_ROOT/skills/$name/SKILL.md"
+done
+"$DREAMING_REPO_ROOT/scripts/dreaming-deps.py" generate-receipt \
+  "$DREAMING_SHARED_SKILLS_ROOT" \
+  --revision 0123456789abcdef0123456789abcdef01234567 \
+  --output "$DREAMING_RECEIPT_FILE"
 
 result="$(
   "$SCRIPT_DIR/daemon-pass.sh" \

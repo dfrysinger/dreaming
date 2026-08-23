@@ -2160,13 +2160,41 @@ class RuntimeTest(unittest.TestCase):
 
     def test_profile_limit_is_independent_and_bounded(self) -> None:
         settings = runtime_module.configured_runtime_settings(
-            {"max_reviews_per_run": 25, "max_profiles_per_run": 100}
+            {
+                "max_reviews_per_run": 25,
+                "max_profiles_per_run": 100,
+                "max_profile_elapsed_seconds": 600,
+            }
         )
         self.assertEqual(settings["max_reviews_per_run"], 25)
         self.assertEqual(settings["max_profiles_per_run"], 100)
+        self.assertEqual(settings["max_profile_elapsed_seconds"], 600)
+        self.assertEqual(
+            runtime_module.profile_budget_reason(
+                100, 100.0, settings, now=100.0
+            ),
+            "session-limit",
+        )
+        self.assertEqual(
+            runtime_module.profile_budget_reason(
+                99, 100.0, settings, now=700.0
+            ),
+            "elapsed-time-limit",
+        )
+        self.assertIsNone(
+            runtime_module.profile_budget_reason(
+                99, 100.0, settings, now=699.0
+            )
+        )
         with self.assertRaisesRegex(RuntimeFailure, "max_profiles_per_run"):
             runtime_module.configured_runtime_settings(
                 {"max_profiles_per_run": 501}
+            )
+        with self.assertRaisesRegex(
+            RuntimeFailure, "max_profile_elapsed_seconds"
+        ):
+            runtime_module.configured_runtime_settings(
+                {"max_profile_elapsed_seconds": 1801}
             )
 
     def test_manual_runtime_ignores_scheduler_only_limits(self) -> None:

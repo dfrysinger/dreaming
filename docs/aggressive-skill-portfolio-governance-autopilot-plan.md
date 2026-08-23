@@ -1099,8 +1099,19 @@
   Mac mini now has one Dreaming scheduler with `StartInterval=14400`,
   `RunAtLoad=false`, and no calendar trigger. The halt switch is inactive only
   after the matching self-test stamp, and the installed candidate bytes remain
-  exact. Natural cadence, installed browser proof, rollback, and restore remain
-  open.
+  exact.
+- Its first natural four-hour launch, run
+  `20260823T070027Z-19573`, is retained as a real failed-cadence receipt rather
+  than rewritten as success. The run began naturally, retained 32 exact
+  candidate-blind profile results, then aborted after 32 minutes because the
+  new `max_profiles_per_run=100` capacity had no elapsed-time stop and exceeded
+  the daemon's 30-minute outer watchdog before review and publication could
+  settle. The successor fix adds an independently validated 600-second
+  profiling elapsed budget while preserving the 100-session capacity and the
+  25 full-review cap; remaining profiles carry into later natural runs. The
+  outer pass backstop is one hour so an in-flight profile plus ordinary review
+  and publication can settle. Natural success, installed browser proof,
+  rollback, and restore remain open.
 - The separate Deep Code Review app-crash correction is complete at local-only
   commit `556db7409e22047bb3e96c176dd042d4577bc2e7`. It caps verification units
   at 16, advocates at four concurrent, judges at two concurrent, waits for the

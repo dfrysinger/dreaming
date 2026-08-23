@@ -7479,6 +7479,7 @@ def configured_runtime_settings(
         "max_pages_per_run": 100,
         "max_reviews_per_run": 25,
         "max_profiles_per_run": 100,
+        "max_profile_elapsed_seconds": 600,
     }
     defaults = {
         **runtime_defaults,
@@ -7521,8 +7522,28 @@ def configured_runtime_settings(
                 "invalid-adapter-config",
                 f"{name} must not exceed 500",
             )
+        if name == "max_profile_elapsed_seconds" and value > 1_800:
+            raise RuntimeFailure(
+                "invalid-adapter-config",
+                f"{name} must not exceed 1800",
+            )
         settings[name] = value
     return settings
+
+
+def profile_budget_reason(
+    attempts: int,
+    started_at: float,
+    settings: dict[str, Any],
+    *,
+    now: float | None = None,
+) -> str | None:
+    if attempts >= settings["max_profiles_per_run"]:
+        return "session-limit"
+    observed_at = time.monotonic() if now is None else now
+    if observed_at - started_at >= settings["max_profile_elapsed_seconds"]:
+        return "elapsed-time-limit"
+    return None
 
 
 def configured_runtime(
@@ -7731,6 +7752,13 @@ def scheduled_run() -> dict[str, Any]:
         "profiles": [],
         "profile_skips": [],
         "deferred_profiles": 0,
+        "profile_budget": {
+            "max_sessions": settings["max_profiles_per_run"],
+            "max_elapsed_seconds": settings["max_profile_elapsed_seconds"],
+            "attempts": 0,
+            "elapsed_seconds": 0,
+            "exhausted_reason": None,
+        },
         "reviews": [],
         "deferred_reviews": 0,
         "publication": [],
@@ -8164,6 +8192,7 @@ def scheduled_run() -> dict[str, Any]:
 
     queue = read_json(paths.queue, [])
     profile_attempts = 0
+    profile_started_at = time.monotonic()
     for item in queue:
         if item.get("status") != "queued":
             continue
@@ -8198,6 +8227,15 @@ def scheduled_run() -> dict[str, Any]:
                 }
             )
             continue
+        budget_reason = profile_budget_reason(
+            profile_attempts,
+            profile_started_at,
+            settings,
+        )
+        if budget_reason is not None:
+            report["deferred_profiles"] += 1
+            report["profile_budget"]["exhausted_reason"] = budget_reason
+            continue
         try:
             existing_receipt = core.task_profile_receipt_for(
                 item["qualified_session_id"],
@@ -8205,9 +8243,6 @@ def scheduled_run() -> dict[str, Any]:
                 executor_name,
             )
             if existing_receipt is not None:
-                if profile_attempts >= settings["max_profiles_per_run"]:
-                    report["deferred_profiles"] += 1
-                    continue
                 profile_attempts += 1
                 snapshot_path, _reviewed_identity = core.render_snapshot(
                     source_name,
@@ -8224,9 +8259,6 @@ def scheduled_run() -> dict[str, Any]:
                 )
                 if existing_receipt is not None:
                     continue
-            if profile_attempts >= settings["max_profiles_per_run"]:
-                report["deferred_profiles"] += 1
-                continue
             profile_attempts += 1
             result = core.profile(
                 source_name,
@@ -8271,6 +8303,10 @@ def scheduled_run() -> dict[str, Any]:
                     "code": error.code,
                 }
             )
+    report["profile_budget"]["attempts"] = profile_attempts
+    report["profile_budget"]["elapsed_seconds"] = int(
+        time.monotonic() - profile_started_at
+    )
     review_attempts = 0
     for item in queue:
         if item.get("status") != "queued":
