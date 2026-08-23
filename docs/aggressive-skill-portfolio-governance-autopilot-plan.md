@@ -1139,6 +1139,16 @@
   evidence-set detection into the executor adapter, records malformed model
   output as a non-authoritative per-session profiling failure, and allows the
   otherwise healthy scheduled run to settle and retry that revision later.
+- Malformed-profile isolation is committed locally as `d151852`, with the
+  review-capacity follow-up at `ca2f8d0`. Mac mini merge commit `00e290c3`
+  installed activation generation `20260823T133542Z-install-30649` behind
+  halt. Its generation-bound full self-test completed with zero failures, and
+  `activation-generation` exactly matched `selftest-passed-generation` before
+  enable. Enable then removed halt and restored the sole Dreaming scheduler
+  with `StartInterval=14400`, `RunAtLoad=false`, and no calendar trigger.
+  Natural cadence has not been manually triggered; the next four-hour launch
+  remains the required proof that malformed model output is isolated without
+  consuming review capacity or making the otherwise healthy run red.
 - The separate Deep Code Review app-crash correction is complete at local-only
   commit `556db7409e22047bb3e96c176dd042d4577bc2e7`. It caps verification units
   at 16, advocates at four concurrent, judges at two concurrent, waits for the
