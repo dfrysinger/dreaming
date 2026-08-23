@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Never
+from typing import Any, NoReturn
 
 
 class TaskProfileReceiptError(ValueError):
@@ -24,7 +24,7 @@ def _digest(value: Any) -> str:
     return "sha256:" + hashlib.sha256(_canonical(value)).hexdigest()
 
 
-def _reject(reason: str) -> Never:
+def _reject(reason: str) -> NoReturn:
     raise TaskProfileReceiptError(reason)
 
 
