@@ -1112,6 +1112,17 @@
   outer pass backstop is one hour so an in-flight profile plus ordinary review
   and publication can settle. Natural success, installed browser proof,
   rollback, and restore remain open.
+- The elapsed-budget fix is committed locally as `f23542c` and transferred
+  without a remote push into Mac mini merge commit `cd1d524b`. Successor
+  generation `20260823T080808Z-install-54155` passed the full installed
+  generation-bound self-test with zero failures behind halt. Its managed
+  adapter config retains `max_profiles_per_run=100` and
+  `max_reviews_per_run=25` while adding
+  `max_profile_elapsed_seconds=600`. Enable occurred only after the matching
+  self-test stamp and restored the sole four-hour scheduler with a fresh
+  natural-run counter. The next natural run must prove that elapsed exhaustion
+  settles successfully and carries deferred profiles instead of being killed
+  by the outer watchdog.
 - The separate Deep Code Review app-crash correction is complete at local-only
   commit `556db7409e22047bb3e96c176dd042d4577bc2e7`. It caps verification units
   at 16, advocates at four concurrent, judges at two concurrent, waits for the
