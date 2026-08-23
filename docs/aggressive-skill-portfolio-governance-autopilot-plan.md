@@ -898,12 +898,12 @@
 - The existing skill reviewer now consumes same-revision task-profile evidence
   without a second authoring path. For a create result, core requires the
   reviewer's exact transcript evidence to identify one unambiguous reusable
-  profile from the candidate-blind receipt. The shadow candidate then inherits
-  that profile's procedure fingerprint, task key, and
-  `independence=verified`; absent or ambiguous matches retain the conservative
-  legacy `unverified` observation. Fifty core checks pass, including both the
-  verified bridge and the fallback. One recent real reviewer-to-profile result
-  and evaluation remain next.
+  profile from the candidate-blind receipt. The shadow candidate retains that
+  profile's task and source identity as `independence=verified`, while the
+  candidate-aware artifact supplies the canonical lifecycle procedure used to
+  group semantically equivalent wording. Absent or ambiguous matches retain the
+  conservative legacy `unverified` observation. Fifty core checks passed at
+  that milestone, including both the verified bridge and the fallback.
 - Adversarial review of the LLM opportunity implementation confirmed 55
   findings. The first hardening slice now aligns profile procedure bounds with
   the candidate lifecycle, validates semantic values and UTF-8 sizes again at
@@ -1021,6 +1021,42 @@
   model review or mutation. Sixty focused core checks and 33 vendor-adapter
   checks pass. The candidate remains report-only and not yet admitted; no
   installed or user-owned skill changed.
+- Profile-informed artifacts can no longer bypass evaluation through a patch or
+  support-file route. Any artifact accompanied by a validated task-profile
+  receipt is now deferred into the shadow lifecycle with reason
+  `task-profile-artifact-requires-evaluation`; focused coverage proves a patch
+  remains report-only before mutation.
+- The first retained shadow replay exposed two additional fail-closed gaps. The
+  mutable result file had been overwritten by a later `macos-agent-shell`
+  repair, so lifecycle `091f41fa-17bc-44ca-993f-3584529c7d2e` paired the
+  proposed name `agent-session-continuity` with a mismatched package. That
+  record remains private failure evidence and is not a candidate. Candidate
+  collection now requires the immutable package's `SKILL.md` frontmatter name
+  to match `proposed_name` both when staging and validating a record.
+- The original successful create result was recovered exactly from the retained
+  session event log and collected under fresh isolated lifecycle
+  `a08cb2d5-f8ec-4d9d-b426-aed74e406ba3`, candidate
+  `sha256:e35806c19789434a505b1ab6267ee1699c8711a4e0266a996a4a42e63fa46d84`.
+  It is report-only, structurally valid, and still `collecting` because its
+  replay observation is honestly `unverified`. No private skill-catalog clone
+  or user-owned skill changed.
+- Candidate-aware artifacts now provide the canonical semantic lifecycle
+  procedure, while a matched candidate-blind profile supplies the independently
+  verified task key, session, time, and summary. Focused coverage proves two
+  independently worded matched profiles for the same artifact enter one
+  lifecycle and cross recurrence only after deterministic distinct-task and
+  distinct-session checks. The core suite passes 61 checks; the candidate
+  lifecycle suite passes 11 checks; Python compilation and the diff check pass.
+  A fresh candidate-aware Codex review of the older independent continuity
+  transcript failed before producing output and remains retained in
+  `state-v16/review-attempts.json`. It was not retried or relabeled, so genuine
+  real recurrence for this candidate is still open.
+- The separate Deep Code Review app-crash correction is owned by Bravo in
+  `/Users/dfrysinger/code/deep`. The retained incident measured 552 agents,
+  13,453 model calls, and approximately 1.187 billion tokens before the app
+  crashed between advocate persistence and judge completion. Romeo is not
+  making competing Deep repository edits while awaiting Bravo's bounded
+  concurrency handoff.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now

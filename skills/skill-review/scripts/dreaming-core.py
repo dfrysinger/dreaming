@@ -1697,7 +1697,9 @@ class DreamingRuntime:
             )
         age_seconds = max(0, self.now() - int(source_updated_at.timestamp()))
         reason: str | None = None
-        if age_seconds > self.max_autonomous_session_age_seconds:
+        if task_profile_receipt is not None:
+            reason = "task-profile-artifact-requires-evaluation"
+        elif age_seconds > self.max_autonomous_session_age_seconds:
             reason = "historical-source-outside-mutation-window"
         elif (
             artifact.get("operation") == "create"
@@ -1707,7 +1709,10 @@ class DreamingRuntime:
         if reason is None:
             return result
         shadow_candidate = None
-        if reason == "autonomous-create-requires-recurrence":
+        if reason in {
+            "autonomous-create-requires-recurrence",
+            "task-profile-artifact-requires-evaluation",
+        }:
             matched_profile, profile_match = self._matching_task_profile(
                 result,
                 task_profile_receipt,
@@ -1832,8 +1837,8 @@ class DreamingRuntime:
                 "candidate-lifecycle-failed",
                 "reviewed source updated_at is invalid",
             )
+        procedure = self._candidate_procedure(artifact)
         if task_profile is None:
-            procedure = self._candidate_procedure(artifact)
             task_key = (
                 "task:"
                 + hashlib.sha256(
@@ -1857,13 +1862,6 @@ class DreamingRuntime:
                 raise RuntimeFailure(
                     "task-profile-receipt-invalid", "matched profile"
                 )
-            procedure = {
-                "schema_version": 1,
-                **profile_procedure,
-                "match_fingerprint": task_profile[
-                    "procedure_fingerprint"
-                ],
-            }
             task_key = task_profile["task_key"]
             independence = "verified"
             summary = task_profile["abstract_summary"]

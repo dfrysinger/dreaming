@@ -98,11 +98,11 @@ PY
 }
 
 make_package() {
-  local root="$1" revision="$2"
+  local root="$1" revision="$2" name="${3:-lifecycle-fixture}"
   mkdir -p "$root/references"
   cat > "$root/SKILL.md" <<EOF
 ---
-name: lifecycle-fixture
+name: $name
 description: Deterministic candidate package.
 ---
 
@@ -144,6 +144,16 @@ expect_refusal package-symlink run collect --procedure "$TMP/fixtures/procedure.
   --observation "$TMP/fixtures/one.json" --package "$TMP/symlink-package" \
   --proposed-name symlink-fixture
 pass "symlinked draft packages refuse before mutation"
+
+make_package "$TMP/mismatched-package" mismatch
+package_roots_before="$(find "$DREAMING_DATA_ROOT/candidates/v1/packages" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+expect_refusal package-name-mismatch run collect --procedure "$TMP/fixtures/procedure.json" \
+  --observation "$TMP/fixtures/one.json" --package "$TMP/mismatched-package" \
+  --proposed-name different-fixture
+package_roots_after="$(find "$DREAMING_DATA_ROOT/candidates/v1/packages" -mindepth 1 -maxdepth 1 -type d | wc -l | tr -d ' ')"
+[[ "$package_roots_before" == "$package_roots_after" ]] ||
+  fail "mismatched package created an immutable candidate directory"
+pass "package frontmatter name must match the proposed candidate name"
 
 cp "$REC" "$TMP/malformed-record.json"
 printf '{' > "$REC"
@@ -228,7 +238,7 @@ collect_fixture() {
   make_procedure "$procedure"
   make_observation "$one" "$first_task" "$first_session" "$first_at"
   make_observation "$two" "$second_task" "$second_session" "$second_at"
-  make_package "$package" "$label"
+  make_package "$package" "$label" "$label"
   local args=(collect --procedure "$procedure" --observation "$one" --package "$package" --proposed-name "$label" --match-outcome "$outcome")
   [[ -n "$covering" ]] && args+=(--covering-lifecycle-id "$covering")
   [[ -n "$tombstone" ]] && args+=(--tombstone-id "$tombstone")
@@ -271,7 +281,7 @@ EXPIRE_PACKAGE="$TMP/expire-package"
 make_procedure "$EXPIRE_PROC"
 make_observation "$EXPIRE_ONE" task-expire-old session-expire-old 2025-12-01T00:00:00Z
 make_observation "$EXPIRE_TWO" task-expire-new session-expire-new 2026-02-04T00:00:00Z
-make_package "$EXPIRE_PACKAGE" expire
+make_package "$EXPIRE_PACKAGE" expire expire-fixture
 EXPIRE_OUT="$(run collect --procedure "$EXPIRE_PROC" --observation "$EXPIRE_ONE" --package "$EXPIRE_PACKAGE" --proposed-name expire-fixture)"
 EXPIRE_ID="$(printf '%s' "$EXPIRE_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["lifecycle_id"])')"
 EXPIRE_REC="$(record "$EXPIRE_ID")"
@@ -294,7 +304,7 @@ ABSORB_OBS="$TMP/fixtures/absorbed-observation.json"
 ABSORB_PACKAGE="$TMP/absorbed-package"
 make_procedure "$ABSORB_PROC"
 make_observation "$ABSORB_OBS" task-absorbed session-absorbed 2026-02-04T00:00:00Z
-make_package "$ABSORB_PACKAGE" absorbed
+make_package "$ABSORB_PACKAGE" absorbed absorbed-fixture
 ABSORB_OUT="$(run collect --procedure "$ABSORB_PROC" --observation "$ABSORB_OBS" --package "$ABSORB_PACKAGE" --proposed-name absorbed-fixture)"
 ABSORB_ID="$(printf '%s' "$ABSORB_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["lifecycle_id"])')"
 ABSORB_REC="$(record "$ABSORB_ID")"

@@ -3480,6 +3480,10 @@ elif sys.argv[1] == "run":
             else:
                 os.environ["SKILLS_STATE_DIR"] = prior_state
         shadow = result["policy_deferred"]["shadow_candidate"]
+        self.assertEqual(
+            result["policy_deferred"]["reason"],
+            "task-profile-artifact-requires-evaluation",
+        )
         attempt = json.loads(self.paths.attempts.read_text())[-1]
         self.assertEqual(attempt["task_profile_delivery"], "delivered")
         self.assertEqual(
@@ -3500,12 +3504,173 @@ elif sys.argv[1] == "run":
         self.assertEqual(record["evidence"][0]["independence"], "verified")
         self.assertEqual(
             record["procedure"],
-            {
-                "schema_version": 1,
-                **procedure,
-                "match_fingerprint": runtime_module.digest(procedure),
-            },
+            core._candidate_procedure(
+                {
+                    "skill_name": "profiled-procedure",
+                    "skill_markdown": (
+                        "---\nname: profiled-procedure\n"
+                        "description: Run the profiled fixture procedure\n---\n"
+                        "# Profiled procedure\n"
+                    ),
+                }
+            ),
         )
+
+        second_profile = {
+            **json.loads(Path(profiled["receipt"]).read_text())["profiles"][0],
+            "task_key": "sha256:" + "b" * 64,
+            "abstract_summary": "Apply the same skill to independently worded work.",
+            "procedure": {
+                "trigger": "A differently worded but equivalent task appears.",
+                "outcome": "The equivalent task reaches the same result.",
+                "actions": ["Recognize the equivalent task.", "Apply the shared procedure."],
+                "exclusions": ["Do not merge unrelated work."],
+            },
+        }
+        second_profile["procedure_fingerprint"] = runtime_module.digest(
+            second_profile["procedure"]
+        )
+        lock_environment = {
+            **os.environ,
+            "SKILLS_STATE_DIR": str(self.paths.state),
+            "SKILLS_NOW_EPOCH": str(self.clock),
+        }
+        token = subprocess.run(
+            [
+                sys.executable,
+                str(SCRIPT_DIR / "daemon-lock.py"),
+                "acquire",
+                "--mode",
+                "session",
+                "--owner",
+                "test-profiled-recurrence",
+            ],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            env=lock_environment,
+        ).stdout.strip()
+        prior_token = os.environ.get("SKILLS_LOCK_TOKEN")
+        prior_state = os.environ.get("SKILLS_STATE_DIR")
+        os.environ["SKILLS_LOCK_TOKEN"] = token
+        os.environ["SKILLS_STATE_DIR"] = str(self.paths.state)
+        try:
+            second = core._collect_shadow_candidate(
+                {
+                    "summary": "The same reusable skill applies",
+                    "artifact": {
+                        "operation": "create",
+                        "skill_name": "profiled-procedure",
+                        "skill_markdown": (
+                            "---\nname: profiled-procedure\n"
+                            "description: Run the profiled fixture procedure\n---\n"
+                            "# Profiled procedure\n"
+                        ),
+                        "support_files": [],
+                    },
+                },
+                {
+                    "qualified_session_id": "fake:two",
+                    "updated_at": self.clock + 1,
+                },
+                second_profile,
+                "matched",
+            )
+        finally:
+            subprocess.run(
+                [
+                    sys.executable,
+                    str(SCRIPT_DIR / "daemon-lock.py"),
+                    "release",
+                    token,
+                ],
+                check=True,
+                env=lock_environment,
+            )
+            if prior_token is None:
+                os.environ.pop("SKILLS_LOCK_TOKEN", None)
+            else:
+                os.environ["SKILLS_LOCK_TOKEN"] = prior_token
+            if prior_state is None:
+                os.environ.pop("SKILLS_STATE_DIR", None)
+            else:
+                os.environ["SKILLS_STATE_DIR"] = prior_state
+        self.assertEqual(second["lifecycle_id"], shadow["lifecycle_id"])
+        self.assertEqual(second["recommendation"], "ready_for_draft")
+        record = core._candidate_lifecycle_call(
+            "read", shadow["lifecycle_id"]
+        )
+        self.assertEqual(
+            [item["independence"] for item in record["evidence"]],
+            ["verified", "verified"],
+        )
+        self.assertEqual(
+            len({item["procedure_fingerprint"] for item in record["evidence"]}),
+            1,
+        )
+
+    def test_profiled_patch_is_shadowed_before_mutation(self) -> None:
+        core = DreamingRuntime(
+            self.paths,
+            {("fake", "exec")},
+            allow_autonomous_skill_creation=False,
+            now=lambda: self.clock,
+        )
+        result = {
+            "terminal_route": "skill",
+            "summary": "Repair a reusable fixture procedure",
+            "routing_reason": "The existing skill needs the observed procedure",
+            "artifact": {
+                "operation": "patch",
+                "skill_name": "existing-procedure",
+                "skill_markdown": (
+                    "---\nname: existing-procedure\n"
+                    "description: Run the existing fixture procedure\n---\n"
+                    "# Existing procedure\n"
+                ),
+                "support_files": [],
+            },
+            "evidence_event_ids": ["one-event-1"],
+            "transcript_context": {
+                "snapshot_sha256": "snapshot",
+                "source_revision": "revision",
+                "event_ids": ["one-event-1"],
+            },
+        }
+        reviewed_identity = {
+            "qualified_session_id": "fake:one",
+            "source_revision": "sha256:" + "1" * 64,
+            "updated_at": datetime.fromtimestamp(
+                self.clock, timezone.utc
+            ).isoformat(),
+        }
+        with (
+            mock.patch.object(
+                core,
+                "_matching_task_profile",
+                return_value=(None, "no-exact-match"),
+            ),
+            mock.patch.object(
+                core,
+                "_collect_shadow_candidate",
+                return_value={"shadow_only": True, "state": "collecting"},
+            ) as collect,
+        ):
+            deferred = core._apply_autonomous_admission_policy(
+                result,
+                reviewed_identity,
+                self.case / "receipt.json",
+            )
+        self.assertEqual(deferred["terminal_route"], "discard")
+        self.assertIsNone(deferred["artifact"])
+        self.assertEqual(
+            deferred["policy_deferred"]["reason"],
+            "task-profile-artifact-requires-evaluation",
+        )
+        self.assertEqual(
+            deferred["policy_deferred"]["original_operation"], "patch"
+        )
+        collect.assert_called_once()
 
     def test_profile_matching_reports_no_match_and_ambiguity(self) -> None:
         fixture = self.source_fixture([self.session("one", 10)])

@@ -103,6 +103,13 @@ Two observations are independent only when they have distinct task keys and
 source sessions. The task-profile model may propose similarity, but deterministic
 owner code applies recurrence counts and identity rules.
 
+The candidate-aware reviewer owns the semantic decision that differently worded
+profiles belong to the same reusable procedure. Once it chooses the same skill
+artifact, the owner derives one canonical lifecycle procedure fingerprint from
+that artifact while retaining each matched profile's original receipt, task key,
+session, and source-procedure identity as evidence. Deterministic code must not
+infer semantic equivalence from text similarity alone.
+
 ### 3. Accumulate evidence before authoring
 
 A reusable procedure becomes authoring-ready when:
@@ -140,6 +147,10 @@ It chooses one outcome:
 The full reviewer may read the original transcript evidence. It must generalize
 the procedure and avoid copying credentials, private code, customer data, or
 source-specific details into the skill.
+
+Any profile-informed create, patch, or support-file artifact remains report-only
+until recurrence and evaluation pass. Matching an existing skill does not grant
+immediate mutation authority.
 
 ### 5. Evaluate the candidate
 

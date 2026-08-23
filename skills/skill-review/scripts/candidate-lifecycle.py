@@ -365,6 +365,27 @@ def candidate_identity(files: list[dict[str, Any]]) -> str:
     return sha256(canonical(files))
 
 
+def package_skill_name(root: Path, field: str) -> str:
+    skill_path = root / "SKILL.md"
+    reject_symlink(skill_path, field)
+    if not skill_path.is_file():
+        raise LifecycleError(f"{field} must contain SKILL.md")
+    try:
+        content = skill_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as exc:
+        raise LifecycleError(f"{field} SKILL.md must be UTF-8") from exc
+    if not content.startswith("---\n"):
+        raise LifecycleError(f"{field} SKILL.md must start with YAML frontmatter")
+    closing = content.find("\n---\n", 4)
+    if closing < 0:
+        raise LifecycleError(f"{field} SKILL.md frontmatter is not closed")
+    frontmatter = content[4:closing]
+    names = re.findall(r"^name:[ \t]*([a-z][a-z0-9-]{2,63})[ \t]*$", frontmatter, re.MULTILINE)
+    if len(names) != 1:
+        raise LifecycleError(f"{field} SKILL.md must declare exactly one canonical name")
+    return names[0]
+
+
 def package_path(lifecycle_id: str, candidate_id: str) -> Path:
     return packages_root() / lifecycle_id / candidate_id
 
@@ -373,20 +394,26 @@ def package_reference(lifecycle_id: str, candidate_id: str) -> str:
     return f"candidates/v1/packages/{lifecycle_id}/{candidate_id}"
 
 
-def verify_package(lifecycle_id: str, revision: dict[str, Any]) -> None:
+def verify_package(lifecycle_id: str, revision: dict[str, Any], proposed_name: str) -> None:
     candidate = require_sha256(revision["candidate_id"], "candidate revision.candidate_id")
     expected = package_path(lifecycle_id, candidate)
     if revision["package_path"] != package_reference(lifecycle_id, candidate):
         raise LifecycleError("candidate revision.package_path does not name its exact immutable package")
     actual_files = package_inventory(expected, "immutable package")
+    if package_skill_name(expected, "immutable package") != proposed_name:
+        raise LifecycleError("immutable package SKILL.md name does not match candidate proposed_name")
     if actual_files != revision["files"] or candidate_identity(actual_files) != candidate:
         raise LifecycleError(f"immutable package content does not match {candidate}")
     if os.access(expected, os.W_OK):
         raise LifecycleError(f"immutable package is writable: {expected}")
 
 
-def make_immutable_package(lifecycle_id: str, source: Path) -> tuple[str, list[dict[str, Any]], bool]:
+def make_immutable_package(
+    lifecycle_id: str, source: Path, proposed_name: str
+) -> tuple[str, list[dict[str, Any]], bool]:
     source_files = package_inventory(source, "package source")
+    if package_skill_name(source, "package source") != proposed_name:
+        raise LifecycleError("package source SKILL.md name does not match --proposed-name")
     candidate = candidate_identity(source_files)
     target = package_path(lifecycle_id, candidate)
     if target.exists() or target.is_symlink():
@@ -501,7 +528,7 @@ def validate_record(value: Any, verify_packages: bool = True) -> dict[str, Any]:
         validate_files(revision["files"], f"candidate record.candidate_revisions[{index}].files")
         parse_time(revision["staged_at"], f"candidate record.candidate_revisions[{index}].staged_at")
         if verify_packages:
-            verify_package(lifecycle_id, revision)
+            verify_package(lifecycle_id, revision, record["proposed_name"])
     if record["current_candidate_id"] not in candidate_ids:
         raise LifecycleError("candidate record.current_candidate_id must name a staged revision")
 
@@ -939,7 +966,7 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
         require_text(item, "--tombstone-id", 512)
     if existing and (covering or tombstones):
         raise LifecycleError("matching blockers can only be declared while creating a lifecycle")
-    candidate, files, created = make_immutable_package(lifecycle_id, source)
+    candidate, files, created = make_immutable_package(lifecycle_id, source, args.proposed_name)
     try:
         if existing is None:
             record = new_record(
