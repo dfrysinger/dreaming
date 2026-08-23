@@ -1077,6 +1077,30 @@
   candidate, cases, receipts, activation logs, lifecycle results, and review
   evidence live under `files/real-reviewer-profile-v1/evaluation-v24/` and the
   local evaluation receipt store.
+- The exact candidate is committed in both personal skill roots and retains
+  identity
+  `sha256:710724fc9cc1c9206d7f7eed1c349b21cd01e237f35fb13e92f6ba1058f228bd`.
+  Its managed-path native evaluation receipt
+  `sha256:a8aa272428985f01b2a8ce39484df61b51ef08995c71369deb2eb830cfcc0994`
+  passes. MacBook skill commit `48a8ed3` and Mac mini skill commit `3f0ff3d`
+  are local only.
+- Installed proof retained the first halted generation
+  `20260823T020230Z-install-33781` as a real failure. Python 3.9 receipt
+  compatibility, the portable `skill-create` dependency, a stale dashboard
+  fixture call, and the trusted authoring-adapter digest were corrected in
+  local successor commits `a522333`, `0f0f500`, `0034fde`, and `680a9f8`.
+  Targeted closure passes 61 core checks, the installer suite, 170 dashboard
+  checks, the evaluation-input source-builder suite, 46 certification checks,
+  and the same-candidate process-cleanup rerun.
+- Successor generation `20260823T030026Z-install-85516` passed private adapter
+  preflight with 23 local executable paths present and all four configured
+  source, executor, and publisher health probes green. Its generation-bound
+  installed self-test completed with zero failures before enable. The enabled
+  Mac mini now has one Dreaming scheduler with `StartInterval=14400`,
+  `RunAtLoad=false`, and no calendar trigger. The halt switch is inactive only
+  after the matching self-test stamp, and the installed candidate bytes remain
+  exact. Natural cadence, installed browser proof, rollback, and restore remain
+  open.
 - The separate Deep Code Review app-crash correction is complete at local-only
   commit `556db7409e22047bb3e96c176dd042d4577bc2e7`. It caps verification units
   at 16, advocates at four concurrent, judges at two concurrent, waits for the
