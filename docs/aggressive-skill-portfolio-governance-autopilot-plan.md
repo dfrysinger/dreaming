@@ -1149,6 +1149,17 @@
   Natural cadence has not been manually triggered; the next four-hour launch
   remains the required proof that malformed model output is isolated without
   consuming review capacity or making the otherwise healthy run red.
+- Natural run `20260823T173543Z-65539` started without a manual trigger on
+  generation `20260823T133542Z-install-30649` and completed in 30 minutes with
+  launchd exit `0`. Profiling attempted 29 sessions over 640 elapsed seconds,
+  retained 13 profiles, and stopped with
+  `profile_budget.exhausted_reason=elapsed-time-limit`; 1,202 profiles remained
+  deferred. The run completed the full 25-review allowance, deferred 1,206
+  reviews, reported `profile_failures=[]` and `errors=[]`, and published the
+  exact existing bundle
+  `sha256:4066a0bb9774ab953d81f1d6286dfbcdb0d95cdf7f8ec04229cbebb08ad5b234`.
+  This closes the successful natural-cadence checkpoint. Rollback preservation
+  and exact reviewed-candidate restore remain open.
 - The separate Deep Code Review app-crash correction is complete at local-only
   commit `556db7409e22047bb3e96c176dd042d4577bc2e7`. It caps verification units
   at 16, advocates at four concurrent, judges at two concurrent, waits for the
