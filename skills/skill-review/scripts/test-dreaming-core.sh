@@ -2272,7 +2272,7 @@ class RuntimeTest(unittest.TestCase):
                 }
             ],
         )
-        self.assertEqual(len(report["reviews"]), 1)
+        self.assertEqual(report["reviews"], [])
 
     def test_manual_runtime_ignores_scheduler_only_limits(self) -> None:
         runtime = runtime_module.configured_runtime(

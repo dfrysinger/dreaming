@@ -8193,6 +8193,7 @@ def scheduled_run() -> dict[str, Any]:
 
     queue = read_json(paths.queue, [])
     profile_attempts = 0
+    profile_failed_sessions: set[str] = set()
     profile_started_at = time.monotonic()
     for item in queue:
         if item.get("status") != "queued":
@@ -8298,6 +8299,7 @@ def scheduled_run() -> dict[str, Any]:
                 )
                 continue
             if error.code == "malformed-executor-result":
+                profile_failed_sessions.add(item["qualified_session_id"])
                 report["profile_failures"].append(
                     {
                         "session_id": item.get("qualified_session_id"),
@@ -8319,6 +8321,8 @@ def scheduled_run() -> dict[str, Any]:
     review_attempts = 0
     for item in queue:
         if item.get("status") != "queued":
+            continue
+        if item.get("qualified_session_id") in profile_failed_sessions:
             continue
         if review_attempts >= settings["max_reviews_per_run"]:
             report["deferred_reviews"] += 1
