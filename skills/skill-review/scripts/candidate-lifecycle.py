@@ -1038,6 +1038,51 @@ def evaluate(args: argparse.Namespace) -> dict[str, Any]:
     return result(record, recommendation="ready_for_draft" if decision["ready"] else "collecting", recurrence=decision)
 
 
+def revise(args: argparse.Namespace) -> dict[str, Any]:
+    assert_writer_lease()
+    record = copy.deepcopy(load_record(args.lifecycle_id))
+    assert_expected(record, args)
+    if record["state"] not in {"collecting", "ready_for_draft", "evaluating"}:
+        raise LifecycleError("candidate revision requires a collecting, ready, or evaluating lifecycle")
+    candidate, files, created = make_immutable_package(
+        args.lifecycle_id,
+        Path(args.package),
+        record["proposed_name"],
+    )
+    if candidate == record["current_candidate_id"]:
+        return result(record, changed=False)
+    try:
+        if candidate not in {item["candidate_id"] for item in record["candidate_revisions"]}:
+            record["candidate_revisions"].append(
+                {
+                    "candidate_id": candidate,
+                    "package_path": package_reference(args.lifecycle_id, candidate),
+                    "files": files,
+                    "staged_at": iso(),
+                }
+            )
+        record["current_candidate_id"] = candidate
+        if record["state"] == "evaluating":
+            append_transition(
+                record,
+                "ready_for_draft",
+                "candidate-revised",
+                [
+                    item["evidence_id"]
+                    for item in record["evidence"]
+                    if item["independence"] == "verified"
+                ],
+                [],
+                internal=True,
+            )
+        record = persist(record)
+    except Exception:
+        if created:
+            remove_created_package(args.lifecycle_id, candidate)
+        raise
+    return result(record, changed=True)
+
+
 def transition(args: argparse.Namespace) -> dict[str, Any]:
     assert_writer_lease()
     record = copy.deepcopy(load_record(args.lifecycle_id))
@@ -1057,6 +1102,16 @@ def transition(args: argparse.Namespace) -> dict[str, Any]:
     if target == "evaluating":
         if args.candidate_id != record["current_candidate_id"]:
             raise LifecycleError("evaluating must name the current exact candidate_id")
+        history = record["evaluation"]["history"]
+        if (
+            record["evaluation"]["status"] != "shadow_ready"
+            or not history
+            or history[-1]["candidate_id"] != record["current_candidate_id"]
+            or history[-1]["recommendation"] != "ready_for_draft"
+        ):
+            raise LifecycleError(
+                "evaluating requires a shadow-ready recommendation for the current candidate"
+            )
     append_transition(
         record,
         target,
@@ -1182,6 +1237,16 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate_parser.add_argument("--expected-version", type=int, required=True)
     evaluate_parser.add_argument("--expected-record-sha256")
     evaluate_parser.set_defaults(func=evaluate)
+
+    revise_parser = sub.add_parser(
+        "revise",
+        help="stage an immutable successor package without inventing new evidence",
+    )
+    revise_parser.add_argument("lifecycle_id")
+    revise_parser.add_argument("--package", required=True, help="successor draft package directory")
+    revise_parser.add_argument("--expected-version", type=int, required=True)
+    revise_parser.add_argument("--expected-record-sha256")
+    revise_parser.set_defaults(func=revise)
 
     transition_parser = sub.add_parser("transition", help="perform a declared shadow lifecycle transition")
     transition_parser.add_argument("lifecycle_id")

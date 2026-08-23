@@ -124,6 +124,11 @@ The opportunity observations feed the existing shadow-candidate lifecycle. They
 replace the current permanently `unverified` session-derived observation with
 verified task identity where the evidence proves independence.
 
+Review fixes stage a new immutable candidate revision without creating another
+opportunity observation. The exact successor makes the prior recommendation
+stale and must be rebound to the retained recurrence evidence before evaluation
+or deployment can continue.
+
 One-off tasks remain evidence but do not create a candidate.
 
 ### 4. Apply the learning to the skill estate
@@ -323,9 +328,9 @@ history.
       reusable procedures from bounded real transcripts.
 - [x] Retained observations bind exact snapshot and event identities.
 - [x] Verified independent observations can cross the existing recurrence gate.
-- [ ] One recurring opportunity produces a real shadow candidate or existing
+- [x] One recurring opportunity produces a real shadow candidate or existing
       skill repair from its transcript evidence.
-- [ ] Triggering, task-performance, and overall-regression evaluations pass for
+- [x] Triggering, task-performance, and overall-regression evaluations pass for
       the accepted candidate.
 - [ ] The report-only dashboard distinguishes task opportunity, skill use,
       evaluation, and deployment authority.

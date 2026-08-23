@@ -218,6 +218,41 @@ run evaluate "$LID" --expected-version "$(version_of "$REC")" > "$TMP/evaluate.o
 [[ "$(json_get 'json.load(open(0))["recommendation"]' "$TMP/evaluate.out")" == ready_for_draft ]] ||
   fail "two independent recent observations did not recommend ready"
 [[ "$(state_of "$REC")" == ready_for_draft ]] || fail "ready recurrence did not transition state"
+make_package "$TMP/package-three" three
+evidence_count_before="$(json_get 'len(json.load(open(0))["evidence"])' "$REC")"
+revision_count_before="$(json_get 'len(json.load(open(0))["candidate_revisions"])' "$REC")"
+evaluated_candidate="$(candidate_of "$REC")"
+evaluated_at_before="$(json_get 'json.load(open(0))["evaluation"]["last_evaluated_at"]' "$REC")"
+run revise "$LID" --package "$TMP/package-three" \
+  --expected-version "$(version_of "$REC")" >/dev/null
+[[ "$evaluated_candidate" != "$(candidate_of "$REC")" ]] ||
+  fail "candidate revision did not change the exact candidate identity"
+[[ "$(json_get 'len(json.load(open(0))["evidence"])' "$REC")" == "$evidence_count_before" ]] ||
+  fail "candidate revision invented or removed recurrence evidence"
+[[ "$(json_get 'len(json.load(open(0))["candidate_revisions"])' "$REC")" == "$((revision_count_before + 1))" ]] ||
+  fail "candidate revision did not append exactly one immutable package"
+[[ "$(json_get 'json.load(open(0))["evaluation"]["status"]' "$REC")" == shadow_ready ]] ||
+  fail "candidate revision rewrote the retained recommendation summary"
+[[ "$(json_get 'json.load(open(0))["evaluation"]["last_evaluated_at"]' "$REC")" == "$evaluated_at_before" ]] ||
+  fail "candidate revision rewrote the retained evaluation timestamp"
+[[ "$(json_get 'json.load(open(0))["evaluation"]["history"][-1]["candidate_id"]' "$REC")" == "$evaluated_candidate" ]] ||
+  fail "candidate revision rewrote prior evaluation history"
+cp "$REC" "$TMP/pre-unevaluated-transition.json"
+expect_refusal stale-revision-evaluating run transition "$LID" --to evaluating \
+  --reason stale-revision-evaluation --candidate-id "$(candidate_of "$REC")" \
+  --expected-version "$(version_of "$REC")"
+cmp -s "$REC" "$TMP/pre-unevaluated-transition.json" ||
+  fail "stale successor transition changed the lifecycle record"
+cp "$REC" "$TMP/pre-mismatched-revision.json"
+make_package "$TMP/mismatched-revision-package" mismatch different-fixture
+expect_refusal revise-name-mismatch run revise "$LID" --package "$TMP/mismatched-revision-package" \
+  --expected-version "$(version_of "$REC")"
+cmp -s "$REC" "$TMP/pre-mismatched-revision.json" ||
+  fail "rejected candidate revision changed the lifecycle record"
+run evaluate "$LID" --expected-version "$(version_of "$REC")" > "$TMP/revised-evaluate.out"
+[[ "$(json_get 'json.load(open(0))["evaluation"]["history"][-1]["candidate_id"]' "$REC")" == "$(candidate_of "$REC")" ]] ||
+  fail "successor recommendation was not bound to the exact revised candidate"
+pass "candidate revisions preserve recurrence evidence and require a fresh recommendation"
 run transition "$LID" --to evaluating --reason exact-draft-evaluation \
   --candidate-id "$(candidate_of "$REC")" --expected-version "$(version_of "$REC")" >/dev/null
 [[ "$(state_of "$REC")" == evaluating ]] || fail "legal evaluating transition failed"

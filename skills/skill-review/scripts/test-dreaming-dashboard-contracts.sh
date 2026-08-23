@@ -553,7 +553,9 @@ def candidate_observation(task, session, offset_days, independence="verified"):
 
 def candidate_record(label, observations):
     identity = str(uuid.uuid4())
-    staged, files, _ = lifecycle.make_immutable_package(identity, candidate_package(label))
+    staged, files, _ = lifecycle.make_immutable_package(
+        identity, candidate_package(label), "lifecycle-fixture"
+    )
     record = lifecycle.new_record(
         identity,
         "lifecycle-fixture",
@@ -776,7 +778,7 @@ check(
 )
 drifted = copy.deepcopy(ready)
 staged_two, files_two, _ = lifecycle.make_immutable_package(
-    ready_id, candidate_package("ready-revision-two")
+    ready_id, candidate_package("ready-revision-two"), "lifecycle-fixture"
 )
 drifted["candidate_revisions"].append(
     {

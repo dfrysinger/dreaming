@@ -1045,18 +1045,43 @@
   verified task key, session, time, and summary. Focused coverage proves two
   independently worded matched profiles for the same artifact enter one
   lifecycle and cross recurrence only after deterministic distinct-task and
-  distinct-session checks. The core suite passes 61 checks; the candidate
-  lifecycle suite passes 11 checks; Python compilation and the diff check pass.
-  A fresh candidate-aware Codex review of the older independent continuity
-  transcript failed before producing output and remains retained in
-  `state-v16/review-attempts.json`. It was not retried or relabeled, so genuine
-  real recurrence for this candidate is still open.
-- The separate Deep Code Review app-crash correction is owned by Bravo in
-  `/Users/dfrysinger/code/deep`. The retained incident measured 552 agents,
-  13,453 model calls, and approximately 1.187 billion tokens before the app
-  crashed between advocate persistence and judge completion. Romeo is not
-  making competing Deep repository edits while awaiting Bravo's bounded
-  concurrency handoff.
+  distinct-session checks. Two fresh verified observations now qualify private
+  lifecycle `fedd0450-cf9f-4353-8690-834f9dd638f5`; they retain distinct task
+  keys and sessions from August 19 and 20 without stale June evidence.
+- The accepted shadow candidate is `agent-session-continuity` revision
+  `sha256:710724fc9cc1c9206d7f7eed1c349b21cd01e237f35fb13e92f6ba1058f228bd`.
+  Candidate revision staging is now separate from task observation collection,
+  so paired-review fixes did not invent recurrence. Lifecycle record version 6
+  is `ready_for_draft` and its latest `shadow_ready` recommendation is bound to
+  that exact revision. The candidate lifecycle suite passes 12 checks and the
+  core suite passes 61; 58 dashboard-contract checks confirm a successor stays
+  visible with its prior recommendation marked stale until re-evaluation.
+  Paired lifecycle review closed both a stale-successor transition bypass and
+  an invalid intermediate dashboard state with no remaining finding.
+- Native `gpt-5.4` report-only evaluation receipt
+  `sha256:447a05883608ddba7b68ce09ad62358e32af3368bb9752d1409f1338e3dbabaa`
+  passes. The wrong-predecessor source baseline fails while the candidate loads
+  and passes; both related safety-rule arms pass without regression. Hardened
+  graders require candidate-session search, comparison, persisted evidence,
+  authority declaration, and a pre-implementation gate. Four retained
+  adversarial unsafe answers fail those graders.
+- Description probes bind the intended activation boundary. An empty
+  replacement with unconfirmed seed provenance loads the exact candidate once,
+  pauses work, and reconstructs authority. A known-good ordinary oversized
+  rotation loads it zero times. The candidate delegates all mechanical
+  rotation handling to `rotate-session`, including tmux/non-tmux branching and
+  failure reporting.
+- Paired Opus/Terra review closed duplicated rotation mechanics, source and
+  sibling false-pass channels, and the missing empty-replacement trigger.
+  Final resolution-only review reports zero material findings. Retained
+  candidate, cases, receipts, activation logs, lifecycle results, and review
+  evidence live under `files/real-reviewer-profile-v1/evaluation-v24/` and the
+  local evaluation receipt store.
+- The separate Deep Code Review app-crash correction is complete at local-only
+  commit `556db7409e22047bb3e96c176dd042d4577bc2e7`. It caps verification units
+  at 16, advocates at four concurrent, judges at two concurrent, waits for the
+  advocate barrier, and bounds each task to two attempts. Focused package,
+  concurrency, syntax, and paired-review checks passed. Nothing was pushed.
 - The remote evaluation-input installation path is hardened through capacity
   commits `f33539c`, `b1b2726`, and `274ae8e`, transferred without remotes to
   Mac mini commits `0ec0b8fe` and `b393bb84`. Managed adapter regeneration now
