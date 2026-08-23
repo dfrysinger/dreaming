@@ -210,6 +210,11 @@ queue into the next natural run. The enclosing pass has a one-hour backstop so
 an in-flight profile can finish and the ordinary review and publication phases
 can still settle. `max_reviews_per_run` remains capped at 25.
 
+A malformed model profile is rejected before it can become task evidence and
+is retained as a per-session profiling failure. It does not fail an otherwise
+healthy scheduled run, consume a full-review attempt, or authorize recurrence.
+The queued source revision remains eligible for a later independent retry.
+
 The first backfill processes recent stable sessions first. After catch-up, only
 new or changed source revisions require profiling.
 

@@ -7751,6 +7751,7 @@ def scheduled_run() -> dict[str, Any]:
         "discovery": {},
         "profiles": [],
         "profile_skips": [],
+        "profile_failures": [],
         "deferred_profiles": 0,
         "profile_budget": {
             "max_sessions": settings["max_profiles_per_run"],
@@ -8290,6 +8291,14 @@ def scheduled_run() -> dict[str, Any]:
                 continue
             if error.code == "completion-not-admitted":
                 report["profile_skips"].append(
+                    {
+                        "session_id": item.get("qualified_session_id"),
+                        "code": error.code,
+                    }
+                )
+                continue
+            if error.code == "malformed-executor-result":
+                report["profile_failures"].append(
                     {
                         "session_id": item.get("qualified_session_id"),
                         "code": error.code,

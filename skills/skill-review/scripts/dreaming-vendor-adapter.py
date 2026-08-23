@@ -1877,6 +1877,7 @@ def task_profile_prompt(snapshot: dict[str, Any]) -> str:
             "procedure_required_for": ["reusable-procedure"],
             "procedure_forbidden_for": ["one-off", "no-durable-learning"],
             "split_distinct_user_outcomes": True,
+            "unique_source_event_sets": True,
             "do_not_infer_completion_without_evidence": True,
         },
         "result_schema": task_profile_result_schema(snapshot),
@@ -2172,6 +2173,7 @@ def executor_run(args: argparse.Namespace) -> None:
         if not isinstance(qualified_session_id, str) or not qualified_session_id:
             raise AdapterError("snapshot-invalid", "qualified session identity")
         profiles: list[dict[str, Any]] = []
+        seen_task_keys: set[str] = set()
         for profile in model_result["profiles"]:
             expected_profile_keys = {
                 "source_event_ids",
@@ -2296,6 +2298,12 @@ def executor_run(args: argparse.Namespace) -> None:
                     "source_event_ids": event_ids,
                 }
             )
+            if task_key in seen_task_keys:
+                raise AdapterError(
+                    "malformed-executor-result",
+                    "duplicate task profile evidence",
+                )
+            seen_task_keys.add(task_key)
             retained = {
                 **profile,
                 "task_key": task_key,

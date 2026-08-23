@@ -238,6 +238,41 @@ class VendorAdapterTest(unittest.TestCase):
             "malformed-executor-result",
         )
 
+    def test_task_profile_mode_rejects_duplicate_evidence_sets(self):
+        snapshot = self.case / "duplicate-profile-snapshot.json"
+        snapshot.write_text(
+            json.dumps(
+                {
+                    "identity": {
+                        "qualified_session_id": "copilot:profile-fixture",
+                    },
+                    "events": [
+                        {"source_event_id": "event-1"},
+                        {"source_event_id": "event-2"},
+                    ],
+                }
+            )
+        )
+        result = self.run_adapter(
+            "copilot",
+            "review-executor",
+            "run",
+            "--snapshot",
+            snapshot,
+            "--result",
+            self.case / "duplicate-profile-result.json",
+            "--mode",
+            "profile",
+            check=False,
+            environment={**self.env, "FAKE_TASK_PROFILE_DUPLICATE": "1"},
+        )
+        self.assertFalse(result["ok"])
+        self.assertEqual(
+            result["error"]["code"],
+            "malformed-executor-result",
+        )
+        self.assertIn("duplicate task profile evidence", result["error"]["message"])
+
     def _task_profile_review_fixture(self):
         snapshot_value = {
             "identity": {
@@ -872,24 +907,31 @@ def task_profile_payload(prompt):
     ]
     if os.environ.get("FAKE_TASK_PROFILE_REVERSE") == "1":
         event_ids.reverse()
+    profiles = [{
+      "source_event_ids": event_ids[:2],
+      "task_type": "document-reusable-procedure",
+      "abstract_summary": "Turn completed work into a reusable procedure.",
+      "reuse_value": "reusable-procedure",
+      "procedure": {
+        "trigger": "A completed task contains a reusable procedure.",
+        "outcome": "The procedure is captured for reuse.",
+        "actions": ["Identify the task outcome.", "Capture the ordered procedure."],
+        "exclusions": ["Do not copy source-specific details."],
+      },
+      "confidence": "high",
+      "sensitive_source": False,
+      "task_state": "completed",
+    }]
+    if os.environ.get("FAKE_TASK_PROFILE_DUPLICATE") == "1":
+        profiles.append({
+          **profiles[0],
+          "task_type": "document-second-reusable-procedure",
+          "abstract_summary": "Capture a second claimed procedure from the same evidence.",
+        })
     return {
       "schema_version": 1,
       "kind": "llm_task_opportunity_profile",
-      "profiles": [{
-        "source_event_ids": event_ids[:2],
-        "task_type": "document-reusable-procedure",
-        "abstract_summary": "Turn completed work into a reusable procedure.",
-        "reuse_value": "reusable-procedure",
-        "procedure": {
-          "trigger": "A completed task contains a reusable procedure.",
-          "outcome": "The procedure is captured for reuse.",
-          "actions": ["Identify the task outcome.", "Capture the ordered procedure."],
-          "exclusions": ["Do not copy source-specific details."],
-        },
-        "confidence": "high",
-        "sensitive_source": False,
-        "task_state": "completed",
-      }],
+      "profiles": profiles,
     }
 if "--version" in args:
     print(vendor + " 1.0")

@@ -2197,6 +2197,83 @@ class RuntimeTest(unittest.TestCase):
                 {"max_profile_elapsed_seconds": 1801}
             )
 
+    def test_malformed_profile_is_retained_without_failing_run(self) -> None:
+        source_fixture = self.source_fixture([self.session("one", 1)])
+        executor_fixture = self.write(
+            "malformed-profile-executor.json",
+            {
+                "mode": "success",
+                "task_profile_error": {
+                    "code": "malformed-executor-result",
+                    "message": "duplicate task profile evidence",
+                },
+            },
+        )
+        config = self.write(
+            "malformed-profile-adapters.json",
+            {
+                "contract_version": 1,
+                "routes": ["fake>fake-executor"],
+                "executor_order": ["fake-executor"],
+                "sources": {
+                    "fake": {
+                        "argv": [
+                            sys.executable,
+                            str(FAKE),
+                            "--fixture",
+                            str(source_fixture),
+                            "--adapter-id",
+                            "fake",
+                            "--role",
+                            "session-source",
+                        ]
+                    }
+                },
+                "executors": {
+                    "fake-executor": {
+                        "argv": [
+                            sys.executable,
+                            str(FAKE),
+                            "--fixture",
+                            str(executor_fixture),
+                            "--adapter-id",
+                            "fake-executor",
+                            "--role",
+                            "review-executor",
+                        ]
+                    }
+                },
+                "publishers": {},
+            },
+        )
+        environment = {
+            **os.environ,
+            "DREAMING_ADAPTER_CONFIG": str(config),
+            "DREAMING_DATA_DIR": str(self.case / "malformed-profile-data"),
+            "DREAMING_STATE_DIR": str(self.case / "malformed-profile-state"),
+        }
+        result = subprocess.run(
+            [sys.executable, str(RUNTIME_PATH), "run"],
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        report = json.loads(result.stdout)
+        self.assertTrue(report["ok"])
+        self.assertEqual(report["profiles"], [])
+        self.assertEqual(
+            report["profile_failures"],
+            [
+                {
+                    "session_id": "fake:one",
+                    "code": "malformed-executor-result",
+                }
+            ],
+        )
+        self.assertEqual(len(report["reviews"]), 1)
+
     def test_manual_runtime_ignores_scheduler_only_limits(self) -> None:
         runtime = runtime_module.configured_runtime(
             self.paths,

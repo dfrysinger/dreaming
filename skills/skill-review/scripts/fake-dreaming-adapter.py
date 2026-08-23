@@ -165,6 +165,12 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
     if args.command == "run":
         snapshot = load(Path(args.snapshot), {})
         if args.mode == "profile":
+            profile_error = state.get("task_profile_error")
+            if isinstance(profile_error, dict):
+                fail(
+                    str(profile_error.get("code", "malformed-executor-result")),
+                    str(profile_error.get("message", "invalid task profile")),
+                )
             session_id = snapshot.get("identity", {}).get(
                 "qualified_session_id"
             )

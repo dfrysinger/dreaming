@@ -1128,6 +1128,17 @@
   separate task backlog, learned skills, and unpublished drafts. The fresh
   successor honestly reports scheduled reliability as unknown before its first
   natural run, and the narrow view stacks without horizontal clipping.
+- The first elapsed-budget natural run,
+  `20260823T120810Z-88624`, proves the new bound itself: profiling stopped at
+  601 seconds after 42 attempts, retained 10 new profiles, deferred 1,210,
+  completed 25 full reviews, and published the exact existing bundle. It still
+  ended red because one model returned two claimed tasks with the same complete
+  evidence-event set, which the receipt validator correctly rejected as a
+  duplicate task identity. That single malformed model response was the only
+  core error. The successor keeps the rejection strict, moves duplicate
+  evidence-set detection into the executor adapter, records malformed model
+  output as a non-authoritative per-session profiling failure, and allows the
+  otherwise healthy scheduled run to settle and retry that revision later.
 - The separate Deep Code Review app-crash correction is complete at local-only
   commit `556db7409e22047bb3e96c176dd042d4577bc2e7`. It caps verification units
   at 16, advocates at four concurrent, judges at two concurrent, waits for the
