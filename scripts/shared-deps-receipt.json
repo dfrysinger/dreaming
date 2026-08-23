@@ -3,12 +3,15 @@
     "skills/authenticated-browse/SKILL.md": "3c0df6bb3f050cc7d46a2ef845dcfea85d039e68e7bf14c8c6c6853928e12e7d",
     "skills/authenticated-browse/scripts/pw-session.mjs": "0b48275b95e77d474f2e4f40537e5d68faf640b09b9f456e71b32b7efd2b05ad",
     "skills/authenticated-browse/scripts/pw-session.sh": "65e535787e8786b848a76453f413789b986a0f3fc3375e71eb674a10beb36dd4",
-    "skills/dual-review/SKILL.md": "1afca1a92c80567d6ad9c0ea3db22656d00b9479d58d7da26d74b803bce61ee5",
+    "skills/dual-review/SKILL.md": "307b873d3aebe72e6d85fee9845528676a23de1a2ec4b24c9bfd156828a2e36d",
     "skills/dual-review/references/finding-verifier-prompt.md": "4e0f89eb8891cf0d78c3f2d4ccb260cd2cefef7c3cf5ff64a3a628cb545682de",
-    "skills/dual-review/references/reviewer-prompt-template.md": "f1e7459e904592bc50e2a3637b9f94a38b856a7ffb862988850faff941a5d142",
+    "skills/dual-review/references/reviewer-prompt-template.md": "b1e2155a5f3657a61fba30ac37ac0cfdb07069ca47d56468dc19bd78861fe7ae",
+    "skills/skill-create/SKILL.md": "a4f66265a4dcc2a06345e17cc3b222b5b0df152fb7cbc0692234a130d6d74c09",
+    "skills/skill-create/scripts/test_validate_skill.py": "697dbcc056956a11156b96bdffc19c8875bbf31ae8d44fe856c2c4af5231463d",
+    "skills/skill-create/scripts/validate_skill.py": "ff10d925316e02b755e64a19ed9a21d9e29f0aba3407c8ba61c0be9abc199079",
     "skills/writing-great-skills/SKILL.md": "e4964a8aff6ece6677996467fe166be9e011717ab57cf21097bf79dc7c0516f6",
     "skills/writing-great-skills/references/GLOSSARY.md": "cccd684c73fb7a06f523497b0121765f92d2b33d6ef9c51602294849233451d6"
   },
-  "pinned_revision": "9ba5dee7c141f25c1c1c1d955c392adbf8eb4a69",
+  "pinned_revision": "5af5dee769498518596a832f038a7b6d5dc01a37",
   "protocol_version": 1
 }

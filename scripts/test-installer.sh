@@ -15,7 +15,7 @@ trap 'chmod -R u+w "$TMP" 2>/dev/null || true; rm -rf "$TMP"' EXIT
 export TMPDIR="$TMP"
 INSTALLER="$ROOT/scripts/install.sh"
 SOURCE="$TMP/source"
-for name in writing-great-skills dual-review authenticated-browse; do
+for name in skill-create writing-great-skills dual-review authenticated-browse; do
   mkdir -p "$SOURCE/skills/$name"
   printf -- '---\nname: %s\ndescription: Installer fixture shared skill.\n---\n' "$name" \
     > "$SOURCE/skills/$name/SKILL.md"
