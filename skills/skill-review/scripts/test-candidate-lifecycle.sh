@@ -231,10 +231,10 @@ run revise "$LID" --package "$TMP/package-three" \
   fail "candidate revision invented or removed recurrence evidence"
 [[ "$(json_get 'len(json.load(open(0))["candidate_revisions"])' "$REC")" == "$((revision_count_before + 1))" ]] ||
   fail "candidate revision did not append exactly one immutable package"
-[[ "$(json_get 'json.load(open(0))["evaluation"]["status"]' "$REC")" == shadow_ready ]] ||
-  fail "candidate revision rewrote the retained recommendation summary"
-[[ "$(json_get 'json.load(open(0))["evaluation"]["last_evaluated_at"]' "$REC")" == "$evaluated_at_before" ]] ||
-  fail "candidate revision rewrote the retained evaluation timestamp"
+[[ "$(json_get 'json.load(open(0))["evaluation"]["status"]' "$REC")" == not_evaluated ]] ||
+  fail "candidate revision retained a stale recommendation summary"
+[[ "$(json_get 'json.load(open(0))["evaluation"]["last_evaluated_at"]' "$REC")" == None ]] ||
+  fail "candidate revision retained a stale evaluation timestamp"
 [[ "$(json_get 'json.load(open(0))["evaluation"]["history"][-1]["candidate_id"]' "$REC")" == "$evaluated_candidate" ]] ||
   fail "candidate revision rewrote prior evaluation history"
 cp "$REC" "$TMP/pre-unevaluated-transition.json"
@@ -256,6 +256,16 @@ pass "candidate revisions preserve recurrence evidence and require a fresh recom
 run transition "$LID" --to evaluating --reason exact-draft-evaluation \
   --candidate-id "$(candidate_of "$REC")" --expected-version "$(version_of "$REC")" >/dev/null
 [[ "$(state_of "$REC")" == evaluating ]] || fail "legal evaluating transition failed"
+make_package "$TMP/package-four" four
+run revise "$LID" --package "$TMP/package-four" \
+  --expected-version "$(version_of "$REC")" >/dev/null
+[[ "$(state_of "$REC")" == ready_for_draft ]] ||
+  fail "revision during evaluation did not return to ready_for_draft"
+[[ "$(json_get 'json.load(open(0))["evaluation"]["status"]' "$REC")" == not_evaluated ]] ||
+  fail "revision during evaluation retained a stale recommendation"
+run evaluate "$LID" --expected-version "$(version_of "$REC")" >/dev/null
+run transition "$LID" --to evaluating --reason revised-draft-evaluation \
+  --candidate-id "$(candidate_of "$REC")" --expected-version "$(version_of "$REC")" >/dev/null
 run transition "$LID" --to rejected --reason evaluation-rejected \
   --expected-version "$(version_of "$REC")" >/dev/null
 [[ "$(state_of "$REC")" == rejected ]] || fail "legal rejected transition failed"

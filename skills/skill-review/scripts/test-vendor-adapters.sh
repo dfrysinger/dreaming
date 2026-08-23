@@ -344,6 +344,18 @@ class VendorAdapterTest(unittest.TestCase):
         )
         profiles = [reusable_profile, one_off_profile]
         protocol, capabilities = vendor_module.PROTOCOLS["review-executor"]
+        executor_identity = {
+            "ok": True,
+            "protocol": protocol,
+            "version": 1,
+            "adapter_id": "copilot",
+            "capabilities": capabilities,
+            "executor_version": "copilot 1.0",
+            "model": "default",
+            "adapter_sha256": hashlib.sha256(
+                adapter.read_bytes()
+            ).hexdigest(),
+        }
         receipt_body = {
             "schema_version": 1,
             "kind": "task_profile_receipt",
@@ -352,13 +364,7 @@ class VendorAdapterTest(unittest.TestCase):
             "qualified_session_id": "copilot:profiled-review",
             "observed_at": "2026-01-01T00:00:00+00:00",
             "executor": "copilot",
-            "executor_identity": {
-                "ok": True,
-                "protocol": protocol,
-                "version": 1,
-                "adapter_id": "copilot",
-                "capabilities": capabilities,
-            },
+            "executor_identity": executor_identity,
             "model": "fixture-profile-model",
             "profiles": profiles,
         }

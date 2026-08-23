@@ -89,6 +89,7 @@ PROTOCOLS = {
         ["content-addressed-bundle", "ownership-safe-remove", "exact-inventory"],
     ),
 }
+MAX_TASK_PROFILE_CONTEXT_BYTES = 64_000
 
 
 def adapter_identity(role: str, vendor: str) -> dict[str, Any]:
@@ -100,6 +101,35 @@ def adapter_identity(role: str, vendor: str) -> dict[str, Any]:
         "adapter_id": vendor,
         "capabilities": capabilities,
     }
+
+
+def review_executor_identity(args: argparse.Namespace) -> dict[str, Any]:
+    binary = selected_executable(args.vendor, args.binary)
+    try:
+        version = subprocess.run(
+            [binary, "--version"],
+            check=True,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=10,
+        )
+    except (OSError, subprocess.CalledProcessError, subprocess.TimeoutExpired) as error:
+        raise AdapterError(
+            "executor-unavailable",
+            f"cannot identify {args.vendor} executor: {error}",
+        ) from error
+    identity = adapter_identity("review-executor", args.vendor)
+    identity.update(
+        {
+            "executor_version": (version.stdout or version.stderr).strip(),
+            "model": args.model,
+            "adapter_sha256": hashlib.sha256(
+                Path(__file__).read_bytes()
+            ).hexdigest(),
+        }
+    )
+    return identity
 EVENT_KINDS = {
     "user_message",
     "assistant_message",
@@ -2024,7 +2054,7 @@ def executor_run(args: argparse.Namespace) -> None:
                 f"{args.task_profile_receipt}: receipt-path",
             )
         receipt = load_json(receipt_path)
-        executor_identity = adapter_identity("review-executor", args.vendor)
+        executor_identity = review_executor_identity(args)
         try:
             validated_context = validate_task_profile_receipt(
                 receipt,
@@ -2038,6 +2068,14 @@ def executor_run(args: argparse.Namespace) -> None:
                 "task-profile-receipt-invalid",
                 f"{args.task_profile_receipt}: {error.reason}",
             ) from error
+        if (
+            len(canonical(validated_context))
+            > MAX_TASK_PROFILE_CONTEXT_BYTES
+        ):
+            raise AdapterError(
+                "task-profile-context-too-large",
+                str(len(canonical(validated_context))),
+            )
         if validated_context["profiles"]:
             task_profile_context = validated_context
     prompt = (
@@ -6145,7 +6183,11 @@ def main() -> None:
         if args.command == "contract":
             if args.contract_role != args.role:
                 raise AdapterError("role-mismatch", args.contract_role)
-            emit(adapter_identity(args.role, args.vendor))
+            emit(
+                review_executor_identity(args)
+                if args.role == "review-executor"
+                else adapter_identity(args.role, args.vendor)
+            )
         if args.role == "session-source":
             source_command(args)
         if args.role == "review-executor":

@@ -1062,6 +1062,8 @@ def revise(args: argparse.Namespace) -> dict[str, Any]:
                 }
             )
         record["current_candidate_id"] = candidate
+        record["evaluation"]["status"] = "not_evaluated"
+        record["evaluation"]["last_evaluated_at"] = None
         if record["state"] == "evaluating":
             append_transition(
                 record,

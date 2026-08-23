@@ -2258,10 +2258,11 @@ class RuntimeTest(unittest.TestCase):
             text=True,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            check=True,
+            check=False,
         )
         report = json.loads(result.stdout)
-        self.assertTrue(report["ok"])
+        self.assertNotEqual(result.returncode, 0)
+        self.assertFalse(report["ok"])
         self.assertEqual(report["profiles"], [])
         self.assertEqual(
             report["profile_failures"],
@@ -2269,6 +2270,7 @@ class RuntimeTest(unittest.TestCase):
                 {
                     "session_id": "fake:one",
                     "code": "malformed-executor-result",
+                    "message": "duplicate task profile evidence",
                 }
             ],
         )
@@ -2322,15 +2324,14 @@ class RuntimeTest(unittest.TestCase):
             "profile-refresh-executor",
             "fake:one",
         )
-        self.assertIsNone(
-            refreshed_core.task_profile_receipt_for(
-                "fake:one",
-                identity["source_revision"],
-                "profile-refresh-executor",
-                snapshot_path=snapshot_path,
-                executor_identity=executor.identity,
-            )
+        binding = refreshed_core.task_profile_binding_for(
+            "fake:one",
+            identity["source_revision"],
+            "profile-refresh-executor",
+            snapshot_path,
+            executor.identity,
         )
+        self.assertEqual(binding.status, "absent")
         refreshed = refreshed_core.profile(
             "fake",
             source,
@@ -2342,24 +2343,37 @@ class RuntimeTest(unittest.TestCase):
             refreshed["receipt_sha256"], first["receipt_sha256"]
         )
         self.assertEqual(
-            refreshed_core.task_profile_receipt_for(
+            refreshed_core.indexed_task_profile_receipt_for(
                 "fake:one",
                 identity["source_revision"],
                 "profile-refresh-executor",
-                snapshot_path=snapshot_path,
-                executor_identity=executor.identity,
-            ),
+                current_contract=False,
+                receipt_sha256=first["receipt_sha256"],
+            ).path,
+            Path(first["receipt"]),
+        )
+        self.assertEqual(
+            refreshed_core.indexed_task_profile_receipt_for(
+                "fake:one",
+                identity["source_revision"],
+                "profile-refresh-executor",
+                current_contract=False,
+                receipt_sha256=refreshed["receipt_sha256"],
+            ).path,
             Path(refreshed["receipt"]),
         )
-        with self.assertRaisesRegex(
-            RuntimeFailure, "task-profile-binding-invalid"
-        ):
-            refreshed_core.task_profile_receipt_for(
-                "fake:one",
-                identity["source_revision"],
-                "profile-refresh-executor",
-                snapshot_path=snapshot_path,
-            )
+        binding = refreshed_core.task_profile_binding_for(
+            "fake:one",
+            identity["source_revision"],
+            "profile-refresh-executor",
+            snapshot_path,
+            executor.identity,
+        )
+        self.assertEqual(binding.status, "bound")
+        self.assertEqual(
+            binding.receipt.path if binding.receipt is not None else None,
+            Path(refreshed["receipt"]),
+        )
 
     def test_executor_identity_drift_refreshes_task_profile_receipt(self) -> None:
         source_fixture = self.source_fixture([self.session("one", 1)])
@@ -2391,15 +2405,15 @@ class RuntimeTest(unittest.TestCase):
             "profile-identity-refresh",
             "fake:one",
         )
-        self.assertIsNone(
-            core.task_profile_receipt_for(
-                "fake:one",
-                identity["source_revision"],
-                "profile-identity-refresh",
-                snapshot_path=snapshot_path,
-                executor_identity=upgraded.identity,
-            )
+        binding = core.task_profile_binding_for(
+            "fake:one",
+            identity["source_revision"],
+            "profile-identity-refresh",
+            snapshot_path,
+            upgraded.identity,
         )
+        self.assertEqual(binding.status, "unbound")
+        self.assertEqual(binding.reason, "executor-identity")
         refreshed = core.profile(
             "fake",
             source,
@@ -2445,7 +2459,10 @@ class RuntimeTest(unittest.TestCase):
         )
         self.assertEqual(result["status"], "accepted")
         attempt = json.loads(self.paths.attempts.read_text())[-1]
-        self.assertEqual(attempt["task_profile_delivery"], "unsupported")
+        self.assertEqual(
+            attempt["task_profile_delivery"],
+            "unsupported:profiled-by-other-executor",
+        )
         self.assertNotIn("task_profile_receipt_sha256", attempt)
 
     def test_legacy_review_executor_is_not_used_for_profiling(self) -> None:
@@ -3777,6 +3794,138 @@ elif sys.argv[1] == "run":
         )
         collect.assert_called_once()
 
+    def test_profile_gate_remains_active_without_current_executor_receipt(self) -> None:
+        core = DreamingRuntime(
+            self.paths,
+            {("fake", "legacy")},
+            allow_autonomous_skill_creation=False,
+            now=lambda: self.clock,
+        )
+        result = {
+            "terminal_route": "skill",
+            "summary": "Repair a reusable fixture procedure",
+            "routing_reason": "The existing skill needs the observed procedure",
+            "artifact": {
+                "operation": "patch",
+                "skill_name": "existing-procedure",
+                "skill_markdown": (
+                    "---\nname: existing-procedure\n"
+                    "description: Run the existing fixture procedure\n---\n"
+                    "# Existing procedure\n"
+                ),
+                "support_files": [],
+            },
+            "evidence_event_ids": ["one-event-1"],
+            "transcript_context": {
+                "snapshot_sha256": "snapshot",
+                "source_revision": "revision",
+                "event_ids": ["one-event-1"],
+            },
+        }
+        reviewed_identity = {
+            "qualified_session_id": "fake:one",
+            "source_revision": "sha256:" + "1" * 64,
+            "updated_at": datetime.fromtimestamp(
+                self.clock, timezone.utc
+            ).isoformat(),
+        }
+        with mock.patch.object(
+            core,
+            "_collect_shadow_candidate",
+            return_value={"shadow_only": True, "state": "collecting"},
+        ) as collect:
+            deferred = core._apply_autonomous_admission_policy(
+                result,
+                reviewed_identity,
+                task_profile_evidence_present=True,
+            )
+        self.assertEqual(deferred["terminal_route"], "discard")
+        self.assertEqual(
+            deferred["policy_deferred"]["reason"],
+            "task-profile-artifact-requires-evaluation",
+        )
+        collect.assert_called_once()
+
+    def test_shadow_support_file_candidate_contains_complete_package(self) -> None:
+        core = DreamingRuntime(
+            self.paths,
+            {("fake", "exec")},
+            allow_autonomous_skill_creation=False,
+            now=lambda: self.clock,
+        )
+        skill = self.paths.skills / "existing-procedure"
+        (skill / "references").mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: existing-procedure\n"
+            "description: Run the existing fixture procedure\n---\n"
+            "# Existing procedure\n"
+        )
+        (skill / "references" / "existing.md").write_text("existing\n")
+        (skill / ".agent-created.json").write_text("{}\n")
+        result = {
+            "terminal_route": "support_file",
+            "summary": "Add a reusable fixture reference",
+            "routing_reason": "The existing skill needs supporting detail",
+            "artifact": {
+                "operation": "support_file",
+                "skill_name": "existing-procedure",
+                "skill_markdown": (skill / "SKILL.md").read_text(),
+                "support_files": [
+                    {
+                        "path": "references/new.md",
+                        "content": "new\n",
+                    }
+                ],
+            },
+            "evidence_event_ids": ["one-event-1"],
+        }
+        reviewed_identity = {
+            "qualified_session_id": "fake:one",
+            "source_revision": "sha256:" + "1" * 64,
+            "updated_at": datetime.fromtimestamp(
+                self.clock, timezone.utc
+            ).isoformat(),
+        }
+        captured = {}
+
+        def capture(
+            proposed_name,
+            procedure,
+            observation,
+            package,
+            **_kwargs,
+        ):
+            captured.update(
+                {
+                    path.relative_to(package).as_posix(): path.read_text()
+                    for path in package.rglob("*")
+                    if path.is_file()
+                }
+            )
+            return {"state": "collecting"}
+
+        with (
+            mock.patch.object(
+                core,
+                "_candidate_lifecycle_call",
+                return_value={"records": []},
+            ),
+            mock.patch.object(
+                core,
+                "_collect_candidate_observation",
+                side_effect=capture,
+            ),
+        ):
+            core._collect_shadow_candidate(result, reviewed_identity)
+        self.assertEqual(
+            captured,
+            {
+                "SKILL.md": (skill / "SKILL.md").read_text(),
+                "references/existing.md": "existing\n",
+                "references/new.md": "new\n",
+            },
+        )
+
     def test_profile_matching_reports_no_match_and_ambiguity(self) -> None:
         fixture = self.source_fixture([self.session("one", 10)])
         source = self.adapter("session-source", "fake", fixture)
@@ -4522,11 +4671,11 @@ elif command == "run":
             self.paths.task_profile_index, profile_index
         )
         self.assertEqual(
-            core.task_profile_receipt_for(
+            core.indexed_task_profile_receipt_for(
                 receipt["qualified_session_id"],
                 receipt["source_revision"],
                 receipt["executor"],
-            ),
+            ).path,
             receipt_path,
         )
         original_receipt = receipt_path.read_bytes()

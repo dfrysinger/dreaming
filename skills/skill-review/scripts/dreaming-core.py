@@ -48,6 +48,7 @@ from task_profile_receipt import (
 
 CONTRACT_VERSION = 1
 TASK_PROFILE_CAPABILITY = "task-profile-v2"
+TASK_PROFILE_SNAPSHOT_CONTRACT_VERSION = 1
 ROLES = {
     "session-source": {
         "protocol": "dreaming.session-source",
@@ -410,6 +411,20 @@ class ExecutableAdapter:
             *argv,
             timeout=self.run_timeout if command == "run" else self.timeout,
         )
+
+
+@dataclass(frozen=True)
+class TaskProfileReceipt:
+    path: Path
+    payload: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class TaskProfileBinding:
+    status: str
+    receipt: TaskProfileReceipt | None = None
+    context: dict[str, Any] | None = None
+    reason: str | None = None
 
 
 def validate_identity(session: dict[str, Any], expected_source: str | None = None) -> None:
@@ -1412,6 +1427,18 @@ class DreamingRuntime:
             / f"{result_name}-{hashlib.sha256(current['source_revision'].encode()).hexdigest()}-{executor_name}.json"
         )
         result_path.parent.mkdir(parents=True, exist_ok=True)
+        profile_key = self._task_profile_key(
+            reviewed_identity["qualified_session_id"],
+            reviewed_identity["source_revision"],
+            executor_id,
+        )
+        prior_index = self._state(self.paths.task_profile_index, {})
+        if not isinstance(prior_index, dict):
+            raise RuntimeFailure(
+                "task-profile-index-invalid",
+                str(self.paths.task_profile_index),
+            )
+        prior_entry = prior_index.get(profile_key)
         response = executor.call(
             "run",
             snapshot=snapshot_path,
@@ -1463,15 +1490,6 @@ class DreamingRuntime:
                 )
         else:
             atomic_json(receipt_path, receipt)
-        profile_key = digest(
-            {
-                "qualified_session_id": reviewed_identity[
-                    "qualified_session_id"
-                ],
-                "source_revision": reviewed_identity["source_revision"],
-                "executor": executor_id,
-            }
-        )
         entry = {
             "qualified_session_id": reviewed_identity[
                 "qualified_session_id"
@@ -1491,6 +1509,10 @@ class DreamingRuntime:
                     "task-profile-index-invalid",
                     str(self.paths.task_profile_index),
                 )
+            if index.get(profile_key) != prior_entry:
+                raise RuntimeFailure(
+                    "task-profile-concurrent-refresh", profile_key
+                )
             index[profile_key] = entry
             self._write(self.paths.task_profile_index, index)
         return {
@@ -1501,29 +1523,50 @@ class DreamingRuntime:
             "profile_count": len(receipt["profiles"]),
         }
 
-    def task_profile_receipt_for(
+    def indexed_task_profile_receipt_for(
         self,
         qualified_session_id: str,
         source_revision: str,
         executor_id: str,
         *,
-        snapshot_path: Path | None = None,
-        executor_identity: dict[str, Any] | None = None,
-    ) -> Path | None:
+        current_contract: bool = True,
+        receipt_sha256: str | None = None,
+    ) -> TaskProfileReceipt | None:
         index = self._state(self.paths.task_profile_index, {})
         if not isinstance(index, dict):
             raise RuntimeFailure(
                 "task-profile-index-invalid",
                 str(self.paths.task_profile_index),
             )
-        profile_key = digest(
-            {
-                "qualified_session_id": qualified_session_id,
-                "source_revision": source_revision,
-                "executor": executor_id,
-            }
+        profile_key = self._task_profile_key(
+            qualified_session_id,
+            source_revision,
+            executor_id,
         )
-        entry = index.get(profile_key)
+        entry = index.get(profile_key) if current_contract else None
+        if not current_contract:
+            if not isinstance(receipt_sha256, str):
+                raise RuntimeFailure(
+                    "task-profile-index-invalid",
+                    "historical receipt lookup requires receipt_sha256",
+                )
+            matches = [
+                (key, value)
+                for key, value in index.items()
+                if isinstance(value, dict)
+                and value.get("qualified_session_id")
+                == qualified_session_id
+                and value.get("source_revision") == source_revision
+                and value.get("executor") == executor_id
+                and value.get("receipt_sha256") == receipt_sha256
+            ]
+            if len(matches) > 1:
+                raise RuntimeFailure(
+                    "task-profile-index-invalid",
+                    f"multiple managed receipts for {qualified_session_id}",
+                )
+            if matches:
+                profile_key, entry = matches[0]
         if entry is None:
             return None
         entry_keys = {
@@ -1598,29 +1641,98 @@ class DreamingRuntime:
             raise RuntimeFailure(
                 "task-profile-index-invalid", profile_key
             )
-        if (snapshot_path is None) is not (executor_identity is None):
-            raise RuntimeFailure(
-                "task-profile-binding-invalid",
-                "snapshot path and executor identity must be supplied together",
+        return TaskProfileReceipt(receipt_path, receipt)
+
+    def _task_profile_key(
+        self,
+        qualified_session_id: str,
+        source_revision: str,
+        executor_id: str,
+    ) -> str:
+        return digest(
+            {
+                "qualified_session_id": qualified_session_id,
+                "source_revision": source_revision,
+                "executor": executor_id,
+                "policy_version": self.policy_version,
+                "snapshot_contract_version": (
+                    TASK_PROFILE_SNAPSHOT_CONTRACT_VERSION
+                ),
+            }
+        )
+
+    def task_profile_binding_for(
+        self,
+        qualified_session_id: str,
+        source_revision: str,
+        executor_id: str,
+        snapshot_path: Path,
+        executor_identity: dict[str, Any],
+    ) -> TaskProfileBinding:
+        indexed = self.indexed_task_profile_receipt_for(
+            qualified_session_id,
+            source_revision,
+            executor_id,
+        )
+        if indexed is None:
+            return TaskProfileBinding(status="absent")
+        snapshot = read_json(snapshot_path, {})
+        try:
+            context = validate_task_profile_receipt(
+                indexed.payload,
+                snapshot,
+                receipt_path=indexed.path,
+                expected_executor=executor_id,
+                expected_executor_identity=executor_identity,
             )
-        if snapshot_path is not None and executor_identity is not None:
-            snapshot = read_json(snapshot_path, {})
-            try:
-                validate_task_profile_receipt(
-                    receipt,
-                    snapshot,
-                    receipt_path=receipt_path,
-                    expected_executor=executor_id,
-                    expected_executor_identity=executor_identity,
+        except TaskProfileReceiptError as error:
+            if error.reason in {"snapshot-sha256", "executor-identity"}:
+                return TaskProfileBinding(
+                    status="unbound",
+                    receipt=indexed,
+                    reason=error.reason,
                 )
-            except TaskProfileReceiptError as error:
-                if error.reason in {"snapshot-sha256", "executor-identity"}:
-                    return None
+            raise RuntimeFailure(
+                "task-profile-index-invalid",
+                f"{indexed.path}: {error.reason}",
+            ) from error
+        return TaskProfileBinding(
+            status="bound",
+            receipt=indexed,
+            context=context,
+        )
+
+    def task_profile_evidence_present_for(
+        self,
+        qualified_session_id: str,
+        source_revision: str,
+    ) -> bool:
+        index = self._state(self.paths.task_profile_index, {})
+        if not isinstance(index, dict):
+            raise RuntimeFailure(
+                "task-profile-index-invalid",
+                str(self.paths.task_profile_index),
+            )
+        for profile_key, entry in index.items():
+            if not isinstance(profile_key, str) or not isinstance(entry, dict):
                 raise RuntimeFailure(
-                    "task-profile-index-invalid",
-                    f"{profile_key}: {error.reason}",
-                ) from error
-        return receipt_path
+                    "task-profile-index-invalid", str(profile_key)
+                )
+            if (
+                not isinstance(entry.get("qualified_session_id"), str)
+                or not isinstance(entry.get("source_revision"), str)
+                or not isinstance(entry.get("executor"), str)
+                or not isinstance(entry.get("receipt_sha256"), str)
+            ):
+                raise RuntimeFailure(
+                    "task-profile-index-invalid", profile_key
+                )
+            if (
+                entry["qualified_session_id"] == qualified_session_id
+                and entry["source_revision"] == source_revision
+            ):
+                return True
+        return False
 
     def _matching_task_profile(
         self,
@@ -1685,10 +1797,15 @@ class DreamingRuntime:
         result: dict[str, Any],
         reviewed_identity: dict[str, Any],
         task_profile_receipt: Path | None = None,
+        task_profile_evidence_present: bool = False,
     ) -> dict[str, Any]:
         artifact = result.get("artifact")
         if not isinstance(artifact, dict):
             return result
+        task_profile_evidence_present = (
+            task_profile_evidence_present
+            or task_profile_receipt is not None
+        )
         source_updated_at = parse_time(reviewed_identity.get("updated_at"))
         if source_updated_at is None:
             raise RuntimeFailure(
@@ -1697,7 +1814,7 @@ class DreamingRuntime:
             )
         age_seconds = max(0, self.now() - int(source_updated_at.timestamp()))
         reason: str | None = None
-        if task_profile_receipt is not None:
+        if task_profile_evidence_present:
             reason = "task-profile-artifact-requires-evaluation"
         elif age_seconds > self.max_autonomous_session_age_seconds:
             reason = "historical-source-outside-mutation-window"
@@ -1906,7 +2023,27 @@ class DreamingRuntime:
             prefix=".candidate-", dir=staging_parent
         ) as temporary:
             package = Path(temporary)
+            if artifact["operation"] in {"patch", "support_file"}:
+                existing = self.paths.skills / artifact["skill_name"]
+                for source_path in sorted(existing.rglob("*")):
+                    if source_path.is_symlink():
+                        raise RuntimeFailure(
+                            "candidate-lifecycle-failed",
+                            f"candidate source contains symlink: {source_path}",
+                        )
+                    if not source_path.is_file():
+                        continue
+                    relative = source_path.relative_to(existing)
+                    if relative.as_posix().casefold() in RESERVED_SKILL_FILES:
+                        continue
+                    destination = package / relative
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(source_path, destination)
             atomic_text(package / "SKILL.md", artifact["skill_markdown"])
+            for support_file in artifact.get("support_files", []):
+                destination = package / support_file["path"]
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                atomic_text(destination, support_file["content"])
             collected = self._collect_candidate_observation(
                 artifact["skill_name"],
                 procedure,
@@ -2046,12 +2183,14 @@ class DreamingRuntime:
             raise RuntimeFailure(
                 "task-profile-receipt-invalid", str(receipt_path)
             )
-        managed_receipt = self.task_profile_receipt_for(
+        managed_receipt = self.indexed_task_profile_receipt_for(
             receipt["qualified_session_id"],
             receipt["source_revision"],
             receipt["executor"],
+            current_contract=False,
+            receipt_sha256=receipt["receipt_sha256"],
         )
-        if managed_receipt is None or managed_receipt != receipt_path:
+        if managed_receipt is None or managed_receipt.path != receipt_path:
             raise RuntimeFailure(
                 "task-profile-receipt-invalid", "receipt is not managed"
             )
@@ -2195,8 +2334,13 @@ class DreamingRuntime:
         artifact = result["artifact"]
         existing_artifact = None
         if artifact["operation"] in {"patch", "support_file"}:
-            skill_path = self.paths.skills / artifact["skill_name"] / "SKILL.md"
-            if skill_path.is_symlink() or not skill_path.is_file():
+            skill_dir = self.paths.skills / artifact["skill_name"]
+            skill_path = skill_dir / "SKILL.md"
+            if (
+                skill_dir.is_symlink()
+                or skill_path.is_symlink()
+                or not skill_path.is_file()
+            ):
                 raise RuntimeFailure("skill-missing", artifact["skill_name"])
             existing_markdown = skill_path.read_text(encoding="utf-8")
             existing_frontmatter = re.match(
@@ -2219,8 +2363,9 @@ class DreamingRuntime:
             proposed_headings = set(
                 re.findall(r"(?m)^#{1,6}\s+\S.*$", artifact["skill_markdown"])
             )
-            if not existing_keys.issubset(proposed_keys) or not existing_headings.issubset(
-                proposed_headings
+            if (
+                not existing_keys.issubset(proposed_keys)
+                or not existing_headings.issubset(proposed_headings)
             ):
                 raise RuntimeFailure("patch-content-loss", artifact["skill_name"])
             existing_artifact = {
@@ -2625,6 +2770,10 @@ class DreamingRuntime:
                 return {"status": "already-reviewed-legacy-baseline"}
 
         last_failure: RuntimeFailure | None = None
+        task_profile_evidence_present = self.task_profile_evidence_present_for(
+            qualified_session_id,
+            current["source_revision"],
+        )
         for executor_id, executor in allowed:
             mutation_started = False
             attempt_started_at = self.now()
@@ -2657,29 +2806,45 @@ class DreamingRuntime:
                 )
                 result_path.parent.mkdir(parents=True, exist_ok=True)
                 profile_capable = executor.supports(TASK_PROFILE_CAPABILITY)
-                task_profile_receipt = (
-                    self.task_profile_receipt_for(
+                task_profile_binding = (
+                    self.task_profile_binding_for(
                         qualified_session_id,
                         reviewed_identity["source_revision"],
                         executor_id,
-                        snapshot_path=snapshot_path,
-                        executor_identity=executor.identity,
+                        snapshot_path,
+                        executor.identity,
                     )
                     if profile_capable
+                    else TaskProfileBinding(status="unsupported")
+                )
+                task_profile_receipt = (
+                    task_profile_binding.receipt.path
+                    if task_profile_binding.status == "bound"
+                    and task_profile_binding.receipt is not None
                     else None
                 )
-                task_profile_delivery = (
-                    "delivered"
-                    if task_profile_receipt is not None
-                    else "unavailable" if profile_capable else "unsupported"
-                )
+                task_profile_delivery = {
+                    "bound": "delivered",
+                    "absent": "unavailable",
+                    "unsupported": "unsupported",
+                    "unbound": "unbound",
+                }[task_profile_binding.status]
+                if task_profile_binding.reason is not None:
+                    task_profile_delivery += f":{task_profile_binding.reason}"
+                elif (
+                    task_profile_binding.status in {"absent", "unsupported"}
+                    and task_profile_evidence_present
+                ):
+                    task_profile_delivery += ":profiled-by-other-executor"
                 receipt_fields = (
                     {
                         "task_profile_receipt_sha256": (
-                            "sha256:" + task_profile_receipt.stem
+                            task_profile_binding.receipt.payload[
+                                "receipt_sha256"
+                            ]
                         )
                     }
-                    if task_profile_receipt is not None
+                    if task_profile_binding.receipt is not None
                     else {}
                 )
                 self._write_transaction(
@@ -2738,6 +2903,7 @@ class DreamingRuntime:
                     result,
                     reviewed_identity,
                     task_profile_receipt,
+                    task_profile_evidence_present,
                 )
                 attempt = {
                     "session_id": qualified_session_id,
@@ -8239,28 +8405,26 @@ def scheduled_run() -> dict[str, Any]:
             report["profile_budget"]["exhausted_reason"] = budget_reason
             continue
         try:
-            existing_receipt = core.task_profile_receipt_for(
+            existing_receipt = core.indexed_task_profile_receipt_for(
                 item["qualified_session_id"],
                 item["source_revision"],
                 executor_name,
             )
             if existing_receipt is not None:
-                profile_attempts += 1
-                snapshot_path, _reviewed_identity = core.render_snapshot(
-                    source_name,
-                    source,
-                    executor_name,
-                    item["qualified_session_id"],
-                )
-                existing_receipt = core.task_profile_receipt_for(
-                    item["qualified_session_id"],
-                    item["source_revision"],
-                    executor_name,
-                    snapshot_path=snapshot_path,
-                    executor_identity=executors[executor_name].identity,
-                )
-                if existing_receipt is not None:
+                if (
+                    existing_receipt.payload.get("executor_identity")
+                    == executors[executor_name].identity
+                ):
                     continue
+            budget_reason = profile_budget_reason(
+                profile_attempts,
+                profile_started_at,
+                settings,
+            )
+            if budget_reason is not None:
+                report["deferred_profiles"] += 1
+                report["profile_budget"]["exhausted_reason"] = budget_reason
+                continue
             profile_attempts += 1
             result = core.profile(
                 source_name,
@@ -8298,12 +8462,16 @@ def scheduled_run() -> dict[str, Any]:
                     }
                 )
                 continue
-            if error.code == "malformed-executor-result":
+            if error.code in {
+                "malformed-executor-result",
+                "task-profile-invalid",
+            }:
                 profile_failed_sessions.add(item["qualified_session_id"])
                 report["profile_failures"].append(
                     {
                         "session_id": item.get("qualified_session_id"),
                         "code": error.code,
+                        "message": error.message,
                     }
                 )
                 continue
@@ -8390,7 +8558,7 @@ def scheduled_run() -> dict[str, Any]:
                     "code": error.code,
                 }
             )
-    report["ok"] = not report["errors"]
+    report["ok"] = not report["errors"] and not report["profile_failures"]
     return report
 
 
