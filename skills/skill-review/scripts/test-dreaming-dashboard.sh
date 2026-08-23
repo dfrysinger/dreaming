@@ -1086,7 +1086,9 @@ def candidate_fixture(label, target_state):
         encoding="utf-8",
     )
     identity = str(uuid.uuid4())
-    staged, files, _ = lifecycle.make_immutable_package(identity, source)
+    staged, files, _ = lifecycle.make_immutable_package(
+        identity, source, "dashboard-fixture"
+    )
     observations = [
         lifecycle.validate_observation(
             {
