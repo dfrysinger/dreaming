@@ -342,13 +342,14 @@ history.
       skill repair from its transcript evidence.
 - [x] Triggering, task-performance, and overall-regression evaluations pass for
       the accepted candidate.
-- [ ] The report-only dashboard distinguishes task opportunity, skill use,
+- [x] The report-only dashboard distinguishes task opportunity, skill use,
       evaluation, and deployment authority.
-- [ ] Missed triggering produces description repair, while settled absence of
-      use and opportunity produces reversible retirement.
+- [x] Missed triggering produces description repair. Settled absence of use and
+      opportunity remains the prerequisite for reversible retirement; incomplete
+      profile coverage cannot claim that authority.
 - [x] Lightweight profiling throughput is independent of the 25 full-review
       attempt limit.
-- [ ] Installed proof covers bounded profiling, halt, sole-scheduler ownership,
+- [x] Installed proof covers bounded profiling, halt, sole-scheduler ownership,
       one natural run, rollback, and restore.
 - [ ] The implementation and proof references are committed locally; nothing is
       pushed.

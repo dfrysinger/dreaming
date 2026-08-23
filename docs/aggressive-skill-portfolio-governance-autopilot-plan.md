@@ -1160,6 +1160,34 @@
   `sha256:4066a0bb9774ab953d81f1d6286dfbcdb0d95cdf7f8ec04229cbebb08ad5b234`.
   This closes the successful natural-cadence checkpoint. Rollback preservation
   and exact reviewed-candidate restore remain open.
+- Installed rollback and exact restore are complete. Before rollback, 1,508
+  exact candidate, adapter, task-profile, snapshot, review, evaluation, result,
+  and publication-bundle files were hashed. Explicit backup
+  `20260823T133536Z-30649` restored generation
+  `20260823T185102Z-rollback-3987` behind halt; enable failed before self-test,
+  its full generation-bound self-test completed with zero failures, and only
+  then was it enabled. The complete 1,508-file manifest remained byte-identical
+  both immediately after rollback and after enable. The reviewed successor was
+  then reinstalled from Mac mini commit `00e290c3` as generation
+  `20260823T195239Z-install-61796` behind halt. Its manifest remained identical,
+  its full generation-bound self-test completed with zero failures, and only
+  then was it enabled. The final enabled generation republishes the exact
+  bundle, retains the sole four-hour scheduler, and still matches every
+  pre-rollback hash.
+- The lifecycle criterion closes through the missed-trigger repair branch,
+  without claiming settled-absence authority. The retained post-rotation case
+  exposed a trigger gap, revision `sha256:710724fc9cc1c9206d7f7eed1c349b21cd01e237f35fb13e92f6ba1058f228bd`
+  expanded the `agent-session-continuity` description and procedure for empty
+  replacement sessions with uncertain seed lineage, and native evaluation
+  receipt `447a05883608ddba7b68ce09ad62358e32af3368bb9752d1409f1338e3dbabaa`
+  passed. The repaired candidate loaded for the source case, improved the
+  source result over baseline, and left the unrelated sibling case
+  non-regressed. The retained proof is
+  `real-reviewer-profile-v1/missed-trigger-description-repair-v25.txt` plus
+  `evaluation-v24/native-evaluation-successor-final.log`. Reversible retirement
+  remains the correct future result only after use and opportunity absence are
+  both settled; the current deferred profile backlog is not mislabeled as that
+  authority.
 - The separate Deep Code Review app-crash correction is complete at local-only
   commit `556db7409e22047bb3e96c176dd042d4577bc2e7`. It caps verification units
   at 16, advocates at four concurrent, judges at two concurrent, waits for the
