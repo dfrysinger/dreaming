@@ -1188,6 +1188,20 @@
   remains the correct future result only after use and opportunity absence are
   both settled; the current deferred profile backlog is not mislabeled as that
   authority.
+- Final authority-fix installation remains halted. The first transferred merge
+  retained the Mac mini's superseded `07a6e923` ownership change, which deleted
+  Dreaming's `skill-create` and still required it in the shared bundle. Exact
+  reconciliation to the reviewed `fd227d4` tree is committed on the Mac mini as
+  `80e80295`. Activation generation
+  `20260824T024746Z-install-30242` now enters the full self-test instead of
+  refusing during root validation, but ends with two failures because three
+  otherwise unrelated tracked Python files have pre-existing executable-mode
+  changes in the Mac mini worktree. Those mode-only changes alter executable
+  discovery and trusted adapter identity in the evaluation-input source-builder
+  and certification checks. They remain untouched; halt stays active, no
+  self-test generation stamp exists, enable remains forbidden, and installed
+  live proof is `FAIL` until the owner resolves or authorizes normalization of
+  those worktree modes.
 - The separate Deep Code Review app-crash correction is complete at local-only
   commit `556db7409e22047bb3e96c176dd042d4577bc2e7`. It caps verification units
   at 16, advocates at four concurrent, judges at two concurrent, waits for the
