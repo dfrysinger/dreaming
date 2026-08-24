@@ -1192,16 +1192,20 @@
   retained the Mac mini's superseded `07a6e923` ownership change, which deleted
   Dreaming's `skill-create` and still required it in the shared bundle. Exact
   reconciliation to the reviewed `fd227d4` tree is committed on the Mac mini as
-  `80e80295`. Activation generation
-  `20260824T024746Z-install-30242` now enters the full self-test instead of
-  refusing during root validation, but ends with two failures because three
-  otherwise unrelated tracked Python files have pre-existing executable-mode
-  changes in the Mac mini worktree. Those mode-only changes alter executable
-  discovery and trusted adapter identity in the evaluation-input source-builder
-  and certification checks. They remain untouched; halt stays active, no
-  self-test generation stamp exists, enable remains forbidden, and installed
-  live proof is `FAIL` until the owner resolves or authorizes normalization of
-  those worktree modes.
+  `80e80295`. The owner authorized normalization of three mode-only Python
+  changes, leaving their contents byte-identical and the Mac mini worktree
+  clean. That exposed one real validation-closure defect: reviewed adapter
+  `dreaming-vendor-adapter.py` had changed to
+  `sha256:85ec84fe121eeb7ec95958363f576f806bcb36d05f6a627c6bd3a1550be2cc31`
+  without updating its exact trusted pin. The pin correction is committed
+  locally as `a76e99b` and merged on the Mac mini as `b37ac378`. Source-builder,
+  certification, vendor-adapter, and skill-evaluation checks pass on the
+  MacBook Pro; all 46 certification checks also pass on the Mac mini. The Mac
+  mini's source-builder check now reaches its advisory Claude executor and
+  refuses honestly because `claude auth status --json` reports
+  `loggedIn:false`. Halt stays active, no successor generation has been
+  installed or stamped, and enable remains forbidden until the owner completes
+  `~/.local/bin/claude auth login` on the Mac mini.
 - The separate Deep Code Review app-crash correction is complete at local-only
   commit `556db7409e22047bb3e96c176dd042d4577bc2e7`. It caps verification units
   at 16, advocates at four concurrent, judges at two concurrent, waits for the
