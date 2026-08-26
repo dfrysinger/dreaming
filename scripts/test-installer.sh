@@ -211,7 +211,43 @@ BACKUP="$(<"$STATE/dreaming/latest-migration-backup")"
 echo "PASS  prepare halts, backs up exact bytes, then boots out labels"
 
 : > "$LAUNCHCTL_LOG"
+SOURCE_MODES_BEFORE="$TMP/source-modes.before"
+SOURCE_MODES_AFTER="$TMP/source-modes.after"
+python3 - "$ROOT" >"$SOURCE_MODES_BEFORE" <<'PY'
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+patterns = (
+    "scripts/*.sh",
+    "scripts/*.py",
+    "skills/*/scripts/*.sh",
+    "skills/*/scripts/*.py",
+)
+for pattern in patterns:
+    for path in sorted(root.glob(pattern)):
+        print(f"{path.relative_to(root)} {stat.S_IMODE(path.stat().st_mode):04o}")
+PY
 run_install install >/dev/null
+python3 - "$ROOT" >"$SOURCE_MODES_AFTER" <<'PY'
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+patterns = (
+    "scripts/*.sh",
+    "scripts/*.py",
+    "skills/*/scripts/*.sh",
+    "skills/*/scripts/*.py",
+)
+for pattern in patterns:
+    for path in sorted(root.glob(pattern)):
+        print(f"{path.relative_to(root)} {stat.S_IMODE(path.stat().st_mode):04o}")
+PY
+cmp -s "$SOURCE_MODES_BEFORE" "$SOURCE_MODES_AFTER" ||
+  { echo "install mutated repository source modes" >&2; exit 1; }
 INSTRUCTIONS="$TMP/copilot-home/instructions/dreaming.instructions.md"
 [[ -f "$INSTRUCTIONS" && -f "$STATE/dreaming/managed-instructions.sha256" ]] ||
   { echo "install missed managed Copilot instructions" >&2; exit 1; }

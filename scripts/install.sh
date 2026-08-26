@@ -919,10 +919,6 @@ cmd_install() {
   ensure_neutral_roots
   ensure_dashboard_token
   sync_plugin
-  chmod +x "$DREAMING_REPO_ROOT/scripts/"*.sh \
-    "$DREAMING_REPO_ROOT/scripts/"*.py \
-    "$DREAMING_REPO_ROOT"/skills/*/scripts/*.sh \
-    "$DREAMING_REPO_ROOT"/skills/*/scripts/*.py 2>/dev/null || true
   if [[ "$DREAMING_ENABLE_COPILOT_COMPAT" == "1" ]]; then
     "$DREAMING_REPO_ROOT/scripts/manage-instructions.sh" install
   fi
