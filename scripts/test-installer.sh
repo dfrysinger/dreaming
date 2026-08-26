@@ -113,6 +113,28 @@ run_persisted() {
     "$INSTALLER" "$@"
 }
 
+snapshot_source_modes() {
+  local output="$1"
+  python3 - "$ROOT" >"$output" <<'PY'
+import stat
+import sys
+from pathlib import Path
+
+root = Path(sys.argv[1])
+patterns = (
+    "scripts/*.sh",
+    "scripts/*.py",
+    "skills/*/scripts/*.sh",
+    "skills/*/scripts/*.py",
+)
+for pattern in patterns:
+    for path in sorted(root.glob(pattern)):
+        print(f"{path.relative_to(root)} {stat.S_IMODE(path.stat().st_mode):04o}")
+PY
+  [[ -s "$output" ]] ||
+    { echo "source-mode snapshot matched no repository scripts" >&2; return 1; }
+}
+
 FAKE_PUBLISHER="$TMP/fake-publisher.py"
 cat > "$FAKE_PUBLISHER" <<'PY'
 #!/usr/bin/env python3
@@ -213,41 +235,23 @@ echo "PASS  prepare halts, backs up exact bytes, then boots out labels"
 : > "$LAUNCHCTL_LOG"
 SOURCE_MODES_BEFORE="$TMP/source-modes.before"
 SOURCE_MODES_AFTER="$TMP/source-modes.after"
-python3 - "$ROOT" >"$SOURCE_MODES_BEFORE" <<'PY'
-import stat
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1])
-patterns = (
-    "scripts/*.sh",
-    "scripts/*.py",
-    "skills/*/scripts/*.sh",
-    "skills/*/scripts/*.py",
-)
-for pattern in patterns:
-    for path in sorted(root.glob(pattern)):
-        print(f"{path.relative_to(root)} {stat.S_IMODE(path.stat().st_mode):04o}")
-PY
+snapshot_source_modes "$SOURCE_MODES_BEFORE"
 run_install install >/dev/null
-python3 - "$ROOT" >"$SOURCE_MODES_AFTER" <<'PY'
-import stat
-import sys
-from pathlib import Path
-
-root = Path(sys.argv[1])
-patterns = (
-    "scripts/*.sh",
-    "scripts/*.py",
-    "skills/*/scripts/*.sh",
-    "skills/*/scripts/*.py",
-)
-for pattern in patterns:
-    for path in sorted(root.glob(pattern)):
-        print(f"{path.relative_to(root)} {stat.S_IMODE(path.stat().st_mode):04o}")
-PY
-cmp -s "$SOURCE_MODES_BEFORE" "$SOURCE_MODES_AFTER" ||
-  { echo "install mutated repository source modes" >&2; exit 1; }
+snapshot_source_modes "$SOURCE_MODES_AFTER"
+mode_cmp_status=0
+cmp "$SOURCE_MODES_BEFORE" "$SOURCE_MODES_AFTER" || mode_cmp_status=$?
+case "$mode_cmp_status" in
+  0) ;;
+  1)
+    echo "install mutated repository source modes:" >&2
+    diff -u "$SOURCE_MODES_BEFORE" "$SOURCE_MODES_AFTER" >&2 || true
+    exit 1
+    ;;
+  *)
+    echo "could not compare repository source-mode snapshots" >&2
+    exit "$mode_cmp_status"
+    ;;
+esac
 INSTRUCTIONS="$TMP/copilot-home/instructions/dreaming.instructions.md"
 [[ -f "$INSTRUCTIONS" && -f "$STATE/dreaming/managed-instructions.sha256" ]] ||
   { echo "install missed managed Copilot instructions" >&2; exit 1; }
