@@ -1200,12 +1200,21 @@
   without updating its exact trusted pin. The pin correction is committed
   locally as `a76e99b` and merged on the Mac mini as `b37ac378`. Source-builder,
   certification, vendor-adapter, and skill-evaluation checks pass on the
-  MacBook Pro; all 46 certification checks also pass on the Mac mini. The Mac
-  mini's source-builder check now reaches its advisory Claude executor and
-  refuses honestly because `claude auth status --json` reports
-  `loggedIn:false`. Halt stays active, no successor generation has been
-  installed or stamped, and enable remains forbidden until the owner completes
-  `~/.local/bin/claude auth login` on the Mac mini.
+  MacBook Pro; all 46 certification checks also pass on the Mac mini. The owner
+  completed attended Claude authentication and the Mac mini source-builder
+  check passed. Clean commit `b37ac378` was installed as halted generation
+  `20260825T234600Z-install-44317`. Its first full self-test had one intermittent
+  nested-process cleanup failure; the focused cleanup test passed immediately
+  on the unchanged tree, and a same-generation rerun completed with zero
+  failures and matching activation/self-test stamps. Installation then proved a
+  separate source-integrity defect: `scripts/install.sh` blanket-marked every
+  repository Python script executable, recreating three mode-only changes.
+  Local commit `0082e81` removes that source mutation and adds an installer
+  regression that snapshots all matched repository script modes before and
+  after install. The focused installer suite passes. The fix was transferred
+  without remotes and merged on the Mac mini as clean commit `b298e20`. Halt
+  stays active, the superseded generation was not enabled, and the clean
+  successor still requires installation and its own generation-bound self-test.
 - The separate Deep Code Review app-crash correction is complete at local-only
   commit `556db7409e22047bb3e96c176dd042d4577bc2e7`. It caps verification units
   at 16, advocates at four concurrent, judges at two concurrent, waits for the
