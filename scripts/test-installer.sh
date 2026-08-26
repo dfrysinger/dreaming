@@ -131,8 +131,6 @@ for pattern in patterns:
     for path in sorted(root.glob(pattern)):
         print(f"{path.relative_to(root)} {stat.S_IMODE(path.stat().st_mode):04o}")
 PY
-  [[ -s "$output" ]] ||
-    { echo "source-mode snapshot matched no repository scripts" >&2; return 1; }
 }
 
 FAKE_PUBLISHER="$TMP/fake-publisher.py"
@@ -235,21 +233,26 @@ echo "PASS  prepare halts, backs up exact bytes, then boots out labels"
 : > "$LAUNCHCTL_LOG"
 SOURCE_MODES_BEFORE="$TMP/source-modes.before"
 SOURCE_MODES_AFTER="$TMP/source-modes.after"
+SOURCE_MODES_DIFF="$TMP/source-modes.diff"
 snapshot_source_modes "$SOURCE_MODES_BEFORE"
+[[ -s "$SOURCE_MODES_BEFORE" ]] ||
+  { echo "before-install source-mode snapshot matched no repository scripts under $ROOT" >&2; exit 1; }
 run_install install >/dev/null
 snapshot_source_modes "$SOURCE_MODES_AFTER"
-mode_cmp_status=0
-cmp "$SOURCE_MODES_BEFORE" "$SOURCE_MODES_AFTER" || mode_cmp_status=$?
-case "$mode_cmp_status" in
+mode_diff_status=0
+diff -u "$SOURCE_MODES_BEFORE" "$SOURCE_MODES_AFTER" >"$SOURCE_MODES_DIFF" 2>&1 ||
+  mode_diff_status=$?
+case "$mode_diff_status" in
   0) ;;
   1)
     echo "install mutated repository source modes:" >&2
-    diff -u "$SOURCE_MODES_BEFORE" "$SOURCE_MODES_AFTER" >&2 || true
+    cat "$SOURCE_MODES_DIFF" >&2
     exit 1
     ;;
   *)
-    echo "could not compare repository source-mode snapshots" >&2
-    exit "$mode_cmp_status"
+    cat "$SOURCE_MODES_DIFF" >&2
+    echo "could not compare repository source-mode snapshots with diff" >&2
+    exit "$mode_diff_status"
     ;;
 esac
 INSTRUCTIONS="$TMP/copilot-home/instructions/dreaming.instructions.md"
