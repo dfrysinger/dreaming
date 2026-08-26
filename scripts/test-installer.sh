@@ -233,25 +233,25 @@ echo "PASS  prepare halts, backs up exact bytes, then boots out labels"
 : > "$LAUNCHCTL_LOG"
 SOURCE_MODES_BEFORE="$TMP/source-modes.before"
 SOURCE_MODES_AFTER="$TMP/source-modes.after"
-SOURCE_MODES_DIFF="$TMP/source-modes.diff"
 snapshot_source_modes "$SOURCE_MODES_BEFORE"
 [[ -s "$SOURCE_MODES_BEFORE" ]] ||
   { echo "before-install source-mode snapshot matched no repository scripts under $ROOT" >&2; exit 1; }
 run_install install >/dev/null
 snapshot_source_modes "$SOURCE_MODES_AFTER"
+mode_diff_output=""
 mode_diff_status=0
-diff -u "$SOURCE_MODES_BEFORE" "$SOURCE_MODES_AFTER" >"$SOURCE_MODES_DIFF" 2>&1 ||
+mode_diff_output="$(diff -u "$SOURCE_MODES_BEFORE" "$SOURCE_MODES_AFTER" 2>&1)" ||
   mode_diff_status=$?
 case "$mode_diff_status" in
   0) ;;
   1)
     echo "install mutated repository source modes:" >&2
-    cat "$SOURCE_MODES_DIFF" >&2
+    printf '%s\n' "$mode_diff_output" >&2
     exit 1
     ;;
   *)
-    cat "$SOURCE_MODES_DIFF" >&2
     echo "could not compare repository source-mode snapshots with diff" >&2
+    [[ -z "$mode_diff_output" ]] || printf '%s\n' "$mode_diff_output" >&2
     exit "$mode_diff_status"
     ;;
 esac
