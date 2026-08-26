@@ -1212,9 +1212,26 @@
   Local commit `0082e81` removes that source mutation and adds an installer
   regression that snapshots all matched repository script modes before and
   after install. The focused installer suite passes. The fix was transferred
-  without remotes and merged on the Mac mini as clean commit `b298e20`. Halt
-  stays active, the superseded generation was not enabled, and the clean
-  successor still requires installation and its own generation-bound self-test.
+  without remotes and merged on the Mac mini as clean commit `b298e20`.
+  Commit `b298e20` installed behind halt as generation
+  `20260826T014948Z-install-68238`; its full generation-bound self-test
+  completed with zero failures, its activation and self-test stamps matched,
+  and only then was it enabled. The Mac mini remains the sole Dreaming owner
+  with `StartInterval=14400`, `RunAtLoad=false`, no calendar trigger, no legacy
+  owner, and dashboard health bound to that exact generation. The final
+  machine-validated receipt is
+  `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/task-opportunity-installed-final-live-proof.json`;
+  it passes with candidate fingerprint
+  `sha256:684c0f9439b53d3ae654b12b1593b6537ca0ce91617dbcd1134465fb9ef23348`
+  and retains the natural-cadence, visual, rollback, and exact-restore
+  evidence. Deep Code Review confirmed four findings in the original
+  installer-test regression and five findings in its first fix delta.
+  Successor commits `e048adb`, `fb1b147`, and `81927a0` close them; the
+  focused installer suite passes at `81927a0`, and paired round-three
+  verification found no new material defect. The post-proof delta changes only
+  documentation and `scripts/test-installer.sh`, so no runtime input
+  changed and the receipt remains current without another installation. No
+  branch, commit, or tag was pushed.
 - The separate Deep Code Review app-crash correction is complete at local-only
   commit `556db7409e22047bb3e96c176dd042d4577bc2e7`. It caps verification units
   at 16, advocates at four concurrent, judges at two concurrent, waits for the

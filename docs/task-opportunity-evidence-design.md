@@ -353,5 +353,5 @@ history.
       attempt limit.
 - [x] Installed proof covers bounded profiling, halt, sole-scheduler ownership,
       one natural run, rollback, and restore.
-- [ ] The implementation and proof references are committed locally; nothing is
+- [x] The implementation and proof references are committed locally; nothing is
       pushed.
