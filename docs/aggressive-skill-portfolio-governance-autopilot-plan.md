@@ -1232,6 +1232,19 @@
   documentation and `scripts/test-installer.sh`, so no runtime input
   changed and the receipt remains current without another installation. No
   branch, commit, or tag was pushed.
+- Task-opportunity closure is reopened after reconciling the natural-run
+  accounting with the scheduler implementation. The retained run's 29 profile
+  attempts were 16 cached-receipt validations, 11 newly profiled sessions
+  containing 12 reusable task profiles, and two stale revisions; the old report
+  hid the cached outcomes. More importantly, the scheduler still sent the first
+  25 raw queued transcripts to expensive review instead of deriving that queue
+  from reusable task profiles. The corrected work order requires one terminal
+  accounting state per queue row and model operation, an immediate
+  existing-skill audit for every reusable profile, and new-skill authoring only
+  after three independent sessions and task keys are semantically grouped.
+  No-learning, cached, and raw unprofiled sessions must consume no full-review
+  attempt. The prior installed receipt remains valid evidence for the old
+  behavior but is `STALE` for this corrected funnel.
 - The separate Deep Code Review app-crash correction is complete at local-only
   commit `556db7409e22047bb3e96c176dd042d4577bc2e7`. It caps verification units
   at 16, advocates at four concurrent, judges at two concurrent, waits for the

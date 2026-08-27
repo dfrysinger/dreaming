@@ -110,19 +110,39 @@ that artifact while retaining each matched profile's original receipt, task key,
 session, and source-procedure identity as evidence. Deterministic code must not
 infer semantic equivalence from text similarity alone.
 
-### 3. Accumulate evidence before authoring
+### 3. Run the existing-skill audit and accumulate evidence before authoring
+
+Every accepted reusable task profile enters an existing-skill audit immediately.
+That audit sees the validated profile, the exact skill-load trace for the task,
+and the current skill catalog. It classifies the task as:
+
+1. the correct existing skill loaded;
+2. an existing skill should have loaded but did not;
+3. the wrong or an incomplete skill loaded;
+4. no existing skill covers the reusable procedure.
+
+The first three outcomes may create a report-only trigger, description, or
+procedure-repair recommendation without waiting for recurrence. They do not
+create a new skill. The fourth outcome enters recurrence accumulation.
+
+The existing-skill audit and new-skill recurrence lane are separate projections
+over the same immutable task-profile receipt. Neither reruns transcript
+profiling, creates a second durable queue, or counts one task more than once.
 
 A reusable procedure becomes authoring-ready when:
 
-- at least two verified independent observations share a procedure fingerprint;
-- the observations come from at least two source sessions;
+- at least three verified independent observations have been semantically
+  matched to the same reusable procedure;
+- the observations come from at least three source sessions and task keys;
 - at least one observation is within 30 days;
 - the observations are no more than 45 days apart;
 - no tombstone, covering lifecycle, or explicit user disposition blocks it.
 
-The opportunity observations feed the existing shadow-candidate lifecycle. They
-replace the current permanently `unverified` session-derived observation with
-verified task identity where the evidence proves independence.
+The candidate-aware reviewer owns the semantic grouping decision and records
+why each observation belongs or does not belong. Deterministic code validates
+the independent session and task identities and counts the accepted group; it
+does not group profiles by text similarity. The opportunity observations feed
+the existing shadow-candidate lifecycle only after this recurrence gate.
 
 Review fixes stage a new immutable candidate revision without creating another
 opportunity observation. The exact successor makes the prior recommendation
@@ -133,8 +153,12 @@ One-off tasks remain evidence but do not create a candidate.
 
 ### 4. Apply the learning to the skill estate
 
-Only profiles with durable learning value enter the existing full skill reviewer.
-That reviewer receives:
+Only two profile-derived decisions enter expensive review:
+
+- an existing-skill audit found a missed, wrong, or incomplete skill call; or
+- a no-covering-skill procedure crossed the recurrence threshold.
+
+The expensive reviewer receives:
 
 - the exact bounded transcript snapshot;
 - the validated task profile;
@@ -145,7 +169,7 @@ It chooses one outcome:
 
 1. patch the skill that should already cover the task;
 2. add a support file to an existing umbrella;
-3. collect or update a shadow candidate for a new skill;
+3. create or update a shadow candidate for a recurrence-qualified new skill;
 4. retain a recommendation;
 5. retain no durable learning.
 
@@ -198,9 +222,30 @@ The existing 25-attempt limit remains a limit on expensive full reviews, not on
 lightweight task profiles.
 
 The profiler runs until one of its explicit elapsed-time, token, session, or
-model-operation budgets is reached. High-confidence reusable profiles are
-prioritized for full review. One-off and no-learning sessions are recorded
-without consuming a full review attempt.
+model-operation budgets is reached. Every exact session revision receives one
+terminal profiling disposition: existing receipt reused, reusable procedure
+found, no reusable procedure, stale revision, malformed result, model failure,
+or deferred. One-off and no-learning sessions are recorded without consuming a
+full-review attempt.
+
+The expensive-review queue is derived from validated task profiles, not from the
+raw transcript queue. A raw session cannot consume a review attempt merely
+because it was discovered. Existing-skill audit findings are eligible
+immediately; new-skill authoring becomes eligible only after three independent
+observations are semantically grouped. The queue retains the profile receipt,
+decision lane, recurrence count, and prior disposition used to select each row.
+
+Each run reconciles its accounting:
+
+- every examined queue row is classified as cached, newly attempted, skipped,
+  failed, stale, or deferred;
+- every new model operation has one terminal result;
+- every retained reusable profile is either awaiting catalog audit, awaiting
+  recurrence, eligible for expensive review, or already dispositioned;
+- cached-receipt validation never increments the new-model-operation count.
+
+An accounting mismatch makes the profiling pass unhealthy and is visible in
+the dashboard. It cannot be summarized as low profile yield.
 
 The first production bounds are `max_profiles_per_run=100`, independently
 capped at 500 by configuration validation, and
@@ -349,9 +394,16 @@ history.
 - [x] Missed triggering produces description repair. Settled absence of use and
       opportunity remains the prerequisite for reversible retirement; incomplete
       profile coverage cannot claim that authority.
-- [x] Lightweight profiling throughput is independent of the 25 full-review
-      attempt limit.
-- [x] Installed proof covers bounded profiling, halt, sole-scheduler ownership,
+- [ ] Reusable task profiles, rather than raw queued transcripts, are the only
+      input to expensive full review. Existing-skill audits run for each reusable
+      profile, while new-skill authoring waits for three independent observations.
+- [ ] Profiling and review accounting reconciles every queue row, model operation,
+      retained profile, recurrence state, and terminal disposition.
+- [ ] Lightweight profiling throughput is independent of the 25 full-review
+      attempt limit, and no-learning or cached sessions consume no review attempt.
+- [ ] Installed proof covers the corrected profile-to-audit-to-recurrence funnel,
+      bounded profiling, halt, sole-scheduler ownership,
       one natural run, rollback, and restore.
-- [x] The implementation and proof references are committed locally; nothing is
+- [ ] The corrected implementation and proof references are committed locally;
+      nothing is
       pushed.
