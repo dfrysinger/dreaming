@@ -1243,15 +1243,28 @@
   existing-skill audit for every reusable profile, and new-skill authoring only
   after three independent task occurrences are semantically grouped. Sessions
   are containers, so those occurrences may live in one continuously active
-  session when their stable task keys and event ranges prove they are not
-  continuations or retries. The existing full reviewer itself performs the
-  catalog and actual-skill-load audit; there is no hidden prerequisite auditor.
+  session when their canonical occurrence identities and event evidence prove
+  they are not continuations or retries. The existing full reviewer itself
+  performs the catalog and actual-skill-load audit; there is no hidden
+  prerequisite auditor.
   Profiling and expensive review must each scan past cached, stale, and
   ineligible rows until their real model-operation allowance is full, an
   explicit time or health bound stops the pass, or eligible input is exhausted.
   No-learning, cached, and raw unprofiled sessions must consume no full-review
   attempt. The prior installed receipt remains valid evidence for the old
   behavior but is `STALE` for this corrected funnel.
+- The corrected systemic work order is complete in
+  `docs/task-opportunity-evidence-design.md`. It now specifies immutable
+  cross-run task profiles, source-derived occurrence time, merge/split boundary
+  reconciliation, profile-bound catalog-audit dispositions, terminal audit
+  validity across ordinary catalog changes, historical-only migration of old
+  raw-session reviews, work-conserving stage accounting, a 3,600-second owner
+  backstop inside the four-hour cadence, and exact installed rollback/restore
+  proof. Paired Opus 5 and GPT-5.6 Terra design review completed two bounded
+  rounds. All blocker and high findings were resolved; the only round-two
+  medium provenance comment was also corrected by explicitly superseding the
+  old 1,800-second standalone-pass assertion for the profile-derived
+  generation. Implementation has not started.
 - The separate Deep Code Review app-crash correction is complete at local-only
   commit `556db7409e22047bb3e96c176dd042d4577bc2e7`. It caps verification units
   at 16, advocates at four concurrent, judges at two concurrent, waits for the
