@@ -96,12 +96,19 @@ Each accepted profile becomes an immutable opportunity observation bound to:
 - task key;
 - completion state.
 
-Evidence from one task counts once. Clarifications, retries, tool calls, and
-assistant turns inside that task do not increase recurrence.
+Evidence from one task occurrence counts once. Clarifications, retries, tool
+calls, and assistant turns inside that occurrence do not increase recurrence.
+A session is only a container: one continuously active session may contain many
+independent task occurrences over days or months.
 
-Two observations are independent only when they have distinct task keys and
-source sessions. The task-profile model may propose similarity, but deterministic
-owner code applies recurrence counts and identity rules.
+Two observations are independent when they have distinct stable task keys whose
+supporting event ranges do not represent the same user goal or a continuation,
+retry, or clarification of it. They may come from the same source session.
+Reprofiling a later revision of one long-running session must preserve the task
+key for an already observed occurrence and add only genuinely new task
+occurrences. The task-profile model proposes task boundaries and semantic
+similarity; deterministic owner code validates exact event identity,
+non-duplication, and recurrence counts.
 
 The candidate-aware reviewer owns the semantic decision that differently worded
 profiles belong to the same reusable procedure. Once it chooses the same skill
@@ -110,11 +117,13 @@ that artifact while retaining each matched profile's original receipt, task key,
 session, and source-procedure identity as evidence. Deterministic code must not
 infer semantic equivalence from text similarity alone.
 
-### 3. Run the existing-skill audit and accumulate evidence before authoring
+### 3. Review reusable profiles against the skill estate and accumulate evidence
 
-Every accepted reusable task profile enters an existing-skill audit immediately.
-That audit sees the validated profile, the exact skill-load trace for the task,
-and the current skill catalog. It classifies the task as:
+Every accepted reusable task profile enters the existing full skill reviewer.
+The existing-skill audit is a responsibility of that reviewer, not a separate
+unbounded agent or a prerequisite produced elsewhere. The reviewer sees the
+validated profile, the exact skill-load trace for the task, prior reusable
+profile groups, and the current skill catalog. It classifies the task as:
 
 1. the correct existing skill loaded;
 2. an existing skill should have loaded but did not;
@@ -123,17 +132,17 @@ and the current skill catalog. It classifies the task as:
 
 The first three outcomes may create a report-only trigger, description, or
 procedure-repair recommendation without waiting for recurrence. They do not
-create a new skill. The fourth outcome enters recurrence accumulation.
-
-The existing-skill audit and new-skill recurrence lane are separate projections
-over the same immutable task-profile receipt. Neither reruns transcript
-profiling, creates a second durable queue, or counts one task more than once.
+create a new skill. For the fourth outcome, the same reviewer semantically
+matches the profile to a prior no-covering-skill procedure group or starts a new
+group. Neither path reruns transcript profiling, creates a second durable queue,
+or counts one task occurrence more than once.
 
 A reusable procedure becomes authoring-ready when:
 
 - at least three verified independent observations have been semantically
   matched to the same reusable procedure;
-- the observations come from at least three source sessions and task keys;
+- the observations have at least three distinct stable task keys, whether they
+  occur in one long-running session or several sessions;
 - at least one observation is within 30 days;
 - the observations are no more than 45 days apart;
 - no tombstone, covering lifecycle, or explicit user disposition blocks it.
@@ -153,12 +162,9 @@ One-off tasks remain evidence but do not create a candidate.
 
 ### 4. Apply the learning to the skill estate
 
-Only two profile-derived decisions enter expensive review:
-
-- an existing-skill audit found a missed, wrong, or incomplete skill call; or
-- a no-covering-skill procedure crossed the recurrence threshold.
-
-The expensive reviewer receives:
+Every reusable task profile enters one catalog-aware expensive review. That
+single review performs the existing-skill audit and, when no skill covers the
+task, semantic recurrence grouping. It receives:
 
 - the exact bounded transcript snapshot;
 - the validated task profile;
@@ -169,9 +175,11 @@ It chooses one outcome:
 
 1. patch the skill that should already cover the task;
 2. add a support file to an existing umbrella;
-3. create or update a shadow candidate for a recurrence-qualified new skill;
-4. retain a recommendation;
-5. retain no durable learning.
+3. retain a no-covering-skill procedure group while it remains below recurrence;
+4. create or update a shadow candidate when the current review supplies the
+   third independent observation;
+5. retain a recommendation;
+6. retain no durable learning.
 
 The full reviewer may read the original transcript evidence. It must generalize
 the procedure and avoid copying credentials, private code, customer data, or
@@ -228,12 +236,31 @@ found, no reusable procedure, stale revision, malformed result, model failure,
 or deferred. One-off and no-learning sessions are recorded without consuming a
 full-review attempt.
 
-The expensive-review queue is derived from validated task profiles, not from the
-raw transcript queue. A raw session cannot consume a review attempt merely
-because it was discovered. Existing-skill audit findings are eligible
-immediately; new-skill authoring becomes eligible only after three independent
-observations are semantically grouped. The queue retains the profile receipt,
-decision lane, recurrence count, and prior disposition used to select each row.
+The expensive-review queue is derived from validated reusable task profiles, not
+from the raw transcript queue. A raw session cannot consume a review attempt
+merely because it was discovered. The reviewer audits every reusable profile
+against actual skill loads and the current catalog; new-skill authoring becomes
+eligible only when the current review brings a semantically grouped procedure to
+three independent task occurrences. The queue retains the profile receipt,
+task key, prior audit disposition, proposed recurrence group, and current count.
+
+Both bounded stages are work-conserving:
+
+- profiling scans past cached, already dispositioned, stale, active, or
+  otherwise ineligible queue rows until it starts `max_profiles_per_run` new
+  model operations, reaches its elapsed or other operation budget, or has no
+  eligible unprofiled revision left;
+- expensive review scans past cached, already reviewed, stale, superseded, or
+  otherwise ineligible profile rows until it starts
+  `max_reviews_per_run` reviewer operations, reaches the enclosing pass
+  deadline or another explicit operation budget, or has no eligible reusable
+  profile left.
+
+Queue rows inspected during eligibility checks do not spend an operation slot.
+Once a model operation starts, its success, refusal, malformed result, timeout,
+or other terminal failure spends that slot because it consumed the bounded
+resource. Neither stage takes one fixed input batch and stops merely because
+some members of that batch were cached, stale, or ineligible.
 
 Each run reconciles its accounting:
 
@@ -243,6 +270,11 @@ Each run reconciles its accounting:
 - every retained reusable profile is either awaiting catalog audit, awaiting
   recurrence, eligible for expensive review, or already dispositioned;
 - cached-receipt validation never increments the new-model-operation count.
+
+When eligible backlog is at least the remaining operation allowance, the run
+must either fill that allowance or name the earlier elapsed, token, timeout,
+halt, lease, or health bound that stopped it. A run may report unused capacity
+only when it proves that fewer eligible inputs existed.
 
 An accounting mismatch makes the profiling pass unhealthy and is visible in
 the dashboard. It cannot be summarized as low profile yield.
@@ -395,12 +427,16 @@ history.
       opportunity remains the prerequisite for reversible retirement; incomplete
       profile coverage cannot claim that authority.
 - [ ] Reusable task profiles, rather than raw queued transcripts, are the only
-      input to expensive full review. Existing-skill audits run for each reusable
-      profile, while new-skill authoring waits for three independent observations.
+      input to expensive full review. That reviewer audits actual skill use and
+      the catalog for every reusable profile, while new-skill authoring waits for
+      three independent task occurrences that may share a long-running session.
 - [ ] Profiling and review accounting reconciles every queue row, model operation,
       retained profile, recurrence state, and terminal disposition.
 - [ ] Lightweight profiling throughput is independent of the 25 full-review
       attempt limit, and no-learning or cached sessions consume no review attempt.
+- [ ] With eligible backlog, profiling and expensive review fill their operation
+      allowances unless an explicit earlier resource or health bound stops them;
+      unused capacity proves that eligible input was exhausted.
 - [ ] Installed proof covers the corrected profile-to-audit-to-recurrence funnel,
       bounded profiling, halt, sole-scheduler ownership,
       one natural run, rollback, and restore.

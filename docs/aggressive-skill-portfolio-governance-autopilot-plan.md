@@ -1241,7 +1241,14 @@
   from reusable task profiles. The corrected work order requires one terminal
   accounting state per queue row and model operation, an immediate
   existing-skill audit for every reusable profile, and new-skill authoring only
-  after three independent sessions and task keys are semantically grouped.
+  after three independent task occurrences are semantically grouped. Sessions
+  are containers, so those occurrences may live in one continuously active
+  session when their stable task keys and event ranges prove they are not
+  continuations or retries. The existing full reviewer itself performs the
+  catalog and actual-skill-load audit; there is no hidden prerequisite auditor.
+  Profiling and expensive review must each scan past cached, stale, and
+  ineligible rows until their real model-operation allowance is full, an
+  explicit time or health bound stops the pass, or eligible input is exhausted.
   No-learning, cached, and raw unprofiled sessions must consume no full-review
   attempt. The prior installed receipt remains valid evidence for the old
   behavior but is `STALE` for this corrected funnel.
