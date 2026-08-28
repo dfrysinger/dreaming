@@ -34,6 +34,7 @@ REVIEW_OUTCOMES = frozenset(
         "no-learning",
         "raw-unprofiled",
         "stale-superseded",
+        "deleted",
         "invalid-unbound",
         "known-superseded-contract",
         "eligible-deferred",
@@ -242,7 +243,18 @@ def validate_task_pass_accounting_receipt(receipt: Any) -> dict[str, Any]:
             and row["operation_id"] not in review_operation_ids
         )
         or (
-            row["outcome"] in {"newly-attempted", "eligible-deferred"}
+            row["outcome"] == "newly-attempted"
+            and (
+                not isinstance(row["profile_id"], str)
+                or not isinstance(row["operation_id"], str)
+            )
+        )
+        or (
+            row["outcome"] != "newly-attempted"
+            and row["operation_id"] is not None
+        )
+        or (
+            row["outcome"] == "eligible-deferred"
             and not isinstance(row["profile_id"], str)
         )
         for row in receipt["review_rows"]

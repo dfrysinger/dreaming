@@ -2325,6 +2325,29 @@ class RuntimeTest(unittest.TestCase):
         self.assertEqual(
             accounting.validate_task_pass_accounting_receipt(receipt), receipt
         )
+        unstarted_attempt = {
+            **receipt,
+            "review_rows": [
+                {
+                    **row,
+                    "operation_id": None,
+                }
+                if row["outcome"] == "newly-attempted"
+                else row
+                for row in receipt["review_rows"]
+            ],
+        }
+        unstarted_attempt["receipt_sha256"] = accounting.digest(
+            {
+                key: value
+                for key, value in unstarted_attempt.items()
+                if key != "receipt_sha256"
+            }
+        )
+        with self.assertRaisesRegex(
+            accounting.TaskPassAccountingError, "review-row-terminal-invalid"
+        ):
+            accounting.validate_task_pass_accounting_receipt(unstarted_attempt)
         missing_terminal = accounting.build_task_pass_accounting_receipt(
             **{
                 key: value

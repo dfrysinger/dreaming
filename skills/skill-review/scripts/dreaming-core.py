@@ -9282,6 +9282,33 @@ def scheduled_run() -> dict[str, Any]:
                         "code": "already-dispositioned",
                     }
                 )
+            elif result["status"] == "stale-before-review":
+                review_row["outcome"] = "stale-superseded"
+                report["profile_review_skips"].append(
+                    {
+                        "session_id": qualified_session_id,
+                        "profile_id": target.profile["profile_id"],
+                        "code": result["status"],
+                    }
+                )
+            elif result["status"] == "deleted":
+                review_row["outcome"] = "deleted"
+                report["profile_review_skips"].append(
+                    {
+                        "session_id": qualified_session_id,
+                        "profile_id": target.profile["profile_id"],
+                        "code": result["status"],
+                    }
+                )
+            elif report["review_budget"]["started_operations"] == started_before:
+                review_row["outcome"] = "invalid-unbound"
+                report["profile_review_skips"].append(
+                    {
+                        "session_id": qualified_session_id,
+                        "profile_id": target.profile["profile_id"],
+                        "code": result["status"],
+                    }
+                )
             else:
                 review_row["outcome"] = "newly-attempted"
                 if report["review_budget"]["started_operations"] > started_before:
@@ -9310,7 +9337,8 @@ def scheduled_run() -> dict[str, Any]:
                     }
                 )
         except RuntimeFailure as error:
-            if report["review_budget"]["started_operations"] > started_before:
+            started = report["review_budget"]["started_operations"] > started_before
+            if started:
                 operation_id = (
                     f"review:{accounting_pass_id}:{review_row['review_row_id']}"
                 )
@@ -9332,11 +9360,13 @@ def scheduled_run() -> dict[str, Any]:
                         ),
                     }
                 )
-            destination = (
-                report["errors"]
-                if report["review_budget"]["started_operations"] > started_before
-                else report["profile_review_skips"]
-            )
+            elif error.code == "profile-audit-stale":
+                review_row["outcome"] = "stale-superseded"
+            elif error.code == "session-missing":
+                review_row["outcome"] = "deleted"
+            else:
+                review_row["outcome"] = "invalid-unbound"
+            destination = report["errors"] if started else report["profile_review_skips"]
             record = {
                 "session_id": qualified_session_id,
                 "profile_id": target.profile["profile_id"],
