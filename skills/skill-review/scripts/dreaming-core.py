@@ -1793,6 +1793,64 @@ class DreamingRuntime:
                 "profile-audit-disposition-invalid",
                 f"{path}: {error.reason}",
             ) from error
+        origin_path = (
+            self.paths.task_profile_receipts
+            / f"{disposition['profile_receipt_sha256'].removeprefix('sha256:')}.json"
+        )
+        origin_snapshot_path = (
+            self.paths.snapshots
+            / f"{disposition['snapshot_sha256'].removeprefix('sha256:')}.json"
+        )
+        try:
+            origin_receipt = read_json(origin_path, {})
+            origin_snapshot = read_json(origin_snapshot_path, {})
+            origin_context = validate_task_profile_receipt(
+                origin_receipt,
+                origin_snapshot,
+                receipt_path=origin_path,
+                expected_executor=disposition["profile_executor"],
+                expected_executor_identity=disposition["profile_executor_identity"],
+            )
+        except (RuntimeFailure, TaskProfileReceiptError) as error:
+            reason = (
+                error.reason
+                if isinstance(error, TaskProfileReceiptError)
+                else error.message
+            )
+            raise RuntimeFailure(
+                "profile-audit-disposition-invalid",
+                f"{origin_path}: origin-{reason}",
+            ) from error
+        provenance = {
+            "profile_receipt_sha256": origin_receipt.get("receipt_sha256"),
+            "profile_set_id": origin_receipt.get("profile_set_id"),
+            "snapshot_sha256": origin_receipt.get("snapshot_sha256"),
+            "source_revision": origin_receipt.get("source_revision"),
+            "profile_executor": origin_receipt.get("executor"),
+            "profile_executor_identity": origin_receipt.get("executor_identity"),
+        }
+        if any(disposition.get(key) != value for key, value in provenance.items()):
+            raise RuntimeFailure(
+                "profile-audit-disposition-invalid",
+                f"{origin_path}: origin-provenance",
+            )
+        origin_profile = next(
+            (
+                profile
+                for profile in origin_context["profiles"]
+                if (
+                    profile.get("profile_id") == disposition["profile_id"]
+                    and profile.get("task_key") == disposition["task_key"]
+                    and digest(profile) == disposition["profile_sha256"]
+                )
+            ),
+            None,
+        )
+        if origin_profile != target.profile:
+            raise RuntimeFailure(
+                "profile-audit-disposition-invalid",
+                f"{origin_path}: origin-profile",
+            )
         return disposition
 
     def profile_audit_disposition_admission_for(
@@ -1805,6 +1863,22 @@ class DreamingRuntime:
         if version != CURRENT_PROFILE_AUDIT_CONTRACT_VERSION:
             return "superseded-requires-repair-backfill", disposition
         return "terminal", disposition
+
+    def mark_profile_audit_queue_terminal(
+        self,
+        qualified_session_id: str,
+        source_revision: str,
+        targets: list[ProfileAuditTarget],
+    ) -> bool:
+        if any(
+            self.profile_audit_disposition_admission_for(target)[0] != "terminal"
+            for target in targets
+        ):
+            return False
+        self._mark_queue(
+            qualified_session_id, source_revision, "profile-audited"
+        )
+        return True
 
     def _record_profile_audit_disposition(
         self,
@@ -8762,6 +8836,9 @@ def scheduled_run() -> dict[str, Any]:
     profile_review_candidates: list[
         tuple[str, ExecutableAdapter, str, str, ExecutableAdapter, ProfileAuditTarget]
     ] = []
+    profile_audit_revisions: dict[
+        tuple[str, str], list[ProfileAuditTarget]
+    ] = {}
     for item in queue:
         if item.get("status") != "queued":
             continue
@@ -8827,7 +8904,13 @@ def scheduled_run() -> dict[str, Any]:
                     "code": "no-reusable-profile",
                 }
             )
+            profile_audit_revisions[
+                (item["qualified_session_id"], item["source_revision"])
+            ] = targets
             continue
+        profile_audit_revisions[
+            (item["qualified_session_id"], item["source_revision"])
+        ] = targets
         for target in targets:
             try:
                 disposition_admission, disposition = (
@@ -8950,6 +9033,20 @@ def scheduled_run() -> dict[str, Any]:
                 destination.append({"phase": "review", **record})
             else:
                 destination.append(record)
+    for (qualified_session_id, source_revision), targets in (
+        profile_audit_revisions.items()
+    ):
+        try:
+            core.mark_profile_audit_queue_terminal(
+                qualified_session_id, source_revision, targets
+            )
+        except RuntimeFailure as error:
+            report["profile_review_skips"].append(
+                {
+                    "session_id": qualified_session_id,
+                    "code": error.code,
+                }
+            )
     for publisher_name, publisher in retired_publishers.items():
         try:
             publisher.call("remove")

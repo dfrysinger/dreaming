@@ -434,15 +434,18 @@ def main() -> None:
         protocol, capabilities = ROLE_PROTOCOLS[args.role]
         fixture_state = load(Path(args.fixture), {})
         capabilities = fixture_state.get("capabilities", capabilities)
-        emit(
-            {
-                "ok": True,
-                "protocol": protocol,
-                "version": 1,
-                "adapter_id": args.adapter_id,
-                "capabilities": capabilities,
-            }
-        )
+        identity = {
+            "ok": True,
+            "protocol": protocol,
+            "version": 1,
+            "adapter_id": args.adapter_id,
+            "capabilities": capabilities,
+        }
+        overrides = fixture_state.get("contract_identity_overrides", {})
+        if not isinstance(overrides, dict):
+            fail("fixture-invalid", "contract_identity_overrides")
+        identity.update(overrides)
+        emit(identity)
     fixture = Path(args.fixture)
     if args.role == "session-source":
         source_command(args, fixture)

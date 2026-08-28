@@ -2026,7 +2026,11 @@ class RuntimeTest(unittest.TestCase):
         queued = json.loads(queue.read_text())
         self.assertEqual(
             [item["qualified_session_id"] for item in queued if item["status"] == "queued"],
-            ["fake:one", "fake:two"],
+            [],
+        )
+        self.assertEqual(
+            [item["status"] for item in queued],
+            ["profile-audited", "profile-audited"],
         )
 
         recovery = (
@@ -4986,6 +4990,122 @@ elif command == "run":
             all(row["phase"] == "review" for row in report["errors"])
         )
 
+    def test_profile_audited_queue_drains_and_later_revision_reopens(self) -> None:
+        source_fixture = self.source_fixture([self.session("one", 10, event_count=3)])
+        procedure = {
+            "trigger": "A reusable fixture task is complete.",
+            "outcome": "Retain the fixture procedure.",
+            "actions": ["Retain the procedure."],
+            "exclusions": ["Do not retain source details."],
+        }
+        executor_fixture = self.write(
+            "queue-drain-executor.json",
+            {
+                "task_profiles": [
+                    {
+                        "source_event_ids": ["one-event-1"],
+                        "task_type": "first-task",
+                        "abstract_summary": "First reusable procedure.",
+                        "reuse_value": "reusable-procedure",
+                        "procedure": procedure,
+                    },
+                    {
+                        "source_event_ids": ["one-event-2"],
+                        "task_type": "second-task",
+                        "abstract_summary": "Second reusable procedure.",
+                        "reuse_value": "reusable-procedure",
+                        "procedure": {
+                            **procedure,
+                            "trigger": "A second reusable fixture task is complete.",
+                        },
+                    },
+                ],
+            },
+        )
+        config = self.write(
+            "queue-drain-adapters.json",
+            {
+                "contract_version": 1,
+                "routes": ["fake>exec"],
+                "executor_order": ["exec"],
+                "sources": {
+                    "fake": {
+                        "argv": [
+                            sys.executable, str(FAKE), "--fixture",
+                            str(source_fixture), "--adapter-id", "fake",
+                            "--role", "session-source",
+                        ]
+                    }
+                },
+                "executors": {
+                    "exec": {
+                        "argv": [
+                            sys.executable, str(FAKE), "--fixture",
+                            str(executor_fixture), "--adapter-id", "exec",
+                            "--role", "review-executor",
+                        ]
+                    }
+                },
+                "publishers": {},
+            },
+        )
+
+        def run() -> dict:
+            result = subprocess.run(
+                [sys.executable, str(RUNTIME_PATH), "run"],
+                env={
+                    **os.environ,
+                    "DREAMING_ADAPTER_CONFIG": str(config),
+                    "DREAMING_DATA_DIR": str(self.paths.data),
+                    "DREAMING_STATE_DIR": str(self.paths.state),
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            return json.loads(result.stdout)
+
+        first = run()
+        self.assertEqual(len(first["reviews"]), 2)
+        queue = json.loads(self.paths.queue.read_text())
+        self.assertEqual(queue[0]["status"], "profile-audited")
+        self.assertEqual(len(json.loads(self.paths.attempts.read_text())), 2)
+
+        queue[0]["status"] = "queued"
+        runtime_module.atomic_json(self.paths.queue, queue)
+        recovered = run()
+        self.assertEqual(recovered["reviews"], [])
+        self.assertEqual(
+            json.loads(self.paths.queue.read_text())[0]["status"], "profile-audited"
+        )
+        self.assertEqual(len(json.loads(self.paths.attempts.read_text())), 2)
+
+        fixture = json.loads(executor_fixture.read_text())
+        fixture["contract_identity_overrides"] = {"fixture_generation": 2}
+        executor_fixture.write_text(json.dumps(fixture))
+        identity_changed = run()
+        self.assertEqual(identity_changed["profiles"], [])
+        self.assertEqual(len(list(self.paths.task_profile_receipts.glob("*.json"))), 1)
+
+        source = json.loads(source_fixture.read_text())
+        source["sessions"][0]["events"].append(
+            event("fake", "one", 4, "assistant_message")
+        )
+        source["sessions"][0]["updated_at"] = 11
+        source_fixture.write_text(json.dumps(source))
+        later = run()
+        self.assertEqual(len(later["profiles"]), 1)
+        self.assertEqual(later["reviews"], [])
+        self.assertEqual(len(list(self.paths.task_profile_receipts.glob("*.json"))), 2)
+        statuses = [
+            item["status"]
+            for item in json.loads(self.paths.queue.read_text())
+            if item["qualified_session_id"] == "fake:one"
+        ]
+        self.assertEqual(statuses, ["profile-audited", "profile-audited"])
+        self.assertEqual(len(json.loads(self.paths.attempts.read_text())), 2)
+
     def test_profile_audit_disposition_survives_later_receipt_provenance(self) -> None:
         source_fixture = self.source_fixture([self.session("one", 10, event_count=2)])
         source = self.adapter("session-source", "fake", source_fixture)
@@ -5031,6 +5151,29 @@ elif command == "run":
             second_receipt["receipt_sha256"],
         )
         self.assertEqual(second_receipt["profiles"][0]["profile_id"], profile_id)
+        target = core.profile_audit_targets_for(
+            "fake", source, "fake:one", second_receipt["source_revision"],
+            "exec", executor,
+        )[0]
+        origin_receipt_path = Path(first["receipt"])
+        origin_receipt_bytes = origin_receipt_path.read_bytes()
+        origin_snapshot_path = (
+            self.paths.snapshots
+            / f"{first_receipt['snapshot_sha256'].removeprefix('sha256:')}.json"
+        )
+        origin_snapshot_bytes = origin_snapshot_path.read_bytes()
+        origin_receipt_path.unlink()
+        with self.assertRaisesRegex(RuntimeFailure, "origin-receipt-shape"):
+            core.profile_audit_disposition_for(target)
+        origin_receipt_path.write_bytes(origin_receipt_bytes)
+        origin_snapshot_path.unlink()
+        with self.assertRaisesRegex(RuntimeFailure, "origin-snapshot-shape"):
+            core.profile_audit_disposition_for(target)
+        origin_snapshot_path.write_bytes(origin_snapshot_bytes)
+        origin_receipt_path.write_text("{}")
+        with self.assertRaisesRegex(RuntimeFailure, "origin-receipt-shape"):
+            core.profile_audit_disposition_for(target)
+        origin_receipt_path.write_bytes(origin_receipt_bytes)
         retried = core.review_profile(
             "fake", source, "fake:one", second_receipt["source_revision"],
             "exec", executor, profile_id,
