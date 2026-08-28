@@ -51,6 +51,12 @@ from profile_audit_disposition import (
     build_profile_audit_disposition,
     validate_profile_audit_disposition,
 )
+from task_pass_accounting import (
+    TaskPassAccountingError,
+    build_task_pass_accounting_receipt,
+    queue_row_identity,
+    validate_task_pass_accounting_receipt,
+)
 
 CONTRACT_VERSION = 1
 TASK_PROFILE_CAPABILITY = "task-profile-v2"
@@ -530,6 +536,10 @@ class RuntimePaths:
     @property
     def profile_audit_dispositions(self) -> Path:
         return self.state / "profile-audit-dispositions" / "v1"
+
+    @property
+    def task_pass_accounting_receipts(self) -> Path:
+        return self.data / "task-opportunity-accounting" / "v1"
 
     @property
     def bundles(self) -> Path:
@@ -1385,6 +1395,7 @@ class DreamingRuntime:
         executor_id: str,
         executor: ExecutableAdapter,
         expected_revision: str | None = None,
+        on_profile_operation_start: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         if not self._route_allowed(source_name, executor_id):
             raise RuntimeFailure("route-denied", f"{source_name}>{executor_id}")
@@ -1455,6 +1466,8 @@ class DreamingRuntime:
                 str(self.paths.task_profile_index),
             )
         prior_entry = prior_index.get(profile_key)
+        if on_profile_operation_start is not None:
+            on_profile_operation_start()
         response = executor.call(
             "run",
             snapshot=snapshot_path,
@@ -8275,6 +8288,20 @@ def scheduled_run() -> dict[str, Any]:
             "started_operations": 0,
         },
         "profile_review_skips": [],
+        "accounting": {
+            "schema_version": 1,
+            "status": "pending",
+            "receipt": None,
+            "receipt_sha256": None,
+            "queue_terminal_accounting": [],
+            "profile_operation_accounting": [],
+            "profile_terminal_accounting": [],
+            "review_operation_accounting": [],
+            "review_terminal_accounting": [],
+            "eligible_backlog": {"profiles": 0, "reviews": 0},
+            "unused_capacity": {"profiles": 0, "reviews": 0},
+            "stop_reason": {"profiles": None, "reviews": None},
+        },
         "publication": [],
         "errors": adapter_errors,
         "legacy_records_imported": imported_legacy,
@@ -8705,11 +8732,67 @@ def scheduled_run() -> dict[str, Any]:
         return report
 
     queue = read_json(paths.queue, [])
+    if not isinstance(queue, list) or any(not isinstance(item, dict) for item in queue):
+        raise RuntimeFailure("queue-invalid", str(paths.queue))
+    accounting_pass_id = (
+        f"{core.parent_run_id}:{uuid.uuid4().hex}"
+        if core.parent_run_id
+        else f"manual:{uuid.uuid4().hex}"
+    )
+    queue_accounting: list[dict[str, Any]] = []
+    profile_operations: list[dict[str, Any]] = []
+    profile_accounting: list[dict[str, Any]] = []
+    review_accounting: list[dict[str, Any]] = []
+    review_operations: list[dict[str, Any]] = []
+    queue_ids = {id(item): queue_row_identity(item) for item in queue}
+
+    def account_queue(
+        item: dict[str, Any], outcome: str, operation_id: str | None = None
+    ) -> str:
+        row_id = queue_ids[id(item)]
+        queue_accounting.append(
+            {
+                "queue_row_id": row_id,
+                "outcome": outcome,
+                "profile_operation_id": operation_id,
+            }
+        )
+        return row_id
+
+    def account_profiles(item: dict[str, Any], receipt: TaskProfileReceipt) -> None:
+        row_id = queue_ids[id(item)]
+        for profile in receipt.payload["profiles"]:
+            profile_accounting.append(
+                {
+                    "profile_id": profile["profile_id"],
+                    "queue_row_id": row_id,
+                    "profile_receipt_sha256": receipt.payload["receipt_sha256"],
+                    "terminal": (
+                        "reusable-awaiting-review"
+                        if profile["reuse_value"] == "reusable-procedure"
+                        else "no-learning"
+                    ),
+                }
+            )
+
     profile_attempts = 0
     profile_failed_sessions: set[str] = set()
     profile_started_at = time.monotonic()
     for item in queue:
-        if item.get("status") != "queued":
+        status = item.get("status")
+        if status != "queued":
+            account_queue(
+                item,
+                (
+                    "active-unsettled"
+                    if status == "active"
+                    else "stale-superseded"
+                    if status == "superseded"
+                    else "deleted"
+                    if status == "deleted"
+                    else "already-terminal"
+                ),
+            )
             continue
         source_name = item.get("source")
         source = sources.get(source_name)
@@ -8726,6 +8809,7 @@ def scheduled_run() -> dict[str, Any]:
             None,
         )
         if source is None:
+            account_queue(item, "source-unavailable")
             report["errors"].append(
                 {
                     "phase": "profile",
@@ -8735,6 +8819,7 @@ def scheduled_run() -> dict[str, Any]:
             )
             continue
         if executor_name is None:
+            account_queue(item, "executor-unavailable")
             report["profile_skips"].append(
                 {
                     "session_id": item.get("qualified_session_id"),
@@ -8742,37 +8827,105 @@ def scheduled_run() -> dict[str, Any]:
                 }
             )
             continue
-        budget_reason = profile_budget_reason(
-            profile_attempts,
-            profile_started_at,
-            settings,
-        )
-        if budget_reason is not None:
-            report["deferred_profiles"] += 1
-            report["profile_budget"]["exhausted_reason"] = budget_reason
+        try:
+            current = source.call("inspect", session=item["qualified_session_id"])["session"]
+            validate_identity(current, source_name)
+        except RuntimeFailure as error:
+            if (
+                error.code == "session-missing"
+                and error.message == item.get("qualified_session_id")
+            ):
+                core._mark_queue(
+                    item["qualified_session_id"], item["source_revision"], "deleted"
+                )
+                account_queue(item, "deleted")
+                report["profiles"].append(
+                    {"session_id": item["qualified_session_id"], "status": "deleted"}
+                )
+            else:
+                account_queue(item, "source-unavailable")
+                report["errors"].append(
+                    {
+                        "phase": "profile",
+                        "session_id": item.get("qualified_session_id"),
+                        "code": error.code,
+                    }
+                )
+            continue
+        if current["source_revision"] != item["source_revision"]:
+            core._mark_queue(
+                item["qualified_session_id"], item["source_revision"], "superseded"
+            )
+            core._admit(current)
+            account_queue(item, "stale-superseded")
+            report["profiles"].append(
+                {
+                    "session_id": item["qualified_session_id"],
+                    "status": "stale-before-profile",
+                    "queued_revision": current["source_revision"],
+                }
+            )
+            continue
+        if current["completion_state"] not in COMPLETED:
+            core._admit(current)
+            account_queue(item, "active-unsettled")
+            report["profile_skips"].append(
+                {
+                    "session_id": item["qualified_session_id"],
+                    "code": "completion-not-admitted",
+                }
+            )
             continue
         try:
             existing_receipt = core.indexed_task_profile_receipt_for(
-                item["qualified_session_id"],
-                item["source_revision"],
-                executor_name,
+                item["qualified_session_id"], item["source_revision"], executor_name
             )
-            if existing_receipt is not None:
-                if (
-                    existing_receipt.payload.get("executor_identity")
-                    == executors[executor_name].identity
-                ):
-                    continue
-            budget_reason = profile_budget_reason(
-                profile_attempts,
-                profile_started_at,
-                settings,
+        except RuntimeFailure as error:
+            account_queue(item, "malformed")
+            report["profile_failures"].append(
+                {
+                    "session_id": item["qualified_session_id"],
+                    "code": error.code,
+                    "message": error.message,
+                }
             )
-            if budget_reason is not None:
-                report["deferred_profiles"] += 1
-                report["profile_budget"]["exhausted_reason"] = budget_reason
-                continue
+            continue
+        if (
+            existing_receipt is not None
+            and existing_receipt.payload.get("executor_identity")
+            == executors[executor_name].identity
+        ):
+            account_queue(item, "cached-current-receipt")
+            account_profiles(item, existing_receipt)
+            report["profile_skips"].append(
+                {
+                    "session_id": item["qualified_session_id"],
+                    "code": "cached-current-receipt",
+                }
+            )
+            continue
+        budget_reason = profile_budget_reason(
+            profile_attempts, profile_started_at, settings
+        )
+        if budget_reason is not None:
+            account_queue(item, "eligible-deferred")
+            report["profile_budget"]["exhausted_reason"] = budget_reason
+            continue
+        row_id = queue_ids[id(item)]
+        operation_id = f"profile:{accounting_pass_id}:{row_id}"
+        profile_started = False
+
+        def record_profile_start() -> None:
+            nonlocal profile_attempts, profile_started
+            bound = profile_budget_reason(
+                profile_attempts, profile_started_at, settings
+            )
+            if bound is not None:
+                raise RuntimeFailure("profile-operation-bound", bound)
             profile_attempts += 1
+            profile_started = True
+
+        try:
             result = core.profile(
                 source_name,
                 source,
@@ -8780,69 +8933,166 @@ def scheduled_run() -> dict[str, Any]:
                 executor_name,
                 executors[executor_name],
                 expected_revision=item["source_revision"],
+                on_profile_operation_start=record_profile_start,
             )
-            report["profiles"].append(
-                {"session_id": item["qualified_session_id"], **result}
+            terminal = (
+                "deleted"
+                if result["status"] == "deleted"
+                else "stale"
+                if result["status"] == "stale-before-profile"
+                else "profiled"
             )
-        except RuntimeFailure as error:
-            if (
-                error.code == "session-missing"
-                and error.message == item.get("qualified_session_id")
-            ):
-                core._mark_queue(
-                    item["qualified_session_id"],
-                    item["source_revision"],
-                    "deleted",
-                )
-                report["profiles"].append(
+            receipt = None
+            receipt_error = None
+            if terminal == "profiled":
+                try:
+                    receipt = core.indexed_task_profile_receipt_for(
+                        item["qualified_session_id"],
+                        item["source_revision"],
+                        executor_name,
+                    )
+                    if receipt is None:
+                        raise RuntimeFailure(
+                            "task-profile-index-invalid", "new receipt is absent"
+                        )
+                except RuntimeFailure as error:
+                    receipt_error = error
+            if profile_started:
+                profile_operations.append(
                     {
-                        "session_id": item["qualified_session_id"],
-                        "status": "deleted",
+                        "operation_id": operation_id,
+                        "queue_row_id": row_id,
+                        "terminal": terminal,
                     }
                 )
-                continue
-            if error.code == "completion-not-admitted":
-                report["profile_skips"].append(
-                    {
-                        "session_id": item.get("qualified_session_id"),
-                        "code": error.code,
-                    }
-                )
-                continue
-            if error.code in {
-                "malformed-executor-result",
-                "task-profile-invalid",
-            }:
+            account_queue(
+                item,
+                "deleted" if terminal == "deleted" else
+                "stale-superseded" if terminal == "stale" else "newly-attempted",
+                operation_id if profile_started else None,
+            )
+            report["profiles"].append({"session_id": item["qualified_session_id"], **result})
+            if receipt_error is not None:
                 profile_failed_sessions.add(item["qualified_session_id"])
                 report["profile_failures"].append(
                     {
-                        "session_id": item.get("qualified_session_id"),
-                        "code": error.code,
-                        "message": error.message,
+                        "session_id": item["qualified_session_id"],
+                        "code": receipt_error.code,
+                        "message": receipt_error.message,
                     }
                 )
                 continue
-            report["errors"].append(
+            if receipt is not None:
+                account_profiles(item, receipt)
+        except RuntimeFailure as error:
+            if error.code == "profile-operation-bound":
+                account_queue(item, "eligible-deferred")
+                report["profile_budget"]["exhausted_reason"] = error.message
+                continue
+            terminal = (
+                "malformed"
+                if error.code in {"malformed-executor-result", "task-profile-invalid"}
+                else "failed"
+            )
+            if profile_started:
+                profile_operations.append(
+                    {
+                        "operation_id": operation_id,
+                        "queue_row_id": row_id,
+                        "terminal": terminal,
+                    }
+                )
+            account_queue(
+                item,
+                "malformed" if terminal == "malformed" else "profile-failed",
+                operation_id if profile_started else None,
+            )
+            profile_failed_sessions.add(item["qualified_session_id"])
+            report["profile_failures"].append(
                 {
-                    "phase": "profile",
-                    "session_id": item.get("qualified_session_id"),
+                    "session_id": item["qualified_session_id"],
                     "code": error.code,
+                    "message": error.message,
                 }
             )
-    report["profile_budget"]["attempts"] = profile_attempts
-    report["profile_budget"]["elapsed_seconds"] = int(
-        time.monotonic() - profile_started_at
+    report["deferred_profiles"] = sum(
+        row["outcome"] == "eligible-deferred" for row in queue_accounting
     )
+    report["profile_budget"]["attempts"] = profile_attempts
+    report["profile_budget"]["elapsed_seconds"] = int(time.monotonic() - profile_started_at)
+    profile_queue_outcome = {
+        row["queue_row_id"]: row["outcome"] for row in queue_accounting
+    }
     profile_review_candidates: list[
-        tuple[str, ExecutableAdapter, str, str, ExecutableAdapter, ProfileAuditTarget]
+        tuple[
+            str,
+            ExecutableAdapter,
+            str,
+            str,
+            ExecutableAdapter,
+            ProfileAuditTarget,
+            dict[str, Any],
+        ]
     ] = []
     profile_audit_revisions: dict[
         tuple[str, str], list[ProfileAuditTarget]
     ] = {}
+
+    def account_review(
+        item: dict[str, Any],
+        profile_id: str | None,
+        outcome: str,
+        profile_receipt_sha256: str | None = None,
+    ) -> dict[str, Any]:
+        row = {
+            "review_row_id": digest(
+                {
+                    "queue_row_id": queue_ids[id(item)],
+                    "profile_id": profile_id,
+                    "profile_receipt_sha256": profile_receipt_sha256,
+                    "position": len(review_accounting),
+                }
+            ),
+            "queue_row_id": queue_ids[id(item)],
+            "profile_id": profile_id,
+            "profile_receipt_sha256": profile_receipt_sha256,
+            "outcome": outcome,
+            "operation_id": None,
+        }
+        review_accounting.append(row)
+        return row
+
     for item in queue:
         if item.get("status") != "queued":
+            account_review(
+                item,
+                None,
+                (
+                    "already-dispositioned"
+                    if item.get("status") == "profile-audited"
+                    else "stale-superseded"
+                ),
+            )
+            continue
+        if profile_queue_outcome[queue_ids[id(item)]] in {
+            "eligible-deferred",
+            "malformed",
+            "profile-failed",
+            "source-unavailable",
+            "executor-unavailable",
+            "active-unsettled",
+            "deleted",
+        }:
+            account_review(item, None, "raw-unprofiled")
+            report["profile_review_skips"].append(
+                {
+                    "session_id": item["qualified_session_id"],
+                    "code": "profile-unavailable",
+                }
+            )
             continue
         if item.get("qualified_session_id") in profile_failed_sessions:
+            account_review(item, None, "raw-unprofiled")
             report["profile_review_skips"].append(
                 {
                     "session_id": item["qualified_session_id"],
@@ -8853,6 +9103,7 @@ def scheduled_run() -> dict[str, Any]:
         source_name = item.get("source")
         source = sources.get(source_name)
         if source is None:
+            account_review(item, None, "invalid-unbound")
             report["profile_review_skips"].append(
                 {
                     "session_id": item.get("qualified_session_id"),
@@ -8873,6 +9124,7 @@ def scheduled_run() -> dict[str, Any]:
             None,
         )
         if executor_name is None:
+            account_review(item, None, "invalid-unbound")
             report["profile_review_skips"].append(
                 {
                     "session_id": item["qualified_session_id"],
@@ -8890,6 +9142,13 @@ def scheduled_run() -> dict[str, Any]:
                 executors[executor_name],
             )
         except RuntimeFailure as error:
+            account_review(
+                item,
+                None,
+                "stale-superseded"
+                if error.code == "profile-audit-stale"
+                else "invalid-unbound",
+            )
             report["profile_review_skips"].append(
                 {
                     "session_id": item.get("qualified_session_id"),
@@ -8898,6 +9157,7 @@ def scheduled_run() -> dict[str, Any]:
             )
             continue
         if not targets:
+            account_review(item, None, "no-learning")
             report["profile_review_skips"].append(
                 {
                     "session_id": item["qualified_session_id"],
@@ -8917,6 +9177,12 @@ def scheduled_run() -> dict[str, Any]:
                     core.profile_audit_disposition_admission_for(target)
                 )
             except RuntimeFailure as error:
+                account_review(
+                    item,
+                    target.profile["profile_id"],
+                    "invalid-unbound",
+                    target.receipt.payload["receipt_sha256"],
+                )
                 report["profile_review_skips"].append(
                     {
                         "session_id": item["qualified_session_id"],
@@ -8926,6 +9192,15 @@ def scheduled_run() -> dict[str, Any]:
                 )
                 continue
             if disposition_admission == "terminal" and disposition is not None:
+                account_review(
+                    item,
+                    target.profile["profile_id"],
+                    "already-dispositioned",
+                    target.receipt.payload["receipt_sha256"],
+                )
+                for profile_row in profile_accounting:
+                    if profile_row["profile_id"] == target.profile["profile_id"]:
+                        profile_row["terminal"] = "reusable-dispositioned"
                 report["profile_review_skips"].append(
                     {
                         "session_id": item["qualified_session_id"],
@@ -8939,6 +9214,12 @@ def scheduled_run() -> dict[str, Any]:
                 == "superseded-requires-repair-backfill"
                 and disposition is not None
             ):
+                account_review(
+                    item,
+                    target.profile["profile_id"],
+                    "known-superseded-contract",
+                    target.receipt.payload["receipt_sha256"],
+                )
                 report["profile_review_skips"].append(
                     {
                         "session_id": item["qualified_session_id"],
@@ -8958,6 +9239,12 @@ def scheduled_run() -> dict[str, Any]:
                     item["source_revision"],
                     executors[executor_name],
                     target,
+                    account_review(
+                        item,
+                        target.profile["profile_id"],
+                        "newly-attempted",
+                        target.receipt.payload["receipt_sha256"],
+                    ),
                 )
             )
     for (
@@ -8967,12 +9254,13 @@ def scheduled_run() -> dict[str, Any]:
         source_revision,
         executor,
         target,
+        review_row,
     ) in profile_review_candidates:
         if (
             report["review_budget"]["started_operations"]
             >= settings["max_reviews_per_run"]
         ):
-            report["deferred_reviews"] += 1
+            review_row["outcome"] = "eligible-deferred"
             continue
         executor_id = target.receipt.payload["executor"]
         started_before = report["review_budget"]["started_operations"]
@@ -8995,6 +9283,7 @@ def scheduled_run() -> dict[str, Any]:
                 result["status"]
                 == "profile-audit-disposition-superseded-requires-repair-backfill"
             ):
+                review_row["outcome"] = "known-superseded-contract"
                 report["profile_review_skips"].append(
                     {
                         "session_id": qualified_session_id,
@@ -9003,6 +9292,7 @@ def scheduled_run() -> dict[str, Any]:
                     }
                 )
             elif result["status"] == "already-dispositioned":
+                review_row["outcome"] = "already-dispositioned"
                 report["profile_review_skips"].append(
                     {
                         "session_id": qualified_session_id,
@@ -9010,7 +9300,53 @@ def scheduled_run() -> dict[str, Any]:
                         "code": "already-dispositioned",
                     }
                 )
+            elif result["status"] == "stale-before-review":
+                review_row["outcome"] = "stale-superseded"
+                report["profile_review_skips"].append(
+                    {
+                        "session_id": qualified_session_id,
+                        "profile_id": target.profile["profile_id"],
+                        "code": result["status"],
+                    }
+                )
+            elif result["status"] == "deleted":
+                review_row["outcome"] = "deleted"
+                report["profile_review_skips"].append(
+                    {
+                        "session_id": qualified_session_id,
+                        "profile_id": target.profile["profile_id"],
+                        "code": result["status"],
+                    }
+                )
+            elif report["review_budget"]["started_operations"] == started_before:
+                review_row["outcome"] = "invalid-unbound"
+                report["profile_review_skips"].append(
+                    {
+                        "session_id": qualified_session_id,
+                        "profile_id": target.profile["profile_id"],
+                        "code": result["status"],
+                    }
+                )
             else:
+                review_row["outcome"] = "newly-attempted"
+                if report["review_budget"]["started_operations"] > started_before:
+                    operation_id = (
+                        f"review:{accounting_pass_id}:{review_row['review_row_id']}"
+                    )
+                    review_row["operation_id"] = operation_id
+                    review_operations.append(
+                        {
+                            "operation_id": operation_id,
+                            "profile_id": target.profile["profile_id"],
+                            "profile_receipt_sha256": target.receipt.payload[
+                                "receipt_sha256"
+                            ],
+                            "terminal": "dispositioned",
+                        }
+                    )
+                    for profile_row in profile_accounting:
+                        if profile_row["profile_id"] == target.profile["profile_id"]:
+                            profile_row["terminal"] = "reusable-dispositioned"
                 report["reviews"].append(
                     {
                         "session_id": qualified_session_id,
@@ -9019,11 +9355,36 @@ def scheduled_run() -> dict[str, Any]:
                     }
                 )
         except RuntimeFailure as error:
-            destination = (
-                report["errors"]
-                if report["review_budget"]["started_operations"] > started_before
-                else report["profile_review_skips"]
-            )
+            started = report["review_budget"]["started_operations"] > started_before
+            if started:
+                operation_id = (
+                    f"review:{accounting_pass_id}:{review_row['review_row_id']}"
+                )
+                review_row["operation_id"] = operation_id
+                review_operations.append(
+                    {
+                        "operation_id": operation_id,
+                        "profile_id": target.profile["profile_id"],
+                        "profile_receipt_sha256": target.receipt.payload[
+                            "receipt_sha256"
+                        ],
+                        "terminal": (
+                            "malformed"
+                            if error.code
+                            in {"malformed-executor-result", "task-profile-invalid"}
+                            else "stale"
+                            if error.code == "profile-audit-stale"
+                            else "failed"
+                        ),
+                    }
+                )
+            elif error.code == "profile-audit-stale":
+                review_row["outcome"] = "stale-superseded"
+            elif error.code == "session-missing":
+                review_row["outcome"] = "deleted"
+            else:
+                review_row["outcome"] = "invalid-unbound"
+            destination = report["errors"] if started else report["profile_review_skips"]
             record = {
                 "session_id": qualified_session_id,
                 "profile_id": target.profile["profile_id"],
@@ -9047,6 +9408,84 @@ def scheduled_run() -> dict[str, Any]:
                     "code": error.code,
                 }
             )
+    report["deferred_reviews"] = sum(
+        row["outcome"] == "eligible-deferred" for row in review_accounting
+    )
+    profile_stop_reason = (
+        report["profile_budget"]["exhausted_reason"] or "eligible-exhausted"
+    )
+    review_stop_reason = (
+        "review-operation-limit"
+        if report["deferred_reviews"]
+        else "eligible-exhausted"
+    )
+    accounting_receipt = build_task_pass_accounting_receipt(
+        pass_id=accounting_pass_id,
+        queue_rows=queue_accounting,
+        profile_operations=profile_operations,
+        profiles=profile_accounting,
+        review_rows=review_accounting,
+        review_operations=review_operations,
+        review_terminals=[dict(row) for row in review_operations],
+        profile_stop_reason=profile_stop_reason,
+        review_stop_reason=review_stop_reason,
+    )
+    try:
+        validate_task_pass_accounting_receipt(accounting_receipt)
+        receipt_path = (
+            paths.task_pass_accounting_receipts
+            / f"{accounting_receipt['receipt_sha256'].removeprefix('sha256:')}.json"
+        )
+        if receipt_path.exists():
+            if read_json(receipt_path, {}) != accounting_receipt:
+                raise RuntimeFailure("task-pass-accounting-collision", str(receipt_path))
+        else:
+            atomic_json(receipt_path, accounting_receipt, mode=0o400)
+        report["accounting"] = {
+            "schema_version": 1,
+            "status": "reconciled",
+            "receipt": str(receipt_path),
+            "receipt_sha256": accounting_receipt["receipt_sha256"],
+            "queue_terminal_accounting": queue_accounting,
+            "profile_operation_accounting": profile_operations,
+            "profile_terminal_accounting": profile_accounting,
+            "review_eligibility_accounting": review_accounting,
+            "review_operation_accounting": review_operations,
+            "review_terminal_accounting": [dict(row) for row in review_operations],
+            "eligible_backlog": {
+                "profiles": report["deferred_profiles"],
+                "reviews": report["deferred_reviews"],
+            },
+            "unused_capacity": {
+                "profiles": (
+                    settings["max_profiles_per_run"] - profile_attempts
+                    if profile_stop_reason == "eligible-exhausted"
+                    else 0
+                ),
+                "reviews": (
+                    settings["max_reviews_per_run"]
+                    - report["review_budget"]["started_operations"]
+                    if review_stop_reason == "eligible-exhausted"
+                    else 0
+                ),
+            },
+            "stop_reason": {
+                "profiles": profile_stop_reason,
+                "reviews": review_stop_reason,
+            },
+        }
+    except (RuntimeFailure, TaskPassAccountingError) as error:
+        code = (
+            error.code
+            if isinstance(error, RuntimeFailure)
+            else f"task-pass-accounting-invalid:{error.reason}"
+        )
+        report["accounting"]["status"] = "unhealthy"
+        report["accounting"]["stop_reason"] = {
+            "profiles": profile_stop_reason,
+            "reviews": review_stop_reason,
+        }
+        report["errors"].append({"phase": "accounting", "code": code})
     for publisher_name, publisher in retired_publishers.items():
         try:
             publisher.call("remove")
