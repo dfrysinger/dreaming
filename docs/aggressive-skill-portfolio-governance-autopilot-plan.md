@@ -22,9 +22,8 @@
   `docs/task-opportunity-evidence-autopilot-objective.md`
 - Hourly charter re-brief: schedule `#6`; stop it only after
   `Definition of Done: Profile-derived task-opportunity funnel` is complete.
-- Current phase: profile-derived admission review closure and stacked capacity
-  accounting under `/dfrysinger-skills:development-loop`; reframe status
-  remains `CLEAR`.
+- Current phase: work-conserving capacity accounting proof under
+  `/dfrysinger-skills:development-loop`; reframe status remains `CLEAR`.
 - Active first-slice tracer: prove that only current, reusable,
   undispositioned task profiles can start expensive review, while raw-session
   reviews remain historical. Implementation workspace:
@@ -53,15 +52,18 @@
   unchanged terminal dispositions, and fail-closed missing-origin behavior.
   Fresh real-model evidence covers one Copilot profile-to-selected-review-to-
   disposition path. The earlier `602ff3f` receipt remains retained as history.
+- Both round-two reviewers independently marked the two prior must-fix findings
+  `RESOLVED` and reported no fix-delta defect. Frozen slice one is published as
+  PR `https://github.com/dfrysinger/dreaming/pull/2`, targeting
+  `feature/multi-cli-dreaming`.
 - Formal round-one dual review completed for exact candidate `602ff3f` with
   two verified must-fix findings. Terra found that terminal admission did not
   revalidate the disposition's exact originating immutable receipt. Opus found
   that successful profile audits never retired their raw queue revision, so
   historical rows were re-swept indefinitely. The slice owner is preparing one
   successor with original-receipt validation and a terminal `profile-audited`
-  queue state. Candidate `96a7231` implements both fixes; focused validation
-  and fresh proof pass, and round-two closure review is in flight against only
-  those two prior findings and the fix delta.
+  queue state. Candidate `96a7231` implements both fixes; focused validation,
+  fresh proof, and round-two closure review all pass.
 - Read-only mapper `capacity-accounting-mapper` owns the slice-two traversal
   and terminal-accounting inventory against the current integration tree. It
   completed a dependency-aware map: slice two must classify every queue row
@@ -71,10 +73,10 @@
 - Writer `capacity-accounting-writer` owns slice two in stacked worktree
   `/Users/dfrysinger/code/dreaming-task-profile-accounting` on
   `feature/task-profile-capacity-accounting`, rebased onto frozen dependency
-  `96a7231`. Its current committed candidate is `e06e143`; it owes confirmed
-  focused LLM-OPP-12/13/14 results before the coordinator admits its private
-  work-conserving/accounting proof. It cannot mutate the reviewed slice-one
-  worktree, publish, or start live proof.
+  `96a7231`. Its frozen candidate is `e06e143`; Python compilation, diff
+  validation, and all 74 focused core tests pass. The coordinator now owns its
+  private work-conserving/accounting proof and later review. The slice cannot
+  mutate the reviewed slice-one worktree or publish independently.
 - Open live-proof claims are registered as `INCONCLUSIVE` under
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/task-opportunity-profile-funnel-proof/`.
 - Functional publication policy: freeze, prove, and review small owned-branch
