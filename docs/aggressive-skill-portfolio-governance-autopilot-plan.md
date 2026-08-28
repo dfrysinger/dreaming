@@ -106,6 +106,16 @@
   It may inspect the current stacked candidate and reviewed design but cannot
   write code or proof artifacts. Its integration boundary is a dependency-
   aware implementation and test map consumed only after slice two closes.
+- Writer `canonical-occurrence-writer` owns slice three in isolated worktree
+  `/Users/dfrysinger/code/dreaming-canonical-occurrence` on
+  `feature/canonical-task-occurrence`, based on merged integration commit
+  `57014ea`. It must preserve historical v1 profile and disposition evidence,
+  add source-derived occurrence anchors and a separate immutable occurrence-
+  resolution authority, extend the existing shadow lifecycle rather than add a
+  queue or scheduler, and prove one long-running session can contribute three
+  independent current occurrences without counting a reprofile, merge, or
+  split twice. The coordinator retains proof admission, review, publication,
+  and any reframe decision.
 - Open live-proof claims are registered as `INCONCLUSIVE` under
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/task-opportunity-profile-funnel-proof/`.
 - Functional publication policy: freeze, prove, and review small owned-branch
