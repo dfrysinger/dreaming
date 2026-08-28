@@ -58,6 +58,12 @@
   before budget consumption, count exact started operations and terminal
   states, preserve additive dashboard compatibility, and derive accounting
   from receipts and dispositions rather than report snapshots.
+- Writer `capacity-accounting-writer` owns slice two in stacked worktree
+  `/Users/dfrysinger/code/dreaming-task-profile-accounting` on
+  `feature/task-profile-capacity-accounting`, based on frozen dependency
+  `602ff3f`. It owes a committed work-conserving traversal and reconciled
+  accounting candidate plus focused LLM-OPP-12/13/14 tests. It cannot mutate
+  the reviewed slice-one worktree, publish, or start live proof.
 - Open live-proof claims are registered as `INCONCLUSIVE` under
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/task-opportunity-profile-funnel-proof/`.
 - Functional publication policy: freeze, prove, and review small owned-branch
