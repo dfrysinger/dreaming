@@ -165,18 +165,23 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
     if args.command == "run":
         snapshot = load(Path(args.snapshot), {})
         if args.mode == "profile":
-            profile_error = state.get("task_profile_error")
+            session_id = snapshot.get("identity", {}).get(
+                "qualified_session_id"
+            )
+            profile_error = state.get("task_profile_errors_by_session", {}).get(
+                session_id, state.get("task_profile_error")
+            )
             if isinstance(profile_error, dict):
                 fail(
                     str(profile_error.get("code", "malformed-executor-result")),
                     str(profile_error.get("message", "invalid task profile")),
                 )
-            session_id = snapshot.get("identity", {}).get(
-                "qualified_session_id"
-            )
             snapshot_sha256 = digest(snapshot)
             profiles: list[dict[str, Any]] = []
-            for template in state.get("task_profiles", []):
+            templates = state.get("task_profiles_by_session", {}).get(
+                session_id, state.get("task_profiles", [])
+            )
+            for template in templates:
                 source_event_ids = template.get(
                     "source_event_ids",
                     [
@@ -284,6 +289,18 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                 )
             ):
                 fail("task-profile-receipt-invalid", args.adapter_id)
+            if args.task_profile_id:
+                selected = [
+                    profile
+                    for profile in receipt.get("profiles", [])
+                    if isinstance(profile, dict)
+                    and profile.get("profile_id") == args.task_profile_id
+                    and profile.get("reuse_value") == "reusable-procedure"
+                ]
+                if len(selected) != 1:
+                    fail("task-profile-receipt-invalid", args.adapter_id)
+            elif state.get("require_task_profile_id"):
+                fail("task-profile-id-required", args.adapter_id)
         if state.get("reject_task_profile_receipt") and args.task_profile_receipt:
             fail("unexpected-task-profile-receipt", args.adapter_id)
         mutate_fixture = state.get("mutate_source_fixture")
@@ -400,6 +417,7 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--mode", choices=("review", "profile"), default="review")
     run.add_argument("--task-profile-receipt")
     run.add_argument("--task-profile-executor")
+    run.add_argument("--task-profile-id")
     install = sub.add_parser("install")
     install.add_argument("--bundle", required=True)
     install.add_argument("--bundle-id", required=True)
@@ -416,15 +434,18 @@ def main() -> None:
         protocol, capabilities = ROLE_PROTOCOLS[args.role]
         fixture_state = load(Path(args.fixture), {})
         capabilities = fixture_state.get("capabilities", capabilities)
-        emit(
-            {
-                "ok": True,
-                "protocol": protocol,
-                "version": 1,
-                "adapter_id": args.adapter_id,
-                "capabilities": capabilities,
-            }
-        )
+        identity = {
+            "ok": True,
+            "protocol": protocol,
+            "version": 1,
+            "adapter_id": args.adapter_id,
+            "capabilities": capabilities,
+        }
+        overrides = fixture_state.get("contract_identity_overrides", {})
+        if not isinstance(overrides, dict):
+            fail("fixture-invalid", "contract_identity_overrides")
+        identity.update(overrides)
+        emit(identity)
     fixture = Path(args.fixture)
     if args.role == "session-source":
         source_command(args, fixture)
