@@ -22,8 +22,9 @@
   `docs/task-opportunity-evidence-autopilot-objective.md`
 - Hourly charter re-brief: schedule `#6`; stop it only after
   `Definition of Done: Profile-derived task-opportunity funnel` is complete.
-- Current phase: implementation preparation under
-  `/dfrysinger-skills:development-loop`; reframe status remains `CLEAR`.
+- Current phase: profile-derived admission review closure and stacked capacity
+  accounting under `/dfrysinger-skills:development-loop`; reframe status
+  remains `CLEAR`.
 - Active first-slice tracer: prove that only current, reusable,
   undispositioned task profiles can start expensive review, while raw-session
   reviews remain historical. Implementation workspace:
@@ -39,23 +40,28 @@
   `feature/task-profile-audit-admission`. It owes one committed candidate and
   focused test results; the coordinator retains tracer admission, review,
   publication, and integration authority.
-- Frozen successor `602ff3f` passes 72 focused core tests after correcting
-  exact started-call review capacity, non-consuming eligibility results,
-  session-growth-safe disposition identity, explicit audit-contract
-  supersession, stale-row retirement, and race-idempotent writes.
+- Frozen successor `96a7231` passes 73 focused core tests. In addition to the
+  earlier capacity and migration hardening, it validates each disposition
+  against its exact immutable originating task-profile receipt and snapshot,
+  marks fully audited exact source revisions `profile-audited`, recovers that
+  terminal state after restart without a model call, and permits later source
+  revisions to reopen normally.
 - `profile-derived-review-admission` is `PASS` for candidate fingerprint
-  `sha256:c3a757385b1d5c85e2b0a2829a606641808cebbb18892d2a4136ffb7b44d88b8`.
-  The retained receipt covers a mixed private scheduled-owner run, historical
-  raw-review isolation, immutable idempotent replay, and one real Copilot model
-  profile-to-selected-review-to-disposition path.
+  `sha256:df7a07e3a634507272849cf16bcb9146edb95d734336383a2ee48d728dbca99b`.
+  Fresh deterministic evidence covers profile-only admission, historical
+  raw-review isolation, later-revision idempotency, restart queue drainage,
+  unchanged terminal dispositions, and fail-closed missing-origin behavior.
+  Fresh real-model evidence covers one Copilot profile-to-selected-review-to-
+  disposition path. The earlier `602ff3f` receipt remains retained as history.
 - Formal round-one dual review completed for exact candidate `602ff3f` with
   two verified must-fix findings. Terra found that terminal admission did not
   revalidate the disposition's exact originating immutable receipt. Opus found
   that successful profile audits never retired their raw queue revision, so
   historical rows were re-swept indefinitely. The slice owner is preparing one
   successor with original-receipt validation and a terminal `profile-audited`
-  queue state. The current PASS receipt remains historical evidence for
-  `602ff3f`; runtime-changing fixes will reopen the claim before round two.
+  queue state. Candidate `96a7231` implements both fixes; focused validation
+  and fresh proof pass, and round-two closure review is in flight against only
+  those two prior findings and the fix delta.
 - Read-only mapper `capacity-accounting-mapper` owns the slice-two traversal
   and terminal-accounting inventory against the current integration tree. It
   completed a dependency-aware map: slice two must classify every queue row
@@ -64,10 +70,11 @@
   from receipts and dispositions rather than report snapshots.
 - Writer `capacity-accounting-writer` owns slice two in stacked worktree
   `/Users/dfrysinger/code/dreaming-task-profile-accounting` on
-  `feature/task-profile-capacity-accounting`, based on frozen dependency
-  `602ff3f`. It owes a committed work-conserving traversal and reconciled
-  accounting candidate plus focused LLM-OPP-12/13/14 tests. It cannot mutate
-  the reviewed slice-one worktree, publish, or start live proof.
+  `feature/task-profile-capacity-accounting`, rebased onto frozen dependency
+  `96a7231`. Its current committed candidate is `e06e143`; it owes confirmed
+  focused LLM-OPP-12/13/14 results before the coordinator admits its private
+  work-conserving/accounting proof. It cannot mutate the reviewed slice-one
+  worktree, publish, or start live proof.
 - Open live-proof claims are registered as `INCONCLUSIVE` under
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/task-opportunity-profile-funnel-proof/`.
 - Functional publication policy: freeze, prove, and review small owned-branch
