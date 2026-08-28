@@ -1,31 +1,30 @@
-Execute the current task-opportunity work in
-`docs/aggressive-skill-portfolio-governance-autopilot-plan.md` from
-`/Users/dfrysinger/code/dreaming` on `feature/multi-cli-dreaming`.
+Work from `docs/aggressive-skill-portfolio-governance-autopilot-plan.md` through
+the task-opportunity scope in `/Users/dfrysinger/code/dreaming`.
 
-Outcome: Dreaming uses candidate-blind LLM interpretation of real transcripts
-to retain exact task-opportunity evidence, waits for independent recurrence,
-creates or repairs a useful skill, evaluates triggering and task performance
-without harming the portfolio, and proves the installed Mac mini learning loop
-through natural cadence, browser evidence, rollback, and restore.
+Outcome: Dreaming profiles stable transcript task occurrences, durably retains
+reusable profiles across long-running sessions and scheduled runs, sends only
+eligible reusable profiles to one catalog-aware full reviewer, fills available
+profile and review operation capacity while backlog exists, accumulates three
+current independent task occurrences before creating a new skill, and proves
+candidate routing, evaluation, dashboard accounting, installed natural cadence,
+sole ownership, rollback, and exact restore.
 
-Follow
-`docs/task-opportunity-evidence-autopilot-charter.md`. Keep the plan's Current
-baton and proof references accurate. First finish adversarial review of the
-receipt-hardening successor diff `3e586f2..1a35e25` and apply its confirmed
-must-fix findings in a successor commit. The immutable
-`7cda1a1..3e586f2` review is already closed and must not be repeated. Then
-obtain genuine independent recurrence rather than forcing the existing digest
-observation into a candidate. Use the charter's required process skills only
-in the phases they own.
+Follow the plan in order and keep its Current baton accurate. Use
+`docs/task-opportunity-evidence-autopilot-charter.md`, its required process
+skills, proof gates, functional slice order, and publication policy. Publish
+small frozen, validated, reviewed PRs targeting `feature/multi-cli-dreaming`
+when each functional slice is independently useful.
 
-Do not add a second transcript transport or scheduled owner. Do not replace
-LLM semantic interpretation with deterministic classification. Do not treat
-one occurrence as recurrence, weaken strict receipt validation, raise the 25
-full-review attempt limit, or broaden into unrelated governance and security
-work. Never push.
+Do not add a second transcript transport, durable queue, scheduled owner,
+catalog-audit stage, or deterministic semantic classifier. Do not make sessions
+the recurrence unit, let cached or stale rows spend model-operation slots,
+treat legacy raw reviews as profile audits, reopen historical audits after
+ordinary catalog publication, weaken receipt validation, or broaden into
+unrelated governance and security work.
 
-Finish only when every item under `## Definition of Done` in
+Finish only when every item in the
+`Definition of Done: Profile-derived task-opportunity funnel` section of
 `docs/task-opportunity-evidence-design.md` is verifiably met. Do not substitute
 partial tests, code inspection, replay-only evidence, or a plausible
-implementation for the required real recurrence, evaluation, installed
-natural-cadence, browser, rollback, restore, and local-commit evidence.
+implementation for the required real model, installed natural-cadence, browser,
+rollback, restore, reviewed PR, and exact-receipt evidence.

@@ -16,6 +16,18 @@
 ## Current baton
 
 - Branch: `feature/multi-cli-dreaming`
+- Active unattended implementation charter:
+  `docs/task-opportunity-evidence-autopilot-charter.md`
+- Native objective:
+  `docs/task-opportunity-evidence-autopilot-objective.md`
+- Hourly charter re-brief: schedule `#6`; stop it only after
+  `Definition of Done: Profile-derived task-opportunity funnel` is complete.
+- Current phase: implementation preparation under
+  `/dfrysinger-skills:development-loop`; reframe status remains `CLEAR`.
+- Open live-proof claims are registered as `INCONCLUSIVE` under
+  `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/task-opportunity-profile-funnel-proof/`.
+- Functional publication policy: freeze, prove, and review small owned-branch
+  slices, then push and open PRs targeting `feature/multi-cli-dreaming`.
 - Reviewed governance design commit: `6f82ab2`
 - Reviewed isolated-preview contract commit: `9d9b9af`
 - Capacity implementation commit: `f2b4fcb`
