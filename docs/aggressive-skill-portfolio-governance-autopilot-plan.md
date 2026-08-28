@@ -39,6 +39,13 @@
   `feature/task-profile-audit-admission`. It owes one committed candidate and
   focused test results; the coordinator retains tracer admission, review,
   publication, and integration authority.
+- First candidate `b924839` passed 68 focused core tests after rebasing onto the
+  current baton, but pre-proof design-fit review kept the gate closed. The
+  owner is preparing a successor for five material issues: exact started-call
+  review capacity, non-consuming stale/deleted results, session-growth-safe
+  disposition identity, explicit audit-contract supersession, and
+  race-idempotent disposition writes. No live proof or formal implementation
+  review has started.
 - Read-only mapper `capacity-accounting-mapper` owns the slice-two traversal
   and terminal-accounting inventory against the current integration tree. It
   owes only a dependency-aware implementation map and cannot mutate either
