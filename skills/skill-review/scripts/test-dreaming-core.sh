@@ -3806,7 +3806,7 @@ elif sys.argv[1] == "run":
             profiled["receipt_sha256"],
         )
         self.assertEqual(shadow["profile_match"], "matched")
-        self.assertEqual(shadow["independence"], "verified")
+        self.assertIn("canonical_occurrence_id", record if False else shadow)
         self.assertEqual(
             shadow["profile_id"],
             json.loads(Path(profiled["receipt"]).read_text())["profiles"][0][
@@ -3816,7 +3816,8 @@ elif sys.argv[1] == "run":
         record = core._candidate_lifecycle_call(
             "read", shadow["lifecycle_id"]
         )
-        self.assertEqual(record["evidence"][0]["independence"], "verified")
+        self.assertEqual(record["evidence"][0]["canonical_occurrence_id"], shadow["canonical_occurrence_id"])
+        self.assertEqual(record["evidence"][0]["occurred_at"], json.loads(Path(profiled["receipt"]).read_text())["profiles"][0]["occurred_at"])
         self.assertEqual(
             record["procedure"],
             core._candidate_procedure(
@@ -4793,7 +4794,7 @@ elif command == "run":
                         "procedure": procedure,
                     },
                     {
-                        "source_event_ids": ["one-event-2"],
+                        "source_event_ids": ["one-event-1", "one-event-2"],
                         "task_type": "second-reusable-task",
                         "abstract_summary": "The second reusable procedure.",
                         "reuse_value": "reusable-procedure",
@@ -4908,7 +4909,7 @@ elif command == "run":
                         "procedure": procedure,
                     },
                     {
-                        "source_event_ids": ["one-event-2"],
+                        "source_event_ids": ["one-event-1", "one-event-2"],
                         "task_type": "second-task",
                         "abstract_summary": "Second reusable procedure.",
                         "reuse_value": "reusable-procedure",
@@ -5181,7 +5182,7 @@ elif command == "run":
                         "procedure": procedure,
                     },
                     {
-                        "source_event_ids": ["one-event-2"],
+                        "source_event_ids": ["one-event-1", "one-event-2"],
                         "task_type": "second-task",
                         "abstract_summary": "Second reusable procedure.",
                         "reuse_value": "reusable-procedure",

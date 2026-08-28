@@ -2307,26 +2307,17 @@ class DreamingRuntime:
             independence = "verified"
             summary = task_profile["abstract_summary"]
         if task_profile is None or not isinstance(task_profile.get("goal_event_id"), str) or not isinstance(task_profile.get("occurred_at"), str):
-            # Immutable v1 receipts remain historical.  They can be reviewed but
-            # must never be converted into v2 recurrence authority.
-            return {"status": "legacy-evidence-no-current-occurrence-authority", "shadow_only": True, "profile_match": profile_match}
-        occurred_at = parse_time(task_profile["occurred_at"])
-        decision_at = datetime.fromtimestamp(self.now(), timezone.utc)
-        if occurred_at is None or occurred_at > decision_at:
-            raise RuntimeFailure("candidate-lifecycle-failed", "profile occurrence time is invalid")
-        # This source-goal identity is only a provisional occurrence identity.  A
-        # profile-bound resolution may later alias it; task_key is never reused as it.
-        canonical_occurrence_id = digest({"qualified_session_id": reviewed_identity["qualified_session_id"], "goal_event_id": task_profile["goal_event_id"]})
-        observation = {
-            "task_key": task_key,
-            "source_session_id": reviewed_identity["qualified_session_id"],
-            "canonical_occurrence_id": canonical_occurrence_id,
-            "occurred_at": occurred_at.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-            "decision_at": decision_at.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
-            "resolution_sha256": digest({"task_key": task_key, "canonical_occurrence_id": canonical_occurrence_id, "profile_id": task_profile["profile_id"]}),
-            "summary": summary,
-            "procedure_fingerprint": procedure["match_fingerprint"],
-        }
+            # Preserve historical shadow observations in a v1 record.  V1 is
+            # explicitly non-authoritative in candidate-lifecycle recurrence().
+            observation = {"task_key": task_key, "session_id": reviewed_identity["qualified_session_id"], "observed_at": observed.astimezone(timezone.utc).isoformat(), "independence": independence, "summary": summary, "procedure_fingerprint": procedure["match_fingerprint"]}
+        else:
+            occurred_at = parse_time(task_profile["occurred_at"])
+            decision_at = datetime.fromtimestamp(self.now(), timezone.utc)
+            if occurred_at is None or occurred_at > decision_at:
+                raise RuntimeFailure("candidate-lifecycle-failed", "profile occurrence time is invalid")
+            canonical_occurrence_id = digest({"qualified_session_id": reviewed_identity["qualified_session_id"], "goal_event_id": task_profile["goal_event_id"]})
+            observation = {"task_key": task_key, "source_session_id": reviewed_identity["qualified_session_id"], "canonical_occurrence_id": canonical_occurrence_id, "occurred_at": occurred_at.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"), "decision_at": decision_at.replace(microsecond=0).isoformat().replace("+00:00", "Z"), "resolution_sha256": digest({"task_key": task_key, "canonical_occurrence_id": canonical_occurrence_id, "profile_id": task_profile["profile_id"]}), "summary": summary, "procedure_fingerprint": procedure["match_fingerprint"]}
+        # Current evidence is source anchored; legacy branch remains v1 history.
 
         lifecycle_id = None
         expected_version = None
@@ -2394,6 +2385,7 @@ class DreamingRuntime:
                 **collected,
                 "profile_match": profile_match,
                 "independence": independence,
+                **({"canonical_occurrence_id": observation["canonical_occurrence_id"]} if "canonical_occurrence_id" in observation else {}),
                 **(
                     {"profile_id": task_profile["profile_id"]}
                     if task_profile is not None

@@ -288,22 +288,24 @@ def validate_procedure(value: Any) -> dict[str, Any]:
 
 
 def validate_observation(value: Any, procedure: dict[str, Any]) -> dict[str, Any]:
+    # V1 observations stay readable and may be retained in explicit legacy
+    # records, but recurrence() never grants them current authority.
+    legacy_keys = {"task_key", "session_id", "observed_at", "independence", "summary", "procedure_fingerprint"}
+    if isinstance(value, dict) and set(value) == legacy_keys:
+        require_text(value["task_key"], "observation.task_key", 512); require_text(value["session_id"], "observation.session_id", 512)
+        parse_time(value["observed_at"], "observation.observed_at")
+        if value["independence"] not in {"verified", "unverified"}: raise LifecycleError("observation.independence must be verified or unverified")
+        require_text(value["summary"], "observation.summary"); require_sha256(value["procedure_fingerprint"], "observation.procedure_fingerprint")
+        if value["procedure_fingerprint"] != procedure["match_fingerprint"]: raise LifecycleError("observation.procedure_fingerprint must match procedure.match_fingerprint")
+        evidence=dict(value); evidence["evidence_id"]=sha256(canonical(value)); return {key:evidence[key] for key in sorted(legacy_keys | {"evidence_id"})}
     observation = require_exact_keys(value, EVIDENCE_KEYS - {"evidence_id"}, "observation")
-    require_text(observation["task_key"], "observation.task_key", 512)
-    require_text(observation["source_session_id"], "observation.source_session_id", 512)
-    require_sha256(observation["canonical_occurrence_id"], "observation.canonical_occurrence_id")
-    require_sha256(observation["resolution_sha256"], "observation.resolution_sha256")
-    occurred = parse_time(observation["occurred_at"], "observation.occurred_at")
-    decision = parse_time(observation["decision_at"], "observation.decision_at")
-    if occurred > decision:
-        raise LifecycleError("observation.occurred_at may not be after decision_at")
-    require_text(observation["summary"], "observation.summary")
-    require_sha256(observation["procedure_fingerprint"], "observation.procedure_fingerprint")
-    if observation["procedure_fingerprint"] != procedure["match_fingerprint"]:
-        raise LifecycleError("observation.procedure_fingerprint must match procedure.match_fingerprint")
-    evidence = dict(observation)
-    evidence["evidence_id"] = sha256(canonical(observation))
-    return {key: evidence[key] for key in sorted(EVIDENCE_KEYS)}
+    require_text(observation["task_key"], "observation.task_key", 512); require_text(observation["source_session_id"], "observation.source_session_id", 512)
+    require_sha256(observation["canonical_occurrence_id"], "observation.canonical_occurrence_id"); require_sha256(observation["resolution_sha256"], "observation.resolution_sha256")
+    occurred = parse_time(observation["occurred_at"], "observation.occurred_at"); decision = parse_time(observation["decision_at"], "observation.decision_at")
+    if occurred > decision: raise LifecycleError("observation.occurred_at may not be after decision_at")
+    require_text(observation["summary"], "observation.summary"); require_sha256(observation["procedure_fingerprint"], "observation.procedure_fingerprint")
+    if observation["procedure_fingerprint"] != procedure["match_fingerprint"]: raise LifecycleError("observation.procedure_fingerprint must match procedure.match_fingerprint")
+    evidence=dict(observation); evidence["evidence_id"]=sha256(canonical(observation)); return {key:evidence[key] for key in sorted(EVIDENCE_KEYS)}
 
 
 def validate_files(value: Any, field: str) -> list[dict[str, Any]]:
@@ -869,9 +871,9 @@ def new_record(
         raise LifecycleError("--proposed-name is invalid")
     require_reason(reason)
     lifecycle_id = require_uuid(lifecycle_id, "lifecycle_id")
-    observed = parse_time(evidence["occurred_at"], "observation.observed_at")
+    observed = parse_time(evidence.get("occurred_at", evidence.get("observed_at")), "observation.observed_at")
     record = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": LEGACY_SCHEMA_VERSION if "observed_at" in evidence else SCHEMA_VERSION,
         "lifecycle_id": lifecycle_id,
         "state": "collecting",
         "authority": "autonomous",
@@ -891,7 +893,7 @@ def new_record(
         "publication": {"status": "shadow_only"},
         "lifecycle": {
             "created_at": iso(),
-            "last_supported_at": evidence["occurred_at"],
+            "last_supported_at": evidence.get("occurred_at", evidence.get("observed_at")),
             "expires_at": iso(observed + 30 * DAY),
             "transition_history": [
                 transition_entry(None, "collecting", "candidate-collected", [evidence["evidence_id"]], [])
@@ -924,8 +926,6 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
     lifecycle_id = args.lifecycle_id
     if lifecycle_id is not None:
         existing = load_record(lifecycle_id)
-        if existing["schema_version"] != SCHEMA_VERSION:
-            raise LifecycleError("legacy candidate record requires explicit migration")
         assert_expected(existing, args)
         if existing["procedure"] != procedure:
             raise LifecycleError("same-procedure evidence must use the exact stored procedure descriptor")
@@ -982,9 +982,10 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
                 )
             record["current_candidate_id"] = candidate
             supported = parse_time(record["lifecycle"]["last_supported_at"], "last supported")
-            observed = parse_time(evidence["occurred_at"], "observation.observed_at")
+            observed_value = evidence.get("occurred_at", evidence.get("observed_at"))
+            observed = parse_time(observed_value, "observation.observed_at")
             if observed > supported:
-                record["lifecycle"]["last_supported_at"] = evidence["occurred_at"]
+                record["lifecycle"]["last_supported_at"] = observed_value
                 record["lifecycle"]["expires_at"] = iso(observed + 30 * DAY)
             append_decision(record, outcome, reason, related, [evidence["evidence_id"]])
             if existing["state"] == "expired" and fresh(observed):
