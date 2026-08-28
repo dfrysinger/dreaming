@@ -39,6 +39,10 @@
   `feature/task-profile-audit-admission`. It owes one committed candidate and
   focused test results; the coordinator retains tracer admission, review,
   publication, and integration authority.
+- Read-only mapper `capacity-accounting-mapper` owns the slice-two traversal
+  and terminal-accounting inventory against the current integration tree. It
+  owes only a dependency-aware implementation map and cannot mutate either
+  active worktree.
 - Open live-proof claims are registered as `INCONCLUSIVE` under
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/task-opportunity-profile-funnel-proof/`.
 - Functional publication policy: freeze, prove, and review small owned-branch
