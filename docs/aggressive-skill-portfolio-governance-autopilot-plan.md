@@ -55,7 +55,7 @@
 - Both round-two reviewers independently marked the two prior must-fix findings
   `RESOLVED` and reported no fix-delta defect. Frozen slice one is published as
   PR `https://github.com/dfrysinger/dreaming/pull/2`, targeting
-  `feature/multi-cli-dreaming`.
+  `feature/multi-cli-dreaming`, and merged there as `0d6ea22`.
 - Formal round-one dual review completed for exact candidate `602ff3f` with
   two verified must-fix findings. Terra found that terminal admission did not
   revalidate the disposition's exact originating immutable receipt. Opus found
@@ -94,8 +94,11 @@
   The replay retained the original work-conserving and tamper checks and added
   direct proof that a pre-call stale profile spends no slot while the next
   candidate fills capacity, plus proof that a post-profile receipt reload
-  failure remains singly terminal and cannot reach review. Finding-scoped
-  round-two review is in flight; the earlier receipt remains historical.
+  failure remains singly terminal and cannot reach review. Both round-two
+  reviewers marked both prior findings `RESOLVED` with no fix-delta finding.
+  Frozen slice two is published as
+  `https://github.com/dfrysinger/dreaming/pull/3`, targeting
+  `feature/multi-cli-dreaming`; the earlier receipt remains historical.
 - Read-only mapper `canonical-occurrence-mapper` owns the slice-three inventory
   for canonical task-occurrence identity, source-derived 30-day authority,
   merge/split conflict correction, and durable three-occurrence recurrence.
