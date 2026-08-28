@@ -39,17 +39,25 @@
   `feature/task-profile-audit-admission`. It owes one committed candidate and
   focused test results; the coordinator retains tracer admission, review,
   publication, and integration authority.
-- First candidate `b924839` passed 68 focused core tests after rebasing onto the
-  current baton, but pre-proof design-fit review kept the gate closed. The
-  owner is preparing a successor for five material issues: exact started-call
-  review capacity, non-consuming stale/deleted results, session-growth-safe
-  disposition identity, explicit audit-contract supersession, and
-  race-idempotent disposition writes. No live proof or formal implementation
-  review has started.
+- Frozen successor `602ff3f` passes 72 focused core tests after correcting
+  exact started-call review capacity, non-consuming eligibility results,
+  session-growth-safe disposition identity, explicit audit-contract
+  supersession, stale-row retirement, and race-idempotent writes.
+- `profile-derived-review-admission` is `PASS` for candidate fingerprint
+  `sha256:c3a757385b1d5c85e2b0a2829a606641808cebbb18892d2a4136ffb7b44d88b8`.
+  The retained receipt covers a mixed private scheduled-owner run, historical
+  raw-review isolation, immutable idempotent replay, and one real Copilot model
+  profile-to-selected-review-to-disposition path.
+- Formal round-one dual review is active for exact candidate `602ff3f`; Opus
+  reviewer `opus-profile-audit-review` and Terra reviewer
+  `terra-profile-audit-review` are read-only. PR publication remains closed
+  until both complete and no verified must-fix finding remains.
 - Read-only mapper `capacity-accounting-mapper` owns the slice-two traversal
   and terminal-accounting inventory against the current integration tree. It
-  owes only a dependency-aware implementation map and cannot mutate either
-  active worktree.
+  completed a dependency-aware map: slice two must classify every queue row
+  before budget consumption, count exact started operations and terminal
+  states, preserve additive dashboard compatibility, and derive accounting
+  from receipts and dispositions rather than report snapshots.
 - Open live-proof claims are registered as `INCONCLUSIVE` under
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/task-opportunity-profile-funnel-proof/`.
 - Functional publication policy: freeze, prove, and review small owned-branch
