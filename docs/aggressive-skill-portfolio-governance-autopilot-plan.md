@@ -73,10 +73,14 @@
 - Writer `capacity-accounting-writer` owns slice two in stacked worktree
   `/Users/dfrysinger/code/dreaming-task-profile-accounting` on
   `feature/task-profile-capacity-accounting`, rebased onto frozen dependency
-  `96a7231`. Its frozen candidate is `e06e143`; Python compilation, diff
-  validation, and all 74 focused core tests pass. The coordinator now owns its
-  private work-conserving/accounting proof and later review. The slice cannot
-  mutate the reviewed slice-one worktree or publish independently.
+  `96a7231`. Round-one review found two must-fix accounting paths: pre-start
+  review exits were mislabeled as attempts, and a post-profile receipt reload
+  failure could emit duplicate queue and operation terminals. Frozen successor
+  `8bb1e60` gives pre-start exits truthful non-consuming outcomes, requires
+  every `newly-attempted` review row to link one operation, and keeps the
+  post-profile reload failure singly terminal while excluding it from review.
+  Python compilation, diff validation, and all 74 focused core tests pass. The
+  coordinator owns successor proof and finding-scoped round-two review.
 - `work-conserving-capacity-accounting` passed for candidate fingerprint
   `sha256:089efd1f1d26ffe611698847bf85537dd8fe0dbb01c76ab91916762158fe94b8`.
   Private scheduled-owner traces filled profile capacity 3/3 and review
@@ -84,11 +88,9 @@
   backlog and stopping bounds, reconciled two immutable pass receipts against
   independently derived identity totals, and rejected missing-terminal and
   duplicate-cache tampering. Formal round-one review of exact candidate
-  `e06e143` found one verified must-fix: a source revision that became stale
-  after candidate selection but before the executor call could be retained as
-  `newly-attempted` without a linked operation. The proof gate is reopened as
-  `STALE` while the slice owner adds truthful pre-start outcomes and validator
-  enforcement; the prior passing receipt remains historical evidence.
+  `e06e143` found the two verified must-fix paths above. The proof gate remains
+  `STALE` while exact successor `8bb1e60` replays the reached accounting claim;
+  the prior passing receipt remains historical evidence.
 - Open live-proof claims are registered as `INCONCLUSIVE` under
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/task-opportunity-profile-funnel-proof/`.
 - Functional publication policy: freeze, prove, and review small owned-branch
