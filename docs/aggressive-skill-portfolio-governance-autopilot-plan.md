@@ -89,8 +89,13 @@
   independently derived identity totals, and rejected missing-terminal and
   duplicate-cache tampering. Formal round-one review of exact candidate
   `e06e143` found the two verified must-fix paths above. The proof gate remains
-  `STALE` while exact successor `8bb1e60` replays the reached accounting claim;
-  the prior passing receipt remains historical evidence.
+  exact successor `8bb1e60` now has a current `PASS` receipt at fingerprint
+  `sha256:e0695026a1b651a6cccbf9c3c2119538acab4eaafc1412595f0a298543d5a4a4`.
+  The replay retained the original work-conserving and tamper checks and added
+  direct proof that a pre-call stale profile spends no slot while the next
+  candidate fills capacity, plus proof that a post-profile receipt reload
+  failure remains singly terminal and cannot reach review. Finding-scoped
+  round-two review is in flight; the earlier receipt remains historical.
 - Read-only mapper `canonical-occurrence-mapper` owns the slice-three inventory
   for canonical task-occurrence identity, source-derived 30-day authority,
   merge/split conflict correction, and durable three-occurrence recurrence.
