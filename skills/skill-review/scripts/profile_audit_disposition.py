@@ -6,6 +6,9 @@ import hashlib
 import json
 from typing import Any, NoReturn
 
+CURRENT_PROFILE_AUDIT_CONTRACT_VERSION = 1
+KNOWN_PROFILE_AUDIT_CONTRACT_VERSIONS = frozenset({1})
+
 
 class ProfileAuditDispositionError(ValueError):
     def __init__(self, reason: str):
@@ -39,7 +42,7 @@ def build_profile_audit_disposition(
     disposition = {
         "schema_version": 1,
         "kind": "task_profile_audit_disposition",
-        "profile_audit_contract_version": 1,
+        "profile_audit_contract_version": CURRENT_PROFILE_AUDIT_CONTRACT_VERSION,
         "profile_id": profile["profile_id"],
         "task_key": profile["task_key"],
         "profile_sha256": _digest(profile),
@@ -110,7 +113,8 @@ def validate_profile_audit_disposition(
     if (
         disposition.get("schema_version") != 1
         or disposition.get("kind") != "task_profile_audit_disposition"
-        or disposition.get("profile_audit_contract_version") != 1
+        or disposition.get("profile_audit_contract_version")
+        not in KNOWN_PROFILE_AUDIT_CONTRACT_VERSIONS
         or disposition.get("outcome") != "reviewed-terminal-v1"
     ):
         _reject("disposition-contract")
@@ -118,13 +122,7 @@ def validate_profile_audit_disposition(
         "profile_id": profile.get("profile_id"),
         "task_key": profile.get("task_key"),
         "profile_sha256": _digest(profile),
-        "profile_receipt_sha256": receipt.get("receipt_sha256"),
-        "profile_set_id": receipt.get("profile_set_id"),
-        "snapshot_sha256": receipt.get("snapshot_sha256"),
         "qualified_session_id": receipt.get("qualified_session_id"),
-        "source_revision": receipt.get("source_revision"),
-        "profile_executor": receipt.get("executor"),
-        "profile_executor_identity": receipt.get("executor_identity"),
     }
     if any(disposition.get(key) != value for key, value in expected.items()):
         _reject("disposition-binding")
@@ -143,6 +141,21 @@ def validate_profile_audit_disposition(
         )
         or not isinstance(disposition.get("review_executor_identity"), dict)
         or not disposition["review_executor_identity"]
+        or any(
+            not isinstance(disposition.get(field), str)
+            or not disposition[field].startswith("sha256:")
+            for field in (
+                "profile_receipt_sha256",
+                "profile_set_id",
+                "snapshot_sha256",
+            )
+        )
+        or not isinstance(disposition.get("source_revision"), str)
+        or not disposition["source_revision"]
+        or not isinstance(disposition.get("profile_executor"), str)
+        or not disposition["profile_executor"]
+        or not isinstance(disposition.get("profile_executor_identity"), dict)
+        or not disposition["profile_executor_identity"]
         or isinstance(disposition.get("reviewed_at"), bool)
         or not isinstance(disposition.get("reviewed_at"), int)
     ):

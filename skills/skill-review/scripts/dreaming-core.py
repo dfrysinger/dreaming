@@ -46,6 +46,7 @@ from task_profile_receipt import (
     validate_task_profile_receipt,
 )
 from profile_audit_disposition import (
+    CURRENT_PROFILE_AUDIT_CONTRACT_VERSION,
     ProfileAuditDispositionError,
     build_profile_audit_disposition,
     validate_profile_audit_disposition,
@@ -1732,6 +1733,9 @@ class DreamingRuntime:
         current = source.call("inspect", session=qualified_session_id)["session"]
         validate_identity(current, source_name)
         if current["source_revision"] != source_revision:
+            self._mark_queue(
+                qualified_session_id, source_revision, "superseded"
+            )
             self._admit(current)
             raise RuntimeFailure("profile-audit-stale", qualified_session_id)
         snapshot_path, _identity = self.render_snapshot(
@@ -1791,6 +1795,17 @@ class DreamingRuntime:
             ) from error
         return disposition
 
+    def profile_audit_disposition_admission_for(
+        self, target: ProfileAuditTarget
+    ) -> tuple[str, dict[str, Any] | None]:
+        disposition = self.profile_audit_disposition_for(target)
+        if disposition is None:
+            return "undispositioned", None
+        version = disposition["profile_audit_contract_version"]
+        if version != CURRENT_PROFILE_AUDIT_CONTRACT_VERSION:
+            return "superseded-requires-repair-backfill", disposition
+        return "terminal", disposition
+
     def _record_profile_audit_disposition(
         self,
         target: ProfileAuditTarget,
@@ -1821,9 +1836,9 @@ class DreamingRuntime:
         path = self._profile_audit_disposition_path(target.profile["profile_id"])
         if path.exists():
             existing = self.profile_audit_disposition_for(target)
-            if existing != disposition:
+            if existing is None:
                 raise RuntimeFailure(
-                    "profile-audit-disposition-collision", target.profile["profile_id"]
+                    "profile-audit-disposition-invalid", target.profile["profile_id"]
                 )
             return existing
         atomic_json(path, disposition, mode=0o400)
@@ -1838,6 +1853,7 @@ class DreamingRuntime:
         executor_id: str,
         executor: ExecutableAdapter,
         profile_id: str,
+        on_review_operation_start: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         targets = self.profile_audit_targets_for(
             source_name,
@@ -1853,10 +1869,16 @@ class DreamingRuntime:
         )
         if target is None:
             raise RuntimeFailure("profile-audit-profile-unavailable", profile_id)
-        existing = self.profile_audit_disposition_for(target)
-        if existing is not None:
+        admission, existing = self.profile_audit_disposition_admission_for(target)
+        if admission == "terminal" and existing is not None:
             return {
                 "status": "already-dispositioned",
+                "profile_id": profile_id,
+                "disposition_sha256": existing["disposition_sha256"],
+            }
+        if admission == "superseded-requires-repair-backfill":
+            return {
+                "status": "profile-audit-disposition-superseded-requires-repair-backfill",
                 "profile_id": profile_id,
                 "disposition_sha256": existing["disposition_sha256"],
             }
@@ -1867,6 +1889,7 @@ class DreamingRuntime:
             [(executor_id, executor)],
             expected_revision=source_revision,
             profile_audit_target=target,
+            on_review_operation_start=on_review_operation_start,
         )
 
     def task_profile_evidence_present_for(
@@ -2850,6 +2873,7 @@ class DreamingRuntime:
         executors: list[tuple[str, ExecutableAdapter]],
         expected_revision: str | None = None,
         profile_audit_target: ProfileAuditTarget | None = None,
+        on_review_operation_start: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         attempts = self._state(self.paths.attempts, [])
         allowed = [
@@ -3079,6 +3103,8 @@ class DreamingRuntime:
                         run_arguments["task_profile_id"] = (
                             profile_audit_target.profile["profile_id"]
                         )
+                    if on_review_operation_start is not None:
+                        on_review_operation_start()
                     result = executor.call("run", **run_arguments)
                 except RuntimeFailure:
                     self._clear_transaction(
@@ -8170,6 +8196,10 @@ def scheduled_run() -> dict[str, Any]:
         },
         "reviews": [],
         "deferred_reviews": 0,
+        "review_budget": {
+            "max_operations": settings["max_reviews_per_run"],
+            "started_operations": 0,
+        },
         "profile_review_skips": [],
         "publication": [],
         "errors": adapter_errors,
@@ -8800,7 +8830,9 @@ def scheduled_run() -> dict[str, Any]:
             continue
         for target in targets:
             try:
-                disposition = core.profile_audit_disposition_for(target)
+                disposition_admission, disposition = (
+                    core.profile_audit_disposition_admission_for(target)
+                )
             except RuntimeFailure as error:
                 report["profile_review_skips"].append(
                     {
@@ -8810,12 +8842,28 @@ def scheduled_run() -> dict[str, Any]:
                     }
                 )
                 continue
-            if disposition is not None:
+            if disposition_admission == "terminal" and disposition is not None:
                 report["profile_review_skips"].append(
                     {
                         "session_id": item["qualified_session_id"],
                         "profile_id": target.profile["profile_id"],
                         "code": "already-dispositioned",
+                    }
+                )
+                continue
+            if (
+                disposition_admission
+                == "superseded-requires-repair-backfill"
+                and disposition is not None
+            ):
+                report["profile_review_skips"].append(
+                    {
+                        "session_id": item["qualified_session_id"],
+                        "profile_id": target.profile["profile_id"],
+                        "code": (
+                            "profile-audit-disposition-superseded"
+                            "-requires-repair-backfill"
+                        ),
                     }
                 )
                 continue
@@ -8837,10 +8885,18 @@ def scheduled_run() -> dict[str, Any]:
         executor,
         target,
     ) in profile_review_candidates:
-        if len(report["reviews"]) >= settings["max_reviews_per_run"]:
+        if (
+            report["review_budget"]["started_operations"]
+            >= settings["max_reviews_per_run"]
+        ):
             report["deferred_reviews"] += 1
             continue
         executor_id = target.receipt.payload["executor"]
+        started_before = report["review_budget"]["started_operations"]
+
+        def record_review_start() -> None:
+            report["review_budget"]["started_operations"] += 1
+
         try:
             result = core.review_profile(
                 source_name,
@@ -8850,8 +8906,28 @@ def scheduled_run() -> dict[str, Any]:
                 executor_id,
                 executor,
                 target.profile["profile_id"],
+                on_review_operation_start=record_review_start,
             )
-            if result["status"] != "already-dispositioned":
+            if (
+                result["status"]
+                == "profile-audit-disposition-superseded-requires-repair-backfill"
+            ):
+                report["profile_review_skips"].append(
+                    {
+                        "session_id": qualified_session_id,
+                        "profile_id": target.profile["profile_id"],
+                        "code": result["status"],
+                    }
+                )
+            elif result["status"] == "already-dispositioned":
+                report["profile_review_skips"].append(
+                    {
+                        "session_id": qualified_session_id,
+                        "profile_id": target.profile["profile_id"],
+                        "code": "already-dispositioned",
+                    }
+                )
+            else:
                 report["reviews"].append(
                     {
                         "session_id": qualified_session_id,
@@ -8860,14 +8936,20 @@ def scheduled_run() -> dict[str, Any]:
                     }
                 )
         except RuntimeFailure as error:
-            report["errors"].append(
-                {
-                    "phase": "review",
-                    "session_id": qualified_session_id,
-                    "profile_id": target.profile["profile_id"],
-                    "code": error.code,
-                }
+            destination = (
+                report["errors"]
+                if report["review_budget"]["started_operations"] > started_before
+                else report["profile_review_skips"]
             )
+            record = {
+                "session_id": qualified_session_id,
+                "profile_id": target.profile["profile_id"],
+                "code": error.code,
+            }
+            if destination is report["errors"]:
+                destination.append({"phase": "review", **record})
+            else:
+                destination.append(record)
     for publisher_name, publisher in retired_publishers.items():
         try:
             publisher.call("remove")
