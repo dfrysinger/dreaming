@@ -806,4 +806,5 @@ fewer than three current canonical task occurrences.
       halt, sole-scheduler ownership, one natural scheduled run, browser
       accounting, rollback, and exact restore.
 - [ ] The corrected implementation, paired review, proof receipts, plan baton,
-      and local commits are complete; nothing is pushed.
+      and local commits are complete, and each independently useful functional
+      slice has a reviewed PR targeting `feature/multi-cli-dreaming`.

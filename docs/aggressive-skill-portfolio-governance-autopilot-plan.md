@@ -24,6 +24,21 @@
   `Definition of Done: Profile-derived task-opportunity funnel` is complete.
 - Current phase: implementation preparation under
   `/dfrysinger-skills:development-loop`; reframe status remains `CLEAR`.
+- Active first-slice tracer: prove that only current, reusable,
+  undispositioned task profiles can start expensive review, while raw-session
+  reviews remain historical. Implementation workspace:
+  `/Users/dfrysinger/code/dreaming-task-profile-audit`; branch:
+  `feature/task-profile-audit-admission`; expected evidence:
+  `profile-derived-review-admission`.
+- Read-only mapper `slice-one-mapper` owns the first-slice code and test-path
+  inventory. Its integration boundary is an implementation map only; it does
+  not write files or own the candidate.
+- Writer `profile-audit-writer` owns the isolated first-slice implementation
+  and focused core tests in
+  `/Users/dfrysinger/code/dreaming-task-profile-audit` on
+  `feature/task-profile-audit-admission`. It owes one committed candidate and
+  focused test results; the coordinator retains tracer admission, review,
+  publication, and integration authority.
 - Open live-proof claims are registered as `INCONCLUSIVE` under
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/task-opportunity-profile-funnel-proof/`.
 - Functional publication policy: freeze, prove, and review small owned-branch
