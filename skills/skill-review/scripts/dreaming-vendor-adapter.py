@@ -1840,6 +1840,7 @@ def task_profile_result_schema(
                 "minItems": 1,
                 "maxItems": 20,
             },
+            "goal_event_id": event_id_schema,
             "task_type": bounded_text,
             "abstract_summary": bounded_text,
             "reuse_value": {
@@ -1863,6 +1864,7 @@ def task_profile_result_schema(
         },
         "required": [
             "source_event_ids",
+            "goal_event_id",
             "task_type",
             "abstract_summary",
             "reuse_value",
@@ -1908,6 +1910,8 @@ def task_profile_prompt(snapshot: dict[str, Any]) -> str:
             "procedure_forbidden_for": ["one-off", "no-durable-learning"],
             "split_distinct_user_outcomes": True,
             "unique_source_event_sets": True,
+            "goal_event_must_be_one_supporting_user_event": True,
+            "model_must_not_supply_occurrence_time_or_identity": True,
             "do_not_infer_completion_without_evidence": True,
         },
         "result_schema": task_profile_result_schema(snapshot),

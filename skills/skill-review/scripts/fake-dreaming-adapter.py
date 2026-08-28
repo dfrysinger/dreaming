@@ -189,8 +189,10 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                         for event in snapshot.get("events", [])
                     ],
                 )
+                goal_event_id = template.get("goal_event_id", next((event_id for event_id in source_event_ids if next((event for event in snapshot.get("events", []) if event.get("source_event_id") == event_id and event.get("kind") == "user_message"), None) is not None), None))
                 model_profile = {
                     "source_event_ids": source_event_ids,
+                    "goal_event_id": goal_event_id,
                     "task_type": template["task_type"],
                     "abstract_summary": template["abstract_summary"],
                     "reuse_value": template["reuse_value"],
@@ -203,10 +205,13 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                         "task_state", "completed"
                     ),
                 }
+                # The model selects only the event identity.  The owner adds its timestamp.
+                model_profile.pop("goal_event_id")
                 procedure = model_profile["procedure"]
+                selected_profile = {**model_profile, "goal_event_id": goal_event_id}
                 profiles.append(
                     {
-                        **model_profile,
+                        **selected_profile,
                         "task_key": digest(
                             {
                                 "qualified_session_id": session_id,
@@ -216,7 +221,7 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                         "profile_id": digest(
                             {
                                 "qualified_session_id": session_id,
-                                **model_profile,
+                                **selected_profile,
                             }
                         ),
                         "procedure_fingerprint": (

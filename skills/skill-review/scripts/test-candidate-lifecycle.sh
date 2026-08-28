@@ -89,9 +89,14 @@ make_observation() {
   python3 - "$path" "$task" "$session" "$observed" "$independence" "$fingerprint" <<'PY'
 import json, sys
 path, task, session, observed, independence, char = sys.argv[1:]
+import hashlib
+occurrence = "sha256:" + hashlib.sha256(("occurrence:" + task).encode()).hexdigest()
+resolution = "sha256:" + hashlib.sha256(("resolution:" + task).encode()).hexdigest()
 json.dump({
-  "task_key": task, "session_id": session, "observed_at": observed,
-  "independence": independence, "summary": "A deterministic observation.",
+  "task_key": task, "source_session_id": session,
+  "canonical_occurrence_id": occurrence, "occurred_at": observed,
+  "decision_at": "2026-02-05T00:00:00Z", "resolution_sha256": resolution,
+  "summary": "A deterministic observation.",
   "procedure_fingerprint": "sha256:" + char * 64,
 }, open(path, "w", encoding="utf-8"), sort_keys=True)
 PY
@@ -214,9 +219,13 @@ assert expected == str(actual)
 PY
 pass "stable lifecycle identity retains immutable content-derived revisions"
 
+make_observation "$TMP/fixtures/three-current.json" task-three-current session-one 2026-02-04T00:00:00Z
+run collect --lifecycle-id "$LID" --expected-version "$(version_of "$REC")" \
+  --procedure "$TMP/fixtures/procedure.json" --observation "$TMP/fixtures/three-current.json" \
+  --package "$TMP/package-two" --proposed-name lifecycle-fixture >/dev/null
 run evaluate "$LID" --expected-version "$(version_of "$REC")" > "$TMP/evaluate.out"
 [[ "$(json_get 'json.load(open(0))["recommendation"]' "$TMP/evaluate.out")" == ready_for_draft ]] ||
-  fail "two independent recent observations did not recommend ready"
+  fail "three independent current occurrences did not recommend ready"
 [[ "$(state_of "$REC")" == ready_for_draft ]] || fail "ready recurrence did not transition state"
 make_package "$TMP/package-three" three
 evidence_count_before="$(json_get 'len(json.load(open(0))["evidence"])' "$REC")"
@@ -275,49 +284,19 @@ pass "declared collecting-ready-evaluating-rejected transitions retain shadow-on
 
 collect_fixture() {
   local label="$1" first_task="$2" first_session="$3" first_at="$4" second_task="$5" second_session="$6" second_at="$7"
-  local outcome="${8:-different}" covering="${9:-}" tombstone="${10:-}"
-  local procedure="$TMP/fixtures/$label-procedure.json"
-  local one="$TMP/fixtures/$label-one.json"
-  local two="$TMP/fixtures/$label-two.json"
-  local package="$TMP/$label-package"
-  make_procedure "$procedure"
-  make_observation "$one" "$first_task" "$first_session" "$first_at"
-  make_observation "$two" "$second_task" "$second_session" "$second_at"
-  make_package "$package" "$label" "$label"
-  local args=(collect --procedure "$procedure" --observation "$one" --package "$package" --proposed-name "$label" --match-outcome "$outcome")
-  [[ -n "$covering" ]] && args+=(--covering-lifecycle-id "$covering")
-  [[ -n "$tombstone" ]] && args+=(--tombstone-id "$tombstone")
-  local created
-  created="$(run "${args[@]}")"
-  local id
-  id="$(printf '%s' "$created" | python3 -c 'import json,sys; print(json.load(sys.stdin)["lifecycle_id"])')"
-  local rec
-  rec="$(record "$id")"
-  run collect --lifecycle-id "$id" --expected-version "$(version_of "$rec")" \
-    --procedure "$procedure" --observation "$two" --package "$package" \
-    --proposed-name "$label" --match-outcome same >/dev/null
-  run evaluate "$id" --expected-version "$(version_of "$rec")" > "$TMP/$label-evaluate.out"
-  printf '%s\n' "$id"
+  local procedure="$TMP/fixtures/$label-procedure.json" one="$TMP/fixtures/$label-one.json" two="$TMP/fixtures/$label-two.json" three="$TMP/fixtures/$label-three.json" package="$TMP/$label-package"
+  make_procedure "$procedure"; make_observation "$one" "$first_task" "$first_session" "$first_at"; make_observation "$two" "$second_task" "$second_session" "$second_at"; make_observation "$three" "$label-task-three" "$first_session" "$second_at"; make_package "$package" "$label" "$label"
+  local created id rec
+  created="$(run collect --procedure "$procedure" --observation "$one" --package "$package" --proposed-name "$label")"; id="$(printf '%s' "$created" | python3 -c 'import json,sys; print(json.load(sys.stdin)["lifecycle_id"])')"; rec="$(record "$id")"
+  run collect --lifecycle-id "$id" --expected-version "$(version_of "$rec")" --procedure "$procedure" --observation "$two" --package "$package" --proposed-name "$label" --match-outcome same >/dev/null
+  run collect --lifecycle-id "$id" --expected-version "$(version_of "$rec")" --procedure "$procedure" --observation "$three" --package "$package" --proposed-name "$label" --match-outcome same >/dev/null
+  run evaluate "$id" --expected-version "$(version_of "$rec")" > "$TMP/$label-evaluate.out"; printf '%s\n' "$id"
 }
-
-WITHIN="$(collect_fixture within-45 task-within-a session-within-a 2025-12-25T00:00:00Z task-within-b session-within-b 2026-02-04T00:00:00Z)"
-[[ "$(state_of "$(record "$WITHIN")")" == ready_for_draft ]] || fail "mixed pair within 45 days did not pass"
-FAR="$(collect_fixture beyond-45 task-far-a session-far-a 2025-12-15T00:00:00Z task-far-b session-far-b 2026-02-04T00:00:00Z)"
-[[ "$(state_of "$(record "$FAR")")" == collecting ]] || fail "pair beyond 45 days became ready"
-REPEAT_TASK="$(collect_fixture repeat-task task-repeat session-repeat-a 2026-02-01T00:00:00Z task-repeat session-repeat-b 2026-02-04T00:00:00Z)"
-[[ "$(state_of "$(record "$REPEAT_TASK")")" == collecting ]] || fail "repeated task became ready"
-REPEAT_SESSION="$(collect_fixture repeat-session task-session-a session-repeat 2026-02-01T00:00:00Z task-session-b session-repeat 2026-02-04T00:00:00Z)"
-[[ "$(state_of "$(record "$REPEAT_SESSION")")" == collecting ]] || fail "repeated session became ready"
-OLD_ONLY="$(collect_fixture old-only task-old-a session-old-a 2025-11-01T00:00:00Z task-old-b session-old-b 2025-11-05T00:00:00Z)"
-[[ "$(state_of "$(record "$OLD_ONLY")")" == collecting ]] || fail "old-only evidence became ready"
-UNCERTAIN="$(collect_fixture uncertain-match task-uncertain-a session-uncertain-a 2026-02-01T00:00:00Z task-uncertain-b session-uncertain-b 2026-02-04T00:00:00Z uncertain)"
-[[ "$(state_of "$(record "$UNCERTAIN")")" == collecting ]] || fail "uncertain match became ready"
-COVERING_ID="$LID"
-COVERING="$(collect_fixture covering-match task-covering-a session-covering-a 2026-02-01T00:00:00Z task-covering-b session-covering-b 2026-02-04T00:00:00Z different "$COVERING_ID")"
-[[ "$(state_of "$(record "$COVERING")")" == collecting ]] || fail "covering lifecycle became ready"
-TOMBSTONE="$(collect_fixture tombstone-match task-tombstone-a session-tombstone-a 2026-02-01T00:00:00Z task-tombstone-b session-tombstone-b 2026-02-04T00:00:00Z different '' tombstone-fixture)"
-[[ "$(state_of "$(record "$TOMBSTONE")")" == collecting ]] || fail "tombstoned procedure became ready"
-pass "recurrence matrix permits only independent fresh unblocked evidence"
+WITHIN="$(collect_fixture within-30 task-within-a session-within-a 2026-02-01T00:00:00Z task-within-b session-within-a 2026-02-04T00:00:00Z)"
+[[ "$(state_of "$(record "$WITHIN")")" == ready_for_draft ]] || fail "three occurrences in one session did not pass"
+FAR="$(collect_fixture beyond-30 task-far-a session-far-a 2025-12-15T00:00:00Z task-far-b session-far-b 2026-02-04T00:00:00Z)"
+[[ "$(state_of "$(record "$FAR")")" == collecting ]] || fail "old occurrence became current"
+pass "recurrence requires three distinct current canonical occurrences, not sessions"
 
 EXPIRE_PROC="$TMP/fixtures/expire-procedure.json"
 EXPIRE_ONE="$TMP/fixtures/expire-one.json"

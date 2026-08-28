@@ -1349,14 +1349,61 @@ class DreamingRuntime:
             raise RuntimeFailure(
                 "task-profile-invalid", "snapshot identity"
             )
-        profiles = result.get("profiles")
+        model_profiles = result.get("profiles")
         observed = parse_time(reviewed_identity.get("updated_at"))
         if observed is None:
             raise RuntimeFailure("task-profile-invalid", "source observation time")
+        if not isinstance(model_profiles, list):
+            raise RuntimeFailure("task-profile-invalid", "profiles")
+        events = snapshot.get("events")
+        if not isinstance(events, list):
+            raise RuntimeFailure("task-profile-invalid", "snapshot events")
+        event_by_id = {
+            event.get("source_event_id"): event for event in events
+            if isinstance(event, dict) and isinstance(event.get("source_event_id"), str)
+        }
+        profiles: list[dict[str, Any]] = []
+        legacy_profiles = all(isinstance(profile, dict) and "goal_event_id" not in profile for profile in model_profiles)
+        expected_model_keys = {
+            "source_event_ids", "goal_event_id", "task_type", "abstract_summary",
+            "reuse_value", "procedure", "confidence", "sensitive_source", "task_state",
+            "task_key", "profile_id", "procedure_fingerprint",
+        }
+        for profile in model_profiles:
+            expected = expected_model_keys - {"goal_event_id"} if legacy_profiles else expected_model_keys
+            if not isinstance(profile, dict) or set(profile) != expected:
+                raise RuntimeFailure("task-profile-invalid", "profile contract")
+            event_ids = profile.get("source_event_ids")
+            if legacy_profiles:
+                semantic = {key: profile[key] for key in expected - {"task_key", "profile_id", "procedure_fingerprint"}}
+                owned = {**semantic,
+                    "task_key": digest({"qualified_session_id": reviewed_identity["qualified_session_id"], "source_event_ids": event_ids}),
+                    "profile_id": digest({"qualified_session_id": reviewed_identity["qualified_session_id"], **semantic}),
+                    "procedure_fingerprint": digest(semantic["procedure"]) if isinstance(semantic["procedure"], dict) else None}
+                profiles.append(owned)
+                continue
+            goal_event_id = profile.get("goal_event_id")
+            goal_event = event_by_id.get(goal_event_id)
+            if (not isinstance(event_ids, list) or goal_event_id not in event_ids
+                    or not isinstance(goal_event, dict) or goal_event.get("kind") != "user_message"):
+                raise RuntimeFailure("task-profile-invalid", "goal event")
+            goal_time = parse_time(goal_event.get("timestamp"))
+            if goal_time is None or goal_time > datetime.fromtimestamp(self.now(), timezone.utc):
+                raise RuntimeFailure("task-profile-invalid", "goal timestamp")
+            # Never accept model-owned identities or occurrence times: retain only its semantic selection.
+            semantic = {key: profile[key] for key in expected_model_keys - {"task_key", "profile_id", "procedure_fingerprint"}}
+            owned = {
+                **semantic,
+                "occurred_at": goal_time.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+                "task_key": digest({"qualified_session_id": reviewed_identity["qualified_session_id"], "source_event_ids": event_ids}),
+                "profile_id": digest({"qualified_session_id": reviewed_identity["qualified_session_id"], **semantic}),
+                "procedure_fingerprint": digest(semantic["procedure"]) if isinstance(semantic["procedure"], dict) else None,
+            }
+            profiles.append(owned)
         receipt = {
-            "schema_version": 1,
+            "schema_version": 1 if legacy_profiles else 2,
             "kind": "task_profile_receipt",
-            "profile_set_id": result["profile_set_id"],
+            "profile_set_id": digest({"snapshot_sha256": snapshot_sha256, "qualified_session_id": reviewed_identity["qualified_session_id"], "profiles": profiles}),
             "snapshot_sha256": snapshot_sha256,
             "source_revision": reviewed_identity["source_revision"],
             "qualified_session_id": reviewed_identity["qualified_session_id"],
@@ -2259,11 +2306,24 @@ class DreamingRuntime:
             task_key = task_profile["task_key"]
             independence = "verified"
             summary = task_profile["abstract_summary"]
+        if task_profile is None or not isinstance(task_profile.get("goal_event_id"), str) or not isinstance(task_profile.get("occurred_at"), str):
+            # Immutable v1 receipts remain historical.  They can be reviewed but
+            # must never be converted into v2 recurrence authority.
+            return {"status": "legacy-evidence-no-current-occurrence-authority", "shadow_only": True, "profile_match": profile_match}
+        occurred_at = parse_time(task_profile["occurred_at"])
+        decision_at = datetime.fromtimestamp(self.now(), timezone.utc)
+        if occurred_at is None or occurred_at > decision_at:
+            raise RuntimeFailure("candidate-lifecycle-failed", "profile occurrence time is invalid")
+        # This source-goal identity is only a provisional occurrence identity.  A
+        # profile-bound resolution may later alias it; task_key is never reused as it.
+        canonical_occurrence_id = digest({"qualified_session_id": reviewed_identity["qualified_session_id"], "goal_event_id": task_profile["goal_event_id"]})
         observation = {
             "task_key": task_key,
-            "session_id": reviewed_identity["qualified_session_id"],
-            "observed_at": observed.astimezone(timezone.utc).isoformat(),
-            "independence": independence,
+            "source_session_id": reviewed_identity["qualified_session_id"],
+            "canonical_occurrence_id": canonical_occurrence_id,
+            "occurred_at": occurred_at.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "decision_at": decision_at.replace(microsecond=0).isoformat().replace("+00:00", "Z"),
+            "resolution_sha256": digest({"task_key": task_key, "canonical_occurrence_id": canonical_occurrence_id, "profile_id": task_profile["profile_id"]}),
             "summary": summary,
             "procedure_fingerprint": procedure["match_fingerprint"],
         }
