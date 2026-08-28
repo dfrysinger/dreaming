@@ -77,14 +77,18 @@
   validation, and all 74 focused core tests pass. The coordinator now owns its
   private work-conserving/accounting proof and later review. The slice cannot
   mutate the reviewed slice-one worktree or publish independently.
-- `work-conserving-capacity-accounting` is `PASS` for candidate fingerprint
+- `work-conserving-capacity-accounting` passed for candidate fingerprint
   `sha256:089efd1f1d26ffe611698847bf85537dd8fe0dbb01c76ab91916762158fe94b8`.
   Private scheduled-owner traces filled profile capacity 3/3 and review
   capacity 3/3 after leading non-consuming rows, retained exact deferred
   backlog and stopping bounds, reconciled two immutable pass receipts against
   independently derived identity totals, and rejected missing-terminal and
-  duplicate-cache tampering. Formal round-one dual review is in flight for
-  exact candidate `e06e143`.
+  duplicate-cache tampering. Formal round-one review of exact candidate
+  `e06e143` found one verified must-fix: a source revision that became stale
+  after candidate selection but before the executor call could be retained as
+  `newly-attempted` without a linked operation. The proof gate is reopened as
+  `STALE` while the slice owner adds truthful pre-start outcomes and validator
+  enforcement; the prior passing receipt remains historical evidence.
 - Open live-proof claims are registered as `INCONCLUSIVE` under
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/task-opportunity-profile-funnel-proof/`.
 - Functional publication policy: freeze, prove, and review small owned-branch
