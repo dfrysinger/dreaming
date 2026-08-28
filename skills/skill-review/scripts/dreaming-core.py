@@ -8942,6 +8942,21 @@ def scheduled_run() -> dict[str, Any]:
                 if result["status"] == "stale-before-profile"
                 else "profiled"
             )
+            receipt = None
+            receipt_error = None
+            if terminal == "profiled":
+                try:
+                    receipt = core.indexed_task_profile_receipt_for(
+                        item["qualified_session_id"],
+                        item["source_revision"],
+                        executor_name,
+                    )
+                    if receipt is None:
+                        raise RuntimeFailure(
+                            "task-profile-index-invalid", "new receipt is absent"
+                        )
+                except RuntimeFailure as error:
+                    receipt_error = error
             if profile_started:
                 profile_operations.append(
                     {
@@ -8957,14 +8972,17 @@ def scheduled_run() -> dict[str, Any]:
                 operation_id if profile_started else None,
             )
             report["profiles"].append({"session_id": item["qualified_session_id"], **result})
-            if terminal == "profiled":
-                receipt = core.indexed_task_profile_receipt_for(
-                    item["qualified_session_id"], item["source_revision"], executor_name
+            if receipt_error is not None:
+                profile_failed_sessions.add(item["qualified_session_id"])
+                report["profile_failures"].append(
+                    {
+                        "session_id": item["qualified_session_id"],
+                        "code": receipt_error.code,
+                        "message": receipt_error.message,
+                    }
                 )
-                if receipt is None:
-                    raise RuntimeFailure(
-                        "task-profile-index-invalid", "new receipt is absent"
-                    )
+                continue
+            if receipt is not None:
                 account_profiles(item, receipt)
         except RuntimeFailure as error:
             if error.code == "profile-operation-bound":
