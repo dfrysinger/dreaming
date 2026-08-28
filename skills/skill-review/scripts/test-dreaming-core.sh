@@ -2223,6 +2223,154 @@ class RuntimeTest(unittest.TestCase):
                 {"max_profile_elapsed_seconds": 1801}
             )
 
+    def test_task_pass_accounting_reconciles_and_fails_closed(self) -> None:
+        accounting = sys.modules["task_pass_accounting"]
+        queue_rows = [
+            {
+                "queue_row_id": f"queue-{index}",
+                "outcome": outcome,
+                "profile_operation_id": operation,
+            }
+            for index, (outcome, operation) in enumerate(
+                [
+                    ("newly-attempted", "profile-one"),
+                    ("malformed", "profile-two"),
+                    ("profile-failed", "profile-three"),
+                    ("cached-current-receipt", None),
+                    ("stale-superseded", None),
+                    ("eligible-deferred", None),
+                ],
+                1,
+            )
+        ]
+        receipt = accounting.build_task_pass_accounting_receipt(
+            pass_id="fixture-pass",
+            queue_rows=queue_rows,
+            profile_operations=[
+                {
+                    "operation_id": "profile-one",
+                    "queue_row_id": "queue-1",
+                    "terminal": "profiled",
+                },
+                {
+                    "operation_id": "profile-two",
+                    "queue_row_id": "queue-2",
+                    "terminal": "malformed",
+                },
+                {
+                    "operation_id": "profile-three",
+                    "queue_row_id": "queue-3",
+                    "terminal": "failed",
+                },
+            ],
+            profiles=[
+                {
+                    "profile_id": "profile-reusable",
+                    "queue_row_id": "queue-1",
+                    "profile_receipt_sha256": "sha256:" + "1" * 64,
+                    "terminal": "reusable-dispositioned",
+                },
+                {
+                    "profile_id": "profile-no-learning",
+                    "queue_row_id": "queue-4",
+                    "profile_receipt_sha256": "sha256:" + "2" * 64,
+                    "terminal": "no-learning",
+                },
+            ],
+            review_rows=[
+                {
+                    "review_row_id": "review-reusable",
+                    "queue_row_id": "queue-1",
+                    "profile_id": "profile-reusable",
+                    "profile_receipt_sha256": "sha256:" + "1" * 64,
+                    "outcome": "newly-attempted",
+                    "operation_id": "review-one",
+                },
+                {
+                    "review_row_id": "review-no-learning",
+                    "queue_row_id": "queue-4",
+                    "profile_id": "profile-no-learning",
+                    "profile_receipt_sha256": "sha256:" + "2" * 64,
+                    "outcome": "no-learning",
+                    "operation_id": None,
+                },
+                {
+                    "review_row_id": "review-deferred",
+                    "queue_row_id": "queue-6",
+                    "profile_id": "profile-reusable",
+                    "profile_receipt_sha256": "sha256:" + "1" * 64,
+                    "outcome": "eligible-deferred",
+                    "operation_id": None,
+                },
+            ],
+            review_operations=[
+                {
+                    "operation_id": "review-one",
+                    "profile_id": "profile-reusable",
+                    "profile_receipt_sha256": "sha256:" + "1" * 64,
+                    "terminal": "dispositioned",
+                }
+            ],
+            review_terminals=[
+                {
+                    "operation_id": "review-one",
+                    "profile_id": "profile-reusable",
+                    "profile_receipt_sha256": "sha256:" + "1" * 64,
+                    "terminal": "dispositioned",
+                }
+            ],
+            profile_stop_reason="session-limit",
+            review_stop_reason="review-operation-limit",
+        )
+        self.assertEqual(
+            accounting.validate_task_pass_accounting_receipt(receipt), receipt
+        )
+        missing_terminal = accounting.build_task_pass_accounting_receipt(
+            **{
+                key: value
+                for key, value in receipt.items()
+                if key
+                not in {
+                    "schema_version",
+                    "kind",
+                    "totals",
+                    "receipt_sha256",
+                    "review_terminals",
+                }
+            },
+            review_terminals=[],
+        )
+        with self.assertRaisesRegex(
+            accounting.TaskPassAccountingError, "review-operation-terminal-unmatched"
+        ):
+            accounting.validate_task_pass_accounting_receipt(missing_terminal)
+        duplicate_cached = accounting.build_task_pass_accounting_receipt(
+            **{
+                key: value
+                for key, value in receipt.items()
+                if key
+                not in {
+                    "schema_version",
+                    "kind",
+                    "totals",
+                    "receipt_sha256",
+                    "queue_rows",
+                }
+            },
+            queue_rows=[
+                *queue_rows,
+                {
+                    "queue_row_id": "queue-4",
+                    "outcome": "cached-current-receipt",
+                    "profile_operation_id": None,
+                },
+            ],
+        )
+        with self.assertRaisesRegex(
+            accounting.TaskPassAccountingError, "queue-identity"
+        ):
+            accounting.validate_task_pass_accounting_receipt(duplicate_cached)
+
     def test_malformed_profile_is_retained_without_failing_run(self) -> None:
         source_fixture = self.source_fixture([self.session("one", 1)])
         executor_fixture = self.write(
