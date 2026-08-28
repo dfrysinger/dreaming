@@ -48,10 +48,14 @@
   The retained receipt covers a mixed private scheduled-owner run, historical
   raw-review isolation, immutable idempotent replay, and one real Copilot model
   profile-to-selected-review-to-disposition path.
-- Formal round-one dual review is active for exact candidate `602ff3f`; Opus
-  reviewer `opus-profile-audit-review` and Terra reviewer
-  `terra-profile-audit-review` are read-only. PR publication remains closed
-  until both complete and no verified must-fix finding remains.
+- Formal round-one dual review completed for exact candidate `602ff3f` with
+  two verified must-fix findings. Terra found that terminal admission did not
+  revalidate the disposition's exact originating immutable receipt. Opus found
+  that successful profile audits never retired their raw queue revision, so
+  historical rows were re-swept indefinitely. The slice owner is preparing one
+  successor with original-receipt validation and a terminal `profile-audited`
+  queue state. The current PASS receipt remains historical evidence for
+  `602ff3f`; runtime-changing fixes will reopen the claim before round two.
 - Read-only mapper `capacity-accounting-mapper` owns the slice-two traversal
   and terminal-accounting inventory against the current integration tree. It
   completed a dependency-aware map: slice two must classify every queue row
