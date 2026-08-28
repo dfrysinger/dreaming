@@ -91,6 +91,12 @@
   `e06e143` found the two verified must-fix paths above. The proof gate remains
   `STALE` while exact successor `8bb1e60` replays the reached accounting claim;
   the prior passing receipt remains historical evidence.
+- Read-only mapper `canonical-occurrence-mapper` owns the slice-three inventory
+  for canonical task-occurrence identity, source-derived 30-day authority,
+  merge/split conflict correction, and durable three-occurrence recurrence.
+  It may inspect the current stacked candidate and reviewed design but cannot
+  write code or proof artifacts. Its integration boundary is a dependency-
+  aware implementation and test map consumed only after slice two closes.
 - Open live-proof claims are registered as `INCONCLUSIVE` under
   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/task-opportunity-profile-funnel-proof/`.
 - Functional publication policy: freeze, prove, and review small owned-branch
