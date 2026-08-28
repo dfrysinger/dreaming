@@ -22,7 +22,7 @@
   `docs/task-opportunity-evidence-autopilot-objective.md`
 - Hourly charter re-brief: schedule `#6`; stop it only after
   `Definition of Done: Profile-derived task-opportunity funnel` is complete.
-- Current phase: work-conserving capacity accounting proof under
+- Current phase: canonical task-occurrence slice preparation under
   `/dfrysinger-skills:development-loop`; reframe status remains `CLEAR`.
 - Active first-slice tracer: prove that only current, reusable,
   undispositioned task profiles can start expensive review, while raw-session
@@ -98,7 +98,8 @@
   reviewers marked both prior findings `RESOLVED` with no fix-delta finding.
   Frozen slice two is published as
   `https://github.com/dfrysinger/dreaming/pull/3`, targeting
-  `feature/multi-cli-dreaming`; the earlier receipt remains historical.
+  `feature/multi-cli-dreaming`, and merged there as `2644268`; the earlier
+  receipt remains historical.
 - Read-only mapper `canonical-occurrence-mapper` owns the slice-three inventory
   for canonical task-occurrence identity, source-derived 30-day authority,
   merge/split conflict correction, and durable three-occurrence recurrence.
