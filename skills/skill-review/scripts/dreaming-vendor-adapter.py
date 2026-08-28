@@ -2076,6 +2076,18 @@ def executor_run(args: argparse.Namespace) -> None:
                 "task-profile-context-too-large",
                 str(len(canonical(validated_context))),
             )
+        if args.task_profile_id:
+            selected = [
+                profile
+                for profile in validated_context["profiles"]
+                if profile.get("profile_id") == args.task_profile_id
+            ]
+            if len(selected) != 1:
+                raise AdapterError(
+                    "task-profile-receipt-invalid",
+                    f"{args.task_profile_receipt}: selected-profile",
+                )
+            validated_context = {**validated_context, "profiles": selected}
         if validated_context["profiles"]:
             task_profile_context = validated_context
     prompt = (
@@ -6152,6 +6164,7 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--mode", choices=("review", "profile"), default="review")
     run.add_argument("--task-profile-receipt")
     run.add_argument("--task-profile-executor")
+    run.add_argument("--task-profile-id")
     prepare = sub.add_parser("prepare")
     prepare.add_argument("--trial", required=True)
     normalize = sub.add_parser("normalize")

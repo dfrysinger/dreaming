@@ -45,6 +45,11 @@ from task_profile_receipt import (
     TaskProfileReceiptError,
     validate_task_profile_receipt,
 )
+from profile_audit_disposition import (
+    ProfileAuditDispositionError,
+    build_profile_audit_disposition,
+    validate_profile_audit_disposition,
+)
 
 CONTRACT_VERSION = 1
 TASK_PROFILE_CAPABILITY = "task-profile-v2"
@@ -427,6 +432,12 @@ class TaskProfileBinding:
     reason: str | None = None
 
 
+@dataclass(frozen=True)
+class ProfileAuditTarget:
+    receipt: TaskProfileReceipt
+    profile: dict[str, Any]
+
+
 def validate_identity(session: dict[str, Any], expected_source: str | None = None) -> None:
     required = {
         "source",
@@ -514,6 +525,10 @@ class RuntimePaths:
     @property
     def task_profile_index(self) -> Path:
         return self.state / "task-profile-index.json"
+
+    @property
+    def profile_audit_dispositions(self) -> Path:
+        return self.state / "profile-audit-dispositions" / "v1"
 
     @property
     def bundles(self) -> Path:
@@ -1702,6 +1717,158 @@ class DreamingRuntime:
             context=context,
         )
 
+    def profile_audit_targets_for(
+        self,
+        source_name: str,
+        source: ExecutableAdapter,
+        qualified_session_id: str,
+        source_revision: str,
+        executor_id: str,
+        executor: ExecutableAdapter,
+    ) -> list[ProfileAuditTarget]:
+        """Resolve every reusable profile without spending a model call."""
+        if not executor.supports(TASK_PROFILE_CAPABILITY):
+            raise RuntimeFailure("profile-audit-executor-unsupported", executor_id)
+        current = source.call("inspect", session=qualified_session_id)["session"]
+        validate_identity(current, source_name)
+        if current["source_revision"] != source_revision:
+            self._admit(current)
+            raise RuntimeFailure("profile-audit-stale", qualified_session_id)
+        snapshot_path, _identity = self.render_snapshot(
+            source_name, source, executor_id, qualified_session_id
+        )
+        binding = self.task_profile_binding_for(
+            qualified_session_id,
+            source_revision,
+            executor_id,
+            snapshot_path,
+            executor.identity,
+        )
+        if binding.status == "absent":
+            raise RuntimeFailure("profile-audit-receipt-unavailable", qualified_session_id)
+        if binding.status != "bound" or binding.receipt is None or binding.context is None:
+            raise RuntimeFailure(
+                "profile-audit-receipt-unbound",
+                binding.reason or binding.status,
+            )
+        profiles = binding.context.get("profiles")
+        if not isinstance(profiles, list):
+            raise RuntimeFailure("profile-audit-receipt-invalid", "profiles")
+        # A receipt can produce multiple review units.  Callers intentionally
+        # enumerate this list rather than treating the receipt as one unit.
+        return [
+            ProfileAuditTarget(binding.receipt, profile)
+            for profile in profiles
+            if isinstance(profile, dict)
+        ]
+
+    def _profile_audit_disposition_path(self, profile_id: str) -> Path:
+        if not isinstance(profile_id, str) or not re.fullmatch(
+            r"sha256:[0-9a-f]{64}", profile_id
+        ):
+            raise RuntimeFailure("profile-audit-disposition-invalid", "profile-id")
+        return (
+            self.paths.profile_audit_dispositions
+            / f"{profile_id.removeprefix('sha256:')}.json"
+        )
+
+    def profile_audit_disposition_for(
+        self, target: ProfileAuditTarget
+    ) -> dict[str, Any] | None:
+        path = self._profile_audit_disposition_path(target.profile["profile_id"])
+        if not path.exists():
+            return None
+        try:
+            disposition = validate_profile_audit_disposition(
+                read_json(path, {}),
+                receipt=target.receipt.payload,
+                profile=target.profile,
+            )
+        except ProfileAuditDispositionError as error:
+            raise RuntimeFailure(
+                "profile-audit-disposition-invalid",
+                f"{path}: {error.reason}",
+            ) from error
+        return disposition
+
+    def _record_profile_audit_disposition(
+        self,
+        target: ProfileAuditTarget,
+        executor_id: str,
+        executor_identity: dict[str, Any],
+        result: dict[str, Any],
+    ) -> dict[str, Any]:
+        review_result = {
+            key: result.get(key)
+            for key in (
+                "terminal_route",
+                "summary",
+                "routing_reason",
+                "draft_reviews",
+                "artifact_commit",
+                "policy_deferred",
+            )
+            if key in result
+        }
+        disposition = build_profile_audit_disposition(
+            receipt=target.receipt.payload,
+            profile=target.profile,
+            review_executor=executor_id,
+            review_executor_identity=executor_identity,
+            review_result=review_result,
+            reviewed_at=self.now(),
+        )
+        path = self._profile_audit_disposition_path(target.profile["profile_id"])
+        if path.exists():
+            existing = self.profile_audit_disposition_for(target)
+            if existing != disposition:
+                raise RuntimeFailure(
+                    "profile-audit-disposition-collision", target.profile["profile_id"]
+                )
+            return existing
+        atomic_json(path, disposition, mode=0o400)
+        return disposition
+
+    def review_profile(
+        self,
+        source_name: str,
+        source: ExecutableAdapter,
+        qualified_session_id: str,
+        source_revision: str,
+        executor_id: str,
+        executor: ExecutableAdapter,
+        profile_id: str,
+    ) -> dict[str, Any]:
+        targets = self.profile_audit_targets_for(
+            source_name,
+            source,
+            qualified_session_id,
+            source_revision,
+            executor_id,
+            executor,
+        )
+        target = next(
+            (item for item in targets if item.profile.get("profile_id") == profile_id),
+            None,
+        )
+        if target is None:
+            raise RuntimeFailure("profile-audit-profile-unavailable", profile_id)
+        existing = self.profile_audit_disposition_for(target)
+        if existing is not None:
+            return {
+                "status": "already-dispositioned",
+                "profile_id": profile_id,
+                "disposition_sha256": existing["disposition_sha256"],
+            }
+        return self.review(
+            source_name,
+            source,
+            qualified_session_id,
+            [(executor_id, executor)],
+            expected_revision=source_revision,
+            profile_audit_target=target,
+        )
+
     def task_profile_evidence_present_for(
         self,
         qualified_session_id: str,
@@ -2682,6 +2849,7 @@ class DreamingRuntime:
         qualified_session_id: str,
         executors: list[tuple[str, ExecutableAdapter]],
         expected_revision: str | None = None,
+        profile_audit_target: ProfileAuditTarget | None = None,
     ) -> dict[str, Any]:
         attempts = self._state(self.paths.attempts, [])
         allowed = [
@@ -2734,7 +2902,7 @@ class DreamingRuntime:
                 "latest_admission": admission,
                 "queued_revision": current["source_revision"],
             }
-        if source_name == "copilot":
+        if profile_audit_target is None and source_name == "copilot":
             migration = self.migrate_legacy(
                 current["native_session_id"], current
             )
@@ -2745,29 +2913,30 @@ class DreamingRuntime:
                     "migration-hold",
                 )
                 return {"status": "migration-hold"}
-        for row in self._state(self.paths.ledger, []):
-            if row.get("session_id") != qualified_session_id:
-                continue
-            if row.get("source_revision") == current["source_revision"]:
-                self._clear_transaction(
-                    qualified_session_id, current["source_revision"]
-                )
-                self._mark_queue(
-                    qualified_session_id, current["source_revision"], "reviewed"
-                )
-                return {"status": "already-reviewed"}
-            migration = row.get("migration", {})
-            if (
-                row.get("source_revision") == "legacy-reviewed"
-                and migration.get("status") == "baseline-seeded"
-                and migration.get("event_frontier") == current["event_frontier"]
-                and migration.get("snapshot_digest") == current["snapshot_digest"]
-                and migration.get("adapter_version") == current["adapter_version"]
-            ):
-                self._mark_queue(
-                    qualified_session_id, current["source_revision"], "reviewed"
-                )
-                return {"status": "already-reviewed-legacy-baseline"}
+        if profile_audit_target is None:
+            for row in self._state(self.paths.ledger, []):
+                if row.get("session_id") != qualified_session_id:
+                    continue
+                if row.get("source_revision") == current["source_revision"]:
+                    self._clear_transaction(
+                        qualified_session_id, current["source_revision"]
+                    )
+                    self._mark_queue(
+                        qualified_session_id, current["source_revision"], "reviewed"
+                    )
+                    return {"status": "already-reviewed"}
+                migration = row.get("migration", {})
+                if (
+                    row.get("source_revision") == "legacy-reviewed"
+                    and migration.get("status") == "baseline-seeded"
+                    and migration.get("event_frontier") == current["event_frontier"]
+                    and migration.get("snapshot_digest") == current["snapshot_digest"]
+                    and migration.get("adapter_version") == current["adapter_version"]
+                ):
+                    self._mark_queue(
+                        qualified_session_id, current["source_revision"], "reviewed"
+                    )
+                    return {"status": "already-reviewed-legacy-baseline"}
 
         last_failure: RuntimeFailure | None = None
         task_profile_evidence_present = self.task_profile_evidence_present_for(
@@ -2779,6 +2948,15 @@ class DreamingRuntime:
             attempt_started_at = self.now()
             task_profile_delivery = "unknown"
             receipt_fields: dict[str, str] = {}
+            profile_audit_fields: dict[str, Any] = (
+                {
+                    "profile_audit": True,
+                    "profile_id": profile_audit_target.profile["profile_id"],
+                    "task_key": profile_audit_target.profile["task_key"],
+                }
+                if profile_audit_target is not None
+                else {}
+            )
             try:
                 doctor = executor.call("doctor")
                 if not doctor.get("healthy") or not doctor.get("boundary_ready"):
@@ -2802,21 +2980,40 @@ class DreamingRuntime:
                 result_path = (
                     self.paths.state
                     / "results"
-                    / f"{result_name}-{hashlib.sha256(current['source_revision'].encode()).hexdigest()}-{executor_name}.json"
+                    / (
+                        f"{result_name}-{hashlib.sha256(current['source_revision'].encode()).hexdigest()}"
+                        f"-{executor_name}"
+                        f"{('-' + profile_audit_target.profile['profile_id'].removeprefix('sha256:')[:16]) if profile_audit_target is not None else ''}.json"
+                    )
                 )
                 result_path.parent.mkdir(parents=True, exist_ok=True)
-                profile_capable = executor.supports(TASK_PROFILE_CAPABILITY)
-                task_profile_binding = (
-                    self.task_profile_binding_for(
-                        qualified_session_id,
-                        reviewed_identity["source_revision"],
-                        executor_id,
-                        snapshot_path,
-                        executor.identity,
+                if profile_audit_target is not None:
+                    if (
+                        executor_id != profile_audit_target.receipt.payload["executor"]
+                        or executor.identity
+                        != profile_audit_target.receipt.payload["executor_identity"]
+                    ):
+                        raise RuntimeFailure(
+                            "profile-audit-executor-mismatch", executor_id
+                        )
+                    task_profile_binding = TaskProfileBinding(
+                        status="bound",
+                        receipt=profile_audit_target.receipt,
+                        context={"profiles": [profile_audit_target.profile]},
                     )
-                    if profile_capable
-                    else TaskProfileBinding(status="unsupported")
-                )
+                else:
+                    profile_capable = executor.supports(TASK_PROFILE_CAPABILITY)
+                    task_profile_binding = (
+                        self.task_profile_binding_for(
+                            qualified_session_id,
+                            reviewed_identity["source_revision"],
+                            executor_id,
+                            snapshot_path,
+                            executor.identity,
+                        )
+                        if profile_capable
+                        else TaskProfileBinding(status="unsupported")
+                    )
                 task_profile_receipt = (
                     task_profile_binding.receipt.path
                     if task_profile_binding.status == "bound"
@@ -2859,6 +3056,7 @@ class DreamingRuntime:
                         "started_at": attempt_started_at,
                         "task_profile_delivery": task_profile_delivery,
                         **receipt_fields,
+                        **profile_audit_fields,
                     },
                 )
                 try:
@@ -2870,8 +3068,16 @@ class DreamingRuntime:
                         run_arguments.update(
                             {
                                 "task_profile_receipt": task_profile_receipt,
-                                "task_profile_executor": executor_id,
+                                "task_profile_executor": (
+                                    profile_audit_target.receipt.payload["executor"]
+                                    if profile_audit_target is not None
+                                    else executor_id
+                                ),
                             }
+                        )
+                    if profile_audit_target is not None:
+                        run_arguments["task_profile_id"] = (
+                            profile_audit_target.profile["profile_id"]
                         )
                     result = executor.call("run", **run_arguments)
                 except RuntimeFailure:
@@ -2899,6 +3105,20 @@ class DreamingRuntime:
                     snapshot_path,
                     reviewed_identity,
                 )
+                if profile_audit_target is not None and result["terminal_route"] in {
+                    "skill",
+                    "support_file",
+                }:
+                    matched_profile, _profile_match = self._matching_task_profile(
+                        result,
+                        task_profile_receipt,
+                        reviewed_identity,
+                    )
+                    if matched_profile != profile_audit_target.profile:
+                        raise RuntimeFailure(
+                            "profile-audit-evidence-mismatch",
+                            profile_audit_target.profile["profile_id"],
+                        )
                 result = self._apply_autonomous_admission_policy(
                     result,
                     reviewed_identity,
@@ -2917,6 +3137,7 @@ class DreamingRuntime:
                     "started_at": attempt_started_at,
                     "task_profile_delivery": task_profile_delivery,
                     **receipt_fields,
+                    **profile_audit_fields,
                     **(
                         {"parent_run_id": self.parent_run_id}
                         if self.parent_run_id
@@ -2983,9 +3204,20 @@ class DreamingRuntime:
                     result,
                     artifact_commit,
                 )
-                ledger = self._state(self.paths.ledger, [])
-                ledger.append(
-                    {
+                if profile_audit_target is not None:
+                    disposition = self._record_profile_audit_disposition(
+                        profile_audit_target,
+                        executor_id,
+                        executor.identity,
+                        {
+                            **result,
+                            "artifact_commit": artifact_commit,
+                        },
+                    )
+                else:
+                    ledger = self._state(self.paths.ledger, [])
+                    ledger.append(
+                        {
                         "session_id": qualified_session_id,
                         "source": source_name,
                         "source_revision": reviewed_identity["source_revision"],
@@ -3011,14 +3243,14 @@ class DreamingRuntime:
                             if isinstance(reviewed_identity.get("display_name"), str)
                             else {}
                         ),
-                    }
-                )
-                self._write(self.paths.ledger, ledger)
-                self._mark_queue(
-                    qualified_session_id,
-                    reviewed_identity["source_revision"],
-                    "reviewed",
-                )
+                        }
+                    )
+                    self._write(self.paths.ledger, ledger)
+                    self._mark_queue(
+                        qualified_session_id,
+                        reviewed_identity["source_revision"],
+                        "reviewed",
+                    )
                 self._clear_transaction(
                     qualified_session_id,
                     reviewed_identity["source_revision"],
@@ -3033,6 +3265,14 @@ class DreamingRuntime:
                     "terminal_route": result["terminal_route"],
                     "artifact_mutated": artifact_commit is not None,
                     "artifact_commit": artifact_commit,
+                    **(
+                        {
+                            "profile_id": profile_audit_target.profile["profile_id"],
+                            "disposition_sha256": disposition["disposition_sha256"],
+                        }
+                        if profile_audit_target is not None
+                        else {}
+                    ),
                     **(
                         {"policy_deferred": result["policy_deferred"]}
                         if isinstance(result.get("policy_deferred"), dict)
@@ -3062,6 +3302,7 @@ class DreamingRuntime:
                             "started_at": attempt_started_at,
                             "task_profile_delivery": task_profile_delivery,
                             **receipt_fields,
+                            **profile_audit_fields,
                             **(
                                 {"parent_run_id": self.parent_run_id}
                                 if self.parent_run_id
@@ -3089,6 +3330,7 @@ class DreamingRuntime:
                         "started_at": attempt_started_at,
                         "task_profile_delivery": task_profile_delivery,
                         **receipt_fields,
+                        **profile_audit_fields,
                         **(
                             {"parent_run_id": self.parent_run_id}
                             if self.parent_run_id
@@ -7928,6 +8170,7 @@ def scheduled_run() -> dict[str, Any]:
         },
         "reviews": [],
         "deferred_reviews": 0,
+        "profile_review_skips": [],
         "publication": [],
         "errors": adapter_errors,
         "legacy_records_imported": imported_legacy,
@@ -8486,47 +8729,142 @@ def scheduled_run() -> dict[str, Any]:
     report["profile_budget"]["elapsed_seconds"] = int(
         time.monotonic() - profile_started_at
     )
-    review_attempts = 0
+    profile_review_candidates: list[
+        tuple[str, ExecutableAdapter, str, str, ExecutableAdapter, ProfileAuditTarget]
+    ] = []
     for item in queue:
         if item.get("status") != "queued":
             continue
         if item.get("qualified_session_id") in profile_failed_sessions:
-            continue
-        if review_attempts >= settings["max_reviews_per_run"]:
-            report["deferred_reviews"] += 1
+            report["profile_review_skips"].append(
+                {
+                    "session_id": item["qualified_session_id"],
+                    "code": "profile-unavailable",
+                }
+            )
             continue
         source_name = item.get("source")
         source = sources.get(source_name)
         if source is None:
-            report["errors"].append(
+            report["profile_review_skips"].append(
                 {
-                    "phase": "review",
                     "session_id": item.get("qualified_session_id"),
                     "code": "source-not-configured",
                 }
             )
             continue
-        review_attempts += 1
+        executor_name = next(
+            (
+                name
+                for name in executor_order
+                if (
+                    name in executors
+                    and (source_name, name) in routes
+                    and executors[name].supports(TASK_PROFILE_CAPABILITY)
+                )
+            ),
+            None,
+        )
+        if executor_name is None:
+            report["profile_review_skips"].append(
+                {
+                    "session_id": item["qualified_session_id"],
+                    "code": "no-profile-capable-executor",
+                }
+            )
+            continue
         try:
-            result = core.review(
+            targets = core.profile_audit_targets_for(
                 source_name,
                 source,
                 item["qualified_session_id"],
-                [
-                    (name, executors[name])
-                    for name in executor_order
-                    if name in executors
-                ],
-                expected_revision=item["source_revision"],
+                item["source_revision"],
+                executor_name,
+                executors[executor_name],
             )
-            report["reviews"].append(
-                {"session_id": item["qualified_session_id"], **result}
+        except RuntimeFailure as error:
+            report["profile_review_skips"].append(
+                {
+                    "session_id": item.get("qualified_session_id"),
+                    "code": error.code,
+                }
             )
+            continue
+        if not targets:
+            report["profile_review_skips"].append(
+                {
+                    "session_id": item["qualified_session_id"],
+                    "code": "no-reusable-profile",
+                }
+            )
+            continue
+        for target in targets:
+            try:
+                disposition = core.profile_audit_disposition_for(target)
+            except RuntimeFailure as error:
+                report["profile_review_skips"].append(
+                    {
+                        "session_id": item["qualified_session_id"],
+                        "profile_id": target.profile["profile_id"],
+                        "code": error.code,
+                    }
+                )
+                continue
+            if disposition is not None:
+                report["profile_review_skips"].append(
+                    {
+                        "session_id": item["qualified_session_id"],
+                        "profile_id": target.profile["profile_id"],
+                        "code": "already-dispositioned",
+                    }
+                )
+                continue
+            profile_review_candidates.append(
+                (
+                    source_name,
+                    source,
+                    item["qualified_session_id"],
+                    item["source_revision"],
+                    executors[executor_name],
+                    target,
+                )
+            )
+    for (
+        source_name,
+        source,
+        qualified_session_id,
+        source_revision,
+        executor,
+        target,
+    ) in profile_review_candidates:
+        if len(report["reviews"]) >= settings["max_reviews_per_run"]:
+            report["deferred_reviews"] += 1
+            continue
+        executor_id = target.receipt.payload["executor"]
+        try:
+            result = core.review_profile(
+                source_name,
+                source,
+                qualified_session_id,
+                source_revision,
+                executor_id,
+                executor,
+                target.profile["profile_id"],
+            )
+            if result["status"] != "already-dispositioned":
+                report["reviews"].append(
+                    {
+                        "session_id": qualified_session_id,
+                        "profile_id": target.profile["profile_id"],
+                        **result,
+                    }
+                )
         except RuntimeFailure as error:
             report["errors"].append(
                 {
                     "phase": "review",
-                    "session_id": item.get("qualified_session_id"),
+                    "session_id": qualified_session_id,
+                    "profile_id": target.profile["profile_id"],
                     "code": error.code,
                 }
             )
