@@ -17,6 +17,7 @@ cleanup() {
 trap cleanup EXIT
 
 python3 - "$ROOT" "$WORK" <<'PY'
+import argparse
 import hashlib
 import importlib.util
 import json
@@ -1691,6 +1692,15 @@ else:
         self.assertEqual(artifact_target.read_text(), "safe\n")
 
 
+    def load_adapter_module(self):
+        spec = importlib.util.spec_from_file_location(
+            "dreaming_vendor_adapter", adapter
+        )
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        return module
+
     def guard_reader_source(self):
         return (
             "#include <stdio.h>\n#include <string.h>\n"
@@ -1739,10 +1749,20 @@ else:
         """CHK-A3 pre-implementation guard.
 
         Proves by execution, not by policy text, that the adapter's real
-        --shadow-contract Copilot sandbox profile confines reads of the
-        projected authentication files to the exact configured CLI executable
-        path. Uses dummy projected files only: no real credential bytes, no
-        account authentication, no model call, no installed state.
+        shadow-contract Copilot sandbox policy confines reads of the projected
+        authentication files to the exact configured CLI executable path.
+
+        This guard covers the profile-construction enforcement layer only. It
+        loads the production adapter script and calls its own
+        evaluation_environment/evaluation_sandbox_profile with a synthetic
+        namespace, so the bytes under test are the production-generated policy.
+        It deliberately does not go through the public command surface, because
+        the credential-root account-home authority is a different enforcement
+        layer owned by CHK-A4. No production flag, environment exception, or
+        runtime seam is added to make this reachable.
+
+        Uses dummy projected files only: no real credential bytes, no account
+        authentication, no model call, no installed state.
         """
         marker = "SHADOWGUARDDUMMY0000"
         credentials = work / f"{self._testMethodName}-guard-credentials"
@@ -1760,66 +1780,40 @@ else:
         relocated.write_bytes(reader.read_bytes())
         relocated.chmod(0o755)
 
-        trial, trial_path = self.trial("copilot", prompt="shadow guard")
+        trial, _ = self.trial("copilot", prompt="shadow guard")
         control = Path(trial["workspace"]) / "control.txt"
         control.write_text(f"{marker}-control\n")
 
-        command = [
-            sys.executable,
-            str(adapter),
-            "--vendor",
-            "copilot",
-            "--role",
-            "skill-evaluation-executor",
-            "--binary",
-            str(reader),
-            "--credential-root",
-            str(credentials),
-            "--model",
-            "fixture-model",
-            "--timeout",
-            "10",
-            "--token-budget",
-            "100",
-            "--output-bytes",
-            "100000",
-            "--shadow-contract",
-            "--turn-budget",
-            "7",
-            "--tool-budget",
-            "8",
-            "prepare",
-            "--trial",
-            str(trial_path),
-        ]
-        environment = {
-            key: value
-            for key, value in os.environ.items()
-            if key
-            not in {
-                "DREAMING_EXECUTOR_TEST_ALLOW_ROOT",
-                "DREAMING_EXECUTOR_TEST_ALLOW_ROOTS",
-            }
-        }
-        environment["GH_TOKEN"] = "fixture-token"
-        result = subprocess.run(
-            command,
-            env=environment,
-            text=True,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+        vendor_adapter = self.load_adapter_module()
+        namespace = argparse.Namespace(
+            vendor="copilot",
+            binary=str(reader),
+            credential_root=str(credentials),
+            deny_root=[],
+            shadow_contract=True,
         )
-        if result.returncode:
-            self.fail(result.stdout + result.stderr)
+        for name in (
+            "DREAMING_EXECUTOR_TEST_ALLOW_ROOT",
+            "DREAMING_EXECUTOR_TEST_ALLOW_ROOTS",
+        ):
+            os.environ.pop(name, None)
+        environment = vendor_adapter.evaluation_environment(namespace, trial)
+        profile = vendor_adapter.evaluation_sandbox_profile(
+            namespace, trial, environment
+        )
 
         home = Path(trial["home"])
-        profile = home / "evaluation.sb"
-        self.assertTrue(profile.is_file())
+        self.assertTrue(Path(profile).is_file())
+        self.assertEqual(Path(profile), home.resolve() / "evaluation.sb")
         for relative in projected:
             self.assertTrue(
                 (home / relative).is_file(),
                 f"{relative} was not projected into the synthetic home",
             )
+        self.assertNotIn(
+            "DREAMING_EXECUTOR_TEST_ALLOW_ROOT",
+            Path(profile).read_text(),
+        )
 
         for relative in projected:
             allowed = self.sandboxed_read(profile, reader, home / relative)

@@ -23,7 +23,7 @@ passes=0
 pass() { echo "PASS  $*"; passes=$((passes + 1)); }
 fail() { echo "FAIL  $*" >&2; exit 1; }
 
-# CHK-A2 harness purity ratchet.
+# CHK-A15 harness purity ratchet.
 # docs/shadow-trial-authentication-boundary-design.md invariant I1 freezes this
 # harness: the shadow trial authentication boundary is only sound if the
 # harness that builds every trial environment is byte-unchanged from the
@@ -34,19 +34,19 @@ HARNESS_BASE_COMMIT="f63f55befa1e4a476ebf450444406ed1606cb750"
 HARNESS_PINNED_SHA256="4b9b30524bf33be0d526130064ec426d61754c39f0eec24e8320637eb988ee57"
 harness_working_sha256="$(shasum -a 256 "$HARNESS" | awk '{print $1}')"
 if [ "$harness_working_sha256" != "$HARNESS_PINNED_SHA256" ]; then
-  fail "unauthorized skill-evaluation-harness.py byte change: working tree is $harness_working_sha256 but the reviewed pin is $HARNESS_PINNED_SHA256 (CHK-A2, invariant I1)"
+  fail "unauthorized skill-evaluation-harness.py byte change: working tree is $harness_working_sha256 but the reviewed pin is $HARNESS_PINNED_SHA256 (CHK-A15, invariant I1)"
 fi
-pass "harness working-tree bytes match the reviewed CHK-A2 pin"
+pass "harness working-tree bytes match the reviewed CHK-A15 pin"
 
 # The pin is compared against a second, independent source of the base bytes —
 # the git object store — so this check cannot pass vacuously by deriving the
 # expected and actual digests from the same file.
 if ! git -C "$REPO_ROOT" rev-parse --verify --quiet "$HARNESS_BASE_COMMIT^{commit}" >/dev/null 2>&1; then
-  fail "CHK-A2 ratchet source unavailable: integration base $HARNESS_BASE_COMMIT is not readable from $REPO_ROOT, so harness purity cannot be independently corroborated"
+  fail "CHK-A15 ratchet source unavailable: integration base $HARNESS_BASE_COMMIT is not readable from $REPO_ROOT, so harness purity cannot be independently corroborated"
 fi
 harness_base_sha256="$(git -C "$REPO_ROOT" show "$HARNESS_BASE_COMMIT:skills/skill-review/scripts/skill-evaluation-harness.py" | shasum -a 256 | awk '{print $1}')"
 if [ "$harness_base_sha256" != "$HARNESS_PINNED_SHA256" ]; then
-  fail "CHK-A2 pin disagrees with integration base $HARNESS_BASE_COMMIT: base is $harness_base_sha256 but the pin is $HARNESS_PINNED_SHA256"
+  fail "CHK-A15 pin disagrees with integration base $HARNESS_BASE_COMMIT: base is $harness_base_sha256 but the pin is $HARNESS_PINNED_SHA256"
 fi
 pass "harness pin corroborated against the integration base object bytes"
 

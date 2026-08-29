@@ -313,6 +313,13 @@ Refusal codes: `shadow-credential-root-missing`,
 `shadow-credential-root-symlink`, `shadow-credential-root-invalid`,
 `shadow-credential-root-mismatch`.
 
+**Where this authority lives.** These four validations belong to argument
+validation at the command boundary. `evaluation_credential_root` and
+`evaluation_sandbox_profile` must stay authority-free, so that profile
+construction remains independently testable from synthetic inputs (see
+[Layer separation in the executed checks](#layer-separation-in-the-executed-checks)).
+This places the invariant in exactly one owner; it does not weaken it.
+
 ### A2 — Fail-closed projection *completeness* check
 
 Today `copy_auth_file` (`:1198`) silently no-ops when the source is missing or
@@ -633,12 +640,41 @@ stage default-open.
 Every check is executed. At-boundary and past-boundary cases are paired at each
 enforcing layer.
 
+### Layer separation in the executed checks
+
+Two enforcement layers are tested separately, because a single test that
+crossed both would either prove neither cleanly or would tempt a production
+relaxation to stay reachable.
+
+- **Profile policy (CHK-A3, CHK-A16).** Exercised by loading the production
+  adapter script and calling its own `evaluation_environment` and
+  `evaluation_sandbox_profile` with a synthetic namespace, trial, and dummy
+  projected files. The policy under test is therefore the production-generated
+  bytes, and `sandbox-exec` runs against exactly those bytes. This deliberately
+  does not go through the public command surface. No production flag,
+  environment exception, or runtime seam exists or may be added to make it
+  reachable, and the `DREAMING_EXECUTOR_TEST_ALLOW_ROOT`/`_ROOTS` escape is
+  stripped so the generated policy cannot be vacuously permissive.
+- **Command authority (CHK-A4, CHK-A19).** Owns the credential-root
+  account-home refusal and the configured-argv requirement, exercised through
+  the public adapter command.
+
+This separation requires that the account-home authority of A1 live in argument
+validation at the command boundary, **not** inside
+`evaluation_credential_root` or the profile generator. The A1 invariant is
+unchanged and is not weakened: it simply has one owner, so profile construction
+remains independently testable with synthetic inputs after A1 lands.
+
+The complete post-implementation campaign additionally runs real `prepare` and
+`run` under valid account authority (CHK-A1, CHK-A11), so the two layers are
+also proved composed, not only in isolation.
+
 | ID | Layer | Check | Boundary |
 |---|---|---|---|
 | CHK-A1 | End to end | Real Copilot trial under synthetic `HOME` completes with a real verdict; no `authentication-required`, no `infrastructure_error` | at |
 | CHK-A2 | Adapter argv | Shadow invocation without `--credential-root` refuses with `shadow-credential-root-missing`, launching no CLI | past |
-| CHK-A3 | Sandbox, executed | Under the **adapter-generated** profile, the CLI process path reads a projected file successfully **and** a non-CLI process path reading the same file is denied. The platform primitive is already proved (reframe probe 3); this check proves the generated policy and the real CLI | at + past |
-| CHK-A4 | Adapter argv | Account home accepted; a different existing directory, a raw symlink to the account home, a non-existent path, and a file are each refused with the specific code, before projection | at + past |
+| CHK-A3 | Profile policy, executed | Generate the profile directly from the production generator with synthetic inputs and dummy projected files, then under `sandbox-exec`: the exact configured reader path reads each of the three projected files, a byte-identical reader at a different path is denied on all three, and a workspace control read still succeeds. The platform primitive is already proved (reframe probe 3); this check proves the generated policy | at + past |
+| CHK-A4 | Command authority | Account home accepted; a different existing directory, a raw symlink to the account home, a non-existent path, and a file are each refused with the specific code, before projection. This check solely owns the account-home authority that CHK-A3 bypasses | at + past |
 | CHK-A5 | Executor env | The emitted trial environment contains neither `GH_TOKEN` nor `GITHUB_TOKEN`, and its key set is otherwise unchanged from today | at |
 | CHK-A6 | Projection completeness | Each of: missing file, mode `0644`, zero size, symlinked destination raises `shadow-credential-projection-incomplete`; a complete projection passes | at + past |
 | CHK-A7 | Sandbox, executed | `prove_boundary` still refuses protected `HOME`, config, and content reads; keychain roots are denied under shadow | past |
@@ -649,7 +685,7 @@ enforcing layer.
 | CHK-A12 | Config | With the evaluator entry deleted: config validates, `shadow_execution_authority` reports unavailable, zero durable writes | at |
 | CHK-A13 | Process | Timeout and cleanup asserts unchanged; the added `prepare` probe is bounded and leaves no orphan | at |
 | CHK-A14 | Artifacts | Grep every retained artifact from a real trial for the projected credential's distinguishing markers; zero hits | past |
-| CHK-A15 | Harness | `skill-evaluation-harness.py` digest equals base | at |
+| CHK-A15 | Harness | `skill-evaluation-harness.py` digest equals the reviewed integration base, corroborated against an independent copy of the base bytes so the pin cannot be satisfied by the file under test alone | at |
 | CHK-A16 | Sandbox, past boundary | A process whose path is not the resolved CLI attempts each projected path and each denied subpath; all denied | past |
 | CHK-A17 | Usability probe | With the projection complete but the account unusable, `doctor` and `prepare` each raise `shadow-credential-unusable` and launch no CLI; with a usable account both pass | at + past |
 | CHK-A18 | Secret non-serialization | The probe's returned token value appears in no stdout, `prepared.json`, profile, environment dump, or log produced by a full prepare/run pair | past |
