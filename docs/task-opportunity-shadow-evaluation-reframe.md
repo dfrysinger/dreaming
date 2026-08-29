@@ -5,26 +5,39 @@
 Let one scheduled owner pass claim one recurrence-gated shadow candidate under
 an append-only open-attempt record, have the existing candidate-blind authoring
 boundary design its observed-task cases from one closed packet, run the
-existing `shadow-compile` / `shadow-execute` / `shadow-certify` flow inside a
-pre-reserved and mechanically enforced worst-case time bound, retain a semantic
-result bound to the exact candidate and occurrence authorities, and always
-leave `evaluating` in the same pass while the owner holds its lease.
+existing `shadow-compile` / `shadow-execute` / `shadow-certify` flow in
+`catalog_plus_candidate` routing mode against a one-skill approved target
+catalog derived from the existing estate census, inside a pre-reserved and
+mechanically enforced worst-case time bound, retain a semantic result bound to
+the exact candidate, catalog, and occurrence authorities, and always leave
+`evaluating` in the same pass while the owner holds its lease.
+
+The stage must be able to reach a truthful `pass` on triggering, task
+performance, and overall regression, because that is the parent funnel's
+Definition of Done. It grants no install or publication authority regardless of
+the outcome.
 
 This design follows the principles in
 `skills/skill-review/SKILL.md#dreaming-design-principles` and continues the
 funnel specified in `docs/task-opportunity-evidence-design.md`.
 
 Revision 3 resolves round-one findings T1-T3 and O4-O6 and round-two findings
-R1-R3 and N1-N2, and revision 4 resolves the single round-three finding by
-moving all deterministic preparation ahead of the lifecycle claim and extending
-the admission formula to cover it. Round three accepted every other decision,
-so T1, T3, R1-R3, N1-N2, and O4-O6 are carried forward unchanged. Reframe
-status remains OPEN pending final reviewer verification.
+R1-R3 and N1-N2. Revision 4 resolves the round-three preparation-bound finding
+by moving all deterministic preparation ahead of the lifecycle claim and
+extending the admission formula to cover it. Revision 5 resolves round-three
+findings M1 and M2: the author call is bounded by the same stateless wrapper as
+the other pinned tools and carries the vendor argument the adapter requires,
+and the routing mode changes from `candidate_only` to `catalog_plus_candidate`
+because the harness makes a `candidate_only` `pass` unreachable by
+construction. T1, T3, R1-R3, N1-N2, and O4-O6 are carried forward unchanged.
+Reframe status remains OPEN pending final reviewer verification.
 
 ## Lane
 
 **Systemic.** This change gives the scheduled owner a third bounded model-and-
-execution stage, adds a fourth adapter role to the existing registry, extends
+execution stage, gives the estate census a second read-only consumer as the
+approved target catalog authority, adds a fourth adapter role to the existing
+registry, extends
 the authoring boundary to a second subject class, adds append-only attempt
 records and a cross-pass recovery sweep, adds a bounded-subprocess wrapper for
 the evaluator and lifecycle tools, and changes how the pass deadline,
@@ -40,7 +53,18 @@ mid-evaluation. It is not a local fix inside one function.
   transport.
 - Do not add a supervisor process, signal transport, or watchdog for mid-run
   interruption of `shadow-execute`.
-- Do not add a second catalog stage or a deterministic semantic classifier.
+- Do not add a second catalog stage, a catalog audit, or a deterministic
+  semantic classifier. The approved target catalog is materialized from the
+  estate census the pass already builds, and the conflict target is selected
+  from an owner-recomputed behavioral trace, not by similarity scoring.
+- Do not narrow the parent Definition of Done. A design that cannot reach a
+  truthful `pass` on triggering, task performance, and overall regression is
+  not acceptable, and neither is a weakened `pass`, a manufactured fixture
+  result, or an inconclusive diagnostic relabelled as a pass.
+- Do not treat the certificate's `authoritative` bit as install, publication,
+  or admission authority. In `catalog_plus_candidate` mode that bit can be
+  true; the prohibition is enforced independently by lifecycle and stage
+  policy.
 - Do not evaluate more than one candidate per pass beyond the configured
   allowance, and do not evaluate the same subject twice in one pass.
 - Do not grant install, publication, portfolio, or admission authority from a
@@ -74,6 +98,11 @@ mid-evaluation. It is not a local fix inside one function.
 | Attempt evidence is append-only: one immutable open-attempt record written before the claim transition, settled by appending at most one immutable terminal-attempt record that names the open record's digest | Round-one finding T1 and round-two finding R3; existing content-addressed receipt pattern | Abnormal termination is detectable and deterministically recoverable with no mutable state and no in-place rewrite | Recovery is proven expressible from lifecycle state alone without ambiguity |
 | Halt and deadline are observed only between bounded operations; `shadow-execute` runs to completion once started | Existing `halt_check` placement in `dreaming-core.py:8917`, `:9189`, `:9260`, `:9291`, `:9323`; round-one finding T2 | One enforcement model with no new supervisor process or signal transport | A supervised per-trial execution path exists in the harness without a new subsystem |
 | The stage refuses to start unless remaining pass time covers a worst-case bound whose every term is mechanically enforced, including preparation, revalidation, authoring, attestation, trials, compile, certify with its nested verification subprocess, settlement, and termination overhead | Round-one finding T2 and round-two finding R2; existing bounded process-group calls in `dreaming-core.py:388-413` and `skill-evaluation-harness.py:580-650` | The 3,600-second pass deadline holds without mid-run interruption and without an unenforced estimate | Measured cost shows the bound is unusably pessimistic and a supervised path is justified |
+| The stage compiles in `catalog_plus_candidate` routing mode | Round-three finding M2, verified: `shadow_aggregate` hard-codes `"inconclusive" if manifest["routing_mode"] == "candidate_only"` into the routing gate (`skill-evaluation-harness.py:2137-2139`), so a `candidate_only` run can never aggregate to `pass` | The parent Definition of Done — passing triggering, task-performance, and overall-regression evaluation — becomes reachable | The harness stops treating `candidate_only` as inherently inconclusive |
+| The approved target catalog is one skill, materialized from the existing content-addressed estate census | Round-three finding M2; `census.physical_instances` already carry `skill_name`, `absolute_path`, `inventory_sha256`, and a full per-file inventory (`dreaming-estate.py:1246-1266`) inside a snapshot digest (`:1739`), and the pass already builds it | Reuse of an owner-derived current authority; and every non-conflict routing case must load *zero* catalog skills (`skill-evaluation-harness.py:1879-1882`), so a minimal catalog is the only one that is not gratuitously flaky | A larger catalog is shown necessary, or the census stops being current at stage time |
+| The conflict target is the first catalog skill in the owner-recomputed `skill_load_trace` of the authorizing occurrences | Round-three finding M2; `no-covering-skill` audits carry `catalog_skill_name: None` (`dreaming-core.py:1416-1418`), so no named target exists, and the trace is recomputed by the owner and required to match (`dreaming-core.py:1156-1214`, `:1333-1338`) | A deterministic, behavioral, owner-derived choice that is not a semantic classifier | Selection is shown to require similarity, keyword, or embedding scoring, which would be the forbidden classifier |
+| The packet discloses exactly one catalog skill's name and SKILL.md description, and nothing else about the catalog | Round-three finding M2; `shadow_suite` requires the `routing_conflict` case to name exactly one catalog skill in catalog mode (`skill-evaluation.py:10665-10670`), and the route proof demands the executor load precisely it (`skill-evaluation-harness.py:1879-1882`) | Minimum disclosure that still lets the author write a conflict prompt that can truthfully pass | A conflict case is shown authorable with no knowledge of the incumbent |
+| A passing evaluation grants no install or publication authority even when the certificate reports `authoritative: true` | Round-three finding M2 and the parent report-only constraint; the bit is adapter-attested, since `real_backend` is self-declared and `real_backend_source` is free text (`skill-evaluation.py:10767-10770`) | Report-only survives the routing-mode change without depending on a certificate field | The lifecycle gains a reviewed forward edge, which is a separate work order |
 | All deterministic preparation — package materialization, inventory re-hashing, packet construction, packet validation — runs before the lifecycle claim, and the pre-claim admission covers preparation and the claimed stage together | Round-three finding: the previous ordering left post-claim deterministic work outside the reservation | Nothing unbounded or unaccounted survives inside `evaluating`, and a preparation overrun costs pass time only | A preparation step is shown to require the claim to have already happened, in which case it needs an explicit enforced `preparation_bound` inside the claimed stage |
 | Pre-claim refusals write no attempt record, change no lifecycle state, and are retained as run-report and routing evidence only | Round-three finding, plus the append-only regime of R3: an unclaimed subject has no attempt to settle | The one-to-zero-or-one open/terminal relation stays exact and no record type is invented | Pre-claim refusal evidence is shown to need durability beyond deterministic reproduction from the same bytes |
 | Preparation writes only to a pass-local scratch root outside every durable record root, and is never read across passes | Round-three finding; required so a fenced-out pass still writes zero durable bytes | Scratch cannot become recovery authority or contaminate the R1 zero-write rule | Any later pass needs to read a predecessor's scratch |
@@ -86,7 +115,7 @@ mid-evaluation. It is not a local fix inside one function.
 | No subject is claimed twice in one pass; a persistent failure never starves other ready candidates | Round-one finding O6 | Work conservation and fair progress across candidates | Only one candidate is ever ready, making ordering moot |
 | Deterministic trial count per candidate is `executors x (cases + task_value_cases) + executors` | Derived from `skill-evaluation-harness.py:2344-2352` (control plus candidate treatment for `task_value`) and `:2330-2342` (one `version` call per executor) | Cost is predictable before the stage starts | The harness changes its treatment or attestation plan |
 | Minimum conforming suite is five cases, one per required routing class | Derived from `skill-evaluation.py:10706-10711`, which requires exactly the set `routing_positive`, `routing_close_negative`, `routing_unrelated`, `routing_conflict`, `task_value` | The three gates are all observable | The evaluator changes its required class set |
-| Numeric values of `max_evaluations_per_run`, the evaluation stage second budget, per-call `timeout_seconds` / `token_budget` / `turn_budget` / `tool_budget` / `output_bytes`, every reservation term (`author_call_bound`, `author_doctor_bound`, `compile_bound`, `certify_bound`, `settlement_bound`, `deadline_margin`), and every preparation term (`package_file_ceiling`, `package_bytes_ceiling`, `prepare_throughput`, `hash_throughput`, `packet_build_bound`, `packet_validate_bound`, `lifecycle_read_bound`) | **Unresolved policy decision.** No measured shadow-trial cost exists in this repository; the only shadow runs are deterministic fixtures in `test-shadow-mutation-boundary.sh` | Bounded model cost and a deadline-safe pass | Set them from CHK-09's measured single-candidate run, or record an owner-set provisional bound with the measurement scheduled; do not hard-code a number before one of those. Enforcement of each term is settled here; only the numbers are open |
+| Numeric values of `max_evaluations_per_run`, the evaluation stage second budget, per-call `timeout_seconds` / `token_budget` / `turn_budget` / `tool_budget` / `output_bytes`, every reservation term (`author_call_bound`, `author_doctor_bound`, `compile_bound`, `certify_bound`, `settlement_bound`, `deadline_margin`), and every preparation term (`package_file_ceiling`, `package_bytes_ceiling`, `catalog_file_ceiling`, `catalog_bytes_ceiling`, `prepare_throughput`, `hash_throughput`, `packet_build_bound`, `packet_validate_bound`, `lifecycle_read_bound`) | **Unresolved policy decision.** No measured shadow-trial cost exists in this repository; the only shadow runs are deterministic fixtures in `test-shadow-mutation-boundary.sh` | Bounded model cost and a deadline-safe pass | Set them from CHK-09's measured single-candidate run, or record an owner-set provisional bound with the measurement scheduled; do not hard-code a number before one of those. Enforcement of each term is settled here; only the numbers are open |
 
 **Reframe status: OPEN.**
 
@@ -243,20 +272,24 @@ audit.
 | `lifecycle_id`, `candidate_id` | Claimed subject identity | Lifecycle record |
 | `candidate_contract` | Proposed skill name, contract text, and per-file `{path, sha256, bytes}` inventory | Materialized package directory only |
 | `suite_template` | Five fixed cases: `id`, `class`, `routing`, `artifacts`, `deterministic_graders`, `fixture`, `semantic` | Builder constant |
+| `conflict_reference` | Exactly `{name, description}` of the single approved-target-catalog skill, where `description` is that skill's SKILL.md front-matter description | Materialized one-skill catalog snapshot only |
 | `compilation_contract.case_runtime` | Per-case runtime block consumed by the existing response validator | Builder constant |
 | `executor_contract` | Executor identity digest, declared `model`, and `limits` | Derived executor document |
 | `harness_digest` | `sha256` of the harness executable | Harness file |
-| `routing_mode` | `candidate_only` | Builder constant |
+| `routing_mode` | `catalog_plus_candidate` | Builder constant |
 
-**Permitted source roots** are exactly three: the materialized candidate
-package directory, builder constants, and the derived executor identity
-document. No other filesystem root, database, or environment value may
-contribute a byte.
+**Permitted source roots** are exactly four: the materialized candidate package
+directory, builder constants, the derived executor identity document, and the
+materialized one-skill catalog snapshot of E2c — and from that snapshot only
+the skill's directory name and its SKILL.md front-matter description. No other
+filesystem root, database, or environment value may contribute a byte.
 
 **Prohibited fields and sources**, refused explicitly rather than merely
 omitted: estate census rows, any other skill root, catalog inventory,
 transcripts, session records, task-profile receipts, audit dispositions,
 reviewer claims, dashboards, home state, credentials, environment variables,
+catalog file inventories, catalog file bodies, any second catalog skill, census
+rows, capability identities,
 absolute filesystem paths, adapter `argv`, canonical occurrence identities,
 `profile_id` values, lease tokens, pass identity, and wall-clock timestamps.
 Occurrence and profile authorities are deliberately excluded from the packet:
@@ -292,11 +325,79 @@ the existing prompt (`:3021-3060`), the existing task-id shape
 (`:236-240`), and the existing response validation (`:3196-3270`) that pins
 `id` and `class` to the template and forbids duplicate prompts.
 
-*Why `candidate_only` routing mode:* `shadow-compile` refuses a `--catalog-dir`
-in that mode (`skill-evaluation.py:10853`), so no catalog stage can be created.
-`routing_close_negative` and `routing_unrelated` still prove non-triggering,
-and `routing_conflict` is expressed with empty `catalog_loads` as the validator
-requires (`skill-evaluation.py:10661-10678`).
+*Why `catalog_plus_candidate` routing mode:* round-three finding M2 is correct
+and verified. `shadow_aggregate` computes the routing gate as `"inconclusive"
+if manifest["routing_mode"] == "candidate_only"` before any other test
+(`skill-evaluation-harness.py:2137-2139`), so a `candidate_only` run aggregates
+to `inconclusive` or `regression` and **can never reach `pass`**. Since the
+parent funnel's Definition of Done requires passing triggering,
+task-performance, and overall-regression evaluation, `candidate_only` cannot
+satisfy it, and the earlier revisions of this document were wrong to select it.
+The mode change also makes the `routing_conflict` case meaningful: in catalog
+mode `shadow_suite` requires exactly one declared `catalog_loads` entry
+(`skill-evaluation.py:10664-10670`) and the route proof requires the executor
+to load precisely that skill and not the candidate
+(`skill-evaluation-harness.py:1858-1882`).
+
+### E2c. The approved target catalog, reused from the estate census
+
+`catalog_plus_candidate` needs an approved target catalog. This design supplies
+one without adding a catalog stage, a catalog audit, a queue, an owner, or a
+classifier, because every input already exists and is already owner-derived.
+
+**The authority.** The pass already builds the estate census. Each entry of
+`census.physical_instances` is a real installed skill directory carrying
+`skill_name`, `absolute_path`, `relative_path`, `root_id`, `root_class`,
+`canonical_capability_id`, `inventory_sha256`, and a full per-file inventory
+with per-file digests (`dreaming-estate.py:1246-1266`), inside a snapshot that
+is itself content-addressed (`:1739`). The scheduled owner already consumes
+exactly this list elsewhere (`dreaming-core.py:9308-9314`). Nothing new is
+derived; one already-derived record is read.
+
+**Why this is reuse, not a new stage.** A catalog *stage* would decide what the
+portfolio should contain. This reads what the portfolio already contains, for
+one named skill, and copies bytes. It renders no judgement, writes no
+disposition, admits nothing, and produces no durable artifact beyond the
+pass-local scratch snapshot of E5.
+
+**Selecting the one conflict target, deterministically and without a
+classifier.** A `no-covering-skill` audit carries `catalog_skill_name: None`
+(`dreaming-core.py:1416-1418`), so the disposition names no incumbent. The
+selection instead uses `skill_load_trace`, which the owner **recomputes** from
+the content-addressed transcript snapshot and the profile's source event ids
+and requires the reviewer result to match exactly (`dreaming-core.py:1156-1214`
+and `:1333-1338`). It is therefore owner-derived immutable evidence, not a raw
+reviewer claim, which is what the parent constraint demands.
+
+The rule: order the authorizing occurrences canonically, concatenate their
+traces in that order, and take the first entry whose `catalog_skill_name` is
+not null and which resolves to exactly one census instance. This is a
+behavioral fact — a skill that actually loaded while the observed task was
+performed and still failed to cover it — not a similarity, keyword, or
+embedding judgement, so it is not the forbidden semantic classifier.
+
+**Materialization and binding.** The selected instance's declared `files` are
+copied into `scratch/catalog/<skill_name>/`, and the copy is re-hashed to the
+census `inventory_sha256` before use. `shadow_catalog` independently refuses a
+symlinked directory or any entry lacking `SKILL.md`
+(`skill-evaluation.py:10552-10559`), and `shadow_copy_tree` refuses symlinks
+(`:10580-10581`). The retained result binds `catalog_id`, the census
+`snapshot_sha256`, the instance `canonical_capability_id`, and the instance
+`inventory_sha256`, so the exact catalog is reconstructible.
+
+**Why exactly one skill.** For every non-`task_value` case the route proof
+requires the loaded catalog set to equal the declared set exactly
+(`skill-evaluation-harness.py:1879-1882`). Four of the five cases declare no
+catalog load, so any incidental load of any other catalog skill is a
+`regression`. A one-skill catalog is the smallest snapshot that supports the
+required `routing_conflict` case while keeping the other four provable, and it
+also minimizes what the packet must disclose.
+
+**Stable refusals**, all pre-claim and report-only:
+`shadow-conflict-target-unavailable` (no trace entry names a catalog skill),
+`shadow-conflict-target-ambiguous` (the name resolves to zero or several census
+instances), `shadow-catalog-snapshot-stale` (the census digest changed since
+preparation, or the copied bytes do not re-hash to `inventory_sha256`).
 
 ### E2b. The exact packet-only authoring invocation
 
@@ -308,10 +409,17 @@ reuse `v2-input-owner-run`, and adds no second owner.
 bounded wrapper of E5:
 
 ```
-<authoring_adapter> --role evaluation-input-author --model <author_model> \
+<authoring_adapter> --vendor copilot \
+  --role evaluation-input-author --model <author_model> \
   run --operation shadow-author \
       --packet <packet_path> --draft-output <draft_path>
 ```
+
+`--vendor` is required by the adapter parser
+(`dreaming-vendor-adapter.py:6650`), and the vendor value is not free: the
+existing role doctor reports `healthy: true` only when the vendor is `copilot`
+(`dreaming-vendor-adapter.py:3734-3748`), so the health check pins the vendor
+this stage may use. Any other vendor fails the availability derivation below.
 
 `--packet` is the only input path. The installed-capability operations require
 `--skill-dir --suite --policy --config --routing --harness --catalog`
@@ -385,15 +493,16 @@ configured evaluator present, evaluator `doctor` healthy, evaluator `version`
 attested against the derived executors document, shadow suite authority
 available (template constant plus `shadow-compile` subcommand plus resolvable
 harness digest), shadow authoring authority available exactly as enumerated in
-E2b, and the candidate package materializable.
+E2b, catalog authority available (a current readable census whose
+`snapshot_sha256` verifies), and the candidate package materializable.
 
 **Fail-closed.** Missing, malformed, or partially populated authority yields
 `available: false` with reason `shadow-execution-authority-unknown`. Availability
 is true only when every named condition is explicitly true. Computed reason
 codes are stable: `shadow-executor-unconfigured`, `shadow-executor-unhealthy`,
 `shadow-executor-unattested`, `shadow-suite-authority-unavailable`,
-`shadow-authoring-authority-unavailable`, `shadow-candidate-package-unavailable`,
-`shadow-execution-authority-unknown`.
+`shadow-authoring-authority-unavailable`, `shadow-catalog-authority-unavailable`,
+`shadow-candidate-package-unavailable`, `shadow-execution-authority-unknown`.
 
 The scheduled stage and the routing projection consume the **same** derivation
 function on the same facts, so the row cannot disagree with the stage.
@@ -481,7 +590,9 @@ authority_bound  = executors x executor_call_bound          # once per pass
 
 materialize_bound = package_bytes_ceiling / prepare_throughput
 rehash_bound      = package_bytes_ceiling / hash_throughput
-prepare_bound     = materialize_bound + rehash_bound
+catalog_bound     = catalog_bytes_ceiling / prepare_throughput
+                  + catalog_bytes_ceiling / hash_throughput
+prepare_bound     = materialize_bound + rehash_bound + catalog_bound
                   + packet_build_bound + packet_validate_bound
 revalidate_bound  = lifecycle_read_bound + rehash_bound + packet_validate_bound
 
@@ -508,7 +619,8 @@ claim admission:     remaining_pass_seconds >= claimed_bound + deadline_margin
 `executors`, `cases`, `task_value_cases`, `max_transitions_per_candidate`
 (three: claim, exit, and one recovery allowance), `max_records_per_candidate`
 (three: open, terminal, and one result), `package_file_ceiling`,
-`package_bytes_ceiling`, and `bounded_subprocess_count` (`1 author + executors
+`package_bytes_ceiling`, `catalog_file_ceiling`, `catalog_bytes_ceiling`, and
+`bounded_subprocess_count` (`1 author + executors
 attest + trial_count trials + 1 compile + 1 certify +
 max_transitions_per_candidate lifecycle calls`; preparation and revalidation
 start no subprocess) are all known before any byte is touched, so every
@@ -536,7 +648,7 @@ tools core invokes directly.
 | `materialize_bound`, `rehash_bound` | **Bounded deterministic helper.** The revision inventory declares file count and byte total, so the helper refuses `preparation-oversize` before copying when either exceeds its ceiling, and checks a monotonic deadline between per-file operations over that finite inventory. No supervisor and no subprocess is involved, and unlike a synchronous adapter call the work is decomposable, so a between-item deadline is genuinely enforceable | `preparation-oversize`, `preparation-deadline-exceeded` |
 | `packet_build_bound`, `packet_validate_bound` | Same bounded deterministic helper over the same declared inventory; the packet's only variable-size member is the per-file `candidate_contract` inventory already bounded by `package_file_ceiling` | `preparation-deadline-exceeded` |
 | `revalidate_bound` | Same helper for the lifecycle re-read, the scratch re-hash, and the packet re-validation, each over already-bounded inputs | `revalidation-deadline-exceeded` |
-| `author_bound` | Existing `ExecutableAdapter._invoke` (`dreaming-core.py:388-413`): `start_new_session=True`, `communicate(timeout=run_timeout)`, `killpg SIGTERM`, `wait(5)`, `killpg SIGKILL`. The bound is the `evaluation-input-author` entry's configured `run_timeout` | `author-call-timeout` |
+| `author_bound`, `author_doctor_bound` | **The same stateless bounded wrapper**, not `ExecutableAdapter._invoke`. Round-three finding M1 is correct: E2b deliberately resolves a content-pinned, *unregistered* adapter, so there is no registry entry, no `ExecutableAdapter`, and no configured `run_timeout` to enforce. The wrapper copies the `_invoke` pattern (`dreaming-core.py:388-413`) — own process group, `communicate(timeout=...)`, terminate-then-kill — driven by the named policy value `author_call_bound` | `author-call-timeout` |
 | `attest_bound` | Existing harness `call` (`skill-evaluation-harness.py:597-650`): monotonic deadline, output limit, `terminate()` at `:580-593`. The bound is `executor.limits.timeout_seconds` per `version` call | `execute-timeout` |
 | `trial_bound` | Same harness `call` per trial, one trial per `(executor, case, treatment)` as enumerated at `skill-evaluation-harness.py:2344-2352` | `execute-timeout` |
 | `compile_bound` | **Minimal bounded wrapper.** Core invokes `skill-evaluation.py shadow-compile` through one new helper that copies the `_invoke` pattern exactly: own process group, `communicate(timeout=compile_bound)`, terminate-then-kill | `compile-timeout` |
@@ -556,7 +668,8 @@ appended with the named refusal, and the subject is retryable in a later pass.
 `compile_bound`, `certify_bound`, `lifecycle_transition_bound`,
 `record_write_bound`, `lifecycle_read_bound`, `packet_build_bound`,
 `packet_validate_bound`, `package_file_ceiling`, `package_bytes_ceiling`,
-`prepare_throughput`, `hash_throughput`, `termination_grace`, and
+`prepare_throughput`, `hash_throughput`, `catalog_file_ceiling`,
+`catalog_bytes_ceiling`, `termination_grace`, and
 `deadline_margin` are named policy values set by CHK-09 or by an owner-set
 provisional bound. No number is invented here; only the enforcement is settled.
 
@@ -671,16 +784,29 @@ from `result_id` and live only in the terminal-attempt record. Replaying the
 same evaluation over unchanged evidence therefore yields the same `result_id`
 and different attempt identities, with no determinism contradiction.
 
-**`candidate_only` certificates are non-authoritative by construction.**
-`shadow_certify` sets `authoritative` true only when the status is `pass`
-**and** `routing_mode == "catalog_plus_candidate"` **and** every executor
-attests `real_backend` (`skill-evaluation.py:11032-11036`). This stage always
-compiles in `candidate_only` mode, so every certificate it can produce carries
-`authoritative: false`. The no-install-authority rule is therefore enforced
-twice over: by the absent forward lifecycle edge, and by the evaluator's own
-authoritativeness predicate. `certificate_authoritative` is retained in
-`result_id` precisely so that a future authoritative certificate can never
-collide with a shadow one.
+**The `authoritative` bit is retained but never obeyed.** `shadow_certify`
+sets `authoritative` true when the status is `pass` **and** `routing_mode ==
+"catalog_plus_candidate"` **and** every executor attests `real_backend`
+(`skill-evaluation.py:11032-11036`). Revisions 3 and 4 leaned on
+`candidate_only` to make that bit always false; revision 5 removes that mode,
+so the bit can now be true, and the earlier second enforcement of
+no-install-authority is gone.
+
+It is replaced by an enforcement that does not depend on a certificate field at
+all, for two independent reasons. First, `evaluating` has no forward edge in
+`DECLARED_TRANSITIONS`, so a passing result cannot move a record toward
+publication however the bit reads. Second, the stage never reads the bit as
+authority: it retains it as evidence and takes the identical `evaluating ->
+ready_for_draft` exit for `pass`, `regression`, `inconclusive`, and `stale`
+alike.
+
+That is the safer construction regardless, because the bit is only
+*adapter-attested*: `real_backend` is a boolean the executor declares about
+itself and `real_backend_source` is free text, checked for type and consistency
+but never independently verified (`skill-evaluation.py:10767-10770`). A field
+an adapter can assert about itself is not a basis for installing anything.
+`certificate_authoritative` stays inside `result_id` so an authoritative result
+and a non-authoritative one over otherwise identical inputs cannot collide.
 
 *Why durable records are required:* the evaluator writes its own certificate
 receipt, but that receipt binds evaluator identities only. It does not name the
@@ -706,6 +832,13 @@ Reused unchanged:
 - `candidate-lifecycle.py` `read`, `transition`, `SHADOW_TRANSITIONS`, package
   identity `candidate_identity` (`:413`) and `verify_package` (`:446`);
 - `daemon-lock.py` token-fenced `assert` and `renew` (`:203-225`);
+- the estate census `physical_instances` records and snapshot digest
+  (`dreaming-estate.py:1246-1266`, `:1739`), read as the approved target
+  catalog authority and not modified;
+- the owner-recomputed `skill_load_trace` (`dreaming-core.py:1156-1214`),
+  read as the conflict-target selector;
+- `shadow_catalog` and `shadow_copy_tree` (`skill-evaluation.py:10552-10589`),
+  which independently refuse symlinks and non-skill directories;
 - `trusted_authoring_adapter_path` (`skill-evaluation.py:432-443`) and
   `evaluation_input_author_doctor` (`dreaming-vendor-adapter.py:3734`);
 - the `evaluation_input_owner` config schema and validator
@@ -724,6 +857,9 @@ Extended:
   `trusted_authoring_adapter_path` for the shadow stage;
 - the existing sealed `evaluation_input_owner` block gains a second consumer,
   the shadow stage, reading `enabled` and `author_model` with no new key;
+- the stateless bounded wrapper covers the pinned authoring adapter as well as
+  the evaluator and lifecycle tools, since the pinned adapter has no registry
+  entry and therefore no `ExecutableAdapter` timeout to reuse;
 - **`profile_evaluation_routing.py` gains a computed `execution_authority`
   argument and loses its hard-coded `SHADOW_EXECUTION_BLOCKERS` constant**;
 - the existing authoring sensitive-value rejector covers the new packet kind.
@@ -750,13 +886,17 @@ pass start (lease held)
   -> materialize package into pass-local scratch; refuse preparation-oversize
        above the declared file/byte ceilings
   -> re-hash materialized inventory to candidate_id -> package_digest
+  -> select conflict target from the owner-recomputed skill_load_trace;
+       materialize that one census instance into scratch/catalog and
+       re-hash it to its census inventory_sha256
   -> build shadow-author-packet (closed schema, three source roots)
   -> validate packet; refuse on any prohibited field, source, or value
   -> prepare_id = f(lifecycle, candidate, version, record digest,
        package_digest, packet_id, executors document)
   -> revalidate: lifecycle version + record digest unchanged since
-       preparation; scratch re-hashes to package_digest; retained packet
-       bytes re-hash to packet_id
+       preparation; scratch re-hashes to package_digest; catalog scratch
+       re-hashes to inventory_sha256 and the census snapshot digest is
+       unchanged; retained packet bytes re-hash to packet_id
   -> claim admission: remaining_pass_seconds >= claimed_bound
        + deadline_margin
   -- claimed stage, bounded work only ---------------------------------------
@@ -766,9 +906,11 @@ pass start (lease held)
   -> author adapter: --role evaluation-input-author --model <author_model>
        run --operation shadow-author --packet <path> --draft-output <path>
        -> five case prompts, or a refusal code
-  -> shadow-compile   (bounded wrapper; sealed run manifest)
+  -> shadow-compile   (bounded wrapper; --catalog-dir scratch/catalog;
+       sealed run manifest binding candidate_id and catalog_id)
   -> shadow-execute   (synchronous; runs to completion inside the reservation)
-  -> shadow-certify   (bounded wrapper incl. nested shadow-verify subprocess)
+  -> shadow-certify   (bounded wrapper incl. nested shadow-verify subprocess;
+       same --catalog-dir, or the identity re-check reports stale)
   -> retain semantic result under result_id; retain packet under packet_id
   -> lease assert; transition evaluating -> ready_for_draft
   -> append terminal-attempt record naming open_attempt_id and result_id
@@ -780,7 +922,8 @@ pass start (lease held)
 ## Deterministic and model responsibilities
 
 Deterministic code owns: recovery, readiness derivation, execution-availability
-computation, ordering, admission, pre-claim package materialization,
+computation, ordering, admission, conflict-target selection from the
+owner-recomputed trace, pre-claim package and catalog materialization,
 re-hashing, packet construction and validation, pre-claim revalidation of the
 lifecycle and package authority, claim fencing, the fixed suite template,
 executor and routing derivation from adapter attestation, allowance accounting,
@@ -952,13 +1095,18 @@ predecessor's abandoned work beyond the attempts its own sweep settled.
 | Designed suite fails `shadow_suite` validation | Retain `suite-invalid`, exit `evaluating` |
 | `shadow-compile` refuses | Retain `compile-refused` with the evaluator message, exit `evaluating` |
 | `shadow-execute` fails, exceeds a per-call limit, or an adapter attestation mismatches | Retain `execute-failed` or `execute-timeout`, exit `evaluating`; no partial result is certified |
-| Authoring adapter exceeds `author_call_bound` | Existing `_invoke` terminates the process group; retain `author-call-timeout`, exit `evaluating` |
+| Authoring adapter exceeds `author_call_bound` | The stateless bounded wrapper terminates the process group — the pinned adapter has no registry entry and therefore no `ExecutableAdapter` timeout; retain `author-call-timeout`, exit `evaluating` |
 | `shadow-compile` exceeds `compile_bound` | Bounded wrapper terminates the process group; retain `compile-timeout`, exit `evaluating` |
 | `shadow-certify` or its nested `shadow-verify` subprocess exceeds `certify_bound` | Bounded wrapper terminates the whole process group, not just the direct child; retain `certify-timeout`, exit `evaluating` |
 | A lifecycle transition or record write exceeds `settlement_bound` | Bounded wrapper terminates the process group; retain `settlement-timeout`; the record is repaired by the next pass's recovery sweep |
 | `shadow-certify` returns `stale` | Retain `certificate-stale`; candidate or executor drifted mid-run; exit and retry later |
 | `shadow-certify` returns `regression` or `inconclusive` | Retain the result as terminal evidence, exit `evaluating`, grant no authority |
 | `shadow-certify` returns `pass` | Retain the result, exit to `ready_for_draft`, grant no install or publication authority |
+| `shadow-certify` returns `pass` with `authoritative: true` | Identical handling: the bit is retained as evidence, never read as authority, and the exit and estate behaviour are byte-identical to the `authoritative: false` case |
+| No trace entry names a catalog skill for any authorizing occurrence | Refuse `shadow-conflict-target-unavailable` before the claim; report-only; retryable when a later occurrence supplies one |
+| The selected name resolves to zero or several census instances | Refuse `shadow-conflict-target-ambiguous` before the claim; no guessing and no similarity fallback |
+| Census digest changed since preparation, or catalog bytes do not re-hash to `inventory_sha256` | Refuse `shadow-catalog-snapshot-stale` before the claim; discard scratch; next candidate |
+| The incumbent's SKILL.md description trips the packet sensitive-value scan | Refuse `shadow-packet-sensitive-value` before any model call; the candidate is not evaluable this pass |
 | Halt file appears between operations | Stop before the next claim, retain `halted`; any claimed candidate still completes its owned exit |
 | Remaining pass time insufficient for the full computed formula, preparation included | Refuse before preparation with `pass_deadline_reservation_unmet`; no scratch, no open-attempt record |
 | Scratch root left behind by a fenced-out or crashed pass | The next owner's recovery sweep deletes every scratch root whose pass id is not the current pass; scratch is never read as authority |
@@ -993,16 +1141,20 @@ predecessor's abandoned work beyond the attempts its own sweep settled.
    and every open-attempt record has zero or one terminal-attempt record.
    Openness is derived by scan, never stored as a mutable flag.
 7. Every semantic result names the exact `candidate_id` whose materialized
-   bytes re-hash to it, the exact canonical occurrence identities that
-   authorized it, and the exact `packet_id` the model saw.
+   bytes re-hash to it, the exact `catalog_id` whose one skill re-hashed to its
+   census `inventory_sha256` under an unchanged census snapshot digest, the
+   exact canonical occurrence identities that authorized it, and the exact
+   `packet_id` the model saw.
 8. `result_id` is computed over path-independent semantic fields only. It never
    includes the certificate receipt digest, `result_dir`, `run_dir`, the
    certificate `reason` string, or any pass, lease, attempt, or timing field;
    those live only in the terminal-attempt record.
 9. A shadow evaluation grants no install, publication, portfolio, or admission
-   authority, and adds no forward lifecycle edge. Every certificate this stage
-   produces compiles in `candidate_only` mode and therefore carries
-   `authoritative: false` by the evaluator's own predicate.
+   authority, and adds no forward lifecycle edge. This holds independently of
+   the certificate's `authoritative` bit, which `catalog_plus_candidate` mode
+   may set true: the stage never reads that bit as authority, and takes the
+   identical `evaluating -> ready_for_draft` exit and identical estate
+   behaviour for every certificate status.
 10. The authoring adapter is the content-pinned adapter, invoked with
     `--operation shadow-author` and exactly one `--packet` path and no other
     input path, under the exact `author_model` identity from the sealed
@@ -1039,6 +1191,14 @@ predecessor's abandoned work beyond the attempts its own sweep settled.
     pre-claim refusal never do.
 17. Repair outcomes remain report-only and never enter this stage.
 18. The pass keeps exactly one writer lease and one owner.
+19. The approved target catalog is exactly one census-derived skill, selected
+    by the first catalog load in the owner-recomputed skill-load trace of the
+    canonically ordered authorizing occurrences. No similarity, keyword, or
+    embedding judgement participates, and an absent or ambiguous target is a
+    pre-claim refusal rather than a guess.
+20. The packet discloses from the catalog only that one skill's directory name
+    and SKILL.md description; every other catalog byte, census row, capability
+    identity, and second skill remains a prohibited source.
 
 ## Acceptance criteria
 
@@ -1064,7 +1224,8 @@ predecessor's abandoned work beyond the attempts its own sweep settled.
   `open_attempt_id`, the outcome, the stop reason, `retained_by_pass_id`,
   `settle_time`, phase durations, and the `result_id` when one exists.
 - **AC-E4:** A `pass` result produces no install, publication, or forward
-  lifecycle transition, and no estate mutation.
+  lifecycle transition, and no estate mutation, and this holds identically when
+  the certificate reports `authoritative: true`.
 - **AC-E5:** Every failure row in the failure model that occurs while the lease
   is held **after the claim** leaves the lifecycle record in `ready_for_draft`
   with exactly one appended terminal-attempt record, and a later pass can claim
@@ -1134,9 +1295,25 @@ predecessor's abandoned work beyond the attempts its own sweep settled.
   read verbatim from the sealed `evaluation_input_owner` block; no
   installed-capability owner entry point is invoked and no adapter registry
   entry is added.
-- **AC-E16:** Every certificate this stage produces reports
-  `authoritative: false`, and no code path treats a certificate as install,
-  publication, or admission authority.
+- **AC-E16:** No code path reads the certificate's `authoritative` bit as
+  install, publication, or admission authority. Two runs identical except for
+  that bit produce byte-identical estate contents, the same
+  `evaluating -> ready_for_draft` exit, the same retained record shapes, and
+  differ only in the retained value of `certificate_authoritative`.
+- **AC-E17:** The stage compiles in `catalog_plus_candidate` mode against a
+  catalog containing exactly one skill, whose bytes re-hash to the census
+  `inventory_sha256` under an unchanged census `snapshot_sha256`, selected by
+  the first catalog load in the owner-recomputed skill-load trace of the
+  canonically ordered authorizing occurrences; an absent or ambiguous target
+  refuses before the claim with its stable code; and the retained result binds
+  `catalog_id`, `snapshot_sha256`, `canonical_capability_id`, and
+  `inventory_sha256`.
+- **AC-E18:** With a real-backend executor and a genuine incumbent, the stage
+  can reach `status: pass`, meaning every routing case proved its exact
+  expected candidate and catalog loads and every `task_value` pair completed on
+  both arms — the parent Definition of Done's triggering, task-performance, and
+  overall-regression evaluation. No fixture result, weakened gate, or
+  inconclusive diagnostic is ever recorded as a pass.
 - **AC-E13:** With two ready candidates where the first-sorted fails
   terminally, the second is still claimed and evaluated in the same pass while
   allowance and reservation permit, and neither subject is prepared or claimed
@@ -1148,20 +1325,24 @@ predecessor's abandoned work beyond the attempts its own sweep settled.
 
 | Check | Criterion | Setup | Pass evidence | Failure evidence |
 | --- | --- | --- | --- | --- |
-| CHK-01 | AC-E1, AC-E2 | One lifecycle record with three distinct current occurrences, shadow-ready recommendation, one staged package; healthy fixture evaluator and fixture author | One result retained; manifest `candidate_inventory` equals revision `files`; final state `ready_for_draft`; exactly one open record and one terminal record naming it | No result, a result naming a different candidate id, an unsettled open record, or any record written twice |
+| CHK-01 | AC-E1, AC-E2 | One lifecycle record with three distinct current occurrences, shadow-ready recommendation, one staged package; one census fixture whose skill-load trace names one resolvable incumbent; healthy fixture evaluator and fixture author | One result retained; manifest `candidate_inventory` equals revision `files`; final state `ready_for_draft`; exactly one open record and one terminal record naming it | No result, a result naming a different candidate id, an unsettled open record, or any record written twice |
 | CHK-02 | AC-E3a, AC-E3b | CHK-01 with two distinct authorizing profiles | Result lists both `profile_id`s, all three canonical occurrence ids, record version, `packet_id`, suite id, harness digest, executor identities, and no pass/lease/timing field; open record's key set is exactly the nine declared fields; terminal record names that `open_attempt_id`, outcome, stop reason, `retained_by_pass_id`, `settle_time`, durations, `result_id` | Any authority absent or mismatched, a pass/lease/timing field in the result, or an outcome/result field in the open record |
-| CHK-03 | AC-E4, AC-E16 | CHK-01 forced to `pass` | Skill roots byte-identical before and after; no publisher call; no transition other than in and out of `evaluating`; the certificate reports `authoritative: false` | Any estate mutation, publication, forward transition, or an `authoritative: true` certificate from this stage |
+| CHK-03 | AC-E4, AC-E16 | CHK-01 forced to `pass` twice: once with a fixture executor attesting `real_backend: false` and once attesting `real_backend: true`, which makes `shadow_certify` set `authoritative: true` | Skill roots byte-identical before and after both runs; no publisher call; no transition other than in and out of `evaluating`; the two runs differ only in the retained `certificate_authoritative` value and the resulting `result_id` | Any estate mutation, publication, forward transition, or any behavioural difference between the two runs beyond the retained bit |
+| CHK-12 | AC-E17 | Catalog permutations: a trace whose first catalog load resolves to exactly one census instance; a trace with no catalog load; a name resolving to two instances; a census digest changed between preparation and revalidation; catalog bytes altered after materialization; and an incumbent description containing an absolute path | The first permutation materializes exactly one skill directory, re-hashes to `inventory_sha256`, compiles with `--catalog-dir`, and binds `catalog_id`, `snapshot_sha256`, `canonical_capability_id`, and `inventory_sha256` in the result; the rest refuse before the claim with `shadow-conflict-target-unavailable`, `shadow-conflict-target-ambiguous`, `shadow-catalog-snapshot-stale`, `shadow-catalog-snapshot-stale`, and `shadow-packet-sensitive-value` respectively, writing no record | A catalog with zero or several skills, a selection made by similarity or keyword, a claim made on a stale census, an unbound catalog identity, or a prohibited catalog byte reaching the packet |
 | CHK-04 | AC-E5 | Two fixture groups. Post-claim: authoring refusal, malformed authoring result, invalid suite, compile refusal, execute failure, certify `stale`. Pre-claim: over-ceiling inventory, tampered package at preparation, tampered package at revalidation, packet validator refusal, lifecycle version changed between preparation and claim | Each post-claim row leaves `ready_for_draft`, appends exactly one terminal record with its named outcome, and a second pass re-claims the same candidate. Each pre-claim row leaves the lifecycle record byte-identical, writes no open record, no terminal record, and no result, leaves no scratch root, carries its stable refusal code in the run report, and reproduces identically in a second pass | Any post-claim row leaving `evaluating`, appending no terminal record, appending two, or blocking re-claim; any pre-claim row transitioning the record, writing any attempt record, leaving scratch behind, or refusing non-deterministically |
 | CHK-05 | AC-E6 | Six fixtures: lease assertion forced to fail mid-stage; open record left unsettled by a killed pass; two unsettled open records for one subject and version; two terminal records naming one open record; record in `evaluating` with no open record; record not in `evaluating` with an unsettled open record | A byte-level snapshot of every durable root — lifecycle records, `attempts/`, `results/`, `packets/`, accounting, run reports, but not the non-authoritative scratch root — before and after the fenced-out pass is identical, and its `lease_lost` appears only in process output; the next pass deletes every scratch root not belonging to it; the next pass sweeps in `(claim_time, open_attempt_id)` order before readiness derivation, appends `evaluation-abandoned` with `recovered_after_owner_loss` attributed to itself; collision recovers the earliest and supersedes the rest, unhealthy; settled-twice takes the earliest, unhealthy; orphan appends an `origin: orphan-recovery` pair, degraded; not-required appends `recovery-not-required` with no transition | Any durable byte written by the fenced-out pass, a durable `lease_lost` accounting row, an unsettled open record surviving a sweep, non-deterministic recovery order, an overwritten record, or a terminal record naming no open record |
 | CHK-06 | AC-E7 | Run CHK-04's certify-`stale` fixture, then supply a fourth matching occurrence | Reviewer group context includes the same `lifecycle_id`; no new lifecycle record | A new lifecycle id appears for the same procedure |
 | CHK-07 | AC-E8 | Packets built with, in turn: an extra unknown key, an estate-census field, a transcript fragment, an absolute path, a UUID occurrence id, a `profile_id`, a credential-shaped token | Each refused with its stable `shadow-packet-*` code before any model call; adapter invocation carries exactly one packet path argument; retained packet bytes re-validate | Any prohibited content reaching the model, a silently stripped key, or a second adapter input path |
 | CHK-08 | AC-E9, AC-E13 | Two ready candidates where the first-sorted always fails terminally, with allowance for two; then a variant with allowance for one; then zero ready candidates | Run one evaluates both subjects, each exactly once, and reconciles; run two stops with `evaluation_allowance_spent`; run three stops with `eligible_input_exhausted` listing near-miss, already-attempted, and pre-claim refusal reasons; a variant whose first-sorted subject is refused before the claim still evaluates the second and spends no allowance on the refusal; a later pass sorts the attempted subject after a never-attempted one | A failing or pre-claim-refused candidate blocking its successor, any subject prepared or claimed twice in one pass, allowance spent on a pre-claim refusal, or unused allowance with no stop reason |
-| CHK-09 | AC-E11, AC-E14, and sets the unresolved allowances | One real configured evaluator, one candidate, natural pass; two synthetic runs with remaining pass time set just below the candidate-admission bound and just below the claim-admission bound; one deliberately overrunning fixture per bounded subprocess term (author, executor call, compile, certify with a sleeping nested `shadow-verify`, lifecycle transition); one over-ceiling revision inventory; and one artificially slowed materialization and one slowed revalidation | Every term of the printed formula — preparation, revalidation, authoring, attestation, trials, compile, certify, settlement, termination — is present and finite **before preparation starts**; the natural run performs zero materialization, re-hashing, packet build, or packet validation after the claim, proved by an ordered phase trace; the synthetic runs refuse with `pass_deadline_reservation_unmet` writing neither scratch nor open record; each overrun subprocess fixture is terminated within its bound plus `termination_grace` with no surviving process in its group; the over-ceiling inventory refuses `preparation-oversize` with zero bytes copied; the slowed fixtures refuse `preparation-deadline-exceeded` and `revalidation-deadline-exceeded`; retained per-call and per-phase cost becomes the configured `author_call_bound`, `author_doctor_bound`, `executor_call_bound`, `compile_bound`, `certify_bound`, `lifecycle_transition_bound`, `record_write_bound`, `lifecycle_read_bound`, `packet_build_bound`, `packet_validate_bound`, `package_file_ceiling`, `package_bytes_ceiling`, `prepare_throughput`, `hash_throughput`, `termination_grace`, and `deadline_margin` | A missing or infinite formula term, any deterministic preparation observed after the claim, a start accepted below any admission bound, a scratch root or open record written by a refused admission, a surviving child process after any bound, an unrefused over-ceiling inventory, or allowances configured without this measurement or an owner-recorded provisional bound |
+| CHK-09 | AC-E11, AC-E14, AC-E18, and sets the unresolved allowances | One real configured evaluator with a real backend, one candidate, one genuine census incumbent as the conflict target, natural pass; two synthetic runs with remaining pass time set just below the candidate-admission bound and just below the claim-admission bound; one deliberately overrunning fixture per bounded subprocess term (author, executor call, compile, certify with a sleeping nested `shadow-verify`, lifecycle transition); one over-ceiling revision inventory; and one artificially slowed materialization and one slowed revalidation | Every term of the printed formula — preparation, revalidation, authoring, attestation, trials, compile, certify, settlement, termination — is present and finite **before preparation starts**; the natural run performs zero materialization, re-hashing, packet build, or packet validation after the claim, proved by an ordered phase trace; the synthetic runs refuse with `pass_deadline_reservation_unmet` writing neither scratch nor open record; each overrun subprocess fixture is terminated within its bound plus `termination_grace` with no surviving process in its group; the over-ceiling inventory refuses `preparation-oversize` with zero bytes copied; the slowed fixtures refuse `preparation-deadline-exceeded` and `revalidation-deadline-exceeded`; retained per-call and per-phase cost becomes the configured `author_call_bound`, `author_doctor_bound`, `executor_call_bound`, `compile_bound`, `certify_bound`, `lifecycle_transition_bound`, `record_write_bound`, `lifecycle_read_bound`, `packet_build_bound`, `packet_validate_bound`, `package_file_ceiling`, `package_bytes_ceiling`, `prepare_throughput`, `hash_throughput`, `termination_grace`, and `deadline_margin` additionally, the natural run reaches a certificate status derived from real trials, and if that status is `pass` it is recorded as the parent Definition of Done's triggering, task-performance, and overall-regression evidence, with the routing gate proving exact candidate and catalog loads for all five classes | Any pass claimed from a fixture executor, a weakened gate, an inconclusive result reported as a pass, a missing or infinite formula term, any deterministic preparation observed after the claim, a start accepted below any admission bound, a scratch root or open record written by a refused admission, a surviving child process after any bound, an unrefused over-ceiling inventory, or allowances configured without this measurement or an owner-recorded provisional bound |
 | CHK-10 | AC-E10, AC-E3a | CHK-01 run twice over unchanged evidence with **both** a pinned deterministic author fixture returning a fixed case set and a pinned deterministic executor fixture returning fixed trial output, and with the second run given a **different run and result directory** | Identical `result_id` across both runs even though the certificate `receipt_id` and `result_dir` differ; distinct `open_attempt_id` and `terminal_attempt_id`; both terminal records name the same `result_id` and different open records; the retained result contains no path-bearing field | Differing `result_id` when only the run root changed, identical attempt identities across passes, or any `result_dir`, `run_dir`, `reason`, or receipt digest inside the result identity domain |
-| CHK-11 | AC-E12, AC-E15 | The authority permutation matrix: evaluator unconfigured, configured-unhealthy, healthy-unattested, suite authority missing, package unavailable, malformed authority object, all-present; plus one permutation per E2b authoring sub-condition: `evaluation_input_owner` absent, invalid key set, `enabled: false`, empty `author_model`, authoring adapter digest mismatched, author doctor unhealthy, and `shadow-author-packet` absent | Each permutation's routing row reports the matching computed reason and `available` value; every authoring sub-condition yields `shadow-authoring-authority-unavailable` and a malformed authority object yields `shadow-execution-authority-unknown`; in the all-present case the adapter is invoked exactly once with `--operation shadow-author` and a single `--packet` path under the configured `author_model`, and no `v2-input-owner-run` or `configured_adapters` path is entered; declines under `available: true` carry allowance, reservation, halt, or attempted-set stop reasons rather than authority reasons | Any row claiming authority the host lacks, any stage start under `available: false`, an `executor_unavailable` report under `available: true`, an authority reason used for a scheduling decline, a second adapter input path, or a hard-coded blocker constant surviving in `profile_evaluation_routing.py` |
+| CHK-11 | AC-E12, AC-E15 | The authority permutation matrix: evaluator unconfigured, configured-unhealthy, healthy-unattested, suite authority missing, package unavailable, census absent or digest-mismatched, malformed authority object, all-present; plus one permutation per E2b authoring sub-condition: `evaluation_input_owner` absent, invalid key set, `enabled: false`, empty `author_model`, authoring adapter digest mismatched, author doctor unhealthy, and `shadow-author-packet` absent | Each permutation's routing row reports the matching computed reason and `available` value; every authoring sub-condition yields `shadow-authoring-authority-unavailable`, an absent or unverifiable census yields `shadow-catalog-authority-unavailable`, and a malformed authority object yields `shadow-execution-authority-unknown`; in the all-present case the adapter is invoked exactly once with `--operation shadow-author` and a single `--packet` path under the configured `author_model`, and no `v2-input-owner-run` or `configured_adapters` path is entered; declines under `available: true` carry allowance, reservation, halt, or attempted-set stop reasons rather than authority reasons | Any row claiming authority the host lacks, any stage start under `available: false`, an `executor_unavailable` report under `available: true`, an authority reason used for a scheduling decline, a second adapter input path, or a hard-coded blocker constant surviving in `profile_evaluation_routing.py` |
 
-CHK-01 through CHK-08, CHK-10, and CHK-11 are deterministic and run with
-fixture author and evaluator adapters in the standalone suites. CHK-09 is the
+CHK-01 through CHK-08 and CHK-10 through CHK-12 are deterministic and run with
+fixture author and evaluator adapters in the standalone suites. CHK-03's
+`authoritative: true` half uses a fixture attesting `real_backend`, which is
+legitimate for proving that stage policy ignores the bit, and is never counted
+as a Definition-of-Done pass. CHK-09 is the
 only check requiring a real model and a natural installed pass; its synthetic
 reservation-refusal half is deterministic and runs with the others.
 
@@ -1172,6 +1353,14 @@ Migration is additive. No existing record changes shape. Absent the new
 routing row reports `shadow-executor-unconfigured`, the stage reports
 `executor_unavailable`, changes no state, and the rest of the pass is
 unaffected, so an unconfigured host keeps today's behavior exactly.
+
+The catalog authority is read-only and additive too. The census is already
+built; this stage adds no field to it and writes nothing back. A host with no
+census, no resolvable incumbent, or an ambiguous one simply refuses before the
+claim with its stable code and evaluates nothing, which is the same
+report-only outcome as an unconfigured evaluator. Rollback is deleting the
+stage: the census, the dispositions, and the lifecycle records are untouched by
+it.
 
 Shadow authoring adds no configuration key. It reads `enabled` and
 `author_model` from the existing sealed `evaluation_input_owner` block, so a
@@ -1259,16 +1448,29 @@ first restored pass runs the recovery sweep before deriving readiness.
       any packet is built and again immediately before the claim, and
       preparation writes only to a pass-local scratch root outside every
       durable record root.
-- [ ] `shadow-compile`, `shadow-execute`, and `shadow-certify` run unmodified
-      and produce one certificate covering triggering, task performance, and
-      overall regression.
+- [ ] `shadow-compile`, `shadow-execute`, and `shadow-certify` run unmodified,
+      in `catalog_plus_candidate` mode with `--catalog-dir` pointing at the
+      one-skill census snapshot, and produce one certificate covering
+      triggering, task performance, and overall regression.
+- [ ] A real-backend run can reach `status: pass`, satisfying the parent
+      funnel's Definition of Done, and no fixture, weakened gate, or
+      inconclusive diagnostic is ever recorded as a pass.
+- [ ] The catalog contains exactly one census-derived skill bound by
+      `snapshot_sha256`, `canonical_capability_id`, and `inventory_sha256`,
+      chosen without any similarity, keyword, or embedding judgement, with
+      absent and ambiguous targets refusing before the claim.
 - [ ] The semantic result binds candidate, occurrences, profiles, lifecycle
       version, packet, and the certificate's path-independent `status`,
       `run_id`, `result_id`, and `authoritative` fields, and excludes the
       certificate receipt digest, every path-bearing field, and all pass,
       lease, and timing fields, which live only in the terminal-attempt record.
-- [ ] Every certificate the stage produces reports `authoritative: false`,
-      because it always compiles in `candidate_only` mode.
+- [ ] The stage compiles in `catalog_plus_candidate` mode against a one-skill
+      catalog materialized from the estate census, with the conflict target
+      chosen from the owner-recomputed skill-load trace, so a truthful `pass`
+      on triggering, task performance, and overall regression is reachable.
+- [ ] An `authoritative: true` certificate produces byte-identical estate and
+      lifecycle behaviour to an `authoritative: false` one; no code path reads
+      the bit as install, publication, or admission authority.
 - [ ] Every lease-held path exits `evaluating` in the same pass; a fenced-out
       pass writes zero durable bytes and reports `lease_lost` only through its
       process return and output; the next valid owner retains the durable
@@ -1283,8 +1485,9 @@ first restored pass runs the recovery sweep before deriving readiness.
       stop reason, and accounting reconciles the subjects that pass claimed plus
       the attempts its sweep settled.
 - [ ] A passing result grants no install, publication, or admission authority.
-- [ ] CHK-01 through CHK-08, CHK-10, and CHK-11 pass deterministically; CHK-09
-      records the measured cost that sets the configured allowances.
+- [ ] CHK-01 through CHK-08 and CHK-10 through CHK-12 pass deterministically;
+      CHK-09 records the measured cost that sets the configured allowances and
+      the one real-backend certificate status.
 - [ ] The plan baton, this work order, and the local commits are complete, and
       the slice has a reviewed PR targeting `feature/multi-cli-dreaming`.
 
@@ -1303,9 +1506,11 @@ Reframe status becomes CLEAR when a round-three design review records all of:
    `shadow_attest` against the derived executors document, proving E1 needs no
    invented identity.
 3. **One validated shadow suite** produced from the fixed template plus five
-   model-authored prompts, accepted by `shadow_suite` in `candidate_only`
-   routing mode with no `--catalog-dir`, proving E2 needs no catalog stage and
-   no second authoring stack; together with one trace of the exact E2b
+   model-authored prompts, accepted by `shadow_suite` in
+   `catalog_plus_candidate` routing mode against a one-skill catalog
+   materialized from the census, with the `routing_conflict` case naming that
+   one skill, proving E2 and E2c need no catalog audit stage and no second
+   authoring stack; together with one trace of the exact E2b
    invocation showing a single `--packet` argument, the content-pinned adapter,
    and the configured `author_model`, and confirming that the resulting
    certificate reports `authoritative: false`.
@@ -1339,9 +1544,17 @@ Reframe status becomes CLEAR when a round-three design review records all of:
    per-phase cost, or an explicit owner-set provisional bound with the
    measurement scheduled, replacing the "unresolved policy decision" row in the
    constraint table.
-8. **Confirmation that no revisit condition in the constraint table has
+8. **Owner acceptance of the catalog reuse** — that reading one already-derived
+   census record and copying one installed skill's bytes into a pass-local
+   snapshot is reuse of an existing authority rather than a second catalog
+   stage, that first-catalog-load-in-the-owner-recomputed-trace is a
+   behavioral rather than semantic selector, and that a one-skill catalog is
+   sufficient to prove triggering, task performance, and overall regression;
+   together with acceptance that the certificate's `authoritative` bit is
+   retained but never obeyed, since it is adapter-attested.
+9. **Confirmation that no revisit condition in the constraint table has
    fired**, in particular the pass-deadline, packet-prohibition, receipt-digest,
    and authoring-identity rows, given the added stage.
 
-Until all eight are recorded, implementation returns to this document rather
+Until all nine are recorded, implementation returns to this document rather
 than starting the stage.
