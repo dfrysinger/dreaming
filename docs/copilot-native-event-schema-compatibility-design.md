@@ -1,7 +1,7 @@
 # Copilot native event schema and usage authority — critical work order (Round 3)
 
-Status: compatibility reframe. Runtime changes pause until this revision passes
-paired design review.
+Status: reviewed Round-3 work order. Implementation may resume only through
+`development-loop`.
 
 Base: `f63f55b` (`feature/copilot-native-event-schema`).
 Current implementation predecessor: `540fafb`.
@@ -299,7 +299,7 @@ Two inherited rules are challenged, and only these two:
 
 ---
 
-## Reframe record — status OPEN pending Round-3 design review
+## Reframe record — status CLEAR
 
 **1. What user outcome is blocked?**
 A complete trial result and a complete comparator result. Not "a validator
@@ -358,13 +358,18 @@ two learns anything new. CLEAR is contingent on exactly that: if the canonical
 Shape A parser could not be expressed inside `dreaming-vendor-adapter.py`
 without a new component, this would return to OPEN.
 
-The Round-3 trigger is addressed by the revised work order, not by a permissive
+The Round-3 trigger is closed by the revised work order, not by a permissive
 implementation: the exact type is measured from the refused live run, its
 payload authority comes from the public generated SDK schema, and the new guard
 places recursive type-, tool-, trace-, and usage-shaped decoys inside
-`data.settings`. This record closes to **CLEAR** only after paired design review
-finds no unresolved material issue. Any new event name or any managed-settings
-token field at a declared usage path reopens it.
+`data.settings`. Round-1 paired review of `b3c05a5` found two material work-order
+defects: the reframe record did not answer the governing invariant-failure
+question, and G-A incorrectly described all 14 additions as red at predecessor
+`540fafb`. Commit `4fe282d` repaired both. Claude Opus 5 and GPT-5.6 Terra each
+completed the bounded fix-verification round, applied the design scope lens,
+resolved both findings, and reported no fix-delta finding. That paired evidence
+changes the durable status to **CLEAR**. Any new event name or any
+managed-settings token field at a declared usage path reopens it.
 
 ---
 
