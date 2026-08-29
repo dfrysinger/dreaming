@@ -31,6 +31,15 @@ UNRESOLVED_BOUNDARIES = frozenset({"boundary-conflict", "boundary-unresolved"})
 AUTHORING_READY_STATES = frozenset({"ready_for_draft", "evaluating"})
 REQUIRED_CURRENT_OCCURRENCES = 3
 CURRENT_OCCURRENCE_WINDOW = timedelta(days=30)
+# Prerequisites the funnel does not yet produce for the existing
+# shadow-compile/shadow-execute/shadow-certify flow.  A routed candidate names
+# them so the projection never implies an evaluation that cannot run, and no
+# code path enters the evaluating state while they are unmet.  See
+# docs/task-opportunity-shadow-evaluation-reframe.md.
+SHADOW_EXECUTION_BLOCKERS = (
+    "shadow-executor-authority-unconfigured",
+    "shadow-suite-authority-unavailable",
+)
 UUID_RE = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}")
 SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}")
 
@@ -237,6 +246,7 @@ def build_evaluation_routing_row(
     candidate_group_id = disposition.get("candidate_group_id")
     boundary_relation = disposition.get("boundary_relation")
     subject: dict[str, Any] | None = None
+    execution: dict[str, Any] | None = None
     if version != 3:
         _assert_unbound(lifecycle_record, "legacy-disposition-unbound")
         route, reasons = "legacy-not-routable", ["legacy-audit-contract"]
@@ -271,6 +281,10 @@ def build_evaluation_routing_row(
         else:
             route = "candidate-evaluation"
             subject = _evaluation_subject(record, occurrence_ids, evidence_ids)
+            execution = {
+                "available": not SHADOW_EXECUTION_BLOCKERS,
+                "reasons": list(SHADOW_EXECUTION_BLOCKERS),
+            }
     decision = {
         "schema_version": EVALUATION_ROUTING_CONTRACT_VERSION,
         "kind": "profile_evaluation_routing_row",
@@ -288,6 +302,7 @@ def build_evaluation_routing_row(
         "reasons": reasons,
         "requires_evaluation": route == "candidate-evaluation",
         "evaluation_subject": subject,
+        "evaluation_execution": execution,
     }
     return {**decision, "decision_sha256": _digest(decision)}
 
@@ -307,5 +322,11 @@ def summarize_evaluation_routing(rows: list[dict[str, Any]]) -> dict[str, Any]:
         "routes": routes,
         "requires_evaluation": sum(
             1 for row in rows if row.get("requires_evaluation") is True
+        ),
+        "executable_evaluation": sum(
+            1
+            for row in rows
+            if isinstance(row.get("evaluation_execution"), dict)
+            and row["evaluation_execution"].get("available") is True
         ),
     }

@@ -53,6 +53,7 @@ from profile_audit_disposition import (
     validate_profile_audit_disposition,
 )
 from profile_evaluation_routing import (
+    SHADOW_EXECUTION_BLOCKERS,
     EvaluationRoutingError,
     build_evaluation_routing_row,
     summarize_evaluation_routing,
@@ -3439,71 +3440,12 @@ class DreamingRuntime:
             "status": "derived",
             "rows": rows,
             "summary": summary,
+            "execution_blockers": self.evaluation_execution_blockers(),
         }
 
-    def handoff_candidate_for_evaluation(self, lifecycle_id: str) -> dict[str, Any]:
-        """Enter the existing shadow evaluation state for one routed candidate."""
-        routing = self.derive_evaluation_routing()
-        matched = [
-            row
-            for row in routing["rows"]
-            if isinstance(row["evaluation_subject"], dict)
-            and row["evaluation_subject"]["lifecycle_id"] == lifecycle_id
-        ]
-        if not matched:
-            raise RuntimeFailure("evaluation-handoff-not-routed", lifecycle_id)
-        if len({digest(row["evaluation_subject"]) for row in matched}) != 1:
-            raise RuntimeFailure("evaluation-handoff-ambiguous", lifecycle_id)
-        subject = matched[0]["evaluation_subject"]
-        record = self._candidate_lifecycle_call("read", lifecycle_id)
-        if (
-            candidate_record_digest(record) != subject["record_sha256"]
-            or record.get("record_version") != subject["record_version"]
-        ):
-            raise RuntimeFailure("evaluation-handoff-stale", lifecycle_id)
-        handoff = {
-            "lifecycle_id": lifecycle_id,
-            "candidate_id": subject["candidate_id"],
-            "proposed_name": subject["proposed_name"],
-            "package_path": subject["package_path"],
-            "current_occurrence_count": subject["current_occurrence_count"],
-            "profile_ids": sorted(row["profile_id"] for row in matched),
-            "shadow_only": True,
-        }
-        if record.get("state") == "evaluating":
-            return {
-                **handoff,
-                "status": "already-evaluating",
-                "changed": False,
-                "record_version": subject["record_version"],
-                "record_sha256": subject["record_sha256"],
-            }
-        transitioned = self._candidate_lifecycle_call(
-            "transition",
-            lifecycle_id,
-            "--to",
-            "evaluating",
-            "--reason",
-            "profile-audit-evaluation-handoff",
-            "--candidate-id",
-            subject["candidate_id"],
-            "--expected-version",
-            str(subject["record_version"]),
-            "--expected-record-sha256",
-            subject["record_sha256"],
-        )
-        if (
-            transitioned.get("state") != "evaluating"
-            or transitioned.get("candidate_id") != subject["candidate_id"]
-        ):
-            raise RuntimeFailure("evaluation-handoff-refused", lifecycle_id)
-        return {
-            **handoff,
-            "status": "evaluating",
-            "changed": True,
-            "record_version": transitioned["record_version"],
-            "record_sha256": transitioned["record_sha256"],
-        }
+    def evaluation_execution_blockers(self) -> list[str]:
+        """Name why a routed candidate cannot yet reach the shadow evaluator."""
+        return list(SHADOW_EXECUTION_BLOCKERS)
 
     def review_profile(
         self,
@@ -10156,6 +10098,7 @@ def scheduled_run() -> dict[str, Any]:
             "status": "pending",
             "summary": None,
             "rows": [],
+            "execution_blockers": list(SHADOW_EXECUTION_BLOCKERS),
         },
         "errors": adapter_errors,
         "legacy_records_imported": imported_legacy,
@@ -11839,6 +11782,7 @@ def scheduled_run() -> dict[str, Any]:
             "status": routing["status"],
             "summary": routing["summary"],
             "rows": routing["rows"],
+            "execution_blockers": routing["execution_blockers"],
         }
     except RuntimeFailure as error:
         report["evaluation_routing"] = {
@@ -11847,6 +11791,7 @@ def scheduled_run() -> dict[str, Any]:
             "code": error.code,
             "summary": None,
             "rows": [],
+            "execution_blockers": list(SHADOW_EXECUTION_BLOCKERS),
         }
         report["errors"].append(
             {"phase": "evaluation-routing", "code": error.code}
@@ -12118,17 +12063,6 @@ def evaluation_routing() -> dict[str, Any]:
     }
 
 
-def handoff_evaluation(lifecycle_id: str) -> dict[str, Any]:
-    paths = default_paths()
-    core = DreamingRuntime(paths, [])
-    return {
-        "ok": True,
-        "runtime": "dreaming-core",
-        "command": "handoff-evaluation",
-        **core.handoff_candidate_for_evaluation(lifecycle_id),
-    }
-
-
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command")
@@ -12158,8 +12092,6 @@ def build_parser() -> argparse.ArgumentParser:
     collect_profile.add_argument("--package", required=True)
     collect_profile.add_argument("--proposed-name", required=True)
     subcommands.add_parser("evaluation-routing")
-    handoff = subcommands.add_parser("handoff-evaluation")
-    handoff.add_argument("--lifecycle-id", required=True)
     return parser
 
 
@@ -12217,8 +12149,6 @@ def main() -> None:
             )
         elif args.command == "evaluation-routing":
             report = evaluation_routing()
-        elif args.command == "handoff-evaluation":
-            report = handoff_evaluation(args.lifecycle_id)
         else:
             report = selftest(require_config=args.command == "doctor")
         print(json.dumps(report, sort_keys=True))

@@ -7625,6 +7625,11 @@ elif sys.argv[1] == "run":
             [row["requires_evaluation"] for row in routing["rows"]],
             [False] * 6,
         )
+        self.assertEqual(
+            [row["evaluation_execution"] for row in routing["rows"]],
+            [None] * 6,
+        )
+        self.assertEqual(routing["summary"]["executable_evaluation"], 0)
         self.assertEqual(routing["summary"]["total"], 6)
         self.assertEqual(routing["summary"]["requires_evaluation"], 0)
         self.assertEqual(
@@ -7637,7 +7642,7 @@ elif sys.argv[1] == "run":
             [row["decision_sha256"] for row in repeated["rows"]],
         )
 
-    def test_gated_candidate_hands_off_once_to_evaluation(self) -> None:
+    def test_gated_candidate_names_an_unexecutable_evaluation(self) -> None:
         self.clock = 1770249600
         self.routing_disposition(
             outcome="no-covering-skill",
@@ -7668,27 +7673,66 @@ elif sys.argv[1] == "run":
             subject["record_sha256"],
             runtime_module.candidate_record_digest(record),
         )
-        first = core.handoff_candidate_for_evaluation(self.ROUTING_LIFECYCLE_ID)
-        self.assertEqual(first["status"], "evaluating")
-        self.assertTrue(first["changed"])
-        self.assertTrue(first["shadow_only"])
-        transitions = [
-            call for call in calls if call and call[0] == "transition"
-        ]
-        self.assertEqual(len(transitions), 1)
-        self.assertIn("--to", transitions[0])
+        execution = row["evaluation_execution"]
+        self.assertFalse(execution["available"])
         self.assertEqual(
-            transitions[0][transitions[0].index("--to") + 1], "evaluating"
+            execution["reasons"],
+            [
+                "shadow-executor-authority-unconfigured",
+                "shadow-suite-authority-unavailable",
+            ],
         )
         self.assertEqual(
-            transitions[0][transitions[0].index("--candidate-id") + 1],
-            record["current_candidate_id"],
+            routing["execution_blockers"], execution["reasons"]
         )
-        second = core.handoff_candidate_for_evaluation(self.ROUTING_LIFECYCLE_ID)
-        self.assertEqual(second["status"], "already-evaluating")
-        self.assertFalse(second["changed"])
+        self.assertEqual(routing["summary"]["requires_evaluation"], 1)
+        self.assertEqual(routing["summary"]["executable_evaluation"], 0)
         self.assertEqual(
-            len([call for call in calls if call and call[0] == "transition"]), 1
+            [call for call in calls if call and call[0] == "transition"], []
+        )
+        self.assertEqual(
+            core.derive_evaluation_routing()["rows"][0]["decision_sha256"],
+            row["decision_sha256"],
+        )
+
+    def test_no_runtime_path_enters_the_evaluating_state(self) -> None:
+        self.clock = 1770249600
+        for marker, outcome, group in (
+            ("collecting", "no-covering-skill", self.ROUTING_LIFECYCLE_ID),
+            ("correct", "correct-skill", None),
+            ("missed", "missed-skill", None),
+        ):
+            self.routing_disposition(
+                outcome=outcome,
+                marker=marker,
+                skill_name=None if outcome == "no-covering-skill" else "existing-skill",
+                loaded=outcome not in {"no-covering-skill", "missed-skill"},
+                candidate_group_id=group,
+            )
+        record = self.routing_lifecycle_record(
+            occurrence_markers=["collecting", "second", "third"]
+        )
+        core, calls = self.routing_core(record)
+        core.derive_evaluation_routing()
+        self.assertEqual(
+            [call for call in calls if call and call[0] != "read"], []
+        )
+        self.assertEqual(record["state"], "ready_for_draft")
+        self.assertFalse(hasattr(core, "handoff_candidate_for_evaluation"))
+        parser = runtime_module.build_parser()
+        commands = {
+            name
+            for action in parser._actions
+            for name in getattr(action, "choices", None) or ()
+        }
+        self.assertIn("evaluation-routing", commands)
+        self.assertNotIn("handoff-evaluation", commands)
+        self.assertEqual(
+            runtime_module.SHADOW_EXECUTION_BLOCKERS,
+            (
+                "shadow-executor-authority-unconfigured",
+                "shadow-suite-authority-unavailable",
+            ),
         )
 
     def test_expired_occurrence_keeps_candidate_below_the_gate(self) -> None:
@@ -7711,10 +7755,7 @@ elif sys.argv[1] == "run":
             "fewer-than-three-current-distinct-occurrences", row["reasons"]
         )
         self.assertIsNone(row["evaluation_subject"])
-        with self.assertRaisesRegex(
-            RuntimeFailure, "evaluation-handoff-not-routed"
-        ):
-            core.handoff_candidate_for_evaluation(self.ROUTING_LIFECYCLE_ID)
+        self.assertIsNone(row["evaluation_execution"])
         self.assertEqual(
             [call for call in calls if call and call[0] == "transition"], []
         )
