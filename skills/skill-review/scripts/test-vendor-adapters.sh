@@ -1762,6 +1762,7 @@ print(json.dumps({"ok": True}))
                 "session.mcp_server_removed",
                 "session.mcp_server_status_changed",
                 "session.mcp_servers_loaded",
+                "session.managed_settings_resolved",
             ),
             10,
         ):

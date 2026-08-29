@@ -1814,6 +1814,55 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
             },
         }
 
+    def managed_settings(self, skill):
+        return {
+            "id": "managed-settings-0",
+            "timestamp": "2026-01-01T00:00:00Z",
+            "parentId": None,
+            "type": "session.managed_settings_resolved",
+            "data": {
+                "bypassPermissionsDisabled": False,
+                "clientManaged": True,
+                "deviceManaged": False,
+                "failClosed": True,
+                "managedKeys": ["permissions", "sandbox"],
+                "permissionsAllowIntersected": True,
+                "sandboxEnabledByUndeterminedPolicy": False,
+                "serverManaged": True,
+                "source": "enterprise",
+                "settings": {
+                    "type": "session.error",
+                    "model": "nested-managed-model",
+                    "message": "nested managed failure",
+                    "usage": {
+                        "prompt_tokens": 999999,
+                        "completion_tokens": 999999,
+                        "total_tokens": 1999998,
+                    },
+                    "outputTokens": 999999,
+                    "toolRequests": [{"toolCallId": "nested-managed-tool"}],
+                    "events": [
+                        self.call_start(
+                            99, [{"toolCallId": "nested-managed-tool"}]
+                        ),
+                        self.call_success("nested-managed-usage", 999999, 999999),
+                        {
+                            "type": "session.skills_loaded",
+                            "data": {
+                                "skills": [
+                                    {
+                                        "name": "nested-managed-skill",
+                                        "path": str(skill),
+                                        "enabled": True,
+                                    }
+                                ]
+                            },
+                        },
+                    ],
+                },
+            },
+        }
+
     def assert_usage_refusal(self, values, reason):
         with self.assertRaises(adapter_module.AdapterError) as raised:
             adapter_module.copilot_usage(values)
@@ -2063,6 +2112,137 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
             and comparator_usage["tool_calls"] == 0
             and not comparator_tool_event
         )
+
+    def test_guard_h_managed_settings_is_admitted_and_semantically_inert(self):
+        case = work / self._testMethodName
+        case.mkdir()
+        skill = case / "fixture-skill" / "SKILL.md"
+        skill.parent.mkdir()
+        skill.write_text("fixture\n")
+        baseline = [
+            {"type": "session.start", "data": {"model": "fixture-model"}},
+            self.call_start(0, [{"toolCallId": "outer-call"}]),
+            {
+                "type": "session.skills_loaded",
+                "data": {
+                    "skills": [
+                        {
+                            "name": "fixture-skill",
+                            "path": str(skill),
+                            "enabled": True,
+                        }
+                    ]
+                },
+            },
+            {
+                "type": "assistant.message",
+                "data": {
+                    "content": "outer answer",
+                    "toolRequests": [
+                        {
+                            "name": "skill",
+                            "toolCallId": "outer-call",
+                            "arguments": {"skill": "fixture-skill"},
+                        }
+                    ],
+                },
+            },
+            {
+                "type": "tool.execution_complete",
+                "data": {
+                    "toolCallId": "outer-call",
+                    "success": True,
+                    "result": {
+                        "content": 'Skill "fixture-skill" loaded successfully.'
+                    },
+                },
+            },
+            {"type": "assistant.turn_end", "data": {"content": "outer final"}},
+            {"type": "session.error", "data": {"message": "outer failure"}},
+            self.call_success("outer-usage", 10, 5),
+        ]
+        managed = self.managed_settings(skill)
+        candidate = [baseline[0], managed, *baseline[1:]]
+
+        def comparator_gate(values):
+            events = list(adapter_module.copilot_outer_events(values))
+            event_types = [
+                item["type"]
+                for item in events
+                if isinstance(item.get("type"), str)
+            ]
+            tool_event = any(
+                item_type.startswith(
+                    (
+                        "external_tool.",
+                        "permission.",
+                        "skill.",
+                        "subagent.",
+                        "tool.",
+                    )
+                )
+                or item_type == "assistant.tool_call_delta"
+                for item_type in event_types
+            )
+            usage = adapter_module.native_detailed_usage("copilot", values)
+            return (
+                event_types.count("model.call_start"),
+                usage["tool_calls"],
+                tool_event,
+            )
+
+        self.assertEqual(
+            adapter_module.native_model("copilot", candidate),
+            adapter_module.native_model("copilot", baseline),
+        )
+        self.assertEqual(
+            adapter_module.native_token_usage("copilot", candidate),
+            adapter_module.native_token_usage("copilot", baseline),
+        )
+        self.assertEqual(
+            adapter_module.native_detailed_usage("copilot", candidate),
+            adapter_module.native_detailed_usage("copilot", baseline),
+        )
+        self.assertEqual(
+            adapter_module.native_skill_evidence(
+                "copilot", candidate, {"fixture-skill": skill}, case
+            ),
+            adapter_module.native_skill_evidence(
+                "copilot", baseline, {"fixture-skill": skill}, case
+            ),
+        )
+        self.assertEqual(
+            adapter_module.normalized_native_events(
+                "copilot", {"events": candidate}
+            ),
+            adapter_module.normalized_native_events(
+                "copilot", {"events": baseline}
+            ),
+        )
+        self.assertEqual(
+            adapter_module.native_failure_message(
+                "copilot",
+                "\n".join(json.dumps(value) for value in candidate),
+                "",
+            ),
+            adapter_module.native_failure_message(
+                "copilot",
+                "\n".join(json.dumps(value) for value in baseline),
+                "",
+            ),
+        )
+        self.assertEqual(comparator_gate(candidate), comparator_gate(baseline))
+
+        for event_type in sorted(self.observed_types):
+            adapter_module.validate_native_schema(
+                "copilot", [{"type": event_type}]
+            )
+        with self.assertRaises(adapter_module.AdapterError) as raised:
+            adapter_module.validate_native_schema(
+                "copilot", [{"type": "unknown-native-schema-sentinel"}]
+            )
+        self.assertEqual(raised.exception.code, "unsupported-native-schema")
+        adapter_module.validate_native_schema("copilot", [managed])
 
     def test_guard_c_shape_b_sums_deduplicates_and_ignores_order(self):
         calls = [
