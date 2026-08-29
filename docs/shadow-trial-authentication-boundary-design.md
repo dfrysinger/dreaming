@@ -1,684 +1,703 @@
-# Shadow trial authentication boundary
+# Shadow trial authentication boundary — critical work order
+
+Revision 2. Round 1 dual review returned six material findings (D1–D6) plus an
+exact-schema finding from Terra. All seven are resolved in this revision; see
+the [Round 1 finding resolution](#round-1-finding-resolution) appendix. The
+architecture changed materially: no identity schema or version change is made,
+the sandbox rules are restructured rather than appended, credential
+*completeness* and credential *usability* are separated, and the rollback is
+the evaluator config entry rather than the argv flag.
 
 ## Objective
 
-Let a shadow evaluation trial's real Copilot executor subprocess authenticate
-against the invoking account's already-authenticated local CLI while keeping
-the harness-owned synthetic environment, candidate blindness, and the denial of
-every unrelated caller, environment, and content read exactly as they are
-today.
-
-## Lane
-
-**Critical.** The change alters an authentication projection and a
-fail-closed sandbox profile that is a pinned trust anchor: the executor
-adapter's bytes are content-addressed into stored executor identities, into
-`TRUSTED_AUTHORING_ADAPTER_SHA256`, and into content-addressed evaluation input
-source bundles. Critical wins over systemic here even though the change is also
-schema-adjacent, so this document carries an explicit rollback path and names
-the evidence that proves the boundary fails closed.
+Allow a supported real Copilot shadow-trial executor subprocess to authenticate
+against the already-authenticated local CLI installation while running under a
+synthetic `HOME`, so that shadow evaluation trials return real model verdicts
+instead of `authentication-required`, without granting the trial access to the
+caller environment, the real home, credential bytes, or any content outside its
+declared inputs.
 
 ## Non-goals
 
-These are outside this change. A reviewer should hold the implementation to
-this list.
+1. **Not** authoring authentication. The authoring adapter path
+   (`evaluation_input_author`, `sandboxed_command(..., "isolated")`) already
+   works and is untouched.
+2. **Not** general credential access. Nothing here grants the harness, the
+   stage, the scheduler, or any reviewer process the ability to read credential
+   material.
+3. **Not** a caller-environment passthrough. `harness_environment`
+   (`skills/skill-review/scripts/skill-evaluation-harness.py:675`) keeps
+   supplying a fixed minimal environment; the parent environment is never
+   forwarded.
+4. **Not** an identity schema change. `EVALUATION_ADAPTER_VERSION` stays `1`,
+   no top-level executor identity field is added, and no exact-key schema in
+   `skill-evaluation-harness.py` or `skill-evaluation.py` is modified. The only
+   identity value that changes is the shadow-mode `sandbox_id` digest.
+   (Revised in this round; see D1, D2, T1.)
+5. **Not** a change to non-shadow behavior. Fixture adapters, unauthenticated
+   adapters, the comparator route, and every non-`--shadow-contract` invocation
+   keep byte-identical identities and byte-identical sandbox profiles.
+6. **Not** the Agent Auth Broker. Its supported APIs cover attended login and
+   specific authenticated reads; they do not cover projecting an authentication
+   state into a sandboxed model-execution subprocess. Using it here would be a
+   claim of generic credential access we cannot support.
+7. **Not** executor content permission widening. The trial's access to
+   candidate, catalog, transcript, and workspace content is unchanged by this
+   work order.
+8. **Not** a new subsystem. No queue, owner, scheduler, transport, catalog
+   stage, or classifier is added.
 
-1. **No change to `harness_environment` or `HARNESS_PATH`**
-   (`skills/skill-review/scripts/skill-evaluation-harness.py:67-69,675-678`).
-   The harness keeps its fixed minimal child environment and its rule that
-   "routing supplies argv only". No environment allowlist, no passthrough key
-   set, no caller-supplied variables. Section "Reframe record" explains why
-   this inherited rule was challenged and upheld rather than relaxed.
-2. **No change to the non-shadow `evaluate` path.** Every new strictness is
-   gated on `--shadow-contract`. Trials run by the existing evaluation flow
-   keep their current environment, sandbox profile, and refusal behavior.
-3. **No change to authoring authentication.** The
-   `evaluation-input-author` / `shadow-author` boundary already authenticates
-   through its own reviewed path and is not touched. See "Three different
-   authentications" below.
-4. **No change to the comparator.** `skill-evaluation-comparator` already
-   receives `--credential-root` from its existing builder and is not part of
-   this change beyond the digest closure it inherits.
-5. **No new credential store, agent, daemon, keychain item, token cache, or
-   credential file format.** No secret is written anywhere the adapter does not
-   already write one.
-6. **No Agent Auth Broker dependency.** Assessed and rejected below.
-7. **No generalization to other vendors' trial authentication.** Claude and
-   Codex shadow trials are out of scope; their existing `evaluation_environment`
-   branches are untouched. A future vendor needing this is a future work order.
-8. **No installer-generated evaluator adapter entry.** `evaluators` is not
-   generated by `scripts/install.sh` today and this change does not add it. An
-   installed host that omits it stays unavailable rather than default-open.
-9. **No relaxation of the model's tool policy.** `EVALUATION_TOOLS`
-   (`dreaming-vendor-adapter.py:3939-3943`) still grants `bash`; confidentiality
-   is enforced by the sandbox, not by removing tools.
-10. **No retroactive re-verification of stored results.** Evaluation results
-    already retained under the previous adapter bytes stay as historical
-    evidence; they are not re-attested against the new identity.
+## Lane
 
-## The observation that forced this work order
+**Critical.**
 
-A private real-backend run of the shadow evaluation stage reached the
-certificate honestly — real executor attestation, six real trials launched,
-`shadow-execute` and `shadow-certify` completed, one semantic result retained,
-the lifecycle returned to `ready_for_draft` — but every trial recorded:
+- It changes an authentication projection.
+- It changes a pinned fail-closed sandbox profile, which is a trust anchor: the
+  sandbox profile digest is an input to `sandbox_id`, which is part of the
+  attested executor identity.
+- Failure modes are silent and severe: a too-wide rule leaks credential bytes
+  into a model-visible context; a too-narrow rule silently degrades every trial
+  to `infrastructure_error` and every candidate to `inconclusive`, which is
+  exactly the PG-7 blocker.
+- Round 1 confirmed a second severity driver: the naive version-bump approach
+  would have been rejected by three independent exact-key schemas at runtime,
+  and would have changed *non-shadow* identity. A critical-lane enumeration is
+  what surfaced that.
+
+## The three authentications, kept separate
+
+This work order is about exactly one of three distinct authentication
+boundaries. Conflating them is the primary design risk.
+
+| Boundary | Who authenticates | Current state | Touched here |
+|---|---|---|---|
+| **Authoring** | The adapter's own `evaluation_input_author` Copilot call, run under `sandboxed_command(..., "isolated")` with the adapter's own environment | Working; proved live by PG-1/PG-2 | No |
+| **Attestation** | `evaluation_version` reading the CLI version and digests | Working; needs no credential | No |
+| **Trial** | The per-trial model execution subprocess launched under `harness_environment` with a synthetic `HOME` | **Broken**: `adapter failed (2): authentication-required: copilot` | **Yes** |
+
+Separately, and orthogonally: **executor content permissions** — what candidate,
+catalog, and workspace bytes a trial may read — are governed by the trial root
+grant and the deny roots, and are *not* changed by this work order.
+
+## Observed failure
+
+Live tracer `live-6` (real backend, `--keep-scratch`) completed the whole
+bounded stage — claim, author, suite assembly, compile, execute, certify,
+settle to `ready_for_draft`, four durable writes, zero residue — and produced
+`certificate_status: inconclusive`. Every trial in the aggregate carried:
 
 ```
-"errors": ["adapter failed (2): authentication-required: copilot"],
-"infrastructure_error": true,
-"status": "inconclusive"
+adapter failed (2): authentication-required: copilot
+infrastructure_error: true
 ```
 
-so the certificate was `inconclusive`. That blocks PG-7 in
-`docs/task-opportunity-shadow-evaluation-reframe.md:1638` and therefore the
-parent funnel's triggering, task-performance, and overall-regression evidence.
+All four routing cases and the task-value pair were `inconclusive`. Attestation
+succeeded in the same pass, because reading a CLI version requires no
+credential.
 
-The mechanism is exact. `evaluation_credential_root`
-(`dreaming-vendor-adapter.py:4656-4657`) defaults to `Path.home()` when
-`--credential-root` is absent. `Path.home()` reads `HOME`. Under the harness the
-adapter's `HOME` is the synthetic per-trial home, so the credential root
-silently becomes a directory that has never held a credential. Then
-`copilot_auth_token` (`:1249-1298`) requires
-`credential_root == Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()`, which is
-false, returns `None`, and `evaluation_run` (`:5792-5796`) raises
+## Root cause
+
+`skills/skill-review/scripts/dreaming-vendor-adapter.py:4656` resolves the
+credential root:
+
+```python
+def evaluation_credential_root(args: argparse.Namespace) -> Path:
+    return Path(getattr(args, "credential_root", None) or Path.home())
+```
+
+The shadow executor argv, unlike the reviewed authoring executor argv built by
+`scripts/build-evaluation-input-source.py:197`, never carries
+`--credential-root`. Under `harness_environment`'s synthetic `HOME`, `Path.home()`
+therefore resolves to a scratch directory that has never held a credential, so
+`copy_auth_file` (`dreaming-vendor-adapter.py:1198`) silently copies nothing,
+`copilot_auth_token` (`:1249`) finds no token, and every trial fails
 `authentication-required`.
 
-The blocker is therefore an implementation default that becomes wrong under a
-synthetic `HOME`, not the harness isolation rule.
-
-## Three different authentications, kept separate
-
-Conflating these is the main way this change could go wrong, so they are named
-before any mechanism is selected.
-
-| Concern | Who authenticates | Where the credential is used | Touched here |
-| --- | --- | --- | --- |
-| **Trial authentication** | The Copilot CLI process executing one trial case inside `sandbox-exec` | Inside the trial sandbox, per trial, ephemeral | **Yes — this document** |
-| **Authoring authentication** | The `evaluation-input-author` / `shadow-author` boundary that drafts the suite | Outside the harness, in the stage's own bounded wrapper | No |
-| **Executor content permissions** | The sandbox profile's file rules governing what the trial may read of the candidate, catalog, workspace, and home | Inside the trial sandbox | Only where the credential projection requires a rule |
-
-"The trial can authenticate" and "the trial may read the candidate" are
-different questions with different enforcement. A change that widens the second
-to achieve the first is a defect, not a shortcut.
-
-## Enforcement layer enumeration
-
-Traced before any mechanism was selected, per
-`layered-validation-boundary-changes`. Every row independently enforces or
-records part of this boundary; a green test at one row is not evidence about
-another.
-
-| # | Layer | File and location | What it enforces today | Changed |
-| --- | --- | --- | --- | --- |
-| L1 | Harness child environment producer | `skill-evaluation-harness.py:675-678` | `PATH`, synthetic `HOME`, `LANG`, `LC_ALL` only | **No** |
-| L2 | Harness `PATH` constant | `skill-evaluation-harness.py:67-69` | python bin plus `/usr/bin:/bin:/usr/sbin:/sbin` | **No** |
-| L3 | Harness routing environment digest | `skill-evaluation-harness.py:524` | `environment_sha256` over `PATH`/`LANG`/`LC_ALL` | **No** |
-| L4 | Harness shadow trial callers | `skill-evaluation-harness.py:1955-2030` (`prepare`, `run`, `normalize`, `collect`) | Each adapter call gets `harness_environment(home)` | **No** |
-| L5 | Harness non-shadow trial callers | `skill-evaluation-harness.py:883,954,1124` | Same environment for the evaluate path | **No** |
-| L6 | Harness attestation and version calls | `skill-evaluation-harness.py:1280,1286,2337` | Identity probes under the same environment | **No** |
-| L7 | Harness comparator and grader calls | `skill-evaluation-harness.py:1124,1280-1290` | Comparator identity and compare calls | **No, intentionally** |
-| L8 | Adapter credential-root resolution | `dreaming-vendor-adapter.py:4656-4657` | Silent `Path.home()` default | **Yes** |
-| L9 | Adapter trial environment projection | `dreaming-vendor-adapter.py:4660-4719` | Synthetic home, XDG roots, `COPILOT_HOME`, three copied auth files | **Yes** |
-| L10 | Adapter token minting | `dreaming-vendor-adapter.py:1249-1298` | `GH_TOKEN`/`GITHUB_TOKEN` env, else `gh auth token` under the real account home | **Yes** |
-| L11 | Adapter run-time token injection | `dreaming-vendor-adapter.py:5792-5799` | Injects the token into the sandboxed process environment | **Yes** |
-| L12 | Adapter sandbox profile | `dreaming-vendor-adapter.py:4915-4995` | Deny real home except trial root and keychains; trial root fully readable | **Yes** |
-| L13 | Adapter executor identity | `dreaming-vendor-adapter.py:4006-4064` | `adapter_id`, `adapter_version`, `tool_policy_id`, `sandbox_id`, limits | **Yes** |
-| L14 | Adapter role contract version | `dreaming-vendor-adapter.py:3936` | `EVALUATION_ADAPTER_VERSION = 1` | **Yes** |
-| L15 | Adapter argv surface | `dreaming-vendor-adapter.py:6850-6853` | `--binary`, `--credential-root`, `--deny-root` | **No new flag** |
-| L16 | Adapter doctor auth predicate | `dreaming-vendor-adapter.py:6205-6287` | Requires `hosts.yml`; proves allow/deny/write canaries | **Yes** |
-| L17 | Adapter boundary canary helper | `dreaming-vendor-adapter.py:1497-1541` | `prove_boundary` allow/deny pair | **No** |
-| L18 | Core adapter role registry | `dreaming-core.py:131-141` | `skill-evaluation-executor` capability set | **Yes** |
-| L19 | Core executor argv contract | `dreaming-core.py:170,9533-9551` | `SHADOW_EXECUTOR_REQUIRED_ARGV`, `_require_role_argv` | **Yes** |
-| L20 | Core execution authority | `dreaming-core.py:9554-9590` | `evaluator_configured` gate on the stage | **Yes** |
-| L21 | Reviewed source-bundle builder | `build-evaluation-input-source.py:197-230,289-296` | Already emits `--credential-root` and validates it equals the account home | **No — reused as precedent** |
-| L22 | Evaluator digest pin | `skill-evaluation.py:88-90,439,5114,5278` | `TRUSTED_AUTHORING_ADAPTER_SHA256` | **Yes, regenerated** |
-| L23 | Digest ratchet test | `test-evaluation-input-source-builder.sh:160-168` | Asserts the pin equals the adapter's bytes | **Yes, re-runs green** |
-| L24 | Vendor adapter suites | `test-vendor-adapters.sh`, `test-skill-evaluation-vendor-adapters.sh:325-400` | Fixture adapters already pass `--credential-root` and `GH_TOKEN` | **Yes, extended** |
-| L25 | Installed config surface | `scripts/install.sh:680-720`, `scripts/configure-adapters.py:719` | No generated `evaluators` entry | **No** |
-| L26 | Docs and error strings | `docs/skill-evaluation-trial-harness-design.md:637-646`, this document, adapter refusal codes | Human-facing statement of the rule | **Yes** |
-
-Rows L1-L7 are the harness. **None of them change.** That is the central claim
-of the selected architecture and the reason the trusted-component count does
-not grow.
+The fix is therefore *not* a new mechanism. It is closing a gap between two
+existing reviewed argv contracts.
 
 ## Constraint provenance and revisit conditions
 
-| Constraint | Provenance | What makes it binding | Outcome it protects | Revisit when |
-| --- | --- | --- | --- | --- |
-| The harness gives children only `PATH`, `HOME`, `LANG`, `LC_ALL` | Design rule, `docs/skill-evaluation-trial-harness-design.md:639-640`: "Give every child a fixed minimal harness-owned environment. Routing supplies a trusted path-to-argv map only and can never widen the environment." | Implemented at `skill-evaluation-harness.py:675-678`; its docstring restates it | Reproducibility and candidate blindness: a caller cannot smuggle content or identity into a trial through the environment | A supported executor exists whose credential cannot be projected by the adapter itself |
-| The credential root must equal the invoking account's home | Implementation predicate reused twice: `copilot_auth_token` (`dreaming-vendor-adapter.py:1256-1257`) and `build-evaluation-input-source.py:289-296` | Both refuse any other value | Prevents an attacker-supplied or test-supplied directory from being treated as a credential source on a real host | A supported multi-account or service-account host is introduced |
-| Exactly three projected Copilot auth relative paths: `.config/gh/hosts.yml`, `.config/gh/config.yml`, `.copilot/config.json` | Existing projection list, `dreaming-vendor-adapter.py:4699-4706`; the doctor authentication predicate uses the first (`:6211`) | Already the reviewed set for the evaluate path | Bounds what leaves the real home to the minimum the CLI needs | Copilot CLI changes where it reads authentication from |
-| Credentials must stay out of logs, traces, artifacts, and receipts | Design rule, `docs/skill-evaluation-trial-harness-design.md:642` | Stated as a security requirement of the harness contract | No durable evidence ever contains a secret | Never — this is a hard invariant, not a tunable |
-| Keychain reads are allowed only as "the narrow existing authentication boundary" | Design rule, `docs/skill-evaluation-trial-harness-design.md:643-645` | Implemented as a broad `file-read*` grant on `<home>/Library/Keychains` and `/Library/Keychains` (`dreaming-vendor-adapter.py:4950-4956`) | Limits how much of the account the trial can read | Evidence shows the CLI still needs the keychain once file projection works |
-| `gh auth token` probe timeout of 10 seconds | Existing value, `dreaming-vendor-adapter.py:1281` | Already shipped and exercised | Bounds the adapter's own preparation time | The measured probe cost approaches the bound |
-| Trial time, output, token, turn, and tool bounds | Existing executor limits, `dreaming-vendor-adapter.py:4012-4024`, supplied by configured argv | Sealed into executor identity and attested | Bounded, terminating trials | Not by this change — explicitly unchanged |
+| Constraint | Source | Revisit when |
+|---|---|---|
+| "A fixed minimal environment. No caller or routing allowlist exists." | `skill-evaluation-harness.py:675` docstring; `docs/skill-evaluation-trial-harness-design.md:639` | **Challenged and narrowed in this revision.** The rule is about *routing-supplied* environment, not about adapter-owned credential projection. Revisit if the harness ever gains a routing-controlled environment surface. |
+| "Credentials never appear in logs, traces, artifacts, or receipts" | `docs/skill-evaluation-trial-harness-design.md:642` | Never relaxed. Reinforced here by I5, AC-T18, CHK-A18. |
+| "Deny keychains beyond the narrow existing authentication boundary" | `docs/skill-evaluation-trial-harness-design.md:643` | Narrowed here: shadow mode denies keychains outright, because the measured evidence shows file-resident credentials suffice. |
+| Adapter identity is exact-keyed and version-pinned to `1` | `skill-evaluation-harness.py:57`, `:682`; `skill-evaluation.py:10734`, `:10770` | Only if those three schemas are changed together in a separate work order. Treated as frozen here. |
+| Credential root must equal the invoking account home | `scripts/build-evaluation-input-source.py:289` | Only if a supported host separates the account home from the credential home. |
+| File-resident Copilot credentials are sufficient for real model execution under a synthetic `HOME` | **Measured**, this round. Retained proof root: `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/shadow-trial-auth-probe` | If a supported host stops storing a file-resident credential, or Copilot changes where it reads authentication from. See the revisit gate in the reframe record. |
 
-No new numeric limit is introduced by this design. Every number above is
-inherited with a citation, which is why this section contains no unexplained
-constants.
+### The challenged rule, precisely
 
-### Reframe gate
+The inherited rule — *"no caller or routing allowlist exists"* — is a statement
+about the **harness**, and it stays true. The harness continues to build one
+fixed minimal environment and continues to pass routing-supplied argv only. It
+gains no allowlist, no passthrough, and no knowledge of credentials.
 
-Implementation returns to this document, and this status becomes or stays
-`OPEN`, when any of these fire:
+What changes is the **adapter's own argv**, which the harness already forwards
+verbatim, and which already carries `--binary` and `--deny-root`. Adding
+`--credential-root` to that argv is the same class of change as those two, is
+covered by the same `_require_role_argv` config enforcement
+(`dreaming-core.py:9533`), and does not create a caller allowlist.
 
-- the credential cannot be projected without a harness environment allowlist;
-- the confidentiality invariant (I4 below) cannot hold in any projection mode
-  the CLI accepts;
-- a second credential-carrying component becomes necessary;
-- a fix moves the failure to the next internal boundary twice in a row;
-- the keychain grant turns out to be required after all, contradicting the
-  tightening this design assumes.
+## Reframe record — status CLEAR
 
-## Reframe record — status OPEN
+**Reframe question.** Can a real Copilot trial subprocess authenticate under
+the harness's synthetic `HOME` without passing the parent environment, the real
+`HOME`, a token, or keychain contents?
 
-**Status: OPEN.** Implementation does not start until paired design review
-closes this record. The record is open because the projection-mode question in
-answer 5 is decided on evidence this document does not yet have, and because
-the change is critical-lane.
+**Status: CLEAR** (raised OPEN in revision 1; cleared this round by measured
+mechanism evidence).
 
-**Triggering evidence.** The real-backend stage run quoted above: six trials,
-all `authentication-required: copilot`, all `infrastructure_error: true`,
-certificate `inconclusive`, PG-7 unreachable.
+**Five answers.**
 
-**1. What user-visible outcome is blocked?**
-The reviewed profile-derived task-opportunity funnel cannot produce a truthful
-evaluation verdict. A candidate skill can be prepared, claimed, executed,
-certified, and settled, but every certificate is `inconclusive` because no
-trial can reach a model. PG-7 and the parent Definition of Done's triggering,
-task-performance, and overall-regression evidence are unreachable.
+1. **What is the trigger?** Every real-backend shadow trial fails
+   `authentication-required`, making PG-7 unreachable and every real-model
+   certificate `inconclusive`.
+2. **What is the smallest change that could work?** Add `--credential-root
+   <account home>` to the shadow executor argv, reusing the adapter's existing
+   projection, and confine the projected files to the CLI process path.
+3. **What would make that change wrong?** If the projected files were readable
+   by the model process itself, or if a token had to be injected into the trial
+   environment, or if credential material could reach a record.
+4. **What evidence closes the question?** A real Copilot model call that
+   succeeds with only projected files present, under a synthetic `HOME`, with
+   no parent environment, no `GH_TOKEN`/`GITHUB_TOKEN`, and no keychain access.
+5. **What happens if it stays open?** PG-7 stays blocked and the stage keeps
+   producing structurally correct but semantically empty certificates.
 
-**2. Which constraint creates the blocker, and where did it come from?**
-Two constraints compose. The binding one is the harness's fixed minimal child
-environment (`skill-evaluation-harness.py:675-678`), whose provenance is the
-harness design rule at `docs/skill-evaluation-trial-harness-design.md:639-640`.
-The proximate one is an implementation default:
-`evaluation_credential_root` falls back to `Path.home()`
-(`dreaming-vendor-adapter.py:4656-4657`), which under a synthetic `HOME`
-resolves to a directory with no credentials, so `copilot_auth_token`'s
-account-home predicate (`:1256-1257`) can never match. The first constraint is
-a reviewed design rule; the second is an inherited default with no provenance
-beyond convenience.
+### Evidence that closed the premise
 
-**3. What concrete invariant fails if the constraint changes?**
-If the harness gained an environment allowlist, "routing supplies argv only"
-fails. Routing is caller-supplied data; an allowlist makes the caller a partial
-author of the trial environment, so a caller could set variables that change
-model behavior, leak candidate identity into a control arm, or vary between
-control and candidate treatments. That breaks candidate blindness and the
-reproducibility that `environment_sha256` (`:524`) and the sealed
-`environment_id` are supposed to guarantee. It would also put credential
-material inside the harness process, contradicting
-`docs/skill-evaluation-trial-harness-design.md:642`.
+Two probes, both retained under
+`~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/shadow-trial-auth-probe`.
+No secret content was recorded, transcribed, or included in this document.
 
-**4. What is the simplest design without that constraint?**
-Pass the parent environment, or an allowlisted subset of it, from the harness
-into trial subprocesses — one deleted line and one config key. It is rejected:
-it makes the harness a credential carrier, makes trial environments
-caller-dependent, and would need its own allowlist parser, per-key policy,
-redaction for `prepared.json`, and drift tests. It buys nothing the adapter
-cannot already do.
+1. **Redacted source-structure probe.** Presence-only booleans:
+   `hosts_file_present=true`, `oauth_token_key_present=true`,
+   `user_key_present=true`, `github_host_entry_present=true`. This establishes
+   that the supported host stores a file-resident credential with the expected
+   shape.
+2. **Direct real-model probe.** Copilot was launched under `env -i` carrying
+   only `PATH`, a synthetic `HOME`, `LANG`, `LC_ALL`, and `COPILOT_HOME`. The
+   synthetic home contained copies of the existing `.config/gh/hosts.yml`,
+   `.config/gh/config.yml`, and `.copilot/config.json` at mode `0600`. No
+   `GH_TOKEN`, no `GITHUB_TOKEN`, no keychain projection, no parent
+   environment. Result: `gpt-5-mini` exited `0` with 26 JSON events, the
+   assistant returned `AUTH_OK`, and no authentication error was raised.
 
-**5. Which option has fewer trusted components and maintenance surfaces?**
-Keeping the harness unchanged and making the credential authority explicit on
-the adapter. The adapter is *already* the credential-carrying component: it
-already resolves a credential root, already mints a token through `gh` in a
-private environment it constructs itself (`:1275-1288`), already copies exactly
-three auth files into the synthetic home, and already owns the sandbox profile.
-The reviewed `build-evaluation-input-source.py` already builds executor argv
-with `--credential-root <account home>` and already validates that value
-against `pwd.getpwuid(os.getuid()).pw_dir` (`:197-230,289-296`). So the option
-with fewer trusted components adds **zero** new components: it removes a silent
-default, requires an existing flag, and tightens an existing profile.
+**What this evidence does and does not establish.** It establishes the
+*mechanism*: file-only projected authentication is reachable on the supported
+host, so the architecture below is not speculative. It does **not** establish
+the sandbox process-path confinement (CHK-A3, CHK-A16), the identity closure
+(CHK-A8), or the live end-to-end stage result (CHK-A1). Round 2 must verify
+that this revision closes D1–D6 and T1; the executed checks remain the
+acceptance boundary.
 
-The inherited rule "no caller or routing allowlist exists" is therefore
-**challenged and upheld**. It was never the blocker.
+**Revisit gate.** Reopen if a supported host ceases to hold a file-resident
+credential, if Copilot changes where it reads authentication from, or if the
+executed confinement proof (CHK-A3/CHK-A16) fails and cannot be satisfied by
+restructuring the emitted rules.
 
-### What review must settle before this becomes CLEAR
+## Enumeration of enforcement layers
 
-1. **Projection mode (I4 versus reachability).** Preferred mode A is
-   file-only projection with a `process-path` read guard and **no** token in
-   the process environment. Fallback mode B is the status quo env injection,
-   which cannot satisfy I4 because a `bash` tool call can print the
-   environment. Which mode Copilot CLI actually authenticates from is an
-   empirical question CHK-A1 answers. If only mode B works, I4 cannot hold and
-   this record must be answered again with the owner, not worked around.
-2. **Keychain tightening.** Whether removing the shadow-mode keychain grant is
-   safe, given `docs/skill-evaluation-trial-harness-design.md:643-645` sanctions
-   a narrow keychain boundary.
-3. **Identity version bump.** Whether `EVALUATION_ADAPTER_VERSION` must go to
-   `2`, given that the executor's declared `sandbox_id` boundary summary changes
-   meaning.
+Traced before selecting the architecture, per
+`layered-validation-boundary-changes`. Ordered by pipeline position, not by
+discovery order. Rows added this round are marked *(R2)*.
+
+| # | Layer | File:line | What it enforces | Changed |
+|---|---|---|---|---|
+| L1 | Harness environment producer | `skill-evaluation-harness.py:675` | Fixed minimal env for every trial subprocess | No |
+| L2 | Harness routing env digest | `skill-evaluation-harness.py:524` | Digest of the routing environment | No |
+| L3 | Harness executor identity key set | `skill-evaluation-harness.py:57` | Exact key set | No |
+| L4 | Harness adapter identity key set | `skill-evaluation-harness.py:61` | Exact key set | No |
+| L5 | Harness attestation equality | `skill-evaluation-harness.py:682` | `set(response) != EXECUTOR_IDENTITY_KEYS` → refuse | No |
+| L6 | Harness shadow attest superset | `skill-evaluation-harness.py:1888`, `:1939` | Adds `real_backend`, `real_backend_source` only | No |
+| L7 | Harness trial prepare/run/normalize/collect | `skill-evaluation-harness.py:1955` | Per-trial protocol | No |
+| L8 | Adapter argv surface | `dreaming-vendor-adapter.py:6850` | `--binary`, `--credential-root`, `--deny-root` | No (flag already exists) |
+| L9 | Adapter credential root resolution | `dreaming-vendor-adapter.py:4656` | Defaults to `Path.home()` | **Yes** |
+| L10 | Adapter credential projection | `dreaming-vendor-adapter.py:1198` | `copy_auth_file`, silent on missing | **Yes** |
+| L11 | Adapter token acquisition | `dreaming-vendor-adapter.py:1249` | `gh auth token`, account-home bound, 10 s | Reused, not changed |
+| L12 | Adapter executor environment | `dreaming-vendor-adapter.py:4660` | Env handed to the CLI subprocess | **Yes** (shadow only) |
+| L12a | Adapter run-time token injection *(R2)* | `dreaming-vendor-adapter.py:5792` | Injects `GH_TOKEN` into the trial env today | **Yes** (shadow only: no injection) |
+| L13 | Adapter sandbox profile builder | `dreaming-vendor-adapter.py:4915` | Emitted SBPL rules and their order | **Yes** |
+| L13a | Adapter unconditional projected-file literal allows *(R2, D3)* | `dreaming-vendor-adapter.py:4989` | `deny file-write*` + **`allow file-read*`** per projected path, emitted after the trial-root grant | **Yes** (shadow only: suppressed and replaced) |
+| L13b | Adapter keychain read grants *(R2)* | `dreaming-vendor-adapter.py:4950` | Broad `file-read*` on both keychain roots | **Yes** (shadow only: omitted) |
+| L13c | Adapter process-path precedent *(R2)* | `dreaming-vendor-adapter.py:4985` | `allow network-outbound (process-path …)` | No (reused as precedent) |
+| L13d | Adapter script-executable refusal *(R2)* | `dreaming-vendor-adapter.py:4977` | Refuses `#!` CLI executables because they cannot receive process-scoped access | No (constrains A3) |
+| L14 | Adapter profile write | `dreaming-vendor-adapter.py:5015` | Writes `<home>/evaluation.sb`; list order is rule order | No |
+| L15 | Adapter identity — version | `dreaming-vendor-adapter.py:3936` | `EVALUATION_ADAPTER_VERSION = 1` | **No** *(was "Yes" in revision 1; see D1/D2)* |
+| L16 | Adapter identity — `sandbox_id` input | `dreaming-vendor-adapter.py:4038` | Hash input describing the confinement | **Yes** (shadow only) |
+| L17 | Adapter identity — limits | `dreaming-vendor-adapter.py:4012` | Exact-keyed limits block | No |
+| L18 | Adapter comparator identity | `dreaming-vendor-adapter.py:4066` | Comparator identity | No (digest changes only) |
+| L19 | Adapter prepare | `dreaming-vendor-adapter.py:5127` | Emits sealed `prepared` record | **Yes** |
+| L19a | Adapter prepared-drift equality *(R2)* | `dreaming-vendor-adapter.py:5784` | `prepared["adapter_prepared"] == expected_prepared` | No (shape unchanged) |
+| L20 | Adapter doctor | `dreaming-vendor-adapter.py:6192` | Health, auth predicate `is_file()` at `:6211`, canaries `:6233` | **Yes** |
+| L21 | Adapter boundary prover | `dreaming-vendor-adapter.py:1497` | `prove_boundary` private-data refusal | No (must keep passing) |
+| L22 | Evaluator config argv requirement | `dreaming-core.py:170`, `:9533` | `SHADOW_EXECUTOR_REQUIRED_ARGV` | **Yes** |
+| L23 | Strict config loader | `dreaming-core.py:9597` | Raises `RuntimeFailure` for the **whole** config | No (behavior relied on) |
+| L23a | Strict config validator *(R2, D6)* | `dreaming-core.py:9838` | `validate_adapter_config` uses the strict loader | No (behavior relied on) |
+| L24 | Shadow execution authority | `dreaming-core.py:9554` | Stage availability | No |
+| L25 | Shadow executors normalizer | `skill-evaluation.py:10734` | Exact keys; `adapter_version != 1` → refuse at `:10770` | No (constrains A4) |
+| L26 | Authoring adapter byte pin | `skill-evaluation.py:88` | `TRUSTED_AUTHORING_ADAPTER_SHA256` | **Yes** (digest only) |
+| L27 | Input-source bundles | `skill-evaluation.py:3235`, `:3468`, `:4477` | Pinned adapter identity inside generated bundles | **Yes** (regeneration) |
+| L28 | Builder ratchet test | `test-evaluation-input-source-builder.sh:160` | Asserts the pinned digest | **Yes** (digest only) |
+| L29 | Installed config generator | `scripts/install.sh:702` | Generates `sources`, `executors`, `publishers` — **not** `evaluators` | No |
+| L30 | Docs and error strings | this file; `docs/skill-evaluation-trial-harness-design.md:639` | Human-facing statement of the rule | **Yes** |
 
 ## Selected architecture
 
-Four changes, all inside components that already carry this responsibility.
+Minimizes trusted components by reusing the adapter's existing, already-reviewed
+credential projection and by adding **no** new identity surface.
 
-### A1 — The credential authority becomes explicit and fails closed
+### A1 — Configured argv carries the credential root
 
-Under `--shadow-contract`, `--credential-root` becomes **required** and is
-validated before anything else:
+Add `--credential-root <account home>` to `SHADOW_EXECUTOR_REQUIRED_ARGV`
+(`dreaming-core.py:170`), so that `_require_role_argv` (`:9533`) refuses any
+evaluator entry lacking it, exactly as it already does for `--binary` and
+`--deny-root`.
 
-- absent → refuse `shadow-credential-authority-required`;
-- present but not an existing real directory, or a symlink → refuse
-  `shadow-credential-authority-invalid`;
-- present but not equal to `Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()`
-  → refuse `shadow-credential-authority-mismatch`.
+The adapter validates the argument in this order, and **refuses before any
+projection, any profile emission, and any model launch**:
 
-The silent `Path.home()` fallback is unreachable in shadow mode. Outside shadow
-mode `evaluation_credential_root` is unchanged, so the evaluate path keeps its
-current behavior (non-goal 2).
+1. the flag is present and non-empty;
+2. `Path(raw).is_symlink()` is false — checked on the **raw** argument, before
+   `expanduser()` and before `resolve()`;
+3. the path exists and is a directory;
+4. `Path(raw).expanduser().resolve() == Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()`.
 
-The check runs on **every** shadow adapter invocation — `doctor`, `version`,
-`prepare`, `run`, `normalize`, `collect` — because all six receive the same
-configured argv, and a uniform check means `normalize` and `collect` cannot
-silently run under a different authority than `run`. Only `doctor`, `prepare`,
-and `run` additionally require the credential to be *usable*.
+**Deliberate divergence from the builder precedent (D5).**
+`scripts/build-evaluation-input-source.py:289` resolves first and *then* calls
+`is_symlink()`, which is effectively vacuous because `resolve()` has already
+followed the link. Checking the raw path first is a deliberate tightening: it
+refuses a symlinked credential root outright rather than silently accepting its
+target. This divergence is intentional and must not be "harmonized" back to the
+builder's ordering.
 
-### A2 — Usability is proven before the model is launched
+Refusal codes: `shadow-credential-root-missing`,
+`shadow-credential-root-symlink`, `shadow-credential-root-invalid`,
+`shadow-credential-root-mismatch`.
 
-`evaluation_prepare` currently copies auth files with `copy_auth_file`, which
-silently no-ops on a missing source (`:1198-1204`), so a missing credential is
-first noticed in `evaluation_run`. Under `--shadow-contract`, prepare asserts
-the projection actually landed: every required relative path exists in the
-synthetic home with mode `0600` and non-zero size, or it refuses
-`shadow-credential-projection-incomplete`.
+### A2 — Fail-closed projection *completeness* check
 
-No model call has happened at that point, and the harness records the refusal
-as a trial error exactly as it records today's `authentication-required`.
+Today `copy_auth_file` (`:1198`) silently no-ops when the source is missing or
+is a symlink, so a broken projection is discovered only when the model call
+fails deep inside a trial.
 
-### A3 — Projected credentials are readable only by the pinned CLI executable
+Under `--shadow-contract`, after projection, the adapter asserts for each
+required projected path:
 
-This is the confidentiality change. The trial root is currently granted
-`file-read* file-write*` wholesale (`:4957-4960`), so a `bash` tool call can
-read the projected `hosts.yml`. Under `--shadow-contract` the profile appends,
-**after** the trial-root allow so that later rules win:
+- it exists and is a regular file;
+- its destination is not a symlink;
+- its mode is `0600`;
+- its size is non-zero.
 
-- `(deny file-read* (subpath <home>/.config/gh))`
-- `(deny file-read* (subpath <home>/.copilot))`
-- `(allow file-read* (require-all (subpath <home>/.config/gh) (process-path <resolved binary>)))`
-- `(allow file-read* (require-all (subpath <home>/.copilot) (process-path <resolved binary>)))`
+Failure raises `shadow-credential-projection-incomplete`.
 
-`require-all` with `process-path` is not a new technique here; it is the exact
-pattern the profile already uses to let only the CLI stat the credential root
-(`:4945-4949`). Writes to `<home>/.copilot` stay allowed so the CLI can keep its
-own session state; only *reads by other process paths* are denied.
+**This check is named *completeness* and claims only completeness.** Presence,
+mode, and size prove that projection happened; they prove nothing about whether
+the credential is valid or the account is signed in. That is A2b's job. (D4.)
 
-Also under `--shadow-contract`:
+### A2b — Bounded adapter-owned authentication *usability* probe
 
-- the broad keychain grants (`:4950-4956`) are **not** emitted, aligning shadow
-  trials with `docs/skill-evaluation-trial-harness-design.md:643-645`;
-- the `GH_TOKEN`/`GITHUB_TOKEN` injection at `:5792-5799` is **not** performed,
-  so no credential value exists in any inherited environment, and none can
-  appear in `prepared.json`, whose `environment` field is durable trial
-  evidence.
+Before any model launch, the adapter performs one bounded positive probe that
+the projected authentication is actually usable:
 
-Mode A is therefore: the CLI reads its own config file; nothing else in the
-trial can read it or the environment. If CHK-A1 shows Copilot CLI cannot
-authenticate this way, the reframe gate fires — see the OPEN record.
+- reuse the existing `copilot_auth_token(credential_root)`
+  (`dreaming-vendor-adapter.py:1249`), which locates `gh`, runs
+  `gh auth token --hostname github.com` under the invoking **account** home with
+  its own minimal environment, and is already bounded at 10 s;
+- treat the return value as a **boolean outcome only**. The returned string is
+  discarded immediately: it is never written into the synthetic home, never
+  placed in any environment, never returned to the harness, and never
+  serialized into `prepared.json`, stdout, records, or logs;
+- a `None`/failure outcome raises `shadow-credential-unusable` **before** the
+  CLI subprocess is launched.
 
-### A4 — The authority is declared in the executor identity
+**Scope of the no-keychain claim.** This probe runs as the adapter process,
+outside the trial sandbox, under the account home; `gh` may consult account
+authentication there. The no-keychain guarantee (I4) applies strictly to the
+**trial sandbox**, which is denied both keychain roots. Stating it any wider
+would be false.
 
-`evaluation_identity` gains, under `--shadow-contract` only, a
-`credential_authority` descriptor and a matching change to the `sandbox_id`
-summary:
+**Owner selection — traced, not assumed.** Three subcommands could own it:
+
+| Subcommand | Semantics | Decision |
+|---|---|---|
+| `doctor` (`:6192`) | Health/qualification; already asserts an auth predicate at `:6211`, but only `is_file()` | **Owns it.** Replace the `is_file()` predicate with completeness + usability under shadow mode. This is where an unusable credential should surface before the stage claims anything. |
+| `prepare` (`:5127`) | Per-trial; emits the sealed `prepared` record consumed by `run` | **Owns it.** Runs the probe before emitting the command and profile, so no trial can reach the model with an unusable credential. |
+| `run` (`:5792`) | Per-trial execution; today calls `copilot_auth_token` to inject `GH_TOKEN` | **Owns a defensive repeat.** Under shadow mode the injection is removed and replaced by the same boolean probe, so `run` pays no *new* subprocess relative to today. |
+| `normalize`, `collect` | Post-execution | Do not probe. |
+
+**No new field is added to the `prepared` record.** Adding one would have to be
+recomputed identically by the prepared-drift equality at `:5784`, creating a
+drift surface for no gain. Keeping the probe as a precondition on both sides
+leaves the sealed record's shape unchanged.
+
+**Bound impact.** Today only `run` pays a `gh auth token` call per trial; after
+this change `prepare` pays one too. Each is bounded at 10 s inside the adapter's
+own `timeout_seconds`. The stage's provisional reservation must account for up
+to one extra bounded 10 s call per trial.
+
+### A3 — Process-path confinement of the projected credential files
+
+This is the security core, and Round 1 found the original formulation
+defective (D3).
+
+**The defect.** `dreaming-vendor-adapter.py:4989` unconditionally loops over the
+projected authentication paths and emits, for each one:
 
 ```
-"credential_authority": {
-  "version": 1,
-  "root": "invoking-account-home",
-  "projected": [".config/gh/hosts.yml", ".config/gh/config.yml",
-                ".copilot/config.json"],
-  "token_in_environment": false,
-  "reader": "cli-executable-only"
-}
+(deny file-write* (literal "<path>"))
+(allow file-read* (literal "<path>"))
 ```
 
-It is **path-free by construction** so executor identity stays portable across
-hosts, exactly as `cli_executable_sha256` and `tool_policy_id` are today. The
-`sandbox_id` summary's `denied` list gains `projected-credential-reads-by-other-processes`
-and `keychains`; its `allowed` list keeps `projected-credentials`.
+These are appended *after* the trial-root grant at `:4957`. An additive
+confinement rule placed after them would not confine anything, because the
+unconditional `allow file-read*` already grants the model process a literal
+read.
 
-Because that summary is the executor's declared boundary and it now means
-something different, `EVALUATION_ADAPTER_VERSION` goes to `2`, so a consumer
-pinned to version 1 cannot silently accept version 2 semantics.
+**The fix.** Under `--shadow-contract` with vendor `copilot`, the adapter does
+not emit those literal read allows for the three Copilot projected paths.
+Instead it emits, at the end of the profile:
 
-### A5 — Configuration refuses an evaluator that lacks the authority
+```
+(deny file-read*  (subpath "<home>/.config/gh"))
+(deny file-read*  (subpath "<home>/.copilot"))
+(deny file-write* (literal "<home>/.config/gh/hosts.yml"))
+(deny file-write* (literal "<home>/.config/gh/config.yml"))
+(deny file-write* (literal "<home>/.copilot/config.json"))
+(allow file-read* (require-all (subpath "<home>/.config/gh")
+                               (process-path "<resolved cli binary>")))
+(allow file-read* (require-all (subpath "<home>/.copilot")
+                               (process-path "<resolved cli binary>")))
+```
 
-`SHADOW_EXECUTOR_REQUIRED_ARGV` (`dreaming-core.py:170`) gains
-`--credential-root`, and `_require_role_argv` (`:9533-9551`) additionally
-refuses a value that is empty or starts with `-`, with the existing
-`invalid-adapter-config` failure. The stage's `shadow_execution_authority`
-(`:9554-9590`) then reports `evaluator_configured: false` for a host whose
-evaluator argv omits it, which keeps the whole stage unavailable rather than
-letting it claim a candidate it cannot evaluate.
+The write denials on the three literals are preserved from today's behavior.
+Writes elsewhere under `<home>/.copilot` remain permitted by the trial-root
+grant, because the CLI writes session state there.
 
-### Why not the Agent Auth Broker
+**No precedence claim.** This work order does **not** assert any SBPL
+precedence or last-match-wins semantics. It specifies the *generated effective
+policy* and requires that the confinement be proved **behaviorally**, by
+executing reads, in CHK-A3 and CHK-A16. If the observed sandbox implementation
+does not yield the intended effective policy from this rule ordering, the
+implementation must restructure what it emits — for example by not emitting the
+broad trial-root read grant over those two subpaths at all — until the executed
+proof passes. The executed proof, not the rule text, is the acceptance
+boundary.
 
-The broker's supported surface is attended login and specific brokered
-authenticated reads. It does not supply credential material to a third-party
-CLI subprocess executing a model turn inside `sandbox-exec`, and claiming
-otherwise would be claiming generic credential access it does not offer. Using
-it would also add a trusted component to a path that already has a reviewed
-one. Not selected.
+**Precedent and constraint.** `process-path` confinement is already used in
+this same profile for `network-outbound` (`:4985`). The existing refusal of
+script-based (`#!`) CLI executables (`:4977`) exists precisely because such
+executables cannot receive process-scoped access; that refusal must remain, and
+A3 depends on it.
+
+**Keychains.** Under shadow mode the broad keychain `file-read*` grants at
+`:4950` are omitted. The measured probe authenticated with no keychain
+projection, so the grant is unnecessary in this mode. Non-shadow mode keeps
+them unchanged.
+
+### A4 — Identity: `sandbox_id` only
+
+Round 1 established that the revision-1 plan was impossible at runtime:
+
+- `skill-evaluation.py:10770` hard-refuses any shadow executor whose
+  `adapter_version != 1`;
+- `skill-evaluation.py:10734` validates shadow executors against an **exact**
+  key set via `require_exact_keys` at `:10742`;
+- `skill-evaluation-harness.py:682` refuses any attestation response whose key
+  set is not exactly `EXECUTOR_IDENTITY_KEYS` (`:57`), with the shadow superset
+  at `:1888` adding only `real_backend` and `real_backend_source`;
+- `EVALUATION_ADAPTER_VERSION` (`:3936`) is a module global feeding **both**
+  executor and comparator identity, so it cannot be conditioned on
+  `--shadow-contract` without changing non-shadow identity, violating non-goal 5
+  and I8.
+
+Therefore:
+
+- `EVALUATION_ADAPTER_VERSION` stays `1`;
+- no top-level identity field is added;
+- no exact-key schema is edited;
+- the boundary is sealed **inside the existing `sandbox_id` hash input**
+  (`:4038`), which is already part of the attested identity and is validated
+  only for shape (`require_sha256`, `skill-evaluation.py:10766`), leaving its
+  content free.
+
+Under `--shadow-contract` only, the `sandbox_id` input dictionary gains entries
+describing the new confinement — projected-auth reads confined to the CLI
+process path, keychains denied, no provider token in the trial environment. Its
+nested `version` stays `1`: no existing consumer reads that nested value, and
+the observable signal is the `sandbox_id` digest itself, which is compared
+exactly by attestation. Bumping it would add an unread field.
+
+The configured argv carries the concrete `--credential-root <account home>`
+path, but the portable identity stays path-free: no host path enters
+`sandbox_id`.
+
+**Net identity effect.** Shadow-mode `sandbox_id` changes; every other identity
+field, and every non-shadow identity value including the non-shadow
+`sandbox_id`, is byte-identical.
+
+### A5 — No token in the trial environment
+
+`evaluation_environment` (`:4660`) keeps its fixed shape. Under
+`--shadow-contract`, the run-time `GH_TOKEN` injection at `:5792` is **not**
+performed: the trial authenticates from the projected files alone, exactly as
+the measured probe did. `GH_TOKEN` and `GITHUB_TOKEN` are absent from the trial
+environment.
 
 ## Reuse contract
 
-| Need | Existing thing reused | Why nothing new |
-| --- | --- | --- |
-| Credential root on the executor argv | `--credential-root` (`dreaming-vendor-adapter.py:6851`) | Already exists; already emitted by `build-evaluation-input-source.py:197-230` |
-| Account-home validation | `pwd.getpwuid(os.getuid()).pw_dir` predicate (`:1256-1257`, `build-evaluation-input-source.py:289-296`) | Same predicate, second caller |
-| Token acquisition | `copilot_auth_token` (`:1249-1298`) | Already runs `gh` in a private environment with the real home; the harness never sees the token |
-| File projection | `copy_auth_file` and the copilot branch of `evaluation_environment` (`:1198-1204,4699-4706`) | Same three paths, same `0600` mode |
-| Process-path read guard | The existing `require-all`/`process-path` rule (`:4945-4949`) | Same SBPL construct, applied to the projected set |
-| Boundary proof | `evaluation_doctor`'s allow/deny/write canaries (`:6233-6277`) and `prove_boundary` (`:1497-1541`) | Extended with new canaries, not replaced |
-| Config-layer argv contract | `_require_role_argv` (`dreaming-core.py:9533-9551`) | One more required flag in an existing check |
-| Stage availability gate | `shadow_execution_authority` (`dreaming-core.py:9554-9590`) | Reads the same config it already reads |
+| Reused component | File:line | Why it is reused rather than rebuilt |
+|---|---|---|
+| `--credential-root` argv contract | `build-evaluation-input-source.py:197`, `:289` | Already reviewed, already validates against the account home |
+| `evaluation_credential_root` | `dreaming-vendor-adapter.py:4656` | Existing resolution point |
+| `copy_auth_file` | `:1198` | Existing projection primitive |
+| `copilot_auth_token` | `:1249` | Existing bounded usability probe; account-home bound, 10 s |
+| `require-all` + `process-path` | `:4945`, `:4985` | Existing precedent in the same profile |
+| `prove_boundary` | `:1497` | Existing private-data refusal proof |
+| `_require_role_argv` | `dreaming-core.py:9533` | Existing argv enforcement for evaluator entries |
 
-Genuinely new: three refusal codes, one `credential_authority` descriptor, four
-SBPL rules, one version bump. Nothing new is a component; everything new is a
-field, a rule, or a refusal inside a component that already exists.
+Nothing new is trusted. The trusted set shrinks in shadow mode: keychain reads
+are removed and projected-file reads narrow from "any process in the sandbox"
+to "the CLI process path only".
 
 ## Source-to-runtime data flow
 
 ```
-owner adapter config
-  evaluators.<name>.argv =
-    [<adapter>, --vendor copilot, --role skill-evaluation-executor,
-     --shadow-contract, --model <exact>, --binary <copilot>,
-     --credential-root <account home>, --timeout/--token-budget/...]
-        |
-        |  dreaming-core._require_role_argv           (L19)
-        |  refuses missing/empty --credential-root
-        v
-shadow_execution_authority -> evaluator_configured    (L20)
-        |
-        v
-skill-evaluation shadow_routing -> routing document (argv verbatim, argv[0] digest-pinned)
-        |
-        v
-skill-evaluation-harness                              (L1-L6, unchanged)
-  call(argv + subcommand, harness_environment(home)={PATH,HOME,LANG,LC_ALL})
-        |
-        v
-dreaming-vendor-adapter (one process per subcommand)
-  A1 validate --credential-root == pw_dir            -> refuse before any work
-  evaluation_environment:
-     copy .config/gh/hosts.yml, .config/gh/config.yml,
-          .copilot/config.json  from <account home> -> <trial home>  (0600)
-     set HOME/TMPDIR/XDG*/COPILOT_HOME to trial paths
-  A2 assert the three projected files exist, 0600, non-empty
-  evaluation_sandbox_profile:
-     existing rules
-   + A3 deny reads of <home>/.config/gh and <home>/.copilot
-   + A3 allow those reads only when process-path == resolved CLI binary
-   - A3 omit keychain grants under --shadow-contract
-  emit prepared{command, environment (no token), sandbox_profile_sha256, projection}
-        |
-        v
-run: sandbox-exec -f <profile> <copilot -p ... --model ... -C workspace>
-     process environment == prepared environment, byte identical, no token
-        |
-        v
-Copilot CLI reads its own projected config -> model turn -> raw JSONL in workspace
-        |
-        v
-normalize -> trace ; collect -> declared artifacts
-        |
-        v
-harness shadow_route_proof / shadow_usage -> trial result.json
-     (never contains credential bytes; A3 keeps them unreadable to graders too)
+operator config  <state>/adapters.json  (or $DREAMING_ADAPTER_CONFIG; dreaming-core.py:5596)
+                 evaluators.<name>.argv  ──►  must contain --credential-root <account home>
+                                              (enforced: dreaming-core.py:9533)
+        │
+        ▼
+dreaming-core.configured_adapters (strict, :9597)  ──► RuntimeFailure on the whole
+        │                                               config if the flag is absent
+        ▼
+shadow_execution_authority (:9554)  ──► stage available only if an evaluator entry exists
+        │
+        ▼
+shadow evaluation stage  ──► harness  ──► harness_environment (:675) synthetic HOME
+        │                                  (no parent env, no token)
+        ▼
+adapter subprocess, argv verbatim:  … --credential-root <account home> --shadow-contract
+        │
+        ├─ A1 validate raw path: symlink? dir? == pw_dir?        (refuse before anything)
+        ├─ A2 project files into synthetic HOME, assert completeness
+        ├─ A2b bounded usability probe (boolean only; secret discarded)
+        ├─ A3 emit sandbox profile: deny subpaths + process-path allow
+        ├─ A4 sandbox_id input records the confinement (shadow only)
+        └─ A5 launch CLI under synthetic HOME, no GH_TOKEN
+                │
+                ▼
+        Copilot reads .config/gh/* and .copilot/config.json  ── permitted: process-path matches
+        model code / tools read the same paths               ── denied:   process-path differs
 ```
-
-The credential crosses exactly one boundary: from the account home into the
-per-trial synthetic home, performed by the adapter, read by the pinned CLI
-executable, destroyed with the trial root. The harness never opens a credential
-file, never holds a token, and never learns the credential root except as an
-opaque argv string it digests.
 
 ## Threat and failure model
 
-How this breaks in production, not in theory.
-
-| # | Failure | Realistic cause | Result today | Required result |
-| --- | --- | --- | --- | --- |
-| F1 | Evaluator argv omits `--credential-root` | Owner writes config by hand from the reframe doc's argv sketch, which never named the flag | Every trial fails deep in `run` after full preparation cost | Config refuses; stage reports unavailable; nothing is claimed |
-| F2 | `--credential-root` names another user's home or a fixture directory | Copy-paste from a test, or a shared host | `copilot_auth_token` returns `None`; generic `authentication-required` | Distinct `shadow-credential-authority-mismatch` refusal, before any projection |
-| F3 | The account is signed out of `gh` | Token expired; `gh auth logout` | Trials fail one by one with an infrastructure error | `doctor` and `prepare` refuse; the stage's executor health check catches it before a claim |
-| F4 | The model tries to read its own credentials | A `bash` tool call in a routing case, or a prompt-injected candidate skill | `cat ~/.config/gh/hosts.yml` succeeds inside the trial | Denied by A3; the CLI itself still reads it |
-| F5 | A credential value reaches durable evidence | Token in `prepared.json`'s `environment`, in a raw JSONL log, or in an artifact | Token is in the run environment and could be echoed into the trace | No token exists in any environment; projected files are unreadable to non-CLI processes |
-| F6 | The trial reads unrelated account content | Broad grants; keychain reads | `<home>/Library/Keychains` and `/Library/Keychains` are readable in evaluate mode | Not granted under `--shadow-contract` |
-| F7 | Two executors disagree about the boundary | A host runs a stale adapter | Identity mismatch surfaces only if bytes differ | Version bump plus byte pin makes it explicit at attestation |
-| F8 | The CLI cannot authenticate from files alone | Copilot CLI requires an env token | Unknown before CHK-A1 | The reframe gate fires; no silent fallback to env injection |
-| F9 | `gh` is missing from every known location | Homebrew uninstalled | `copilot_auth_token` returns `None` late | `doctor` refuses; the reason names the probe |
-| F10 | `sandbox-exec` is unavailable | Future macOS removal | `executor-boundary-unavailable` | Unchanged |
-| F11 | The projected file is a symlink to somewhere else | Tampered account home | `copy_auth_file` skips symlinks silently | A2 refuses because the projection is incomplete |
-| F12 | A rule-ordering mistake makes A3's deny unreachable | SBPL rules appended in the wrong order | n/a | CHK-A3 proves denial from a non-CLI process path, not just that the string is present |
+| # | Threat / failure | Mechanism | Mitigation | Proof |
+|---|---|---|---|---|
+| F1 | Trial reads credential bytes and echoes them to the model | Sandbox allows the trial process to read projected files | A3 process-path confinement | CHK-A3, CHK-A16 |
+| F2 | Credential material lands in a record | Token injected into env, then serialized | A5 no injection; A2b discards the probe result | CHK-A5, CHK-A18 |
+| F3 | Projection silently incomplete → trials fail as `infrastructure_error` | `copy_auth_file` no-ops silently | A2 completeness assertions | CHK-A6 |
+| F3b | Projection complete but the account is signed out → the same silent degradation | Existence proves nothing about validity | A2b bounded usability probe before model launch | CHK-A17 |
+| F4 | Credential root points somewhere else | Operator misconfiguration | A1 account-home equality | CHK-A4 |
+| F4b | Credential root is a symlink to the account home | `resolve()`-then-`is_symlink()` is vacuous | A1 raw-path symlink check before resolution | CHK-A4 |
+| F5 | Non-shadow identity drifts | A global version or unconditional identity change | A4: version stays `1`; identity change is shadow-conditional | CHK-A9 |
+| F5b | Identity change is rejected at runtime by an exact schema | Extra key or bumped version | A4 adds no key and no version bump | CHK-A8 |
+| F6 | Real `HOME` reachable from the trial | Missing deny | Existing deny roots + `prove_boundary` | CHK-A7 |
+| F7 | Keychain reachable from the trial | Existing broad grants | A3 omits them under shadow | CHK-A7 |
+| F8 | Confinement defeated by an earlier unconditional allow | `:4989` literal read allows | A3 suppresses them under shadow | CHK-A3 |
+| F9 | Fixture adapters break | Shared code path | Fixtures already pass `--credential-root` (`test-skill-evaluation-vendor-adapters.sh:325`) | CHK-A10 |
+| F10 | Installed host silently becomes authenticated by default | Generated config | `install.sh:702` does not generate `evaluators`; absent entry → unavailable | CHK-A12 |
+| F11 | Process leak or timeout regression | New subprocess in `prepare` | Bounded 10 s; existing cleanup asserts | CHK-A13 |
+| F12 | Removing the authority does not restore fail-closed behavior | Partial rollback | Rollback deletes the evaluator entry | CHK-A12 |
 
 ## Hard invariants
 
-- **I1 Harness purity.** `harness_environment`, `HARNESS_PATH`, and the
-  routing `environment_sha256` are byte-identical before and after this change,
-  and `harness_executable_sha256` is unchanged.
-- **I2 Explicit authority.** No shadow trial ever runs under a credential root
-  the configuration did not state. There is no default, no environment fallback,
-  and no inference from `HOME`.
-- **I3 Account binding.** The credential root always equals the invoking
-  account's home directory as reported by the password database.
-- **I4 Reader confinement.** Inside a shadow trial sandbox, only the pinned CLI
-  executable's process path can read the projected credential files, and no
-  credential value exists in any process environment.
-- **I5 Evidence cleanliness.** No credential byte appears in `prepared.json`,
-  raw logs, traces, artifacts, trial results, certificates, or any durable
-  shadow evaluation record.
-- **I6 Fail-closed ordering.** Every authority refusal happens before the CLI
-  is launched, and refusals are distinguishable by code.
-- **I7 Identity exactness.** The executor identity returned by `version`,
-  `doctor`, `prepare`, and `run` is identical, matches the config-derived
-  expectation, and declares the new credential authority.
-- **I8 Non-shadow invariance.** Without `--shadow-contract` the adapter's
-  environment, profile, identity, and refusals are unchanged.
-- **I9 No default-open.** A host with no `evaluators` entry, or an entry
-  lacking the authority, reports the shadow stage unavailable and claims
-  nothing.
+- **I1** — `skill-evaluation-harness.py` is byte-unchanged.
+- **I2** — The parent environment is never forwarded to a trial.
+- **I3** — The trial never receives `GH_TOKEN` or `GITHUB_TOKEN`.
+- **I4** — The trial sandbox is denied both keychain roots.
+- **I5** — No credential byte reaches stdout, `prepared.json`, the sandbox
+  profile, any log, any artifact, or any receipt.
+- **I6** — Projected credential files are readable **only** by the resolved CLI
+  executable's process path.
+- **I7** — Candidate blindness and executor content permissions are unchanged.
+- **I8** — Non-shadow identity, non-shadow sandbox profiles, and fixture
+  behavior are byte-identical.
+- **I9** — Every refusal happens before the model is launched.
+- **I10** *(R2)* — `EVALUATION_ADAPTER_VERSION` remains `1` and no exact-key
+  identity schema is modified.
 
 ## Acceptance criteria
 
-Each is observable — a state a check can read, not a judgement.
-
-- **AC-T1** A real authenticated Copilot shadow trial, launched by the harness
-  under a synthetic `HOME`, completes a model turn and produces a trace with at
-  least one assistant event, with `infrastructure_error` absent from its trial
-  result.
-- **AC-T2** With `--shadow-contract` and no `--credential-root`, every adapter
-  subcommand exits non-zero with code `shadow-credential-authority-required`,
-  and no synthetic home, profile, or process is created.
-- **AC-T3** With `--credential-root` naming an existing directory that is not
-  the account home, the refusal code is
-  `shadow-credential-authority-mismatch`.
-- **AC-T4** With `--credential-root` naming a missing path or a symlink, the
-  refusal code is `shadow-credential-authority-invalid`.
-- **AC-T5** With a valid root whose `.config/gh/hosts.yml` is absent, `prepare`
-  exits `shadow-credential-projection-incomplete` and no CLI process is
-  started.
-- **AC-T6** Inside the shadow sandbox, `/bin/cat <home>/.config/gh/hosts.yml`
-  and `/bin/cat <home>/.copilot/config.json` both fail, while the same profile
-  permits the CLI executable's own read of those paths.
-- **AC-T7** Inside the shadow sandbox, reads of the real account home outside
-  the trial root, of `<account home>/.copilot`, of
-  `<account home>/Library/Keychains`, and of `/Library/Keychains` all fail.
-- **AC-T8** The `environment` object emitted in `prepared.json` for a shadow
-  trial contains no key whose name or value carries a token, and specifically
-  no `GH_TOKEN` or `GITHUB_TOKEN`.
-- **AC-T9** The executor identity from `version` equals the identity from
-  `doctor`, `prepare`, and `run`, carries `credential_authority` with
-  `token_in_environment: false`, carries `adapter_version: 2`, and is accepted
-  by `shadow_attest` against the config-derived executors document.
-- **AC-T10** The fixture executor adapters and every existing non-shadow
-  evaluate-path test behave identically to `f63f55b`.
-- **AC-T11** An evaluator config entry whose argv omits `--credential-root` is
-  refused with `invalid-adapter-config`, and
-  `shadow_execution_authority(...)["evaluator_configured"]` is `False`.
-- **AC-T12** With the evaluator entry absent entirely, the shadow stage reports
-  unavailable and writes no durable record.
-- **AC-T13** A shadow trial that exceeds its timeout is still terminated within
-  its existing bound with no surviving process group, and its output-byte
-  ceiling is unchanged.
-- **AC-T14** After a trial, the trial root is removed and no projected
-  credential file survives anywhere outside the account home.
-- **AC-T15** `skill-evaluation-harness.py` is byte-identical to `f63f55b`, and
-  every stored `harness_executable_sha256` is unchanged.
-- **AC-T16** Removing `--credential-root` from a working installed evaluator
-  entry returns the host to exactly today's behavior: stage unavailable, no
-  claim, no durable write.
+| ID | Criterion | Checks |
+|---|---|---|
+| AC-T1 | A real authenticated Copilot trial completes under the synthetic `HOME` and returns a real verdict, not `authentication-required` | CHK-A1 |
+| AC-T2 | Absent `--credential-root` in the adapter argv → refusal before any model use | CHK-A2, CHK-A19 |
+| AC-T3 | Credential root not equal to the account home → refusal before any model use | CHK-A4 |
+| AC-T4 | Raw credential-root symlink is refused **before** `expanduser`/`resolve` | CHK-A4 |
+| AC-T5 | Incomplete projection (missing, wrong mode, empty, symlinked destination) → `shadow-credential-projection-incomplete` before model use | CHK-A6 |
+| AC-T5b | Signed-out or unusable credential → `shadow-credential-unusable` from both `doctor` and `prepare`, with no CLI subprocess launched | CHK-A17 |
+| AC-T6 | The trial process cannot read the projected credential files | CHK-A3, CHK-A16 |
+| AC-T7 | The trial cannot read the real `HOME`, `~/.copilot` session content, `~/.github` beyond the exact projection, keychains, or the parent environment | CHK-A7 |
+| AC-T8 | No provider token appears in the trial environment | CHK-A5 |
+| AC-T9 | Identity is exactly the existing key set, `adapter_version` is `1`, and the shadow `sandbox_id` equals the expected shadow digest and differs from the non-shadow digest | CHK-A8 |
+| AC-T10 | Non-shadow identity, profile, and fixture behavior unchanged | CHK-A9, CHK-A10 |
+| AC-T11 | An evaluator entry lacking the flag is refused by strict config validation | CHK-A19 |
+| AC-T12 | A config with no evaluator entry is valid and leaves the stage unavailable | CHK-A12 |
+| AC-T13 | Process cleanup and output/time bounds unchanged | CHK-A13 |
+| AC-T14 | No credential material survives in any retained artifact | CHK-A14, CHK-A18 |
+| AC-T15 | `skill-evaluation-harness.py` byte-unchanged | CHK-A15 |
+| AC-T16 | Deleting the evaluator entry restores current fail-closed behavior: the config still validates, the stage reports unavailable, and zero durable writes occur | CHK-A12 |
+| AC-T17 | Removing only the flag from a retained evaluator entry fails the **entire** config load — recorded as a negative fail-closed test, explicitly **not** a rollback and **not** "today's behavior" | CHK-A19 |
+| AC-T18 | The usability probe's returned token never appears in stdout, `prepared.json`, the emitted profile, any environment, or any log | CHK-A18 |
+| AC-T19 | The sealed `prepared` record's shape is unchanged and the prepared-drift equality still holds across a prepare/run pair | CHK-A11 |
 
 ## Rollback and fail-closed evidence
 
-**Rollback, in increasing order of cost.**
+**Primary rollback — delete the evaluator entry.** Remove the entire
+`evaluators.<name>` entry from the adapter config. The config remains valid
+(`ROLE_CONFIG_KEYS` tolerates an absent or empty role map),
+`shadow_execution_authority` (`dreaming-core.py:9554`) reports the stage
+unavailable, and no trial runs. This is a config-only action, requires no
+deploy, and produces zero durable writes.
 
-1. **Configuration rollback (seconds, no deploy).** Remove
-   `--credential-root` from the evaluator argv. `_require_role_argv` then
-   refuses the entry, `evaluator_configured` becomes false, the shadow stage
-   reports unavailable, and no candidate is claimed. This is AC-T16 and it is
-   the primary rollback.
-2. **Entry rollback.** Delete the `evaluators` entry. Identical outcome; also
-   the pre-change state of any host that never configured one.
-3. **Code rollback.** Revert the adapter and core commits, restore
-   `TRUSTED_AUTHORING_ADAPTER_SHA256` to
-   `sha256:cb77c7945f8efe858b3d2f2d1e3b28527cfe7590257abe95ec1421d72aaace22`,
-   rebuild the evaluation input source bundles, and regenerate adapter config.
-   No durable state migration is required because this change writes no new
-   durable state.
+**Secondary rollback — revert the code successor.** Restores the previous
+adapter and `SHADOW_EXECUTOR_REQUIRED_ARGV`, at which point a retained evaluator
+entry that still carries `--credential-root` remains valid, because the flag is
+already an accepted adapter argument.
 
-Rollback is safe at any point because the change introduces no persisted
-artifact and no schema whose absence would break a reader.
+**Not a rollback — removing the flag (D6).** Deleting `--credential-root` from
+a retained evaluator entry causes `_require_role_argv` (`:9533`) to raise
+`RuntimeFailure` inside the **strict** `configured_adapters` (`:9597`), which
+`validate_adapter_config` (`:9838`) uses. That aborts the **whole** config load,
+not just the evaluator role, so unrelated source, executor, and publisher roles
+stop resolving too. It is retained only as a negative fail-closed test
+(AC-T17/CHK-A19) and must never be recommended to an operator as a recovery
+step, nor described as "returning to today's behavior".
 
-**Evidence the boundary fails closed.** The rollback claim and the fail-closed
-claim are proved by the same observations, and each is a check below:
-
-- absent authority refuses (AC-T2, CHK-A4);
-- wrong authority refuses (AC-T3, CHK-A5);
-- unusable authority refuses before the model (AC-T5, CHK-A6);
-- the confinement rule denies a real read attempt, not merely a string
-  (AC-T6/AC-T7, CHK-A3);
-- removing the authority restores unavailability with zero durable writes
-  (AC-T16, CHK-A12).
+**Installed-host default.** `scripts/install.sh:702` generates `sources`,
+`executors`, and `publishers` only. An installed host that never adds an
+evaluator entry is already fail-closed by construction; nothing here makes the
+stage default-open.
 
 ## Check contract
 
-Each check names the invariant it protects, its setup, its pass and fail
-signals, and why that failure proves the contract. Layer references are to the
-enumeration table. Every acceptance criterion has at least one check.
+Every check is executed. At-boundary and past-boundary cases are paired at each
+enforcing layer.
 
-| ID | Protects | Setup and input | Pass signal | Failure signal and what it proves |
-| --- | --- | --- | --- | --- |
-| **CHK-A1** | AC-T1, I4 | Live: one real authenticated shadow trial under the harness, mode A (files only, no env token), with a trivial prompt | Trial result has an assistant event and no `infrastructure_error` | Any `authentication-required` or empty trace proves mode A is not reachable and fires the reframe gate rather than licensing mode B |
-| **CHK-A2** | I1, L1-L6 | `git diff f63f55b -- skill-evaluation-harness.py` plus a recomputed digest | Empty diff; digest unchanged | Any harness byte change proves the architecture's central claim failed and the trusted-component count grew |
-| **CHK-A3** | AC-T6, AC-T7, I4, F4, F12 | Generate a shadow profile for a fixture trial; run `sandbox-exec -f <profile> /bin/cat <target>` for each of: projected `hosts.yml`, projected `config.json`, a projected `.copilot` session file, the real home's `hosts.yml`, `<account home>/Library/Keychains`, `/Library/Keychains`; then a control read of a workspace file | Every credential target exits non-zero; the workspace control exits zero | A zero exit on any credential target proves the confinement rule is absent, mis-ordered, or overridden by the trial-root grant. Asserting profile text instead of running `cat` would pass while the rule is unreachable, which is why this check executes |
-| **CHK-A4** | AC-T2, I2, I6 | Each of the six shadow subcommands with `--shadow-contract` and no `--credential-root` | Non-zero exit, code `shadow-credential-authority-required`, no synthetic home created | A zero exit, or a different code, proves the default fallback is still reachable |
-| **CHK-A5** | AC-T3, AC-T4, I3, F2 | Three runs: root = a real other directory; root = a missing path; root = a symlink to the account home | Codes `...-mismatch`, `...-invalid`, `...-invalid` respectively | A pass proves the account-home predicate is not enforced at the new call site |
-| **CHK-A6** | AC-T5, I6, F3, F11 | Valid account-home root, but with the projection source hidden behind a fixture overlay so `hosts.yml` is absent | `prepare` exits `shadow-credential-projection-incomplete`; no CLI process is spawned | A successful `prepare` proves the silent `copy_auth_file` no-op still reaches `run`, i.e. the failure is still late |
-| **CHK-A7** | AC-T8, I5, F5 | Capture `prepared.json` from a shadow `prepare` | No `GH_TOKEN`/`GITHUB_TOKEN` key; no value matching a token shape | Presence proves credential material reached durable trial evidence |
-| **CHK-A8** | AC-T9, I7 | Compare identities from `version`, `doctor`, `prepare`, `run`; attest against a config-derived executors document | All four equal; `shadow_attest` accepts; `adapter_version == 2`; `credential_authority.token_in_environment is False` | Divergence proves an identity path was missed, so a consumer could pin one boundary and get another |
-| **CHK-A9** | AC-T10, I8 | Run the full existing vendor-adapter and skill-evaluation vendor-adapter suites unchanged, plus one non-shadow evaluate trial | All green; the non-shadow profile and environment are byte-identical to `f63f55b` | Any change proves the shadow gating leaked into the evaluate path |
-| **CHK-A10** | AC-T11, L19 | Call `_require_role_argv` with argv missing the flag, with an empty value, and with a value beginning `-`; then `shadow_execution_authority` on the same config | All three raise `invalid-adapter-config`; authority reports `evaluator_configured: False` | Acceptance proves a host could be configured into a state where every trial fails after full preparation cost |
-| **CHK-A11** | AC-T12, I9 | Config with no `evaluators` entry; run one scheduled stage pass against a private root | Stage reports unavailable; durable root byte-identical before and after | A claim or a durable write proves default-open behavior |
-| **CHK-A12** | AC-T16, rollback | Working configured host; remove the flag; run one pass; snapshot the durable root | Unavailable, zero writes, and the report's reason names the missing authority | Any evaluation attempt proves the rollback path does not actually disable the feature |
-| **CHK-A13** | AC-T13 | A fixture trial whose CLI stub sleeps past the timeout | Terminated within the existing bound plus grace; no surviving process group | A survivor proves the profile or environment change altered process control |
-| **CHK-A14** | AC-T14, I5 | After a trial, enumerate the run root and the scratch tree | No file matching the projected credential names outside the account home | A survivor proves credential material outlives its trial |
-| **CHK-A15** | AC-T15, L22, L23 | Recompute the adapter digest; run the ratchet at `test-evaluation-input-source-builder.sh:160-168`; grep the tree for the retired digest | Ratchet green; the retired digest appears nowhere active | A retired digest still active proves an unclosed consumer |
-| **CHK-A16** | I4 boundary pair | At the boundary: the CLI process path reads the projected file (allowed). Just past it: a copy of the CLI binary at a different path attempts the same read (denied) | Allowed, then denied | A denial of the real CLI proves the guard is too tight to be usable; an allow for the copy proves `process-path` is matching something weaker than the resolved binary path |
-
-**Guards that must exist before implementation.** CHK-A2 and CHK-A3, because
-they are the two claims the whole architecture rests on: the harness does not
-change, and the confinement rule is real rather than textual. Writing them
-first constrains the implementation to the selected architecture instead of
-discovering afterwards that the easy path widened the harness.
-
-`REGISTER-ONLY`: a general assertion that no adapter code path reads a
-credential file outside `evaluation_environment`. Useful, not required to ship
-this change.
+| ID | Layer | Check | Boundary |
+|---|---|---|---|
+| CHK-A1 | End to end | Real Copilot trial under synthetic `HOME` completes with a real verdict; no `authentication-required`, no `infrastructure_error` | at |
+| CHK-A2 | Adapter argv | Shadow invocation without `--credential-root` refuses with `shadow-credential-root-missing`, launching no CLI | past |
+| CHK-A3 | Sandbox, executed | Under the emitted profile, the CLI process path reads a projected file successfully **and** a non-CLI process path reading the same file is denied | at + past |
+| CHK-A4 | Adapter argv | Account home accepted; a different existing directory, a raw symlink to the account home, a non-existent path, and a file are each refused with the specific code, before projection | at + past |
+| CHK-A5 | Executor env | The emitted trial environment contains neither `GH_TOKEN` nor `GITHUB_TOKEN`, and its key set is otherwise unchanged from today | at |
+| CHK-A6 | Projection completeness | Each of: missing file, mode `0644`, zero size, symlinked destination raises `shadow-credential-projection-incomplete`; a complete projection passes | at + past |
+| CHK-A7 | Sandbox, executed | `prove_boundary` still refuses protected `HOME`, config, and content reads; keychain roots are denied under shadow | past |
+| CHK-A8 | Identity | Shadow attestation response key set is **exactly** `EXECUTOR_IDENTITY_KEYS ∪ {real_backend, real_backend_source}`; `adapter_version == 1`; `sandbox_id` equals the expected shadow digest and differs from the non-shadow digest; `normalize_shadow_executors` accepts it | at |
+| CHK-A9 | Identity, non-shadow | Without `--shadow-contract`, every identity field including `sandbox_id`, and the emitted profile bytes, are identical to base | at |
+| CHK-A10 | Fixtures | The existing fixture vendor-adapter tests pass unchanged | at |
+| CHK-A11 | Prepare | `prepared` record shape is unchanged and the drift equality at `:5784` still holds across a prepare/run pair | at |
+| CHK-A12 | Config | With the evaluator entry deleted: config validates, `shadow_execution_authority` reports unavailable, zero durable writes | at |
+| CHK-A13 | Process | Timeout and cleanup asserts unchanged; the added `prepare` probe is bounded and leaves no orphan | at |
+| CHK-A14 | Artifacts | Grep every retained artifact from a real trial for the projected credential's distinguishing markers; zero hits | past |
+| CHK-A15 | Harness | `skill-evaluation-harness.py` digest equals base | at |
+| CHK-A16 | Sandbox, past boundary | A process whose path is not the resolved CLI attempts each projected path and each denied subpath; all denied | past |
+| CHK-A17 | Usability probe | With the projection complete but the account unusable, `doctor` and `prepare` each raise `shadow-credential-unusable` and launch no CLI; with a usable account both pass | at + past |
+| CHK-A18 | Secret non-serialization | The probe's returned token value appears in no stdout, `prepared.json`, profile, environment dump, or log produced by a full prepare/run pair | past |
+| CHK-A19 | Strict config | An evaluator entry lacking `--credential-root` causes `validate_adapter_config` to fail the whole config, and unrelated roles stop resolving — asserted as the negative fail-closed behavior, not as a rollback | past |
 
 ## Digest, regeneration, and consumer closure
 
-`skills/skill-review/scripts/dreaming-vendor-adapter.py` bytes change, so every
-stored identity and every pin over those bytes must be closed in the same
-targeted pass. The retired digest is
-`sha256:cb77c7945f8efe858b3d2f2d1e3b28527cfe7590257abe95ec1421d72aaace22`.
+Because no schema and no version change, closure is limited to the adapter's
+**byte digest** and the artifacts that pin it.
 
-**Recompute and re-pin**
+**Consumers that must continue accepting `adapter_version: 1` with a changed
+shadow `sandbox_id`:**
 
-1. `skill-evaluation.py:88-90` — `TRUSTED_AUTHORING_ADAPTER_SHA256` set to the
-   new digest. Consumers to re-verify: `:439`, `:5114`, `:5278`.
-2. Content-addressed evaluation input source bundles containing
-   `authoring/dreaming-vendor-adapter.py` (`skill-evaluation.py:3235`),
-   `reviews/dreaming-vendor-adapter.py` (`:3468`), and
-   `repair/dreaming-vendor-adapter.py` (`:4477`) — rebuilt with
-   `build-evaluation-input-source.py`; their manifest entries change.
-3. Adapter configuration regenerated so every `adapter_executable_sha256` and
-   `adapter_id` matches the new bytes and `adapter_version: 2`. Regenerate the
-   **evaluator and comparator** groups; sources, executors, publishers, and the
-   estate census and curator entries are intentionally preserved because
-   neither their paths nor their bytes changed.
-4. Search the tree for the retired digest and for the literal
-   `dreaming-vendor-adapter.py`; the closure is complete only when no retired
-   digest remains active and every named consumer is in the pass.
+| Consumer | File:line | Why it still accepts |
+|---|---|---|
+| Harness attestation | `skill-evaluation-harness.py:682` | Compares the key set exactly; the key set is unchanged |
+| Harness shadow attest | `skill-evaluation-harness.py:1888`, `:1939` | Same key set plus the two shadow keys |
+| Shadow executors normalizer | `skill-evaluation.py:10734`, `:10742` | Exact keys unchanged; `:10766` validates `sandbox_id` shape only (`require_sha256`), not its value; `:10770` requires version `1`, which holds |
+| Policy identity validation | `skill-evaluation.py:719`, `:814` | Shape-level; no pinned `sandbox_id` |
+| Core identity validation | `dreaming-core.py:521` | Shape-level |
 
-**Consumer tests that must run in the same targeted pass**
+**No stored `sandbox_id` needs updating.** The shadow executors document is
+derived per pass from a live `version` probe and re-attested in the same pass,
+so the expectation and the observation come from the same adapter bytes. There
+is no persisted `sandbox_id` pin to regenerate.
 
-`test-vendor-adapters.sh`, `test-skill-evaluation-vendor-adapters.sh`,
-`test-evaluation-input-source-builder.sh`, `test-dreaming-certification.sh`,
-`test-skill-evaluation.sh`, `test-skill-evaluation-harness.sh`,
-`test-cross-cli-evaluation.sh`, `test-dreaming-dashboard-contracts.sh`,
-`test-dreaming-core.sh`, `test-shadow-evaluation-preparation.sh`, and the new
-checks above. `daemon-selftest.sh:205` names the adapter in its own closure and
-is part of the installed gate, not this targeted pass.
+**Byte pins that must be regenerated together, in this order:**
 
-**Explicitly unchanged identities.** `skill-evaluation-harness.py` and
-therefore `harness_executable_sha256` and `harness_digest`;
-`SHADOW_CONTRACT_VERSION`; every suite, catalog, candidate, and packet
-identity.
+1. Compute the new adapter `sha256` after the code change.
+2. Update `TRUSTED_AUTHORING_ADAPTER_SHA256`
+   (`skill-evaluation.py:88`), whose consumers are `:439`, `:5114`, `:5278`.
+3. Update the builder ratchet test expectation
+   (`test-evaluation-input-source-builder.sh:160`).
+4. Regenerate the evaluation input source bundles that pin adapter identity —
+   `authoring/` (`skill-evaluation.py:3235`), `reviews/` (`:3468`), and
+   `repair/` (`:4477`) — via `scripts/build-evaluation-input-source.py`.
+5. Diff the regenerated bundles. The **only** expected change is the adapter
+   executable digest. Any other delta is a finding.
+6. Re-run the generator and confirm the second run is a no-op.
 
-**Adapter-config preflight.** Before any installed run, generate the candidate
-adapter configuration in a private root and exercise
-`skill-evaluation-executor doctor` against the exact binary and credential root
-it will use, proving the configured executable exists, its byte identity
-matches, and the boundary canaries pass — without touching launchd or live
-writable state.
+**Comparator (D6/#6 correction).** There is **no** comparator role group in the
+adapter config — `ROLE_CONFIG_KEYS` covers `sources`, `executors`,
+`publishers`, and `evaluators` only. The comparator identity
+(`dreaming-vendor-adapter.py:4066`) appears solely inside the regenerated source
+bundles, and it changes for exactly one reason: the shared adapter byte digest.
+Its argv and every other identity field are unchanged. Revision 1's claim that
+a comparator config group must be regenerated is withdrawn.
+
+## Round 1 finding resolution
+
+| ID | Reviewer | Finding | Revised section | Disposition |
+|---|---|---|---|---|
+| D1 | Terra | `adapter_version = 2` and a top-level `credential_authority` field are rejected by exact schemas while the design freezes the harness | A4; Non-goal 4; L15; I10; CHK-A8 | **Accepted.** Version stays `1`; no top-level field. The boundary is sealed in the existing `sandbox_id` hash input. Verified: `skill-evaluation.py:10770` hard-refuses `adapter_version != 1`. |
+| D2 | Terra | Global `EVALUATION_ADAPTER_VERSION` cannot be gated by `--shadow-contract` and would change non-shadow identity, violating the non-goal and I8 | A4; L15; F5; CHK-A9 | **Accepted.** No version gating is attempted. Only the shadow-mode `sandbox_id` input is conditional. |
+| D3 | Opus | Unconditional projected-file literal read allows at `:4989` are emitted after the trial-root grant and would defeat process-path confinement | A3; L13a; F8; CHK-A3 | **Accepted.** Under shadow mode those literal allows are suppressed and replaced by deny-subpath + `require-all(subpath, process-path)`, and the confinement is proved behaviorally rather than by precedence text. |
+| D4 | Opus | Existence/mode/size proves projection completeness, not credential usability; doctor checks only `is_file` | A2 (renamed *completeness*); A2b; L20; F3b; AC-T5b; CHK-A17 | **Accepted.** A bounded adapter-owned `gh auth token` usability probe is added, owned by `doctor` and `prepare` with a defensive repeat in `run`, replacing today's token call rather than adding a new one there. |
+| D5 | Opus | Raw symlink refusal must occur before `expanduser`/`resolve` and is stricter than the cited builder predicate | A1; AC-T4; F4b; CHK-A4 | **Accepted.** Ordering is specified explicitly and the divergence from `build-evaluation-input-source.py:289` (which resolves first, making its `is_symlink()` vacuous) is documented as a deliberate tightening. |
+| D6 | Opus | Removing `--credential-root` makes strict `configured_adapters`/`validate_adapter_config` fail globally, so it is not a valid rollback | Rollback section; AC-T16; AC-T17; L23a; CHK-A19 | **Accepted.** Primary rollback is deleting the evaluator entry. The missing flag is retained only as a negative fail-closed test and is explicitly not a rollback and not "today's behavior". |
+| T1 | Terra | Executor identity is validated against exact key sets in both the harness and the evaluator, so any added identity key is rejected at runtime | A4; L3; L5; L25; I10; CHK-A8 | **Accepted.** No key is added. CHK-A8 asserts the exact existing key set plus the two shadow keys, and asserts the expected `sandbox_id`. |
 
 ## Definition of Done: shadow trial authentication boundary
 
-This work order is done when all of the following hold. It covers exactly this
-boundary; the shadow stage's own gates stay in
-`docs/task-opportunity-shadow-evaluation-reframe.md`.
+This work order is done when **all** of the following hold. Each item is
+distinct from any other work order's DoD in this repository.
 
-1. The reframe record above is `CLEAR`, closed by a revised work order plus
-   paired design review evidence, with the projection mode, keychain
-   tightening, and version-bump questions decided.
-2. A1 through A5 are implemented with no change to
-   `skill-evaluation-harness.py` (CHK-A2).
-3. Every acceptance criterion AC-T1 through AC-T16 holds, each demonstrated by
-   its check.
-4. CHK-A1 through CHK-A16 exist and pass, with CHK-A2 and CHK-A3 written before
-   the implementation they constrain.
-5. CHK-A1 passed against the **real** authenticated Copilot CLI under the
-   harness's synthetic `HOME`, not a fixture, and its trace is retained as live
-   proof.
-6. The digest, regeneration, and consumer closure above is complete: no retired
-   digest is active anywhere, and every listed consumer test ran in the same
-   targeted pass.
-7. The adapter-config preflight passed in a private root before any installed
-   run.
-8. Rollback was exercised, not merely described: CHK-A12 shows that removing
-   the authority returns the host to today's fail-closed behavior with zero
-   durable writes.
-9. `docs/skill-evaluation-trial-harness-design.md` and the shadow reframe
-   document's PG-7 row state the resulting boundary, and no error string or
-   document still describes the removed silent default.
-10. The full installed self-test ran once on the frozen generation, and
-    `development-loop`'s live-proof, implementation-review, and landing gates
-    passed.
-
-Reaching this Definition of Done unblocks, but does not satisfy, PG-7 in the
-shadow evaluation work order. PG-7 additionally requires a certificate whose
-status is derived from real trials across all five routing classes.
+1. `SHADOW_EXECUTOR_REQUIRED_ARGV` requires `--credential-root`, and a
+   configured shadow evaluator entry lacking it is refused by strict validation
+   (CHK-A19).
+2. The adapter validates the credential root raw-symlink-first, then existence,
+   then account-home equality, refusing before any projection or model launch
+   (CHK-A4).
+3. Projection completeness is asserted fail-closed and named as completeness
+   only (CHK-A6).
+4. A bounded adapter-owned usability probe runs before every model launch, its
+   returned secret is discarded immediately, and an unusable credential refuses
+   from both `doctor` and `prepare` (CHK-A17, CHK-A18).
+5. The emitted shadow sandbox profile suppresses the unconditional projected-file
+   read allows, denies the two projected subpaths, and permits reads only from
+   the resolved CLI process path — proved by executed reads, not by rule text
+   (CHK-A3, CHK-A16).
+6. Keychain grants are absent from the shadow profile and `prove_boundary` still
+   refuses protected reads (CHK-A7).
+7. No provider token appears in the trial environment (CHK-A5).
+8. `EVALUATION_ADAPTER_VERSION` is still `1`, no identity key is added, and the
+   only changed identity value is the shadow `sandbox_id` (CHK-A8, CHK-A9).
+9. `skill-evaluation-harness.py` is byte-unchanged (CHK-A15).
+10. Fixture and unauthenticated adapter tests pass unchanged (CHK-A10).
+11. The `prepared` record shape and its drift equality are unchanged (CHK-A11).
+12. Byte-pin closure is complete: adapter digest, `TRUSTED_AUTHORING_ADAPTER_SHA256`,
+    the ratchet test, and the three regenerated bundles, with an explained diff
+    and an idempotent second regeneration.
+13. Deleting the evaluator entry leaves a valid config and an unavailable stage
+    with zero durable writes (CHK-A12).
+14. A real end-to-end shadow trial returns a real verdict, unblocking PG-7
+    (CHK-A1).
+15. No retained artifact contains credential material (CHK-A14, CHK-A18).
