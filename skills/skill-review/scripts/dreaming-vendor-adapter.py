@@ -191,6 +191,7 @@ COPILOT_EVENT_TYPES = {
     "session.custom_agents_updated",
     "session.error",
     "session.info",
+    "session.managed_settings_resolved",
     "session.mode_changed",
     "session.mcp_server_removed",
     "session.mcp_server_status_changed",

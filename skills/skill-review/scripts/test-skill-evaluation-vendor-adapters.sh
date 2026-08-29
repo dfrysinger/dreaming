@@ -1692,7 +1692,7 @@ else:
 
 
 class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
-    observed_types = {
+    round2_types = {
         "model.call_finished",
         "model.captured_assignment_context",
         "model.message",
@@ -1707,6 +1707,8 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
         "session.mcp_server_status_changed",
         "session.mcp_servers_loaded",
     }
+    managed_settings_type = "session.managed_settings_resolved"
+    observed_types = round2_types | {managed_settings_type}
 
     def call_start(self, turn, requests=None):
         return {
@@ -1921,7 +1923,7 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
             [{"events": [{"type": event_type} for event_type in sorted(self.observed_types)]}],
         )
         self.assertEqual(adapter_module.COPILOT_EVENT_TYPES, expected)
-        self.assertEqual(len(adapter_module.COPILOT_EVENT_TYPES), 69)
+        self.assertEqual(len(adapter_module.COPILOT_EVENT_TYPES), 70)
         self.assertEqual(
             adapter_module.SUPPORTED_SOURCE_VERSIONS,
             {"copilot": 1, "claude": 1, "codex": 1},
@@ -2223,7 +2225,7 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
         )
         self.assertEqual(comparator_gate(candidate), comparator_gate(baseline))
 
-        for event_type in sorted(self.observed_types):
+        for event_type in sorted(self.round2_types):
             adapter_module.validate_native_schema(
                 "copilot", [{"type": event_type}]
             )
