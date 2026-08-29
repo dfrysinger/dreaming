@@ -1829,11 +1829,8 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
                 "permissionsAllowIntersected": True,
                 "sandboxEnabledByUndeterminedPolicy": False,
                 "serverManaged": True,
-                "source": "enterprise",
+                "source": "mixed",
                 "settings": {
-                    "type": "session.error",
-                    "model": "nested-managed-model",
-                    "message": "nested managed failure",
                     "usage": {
                         "prompt_tokens": 999999,
                         "completion_tokens": 999999,
@@ -1841,23 +1838,9 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
                     },
                     "outputTokens": 999999,
                     "toolRequests": [{"toolCallId": "nested-managed-tool"}],
+                    "snapshot": self.nested_snapshot(skill),
                     "events": [
-                        self.call_start(
-                            99, [{"toolCallId": "nested-managed-tool"}]
-                        ),
                         self.call_success("nested-managed-usage", 999999, 999999),
-                        {
-                            "type": "session.skills_loaded",
-                            "data": {
-                                "skills": [
-                                    {
-                                        "name": "nested-managed-skill",
-                                        "path": str(skill),
-                                        "enabled": True,
-                                    }
-                                ]
-                            },
-                        },
                     ],
                 },
             },
@@ -2119,6 +2102,9 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
         skill = case / "fixture-skill" / "SKILL.md"
         skill.parent.mkdir()
         skill.write_text("fixture\n")
+        nested_skill = case / "nested-skill" / "SKILL.md"
+        nested_skill.parent.mkdir()
+        nested_skill.write_text("nested fixture\n")
         baseline = [
             {"type": "session.start", "data": {"model": "fixture-model"}},
             self.call_start(0, [{"toolCallId": "outer-call"}]),
@@ -2161,8 +2147,12 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
             {"type": "session.error", "data": {"message": "outer failure"}},
             self.call_success("outer-usage", 10, 5),
         ]
-        managed = self.managed_settings(skill)
-        candidate = [baseline[0], managed, *baseline[1:]]
+        managed = self.managed_settings(nested_skill)
+        candidate = [*baseline, managed]
+        skill_files = {
+            "fixture-skill": skill,
+            "nested-skill": nested_skill,
+        }
 
         def comparator_gate(values):
             events = list(adapter_module.copilot_outer_events(values))
@@ -2205,10 +2195,10 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
         )
         self.assertEqual(
             adapter_module.native_skill_evidence(
-                "copilot", candidate, {"fixture-skill": skill}, case
+                "copilot", candidate, skill_files, case
             ),
             adapter_module.native_skill_evidence(
-                "copilot", baseline, {"fixture-skill": skill}, case
+                "copilot", baseline, skill_files, case
             ),
         )
         self.assertEqual(
