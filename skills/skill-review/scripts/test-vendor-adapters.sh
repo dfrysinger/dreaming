@@ -674,6 +674,68 @@ class VendorAdapterTest(unittest.TestCase):
             expected,
         )
 
+    def test_review_rejects_selected_group_artifact_name_mismatch(self):
+        (
+            snapshot,
+            _snapshot_value,
+            receipt_path,
+            _receipt,
+            reusable_profile,
+        ) = self._task_profile_review_fixture()
+        lifecycle_id = "11111111-1111-1111-1111-111111111111"
+        occurrence_context = self.case / "selected-group-context.json"
+        occurrence_context.write_text(
+            json.dumps(
+                {
+                    "review_contract": "profile-catalog-review-occurrence-v1",
+                    "selected_profile_id": reusable_profile["profile_id"],
+                    "selected_task_key": reusable_profile["task_key"],
+                    "prior_overlaps": [],
+                    "candidate_groups": [
+                        {
+                            "lifecycle_id": lifecycle_id,
+                            "proposed_name": "selected-procedure",
+                            "procedure": {"schema_version": 1},
+                            "state": "collecting",
+                            "record_version": 1,
+                            "record_sha256": "sha256:" + "1" * 64,
+                            "useful_current_count": 0,
+                        }
+                    ],
+                }
+            )
+        )
+        response = self.run_adapter(
+            "copilot",
+            "review-executor",
+            "run",
+            "--snapshot",
+            snapshot,
+            "--result",
+            self.case / "selected-group-result.json",
+            "--task-profile-receipt",
+            receipt_path,
+            "--task-profile-executor",
+            "copilot",
+            "--task-profile-id",
+            reusable_profile["profile_id"],
+            "--task-occurrence-context",
+            occurrence_context,
+            environment={
+                **self.env,
+                "FAKE_CATALOG_CANDIDATE_GROUP_ID": lifecycle_id,
+                "FAKE_CATALOG_NO_COVER": "1",
+            },
+            check=False,
+        )
+        self.assertFalse(response["ok"])
+        self.assertEqual(
+            response["error"]["code"], "malformed-executor-result"
+        )
+        self.assertEqual(
+            response["error"]["message"], "catalog_audit candidate group artifact"
+        )
+
     def test_review_omits_context_when_receipt_has_no_reusable_profiles(self):
         (
             snapshot,
@@ -1225,6 +1287,21 @@ def review_payload(prompt):
             "candidate_group_id":None,
           },
         })
+        if os.environ.get("FAKE_CATALOG_NO_COVER") == "1":
+          payload.update({
+            "routing_reason":"fixture has no covering skill",
+            "artifact":{
+              "operation":"create",
+              "skill_name":"different-procedure",
+              "skill_markdown":"---\\nname: different-procedure\\ndescription: Use for the unmatched procedure.\\n---\\n# Different procedure\\n",
+              "support_files":[],
+            },
+            "catalog_audit":{
+              "outcome":"no-covering-skill",
+              "skill_name":None,
+              "candidate_group_id":os.environ.get("FAKE_CATALOG_CANDIDATE_GROUP_ID"),
+            },
+          })
     if "occurrence_boundary" in required:
         payload["occurrence_boundary"] = {
           "relation":"new-occurrence",

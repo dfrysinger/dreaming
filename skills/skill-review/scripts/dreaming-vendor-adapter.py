@@ -2859,6 +2859,14 @@ def executor_run(args: argparse.Namespace) -> None:
         candidate_group_ids = {
             group["lifecycle_id"] for group in audit_context["candidate_groups"]
         }
+        selected_group = next(
+            (
+                group
+                for group in audit_context["candidate_groups"]
+                if group["lifecycle_id"] == candidate_group_id
+            ),
+            None,
+        )
         if (
             (outcome != "no-covering-skill" or boundary_conflict)
             and candidate_group_id is not None
@@ -2870,6 +2878,17 @@ def executor_run(args: argparse.Namespace) -> None:
         ):
             raise AdapterError(
                 "malformed-executor-result", "catalog_audit candidate group"
+            )
+        if (
+            candidate_group_id is not None
+            and (
+                selected_group is None
+                or artifact_skill != selected_group["proposed_name"]
+            )
+        ):
+            raise AdapterError(
+                "malformed-executor-result",
+                "catalog_audit candidate group artifact",
             )
         valid_semantic_outcome = (
             outcome == "correct-skill"

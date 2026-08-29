@@ -5280,6 +5280,124 @@ elif command == "run":
                 candidate_groups=[],
             )
 
+    def test_catalog_audit_rejects_selected_group_name_mismatch(self) -> None:
+        core = self.core({("fake", "exec")})
+        lifecycle_id = "11111111-1111-1111-1111-111111111111"
+        group = {
+            "lifecycle_id": lifecycle_id,
+            "proposed_name": "selected-procedure",
+            "procedure": {"schema_version": 1},
+            "state": "collecting",
+            "record_version": 1,
+            "record_sha256": "sha256:" + "1" * 64,
+            "useful_current_count": 1,
+        }
+        result = {
+            "status": "ok",
+            "completion_sentinel": "DREAMING_REVIEW_COMPLETE",
+            "terminal_route": "skill",
+            "summary": "Create a reusable procedure.",
+            "routing_reason": "No catalog skill covers it.",
+            "artifact": {
+                "operation": "create",
+                "skill_name": "different-procedure",
+                "skill_markdown": (
+                    "---\nname: different-procedure\n"
+                    "description: Use for the unmatched procedure.\n---\n"
+                    "# Different procedure\n"
+                ),
+                "support_files": [],
+            },
+            "evidence_event_ids": ["event-1"],
+            "catalog_audit": {
+                "outcome": "no-covering-skill",
+                "skill_name": None,
+                "candidate_group_id": lifecycle_id,
+                "reviewer_contract": "profile-catalog-audit-v1",
+                "catalog_sha256": "sha256:" + "2" * 64,
+                "catalog_skill_names": ["existing-skill"],
+                "tombstones_sha256": "sha256:" + "3" * 64,
+                "skill_load_trace": [],
+                "skill_load_trace_sha256": runtime_module.digest([]),
+                "candidate_groups": [group],
+            },
+        }
+        with self.assertRaisesRegex(
+            RuntimeFailure, "candidate group artifact is invalid"
+        ):
+            core._validated_review_result(
+                result,
+                require_catalog_audit=True,
+                catalog_snapshot={
+                    "events": [
+                        {
+                            "source_event_id": "event-1",
+                            "kind": "user_message",
+                            "tool_name": None,
+                            "text": "start",
+                        }
+                    ]
+                },
+                catalog_profile={"source_event_ids": ["event-1"]},
+                candidate_groups=[group],
+            )
+
+    def test_candidate_group_context_skips_ineligible_lifecycle(self) -> None:
+        core = self.core({("fake", "exec")})
+        eligible_id = "11111111-1111-1111-1111-111111111111"
+        ineligible_id = "22222222-2222-2222-2222-222222222222"
+        procedure = {"schema_version": 1, "trigger": "fixture"}
+        records = {
+            eligible_id: {
+                "lifecycle_id": eligible_id,
+                "proposed_name": "eligible-procedure",
+                "procedure": procedure,
+                "state": "collecting",
+                "record_version": 4,
+                "evidence": [],
+            },
+            ineligible_id: {
+                "lifecycle_id": ineligible_id,
+                "proposed_name": "admitted-procedure",
+                "procedure": procedure,
+                "state": "admitted",
+                "record_version": 7,
+                "evidence": [],
+            },
+        }
+        listing = {
+            "records": [
+                {
+                    "candidate_id": "sha256:" + "a" * 64,
+                    "lifecycle_id": lifecycle_id,
+                    "record_sha256": runtime_module.candidate_record_digest(record),
+                    "record_version": record["record_version"],
+                    "shadow_only": True,
+                    "state": record["state"],
+                }
+                for lifecycle_id, record in records.items()
+            ],
+            "shadow_only": True,
+        }
+        calls = []
+
+        def lifecycle_call(*arguments):
+            calls.append(arguments)
+            if arguments == ("list",):
+                return listing
+            if arguments[0] == "read":
+                return records[arguments[1]]
+            self.fail(arguments)
+
+        with mock.patch.object(
+            core, "_candidate_lifecycle_call", side_effect=lifecycle_call
+        ):
+            groups = core._candidate_group_context_for()
+        self.assertEqual([group["lifecycle_id"] for group in groups], [eligible_id])
+        self.assertEqual(
+            calls, [("list",), ("read", eligible_id)]
+        )
+
     def test_profile_audit_persists_new_and_same_occurrence_authority(self) -> None:
         source_fixture = self.source_fixture(
             [self.session("one", 10, event_count=3)]

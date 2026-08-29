@@ -78,6 +78,25 @@ TASK_OCCURRENCE_REVIEW_CONTRACT = "profile-catalog-review-occurrence-v1"
 TASK_OCCURRENCE_CORRECTION_CONTRACT = "profile-boundary-correction-v1"
 MAX_CANDIDATE_GROUPS_PER_REVIEW = 20
 MAX_CANDIDATE_GROUP_CONTEXT_BYTES = 48_000
+CANDIDATE_LIFECYCLE_STATES = {
+    "collecting",
+    "legacy_probation",
+    "ready_for_draft",
+    "evaluating",
+    "portfolio_pending",
+    "admitted",
+    "expired",
+    "rejected",
+    "quarantined",
+    "absorbed",
+    "archived",
+}
+ELIGIBLE_CANDIDATE_GROUP_STATES = {
+    "collecting",
+    "ready_for_draft",
+    "expired",
+    "rejected",
+}
 ROLES = {
     "session-source": {
         "protocol": "dreaming.session-source",
@@ -1558,6 +1577,28 @@ class DreamingRuntime:
                 and operation == "create"
                 and artifact["skill_name"] not in catalog_names
             )
+            selected_group = next(
+                (
+                    group
+                    for group in candidate_groups or []
+                    if isinstance(group, dict)
+                    and group.get("lifecycle_id")
+                    == catalog_audit["candidate_group_id"]
+                ),
+                None,
+            )
+            if (
+                catalog_audit["candidate_group_id"] is not None
+                and (
+                    not isinstance(selected_group, dict)
+                    or artifact["skill_name"]
+                    != selected_group.get("proposed_name")
+                )
+            ):
+                raise RuntimeFailure(
+                    "malformed-executor-result",
+                    "catalog_audit candidate group artifact is invalid",
+                )
             if not valid_catalog_route:
                 raise RuntimeFailure(
                     "malformed-executor-result",
@@ -2595,16 +2636,31 @@ class DreamingRuntime:
         if not isinstance(records, list):
             raise RuntimeFailure("candidate-lifecycle-failed", "candidate listing is malformed")
         groups: list[dict[str, Any]] = []
+        expected_listing_keys = {
+            "candidate_id",
+            "lifecycle_id",
+            "record_sha256",
+            "record_version",
+            "shadow_only",
+            "state",
+        }
         for item in records:
             if (
                 not isinstance(item, dict)
+                or set(item) != expected_listing_keys
                 or not isinstance(item.get("lifecycle_id"), str)
-                or item.get("state")
-                not in {"collecting", "ready_for_draft", "expired", "rejected"}
+                or not isinstance(item.get("candidate_id"), str)
+                or not isinstance(item.get("record_sha256"), str)
+                or not isinstance(item.get("record_version"), int)
+                or item["record_version"] < 1
+                or item.get("shadow_only") is not True
+                or item.get("state") not in CANDIDATE_LIFECYCLE_STATES
             ):
                 raise RuntimeFailure(
                     "candidate-lifecycle-failed", "candidate listing is malformed"
                 )
+            if item["state"] not in ELIGIBLE_CANDIDATE_GROUP_STATES:
+                continue
             record = self._candidate_lifecycle_call("read", item["lifecycle_id"])
             record_sha256 = candidate_record_digest(record)
             if (
