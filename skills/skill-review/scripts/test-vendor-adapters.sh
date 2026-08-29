@@ -2480,6 +2480,150 @@ print(json.dumps({"ok": True}))
             work, environment, str(tool), [str(private)], "isolated"
         )
 
+    def test_authoring_result_parser_accepts_one_fence_only(self):
+        def packet_for(kind):
+            template = [
+                {
+                    "id": f"case-{index}",
+                    "class": f"class-{index}",
+                    "deterministic_graders": [],
+                }
+                for index in range(2)
+            ]
+            packet = {
+                "kind": kind,
+                "packet_id": "sha256:" + "1" * 64,
+                "candidate_id": "sha256:" + "2" * 64,
+                "compilation_contract": {
+                    "case_runtime": [
+                        {
+                            "id": case["id"],
+                            "fixture": {},
+                            "artifacts": [],
+                            "semantic": {},
+                        }
+                        for case in template
+                    ]
+                },
+            }
+            if kind == "safe_evaluation_input_repair_packet":
+                packet["initial_suite"] = {"cases": template}
+            else:
+                packet["suite_template"] = {"cases": template}
+            return packet
+
+        draft = {
+            "outcome": "draft",
+            "summary": "fenced draft",
+            "cases": [
+                {
+                    "id": f"case-{index}",
+                    "task_id": f"fixture-task-{index}",
+                    "prompt": f"perform observed task {index}",
+                }
+                for index in range(2)
+            ],
+        }
+        body = json.dumps(draft, indent=2)
+        labelled = f"```json\n{body}\n```"
+        unlabelled = f"```\n{body}\n```"
+
+        # Bare JSON keeps working, and the existing per-line precedence is
+        # unchanged: the last parseable line still wins.
+        bare = json.dumps(draft)
+        self.assertEqual(vendor_module.parse_evaluation_input_result(bare), draft)
+        superseding = {**draft, "summary": "later line wins"}
+        stream = "\n".join(
+            [json.dumps({**draft, "summary": "earlier"}), json.dumps(superseding)]
+        )
+        self.assertEqual(
+            vendor_module.parse_evaluation_input_result(stream)["summary"],
+            "later line wins",
+        )
+
+        for text in (labelled, unlabelled):
+            self.assertEqual(vendor_module.parse_evaluation_input_result(text), draft)
+
+        # The fence is also reachable inside an event-stream message field,
+        # which is how the copilot CLI actually returns it.
+        event_stream = "\n".join(
+            [
+                json.dumps({"type": "session.info", "data": {}}),
+                json.dumps(
+                    {"type": "assistant.message", "data": {"content": labelled}}
+                ),
+                json.dumps({"type": "result", "exitCode": 0}),
+            ]
+        )
+        self.assertEqual(
+            vendor_module.parse_evaluation_input_result(event_stream), draft
+        )
+
+        # One fence embedded in the model's own commentary is still
+        # unambiguous, and the callers already tolerate unrelated surrounding
+        # lines, so it is accepted.
+        for surrounded in (
+            f"here is the draft\n{labelled}",
+            f"{labelled}\nthat is the whole set",
+            f"lead in\n{labelled}\ntrail out",
+        ):
+            self.assertEqual(
+                vendor_module.parse_evaluation_input_result(surrounded), draft
+            )
+
+        for refused in (
+            "the model explained itself and returned no JSON at all",
+            f"{labelled}\n{unlabelled}",
+            f"{labelled}\n```json\n{body}\n",
+            f"```json\n{body}\n",
+            "```json\n[1, 2, 3]\n```",
+            "```json\n{not json at all}\n```",
+        ):
+            with self.assertRaises(vendor_module.AdapterError) as raised:
+                vendor_module.parse_evaluation_input_result(refused)
+            self.assertEqual(raised.exception.code, "malformed-authoring-result")
+
+        # A fenced object that parses but does not satisfy the schema keeps the
+        # normalizer's existing explicit refusal, for every authoring packet.
+        invalid = {**draft, "cases": draft["cases"][:1]}
+        for kind in (
+            "safe_shadow_evaluation_authoring_packet",
+            "safe_evaluation_input_authoring_packet",
+            "safe_evaluation_input_repair_packet",
+        ):
+            packet = packet_for(kind)
+            parsed = vendor_module.parse_evaluation_input_result(
+                f"```json\n{json.dumps(draft)}\n```"
+            )
+            normalized, summary, reason = (
+                vendor_module.normalize_evaluation_input_author_result(packet, parsed)
+            )
+            self.assertEqual(summary, "fenced draft")
+            self.assertIsNone(reason)
+            self.assertEqual(len(normalized["cases"]), 2)
+            rejected = vendor_module.parse_evaluation_input_result(
+                f"```json\n{json.dumps(invalid)}\n```"
+            )
+            with self.assertRaises(vendor_module.AdapterError) as raised:
+                vendor_module.normalize_evaluation_input_author_result(
+                    packet, rejected
+                )
+            self.assertEqual(raised.exception.code, "malformed-authoring-result")
+
+        # The review parser shares the same fence contract and refusals.
+        review = {"decision": "accept", "summary": "exact manifest", "reason": None}
+        self.assertEqual(
+            vendor_module.parse_evaluation_input_review_result(
+                f"```json\n{json.dumps(review)}\n```"
+            ),
+            review,
+        )
+        with self.assertRaises(vendor_module.AdapterError) as raised:
+            vendor_module.parse_evaluation_input_review_result(
+                "```json\n{\"decision\": \"maybe\"}\n```"
+            )
+        self.assertEqual(raised.exception.code, "malformed-review-result")
+
     def test_publishers_reconcile_one_immutable_bundle(self):
         paths = module.RuntimePaths(
             state=self.case / "state",

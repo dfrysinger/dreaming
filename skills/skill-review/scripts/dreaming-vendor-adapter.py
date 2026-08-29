@@ -3097,6 +3097,52 @@ def evaluation_input_review_prompt(
     )
 
 
+JSON_FENCE_OPENERS = ("```", "```json")
+
+
+def fenced_json_object(text: str) -> dict[str, Any] | None:
+    """Return the one JSON object carried by a single Markdown fence.
+
+    Deterministic line scan rather than a regular expression, so a match can
+    never span two fences or pick one fence out of several. Returns ``None``
+    unless the text holds exactly one terminated ``` or ```json fence enclosing
+    a JSON object; two fences, an unterminated fence, malformed JSON, and any
+    non-object payload all stay with the caller's existing refusal.
+
+    Text outside the single fence is ignored, matching the surrounding
+    contract: the callers already scan an arbitrary event stream line by line
+    and accept a payload embedded in unrelated text. Requiring exactly one
+    fence is what keeps the choice unambiguous.
+    """
+    if "```" not in text:
+        return None
+    lines = text.splitlines()
+    blocks: list[str] = []
+    index = 0
+    while index < len(lines):
+        if lines[index].strip() in JSON_FENCE_OPENERS:
+            body: list[str] = []
+            closed = False
+            index += 1
+            while index < len(lines):
+                if lines[index].strip() == "```":
+                    closed = True
+                    break
+                body.append(lines[index])
+                index += 1
+            if not closed:
+                return None
+            blocks.append("\n".join(body))
+        index += 1
+    if len(blocks) != 1:
+        return None
+    try:
+        value = json.loads(blocks[0])
+    except json.JSONDecodeError:
+        return None
+    return value if isinstance(value, dict) else None
+
+
 def find_evaluation_input_result(value: Any) -> dict[str, Any] | None:
     if isinstance(value, dict):
         if value.get("outcome") in {"draft", "insufficient_information"}:
@@ -3114,7 +3160,10 @@ def find_evaluation_input_result(value: Any) -> dict[str, Any] | None:
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError:
-            return None
+            fenced = fenced_json_object(value)
+            if fenced is None:
+                return None
+            return find_evaluation_input_result(fenced)
         return find_evaluation_input_result(parsed)
     return None
 
@@ -3128,6 +3177,11 @@ def parse_evaluation_input_result(text: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             continue
         found = find_evaluation_input_result(value)
+        if found is not None:
+            return found
+    fenced = fenced_json_object(text)
+    if fenced is not None:
+        found = find_evaluation_input_result(fenced)
         if found is not None:
             return found
     raise AdapterError(
@@ -3154,7 +3208,10 @@ def find_evaluation_input_review_result(
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError:
-            return None
+            fenced = fenced_json_object(value)
+            if fenced is None:
+                return None
+            return find_evaluation_input_review_result(fenced)
         return find_evaluation_input_review_result(parsed)
     return None
 
@@ -3168,6 +3225,11 @@ def parse_evaluation_input_review_result(text: str) -> dict[str, Any]:
         except json.JSONDecodeError:
             continue
         found = find_evaluation_input_review_result(value)
+        if found is not None:
+            return found
+    fenced = fenced_json_object(text)
+    if fenced is not None:
+        found = find_evaluation_input_review_result(fenced)
         if found is not None:
             return found
     raise AdapterError(
