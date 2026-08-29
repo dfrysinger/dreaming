@@ -15,9 +15,11 @@ This design follows the principles in
 funnel specified in `docs/task-opportunity-evidence-design.md`.
 
 Revision 3 resolves round-one findings T1-T3 and O4-O6 and round-two findings
-R1-R3 and N1-N2. Round two accepted the candidate-blind packet isolation of
-revision 2 as resolved and the O4-O6 directions as consistent. Reframe status
-remains OPEN pending round-three review.
+R1-R3 and N1-N2, and revision 4 resolves the single round-three finding by
+moving all deterministic preparation ahead of the lifecycle claim and extending
+the admission formula to cover it. Round three accepted every other decision,
+so T1, T3, R1-R3, N1-N2, and O4-O6 are carried forward unchanged. Reframe
+status remains OPEN pending final reviewer verification.
 
 ## Lane
 
@@ -71,7 +73,10 @@ mid-evaluation. It is not a local fix inside one function.
 | A pass that enters `evaluating` while holding a valid lease must leave it before the pass ends; a pass that loses its lease performs no durable write of any kind, and the next valid lease holder retains that pass's durable outcome and stop reason | Work-order instructions 2026-08-29 and round-one finding T1 as corrected by round-two finding R1; `candidate-lifecycle.py:1011` refuses `collect` in `evaluating`; `ELIGIBLE_CANDIDATE_GROUP_STATES` (`dreaming-core.py:100-105`) hides evaluating groups from the reviewer | A later semantic occurrence cannot fork a new recurrence group, and a fenced-out owner cannot corrupt state | Evaluating groups become visible for aliasing under a separate reviewed slice |
 | Attempt evidence is append-only: one immutable open-attempt record written before the claim transition, settled by appending at most one immutable terminal-attempt record that names the open record's digest | Round-one finding T1 and round-two finding R3; existing content-addressed receipt pattern | Abnormal termination is detectable and deterministically recoverable with no mutable state and no in-place rewrite | Recovery is proven expressible from lifecycle state alone without ambiguity |
 | Halt and deadline are observed only between bounded operations; `shadow-execute` runs to completion once started | Existing `halt_check` placement in `dreaming-core.py:8917`, `:9189`, `:9260`, `:9291`, `:9323`; round-one finding T2 | One enforcement model with no new supervisor process or signal transport | A supervised per-trial execution path exists in the harness without a new subsystem |
-| The stage refuses to start unless remaining pass time covers a worst-case bound whose every term is mechanically enforced, including authoring, attestation, trials, compile, certify with its nested verification subprocess, settlement, and termination overhead | Round-one finding T2 and round-two finding R2; existing bounded process-group calls in `dreaming-core.py:388-413` and `skill-evaluation-harness.py:580-650` | The 3,600-second pass deadline holds without mid-run interruption and without an unenforced estimate | Measured cost shows the bound is unusably pessimistic and a supervised path is justified |
+| The stage refuses to start unless remaining pass time covers a worst-case bound whose every term is mechanically enforced, including preparation, revalidation, authoring, attestation, trials, compile, certify with its nested verification subprocess, settlement, and termination overhead | Round-one finding T2 and round-two finding R2; existing bounded process-group calls in `dreaming-core.py:388-413` and `skill-evaluation-harness.py:580-650` | The 3,600-second pass deadline holds without mid-run interruption and without an unenforced estimate | Measured cost shows the bound is unusably pessimistic and a supervised path is justified |
+| All deterministic preparation — package materialization, inventory re-hashing, packet construction, packet validation — runs before the lifecycle claim, and the pre-claim admission covers preparation and the claimed stage together | Round-three finding: the previous ordering left post-claim deterministic work outside the reservation | Nothing unbounded or unaccounted survives inside `evaluating`, and a preparation overrun costs pass time only | A preparation step is shown to require the claim to have already happened, in which case it needs an explicit enforced `preparation_bound` inside the claimed stage |
+| Pre-claim refusals write no attempt record, change no lifecycle state, and are retained as run-report and routing evidence only | Round-three finding, plus the append-only regime of R3: an unclaimed subject has no attempt to settle | The one-to-zero-or-one open/terminal relation stays exact and no record type is invented | Pre-claim refusal evidence is shown to need durability beyond deterministic reproduction from the same bytes |
+| Preparation writes only to a pass-local scratch root outside every durable record root, and is never read across passes | Round-three finding; required so a fenced-out pass still writes zero durable bytes | Scratch cannot become recovery authority or contaminate the R1 zero-write rule | Any later pass needs to read a predecessor's scratch |
 | Every subprocess the stage starts runs in its own process group under an enforced timeout, with terminate-then-kill cleanup and a named terminal refusal on breach | Round-two finding R2; `ExecutableAdapter._invoke` (`dreaming-core.py:388-413`) and harness `call` / `terminate` (`skill-evaluation-harness.py:580-650`) already implement this pattern | No term of the reservation can be exceeded by an unbounded child | A tool is shown to be uninterruptible without corrupting durable state |
 | The owner pass keeps its existing 3,600-second hard deadline | Installed `daemon-pass.sh:33` backstop inside the four-hour cadence, as recorded in `docs/task-opportunity-evidence-design.md` | Profiling, review, evaluation-input, and evaluation all settle without scheduler overlap | The four-hour cadence changes, or measured stage cost no longer fits |
 | Routing `evaluation_execution.available` is computed from live authority, never from a hard-coded constant, and fails closed | Round-one finding O4; current hard-coded `SHADOW_EXECUTION_BLOCKERS` at `profile_evaluation_routing.py:39-42` | The projection never claims an evaluation the stage cannot run, and never hides one it can | Never; a constant reintroduces the divergence this row exists to prevent |
@@ -81,7 +86,7 @@ mid-evaluation. It is not a local fix inside one function.
 | No subject is claimed twice in one pass; a persistent failure never starves other ready candidates | Round-one finding O6 | Work conservation and fair progress across candidates | Only one candidate is ever ready, making ordering moot |
 | Deterministic trial count per candidate is `executors x (cases + task_value_cases) + executors` | Derived from `skill-evaluation-harness.py:2344-2352` (control plus candidate treatment for `task_value`) and `:2330-2342` (one `version` call per executor) | Cost is predictable before the stage starts | The harness changes its treatment or attestation plan |
 | Minimum conforming suite is five cases, one per required routing class | Derived from `skill-evaluation.py:10706-10711`, which requires exactly the set `routing_positive`, `routing_close_negative`, `routing_unrelated`, `routing_conflict`, `task_value` | The three gates are all observable | The evaluator changes its required class set |
-| Numeric values of `max_evaluations_per_run`, the evaluation stage second budget, per-call `timeout_seconds` / `token_budget` / `turn_budget` / `tool_budget` / `output_bytes`, and every reservation term (`author_call_bound`, `compile_bound`, `certify_bound`, `settlement_bound`, `deadline_margin`) | **Unresolved policy decision.** No measured shadow-trial cost exists in this repository; the only shadow runs are deterministic fixtures in `test-shadow-mutation-boundary.sh` | Bounded model cost and a deadline-safe pass | Set them from CHK-09's measured single-candidate run, or record an owner-set provisional bound with the measurement scheduled; do not hard-code a number before one of those. Enforcement of each term is settled here; only the numbers are open |
+| Numeric values of `max_evaluations_per_run`, the evaluation stage second budget, per-call `timeout_seconds` / `token_budget` / `turn_budget` / `tool_budget` / `output_bytes`, every reservation term (`author_call_bound`, `author_doctor_bound`, `compile_bound`, `certify_bound`, `settlement_bound`, `deadline_margin`), and every preparation term (`package_file_ceiling`, `package_bytes_ceiling`, `prepare_throughput`, `hash_throughput`, `packet_build_bound`, `packet_validate_bound`, `lifecycle_read_bound`) | **Unresolved policy decision.** No measured shadow-trial cost exists in this repository; the only shadow runs are deterministic fixtures in `test-shadow-mutation-boundary.sh` | Bounded model cost and a deadline-safe pass | Set them from CHK-09's measured single-candidate run, or record an owner-set provisional bound with the measurement scheduled; do not hard-code a number before one of those. Enforcement of each term is settled here; only the numbers are open |
 
 **Reframe status: OPEN.**
 
@@ -129,8 +134,12 @@ mid-evaluation. It is not a local fix inside one function.
    already validates roles generically (`dreaming-core.py:9507-9565`), one
    packet kind to an authoring boundary whose model contract is already generic
    over a template, and three append-only record types with no mutable state
-   and no in-place rewrite. Its only new mechanism is one bounded-subprocess
-   helper that copies a pattern the codebase already implements twice. A
+   and no in-place rewrite. Its only new mechanisms are two small bounding
+   helpers: one bounded-subprocess wrapper that copies a pattern the codebase
+   already implements twice, and one bounded deterministic helper applying a
+   declared size ceiling and a between-item deadline to the pre-claim
+   preparation steps. Neither observes halt, interrupts work, nor holds state,
+   so neither is a supervisor. A
    parallel shadow evaluation subsystem would add a queue, an owner process, a
    lease, a supervisor for mid-run interruption, a second accounting path, and a
    second dashboard authority. The extension option is selected.
@@ -269,9 +278,11 @@ authoring sensitive-value rejector, extended to cover the new kind.
 `shadow-packet-sensitive-value`, `shadow-packet-candidate-mismatch`,
 `shadow-packet-template-drift`, `shadow-packet-executor-unattested`.
 
-**Retained evidence.** The exact packet bytes are retained immutably beside the
-result under `packet_id`, so a reviewer can re-run the validator on precisely
-what the model received.
+**Retained evidence.** The packet is built and validated before the claim, in
+the pass-local scratch root of E5. Its exact bytes become immutable retained
+evidence beside the result under `packet_id` only at settlement, so a subject
+refused before the claim retains no packet, and a reviewer of a real attempt
+can re-run the validator on precisely what the model received.
 
 *What is deliberately reused unchanged:* the model contract. The model still
 returns only `{outcome, summary, cases:[{id, task_id, prompt}]}` under
@@ -404,9 +415,58 @@ attempt records.
 ### E5. Run the stage inside the existing pass under an enforced full-invocation reservation
 
 The stage runs after review and evaluation-input settle, under the existing
-writer lease and the existing 3,600-second deadline. It performs, per claimed
-candidate, in order: reserve, claim, materialize, build packet, author,
-compile, execute, certify, retain, exit.
+writer lease and the existing 3,600-second deadline.
+
+**All deterministic preparation happens before the claim.** Round-three review
+found the previous ordering defective: package materialization, inventory
+re-hashing, packet construction, and packet validation ran *after* the
+lifecycle claim but were absent from the reservation, so a claimed candidate
+could consume unbounded, unaccounted pass time. Rather than bound them in
+place, the stage moves them ahead of the claim, where an overrun costs only
+pass time and leaves no claimed subject, no lifecycle transition, and no
+record to recover.
+
+The per-candidate order is therefore: **admit, prepare, revalidate, claim,
+author, attest, execute, compile, certify, retain, exit** — where `admit`,
+`prepare`, and `revalidate` are pre-claim, and everything from `claim` onward
+is the bounded claimed stage.
+
+- **Admit** — check that the remaining pass time covers the *whole* per-candidate
+  worst case, preparation included, before touching a single byte.
+- **Prepare** — materialize the candidate revision's bytes into a pass-local
+  scratch directory, re-hash the materialized inventory to `candidate_id`,
+  build the E2 packet, and run the packet validator. This produces a prepared
+  identity `prepare_id = sha256(canonical({lifecycle_id, candidate_id,
+  record_version, record_sha256, package_digest, packet_id,
+  executors_document_digest}))`, held in memory for the rest of the candidate's
+  turn. It is not a record: every field in it that matters durably already
+  appears in the open-attempt record (`record_version`, `record_sha256`) or the
+  terminal-attempt record (`packet_id`).
+- **Revalidate** — immediately before the claim, re-read the lifecycle record
+  and assert its `version` and `record_sha256` are byte-identical to the values
+  observed at preparation, re-hash the prepared scratch tree to
+  `package_digest`, and re-validate the retained packet bytes to `packet_id`.
+  Any mismatch refuses before the claim.
+
+After the claim only bounded model, harness, evaluator, and settlement work
+remains. Nothing deterministic and unbounded survives inside `evaluating`.
+
+**Pre-claim refusals write no record and change no state.** A subject refused
+at admission, preparation, or revalidation was never claimed, so there is no
+attempt to settle and the append-only one-to-zero-or-one relation is preserved
+exactly. The refusal is retained as run-report and routing-projection evidence
+with its stable code, the subject joins the pass-local attempted set so it
+cannot be retried within the pass, and the stage continues to the next ready
+candidate. Tamper evidence is not lost: the refusal is deterministic, so the
+next pass reproduces it identically from the same bytes.
+
+**Scratch is not durable authority.** Preparation writes only under
+`DREAMING_STATE_DIR/shadow-evaluations/scratch/<pass_id>/<prepare_id>/`, never
+under the durable record roots. It is removed on refusal and after settlement,
+and the recovery sweep deletes any scratch root whose pass id is not the
+current pass. No pass ever reads another pass's scratch, and no scratch byte is
+ever cited as evidence, which is why leaving one behind does not violate the
+zero-durable-write rule of a fenced-out pass.
 
 **Selected enforcement architecture: full-invocation reservation.**
 `shadow-execute` is a synchronous call that runs every trial to completion
@@ -416,27 +476,54 @@ the stage refuses to start unless the remaining pass time covers the entire
 worst case:
 
 ```
+authority_bound  = executors x executor_call_bound          # once per pass
+                 + author_doctor_bound
+
+materialize_bound = package_bytes_ceiling / prepare_throughput
+rehash_bound      = package_bytes_ceiling / hash_throughput
+prepare_bound     = materialize_bound + rehash_bound
+                  + packet_build_bound + packet_validate_bound
+revalidate_bound  = lifecycle_read_bound + rehash_bound + packet_validate_bound
+
 author_bound     = author_call_bound
 attest_bound     = executors x executor_call_bound
 trial_count      = executors x (cases + task_value_cases)
 trial_bound      = trial_count x executor_call_bound
 settlement_bound = lifecycle_transition_bound x max_transitions_per_candidate
-                 + record_write_bound
+                 + record_write_bound x max_records_per_candidate
 termination_overhead = bounded_subprocess_count x termination_grace
 
-worst_case = author_bound + attest_bound + trial_bound
-           + compile_bound + certify_bound
-           + settlement_bound + termination_overhead
+claimed_bound = revalidate_bound + author_bound + attest_bound + trial_bound
+              + compile_bound + certify_bound
+              + settlement_bound + termination_overhead
 
-start allowed iff remaining_pass_seconds >= worst_case + deadline_margin
+worst_case = prepare_bound + claimed_bound
+
+pass admission:      remaining_pass_seconds >= authority_bound + worst_case
+                                              + deadline_margin
+candidate admission: remaining_pass_seconds >= worst_case + deadline_margin
+claim admission:     remaining_pass_seconds >= claimed_bound + deadline_margin
 ```
 
 `executors`, `cases`, `task_value_cases`, `max_transitions_per_candidate`
-(three: claim, exit, and one recovery allowance), and
-`bounded_subprocess_count` (`1 author + executors attest + trial_count trials +
-1 compile + 1 certify + max_transitions_per_candidate lifecycle calls`) are all
-known before the stage starts, so the formula is finite and computable at
-reservation time.
+(three: claim, exit, and one recovery allowance), `max_records_per_candidate`
+(three: open, terminal, and one result), `package_file_ceiling`,
+`package_bytes_ceiling`, and `bounded_subprocess_count` (`1 author + executors
+attest + trial_count trials + 1 compile + 1 certify +
+max_transitions_per_candidate lifecycle calls`; preparation and revalidation
+start no subprocess) are all known before any byte is touched, so every
+admission test is finite and computable in advance.
+
+The three admissions are nested, not independent. Candidate admission is the
+one that gates work: it is taken before preparation and covers preparation and
+the claimed stage together. Claim admission is a defensive re-assertion that
+must hold by construction, because preparation consumed at most
+`prepare_bound`; if it ever fails, the stage claims nothing, retains
+`pass_deadline_reservation_unmet`, and marks the pass unhealthy, because a
+bound was under-declared. `package_bytes_ceiling` and `package_file_ceiling`
+are what make `materialize_bound` and `rehash_bound` finite: a revision whose
+declared inventory exceeds either ceiling is refused as `preparation-oversize`
+before a single byte is copied.
 
 **Every term is mechanically enforced.** Round-two finding R2 requires an
 enforcement mechanism per term, not an estimate. Two bounded process-group
@@ -445,12 +532,16 @@ tools core invokes directly.
 
 | Term | Enforcement mechanism | Terminal refusal on breach |
 | --- | --- | --- |
+| `authority_bound` | Existing harness `call` for each executor `version`, and the bounded wrapper for the author `doctor` call | `shadow-executor-unattested` / `shadow-authoring-authority-unavailable` |
+| `materialize_bound`, `rehash_bound` | **Bounded deterministic helper.** The revision inventory declares file count and byte total, so the helper refuses `preparation-oversize` before copying when either exceeds its ceiling, and checks a monotonic deadline between per-file operations over that finite inventory. No supervisor and no subprocess is involved, and unlike a synchronous adapter call the work is decomposable, so a between-item deadline is genuinely enforceable | `preparation-oversize`, `preparation-deadline-exceeded` |
+| `packet_build_bound`, `packet_validate_bound` | Same bounded deterministic helper over the same declared inventory; the packet's only variable-size member is the per-file `candidate_contract` inventory already bounded by `package_file_ceiling` | `preparation-deadline-exceeded` |
+| `revalidate_bound` | Same helper for the lifecycle re-read, the scratch re-hash, and the packet re-validation, each over already-bounded inputs | `revalidation-deadline-exceeded` |
 | `author_bound` | Existing `ExecutableAdapter._invoke` (`dreaming-core.py:388-413`): `start_new_session=True`, `communicate(timeout=run_timeout)`, `killpg SIGTERM`, `wait(5)`, `killpg SIGKILL`. The bound is the `evaluation-input-author` entry's configured `run_timeout` | `author-call-timeout` |
 | `attest_bound` | Existing harness `call` (`skill-evaluation-harness.py:597-650`): monotonic deadline, output limit, `terminate()` at `:580-593`. The bound is `executor.limits.timeout_seconds` per `version` call | `execute-timeout` |
 | `trial_bound` | Same harness `call` per trial, one trial per `(executor, case, treatment)` as enumerated at `skill-evaluation-harness.py:2344-2352` | `execute-timeout` |
 | `compile_bound` | **Minimal bounded wrapper.** Core invokes `skill-evaluation.py shadow-compile` through one new helper that copies the `_invoke` pattern exactly: own process group, `communicate(timeout=compile_bound)`, terminate-then-kill | `compile-timeout` |
 | `certify_bound` | Same wrapper around `skill-evaluation.py shadow-certify`. Because certify shells to the harness `shadow-verify` subprocess, the wrapper must kill the **process group**, not the direct child; `subprocess.run(timeout=...)` alone is insufficient and is explicitly rejected here | `certify-timeout` |
-| `settlement_bound` | Same wrapper around each `candidate-lifecycle.py transition` call, plus a bounded local write for the result and attempt records | `settlement-timeout` |
+| `settlement_bound` | Same wrapper around each `candidate-lifecycle.py transition` call, plus the bounded deterministic helper for each of the at most `max_records_per_candidate` local record writes | `settlement-timeout` |
 | `termination_overhead` | `termination_grace` is the worst-case cleanup per bounded subprocess: at most SIGTERM plus grace plus SIGKILL. The two existing callers already bound this at 5 s (`dreaming-core.py:406`) and 2 s per signal (`skill-evaluation-harness.py:589`); the new wrapper uses the same shape | Counted, not refused |
 
 The wrapper is one function. It is not a supervisor: it does not observe halt,
@@ -461,20 +552,25 @@ Every breach is a terminal result for the candidate and takes the normal owned
 exit: the record returns to `ready_for_draft`, a terminal-attempt record is
 appended with the named refusal, and the subject is retryable in a later pass.
 
-`author_call_bound`, `executor_call_bound`, `compile_bound`, `certify_bound`,
-`lifecycle_transition_bound`, `record_write_bound`, `termination_grace`, and
+`author_call_bound`, `author_doctor_bound`, `executor_call_bound`,
+`compile_bound`, `certify_bound`, `lifecycle_transition_bound`,
+`record_write_bound`, `lifecycle_read_bound`, `packet_build_bound`,
+`packet_validate_bound`, `package_file_ceiling`, `package_bytes_ceiling`,
+`prepare_throughput`, `hash_throughput`, `termination_grace`, and
 `deadline_margin` are named policy values set by CHK-09 or by an owner-set
 provisional bound. No number is invented here; only the enforcement is settled.
 
 Halt and deadline are checked **between** bounded operations, at the same
 granularity the existing owners already use (`dreaming-core.py:8917`, `:9189`,
-`:9260`, `:9291`, `:9323`): before reserve, before claim, before the authoring
-call, before compile, before execute, and before certify. Once `shadow-execute`
+`:9260`, `:9291`, `:9323`): before admission, before preparation, between
+preparation steps, before revalidation, before claim, before the authoring
+call, before execute, before compile, and before certify. Once `shadow-execute`
 starts, it runs to completion, and the reservation is what guarantees it cannot
 overrun the pass deadline. This is a deliberate property, not an accident.
 
-If the reservation cannot be met, the stage retains stop reason
-`pass_deadline_reservation_unmet` and claims nothing.
+If any admission test fails, the stage retains stop reason
+`pass_deadline_reservation_unmet`, prepares nothing further, and claims
+nothing.
 
 ### E6. Append-only records and a recovery sweep
 
@@ -648,14 +744,25 @@ pass start (lease held)
   -> rows with route=candidate-evaluation and evaluation_execution.available
   -> exclude subjects already attempted in this pass
   -> order by (last_attempt_time, earliest_current_occurrence, lifecycle_id)
-  -> reserve: remaining_pass_seconds >= worst_case + deadline_margin,
-       every term mechanically enforced
+  -- pre-claim, no lifecycle mutation, no record written --------------------
+  -> candidate admission: remaining_pass_seconds >= worst_case
+       + deadline_margin, every term mechanically enforced
+  -> materialize package into pass-local scratch; refuse preparation-oversize
+       above the declared file/byte ceilings
+  -> re-hash materialized inventory to candidate_id -> package_digest
+  -> build shadow-author-packet (closed schema, three source roots)
+  -> validate packet; refuse on any prohibited field, source, or value
+  -> prepare_id = f(lifecycle, candidate, version, record digest,
+       package_digest, packet_id, executors document)
+  -> revalidate: lifecycle version + record digest unchanged since
+       preparation; scratch re-hashes to package_digest; retained packet
+       bytes re-hash to packet_id
+  -> claim admission: remaining_pass_seconds >= claimed_bound
+       + deadline_margin
+  -- claimed stage, bounded work only ---------------------------------------
   -> lease assert; append open-attempt record (write-ahead fence)
   -> lease assert; transition ready_for_draft -> evaluating
        (--expected-version, --expected-record-sha256)
-  -> materialize package; re-verify inventory hashes to candidate_id
-  -> build shadow-author-packet (closed schema, three source roots)
-  -> validate packet; refuse on any prohibited field, source, or value
   -> author adapter: --role evaluation-input-author --model <author_model>
        run --operation shadow-author --packet <path> --draft-output <path>
        -> five case prompts, or a refusal code
@@ -665,6 +772,7 @@ pass start (lease held)
   -> retain semantic result under result_id; retain packet under packet_id
   -> lease assert; transition evaluating -> ready_for_draft
   -> append terminal-attempt record naming open_attempt_id and result_id
+  -> discard the pass-local scratch root
   -> add subject to pass-local attempted set; loop while allowance and time remain
   -> run report and dashboard projection
 ```
@@ -672,8 +780,9 @@ pass start (lease held)
 ## Deterministic and model responsibilities
 
 Deterministic code owns: recovery, readiness derivation, execution-availability
-computation, ordering, reservation, claim fencing, package materialization and
-re-verification, packet construction and validation, the fixed suite template,
+computation, ordering, admission, pre-claim package materialization,
+re-hashing, packet construction and validation, pre-claim revalidation of the
+lifecycle and package authority, claim fencing, the fixed suite template,
 executor and routing derivation from adapter attestation, allowance accounting,
 both record identities, and every lifecycle transition.
 
@@ -692,9 +801,9 @@ mutable rows, and no independent notion of readiness, so it is not a second
 queue.
 
 **Pass-local attempted set.** The stage keeps an in-memory set of
-`(lifecycle_id, candidate_id)` pairs claimed or recovered during the current
-pass. Every terminal result, including every refusal, adds its subject to the
-set, and readiness derivation excludes the set. A persistent failure therefore
+`(lifecycle_id, candidate_id)` pairs claimed, recovered, or refused before
+claim during the current pass. Every terminal result and every pre-claim
+refusal adds its subject to the set, and readiness derivation excludes the set. A persistent failure therefore
 consumes one attempt and the stage moves on to the next ready candidate while
 allowance and reservation permit; it can neither be reclaimed within the pass
 nor starve its successors.
@@ -832,10 +941,12 @@ predecessor's abandoned work beyond the attempts its own sweep settled.
 | --- | --- |
 | No `skill-evaluation-executor` configured, unhealthy, or unattested | Routing rows report `available: false` with the matching computed reason; stage skips with `executor_unavailable`; no lifecycle state changes |
 | Execution authority incomplete or malformed | Fail closed: `available: false` with `shadow-execution-authority-unknown`; stage does not start |
-| Remaining pass time below the computed reservation | Retain `pass_deadline_reservation_unmet`; claim nothing |
-| Lifecycle record changed between routing and claim | `evaluation-claim-stale`; append a terminal record; no transition; try the next ready candidate |
-| Package bytes missing, or inventory does not re-hash to `candidate_id` | Refuse `candidate-package-tampered`, retain a terminal result, exit `evaluating`, do not build a packet or call the model |
-| Packet fails its own validator | Retain the matching `shadow-packet-*` refusal, exit `evaluating`, never call the model |
+| Remaining pass time below the pass, candidate, or claim admission bound | Retain `pass_deadline_reservation_unmet`; prepare nothing further and claim nothing. A claim-admission failure additionally marks the pass unhealthy, because a bound was under-declared |
+| Declared revision inventory exceeds `package_file_ceiling` or `package_bytes_ceiling` | Refuse `preparation-oversize` before copying a byte; no claim, no record; discard scratch; next candidate |
+| Preparation or revalidation exceeds its deterministic bound | Refuse `preparation-deadline-exceeded` or `revalidation-deadline-exceeded`; no claim, no record; discard scratch; next candidate |
+| Lifecycle record changed between routing and preparation, or between preparation and claim | Refuse `evaluation-claim-stale` before the claim; no transition and no record, because nothing was claimed; next ready candidate |
+| Package bytes missing, or inventory does not re-hash to `candidate_id`, at preparation or at revalidation | Refuse `candidate-package-tampered` before the claim; no packet is built or revalidated, no model call, no transition, no record; discard scratch; the refusal is retained as run-report evidence and reproduces deterministically next pass |
+| Packet fails its own validator at build or at revalidation | Refuse the matching `shadow-packet-*` code before the claim; never call the model; no transition and no record |
 | Authoring model returns `insufficient_information` | Retain the refusal code as a terminal result, exit `evaluating`, retry in a later pass |
 | Authoring result malformed, duplicated, or template-drifted | Retain `authoring-result-invalid`, exit `evaluating`; the existing adapter validation is the gate |
 | Designed suite fails `shadow_suite` validation | Retain `suite-invalid`, exit `evaluating` |
@@ -849,7 +960,8 @@ predecessor's abandoned work beyond the attempts its own sweep settled.
 | `shadow-certify` returns `regression` or `inconclusive` | Retain the result as terminal evidence, exit `evaluating`, grant no authority |
 | `shadow-certify` returns `pass` | Retain the result, exit to `ready_for_draft`, grant no install or publication authority |
 | Halt file appears between operations | Stop before the next claim, retain `halted`; any claimed candidate still completes its owned exit |
-| Remaining pass time insufficient for the full computed formula | Refuse before the claim with `pass_deadline_reservation_unmet`; no open-attempt record is written |
+| Remaining pass time insufficient for the full computed formula, preparation included | Refuse before preparation with `pass_deadline_reservation_unmet`; no scratch, no open-attempt record |
+| Scratch root left behind by a fenced-out or crashed pass | The next owner's recovery sweep deletes every scratch root whose pass id is not the current pass; scratch is never read as authority |
 | Lease assertion fails at any point | Perform no durable write; emit `lease_lost` as process-return and run-report-only evidence; leave the unsettled open-attempt record for the next valid owner, which retains the durable outcome and stop reason |
 | Crash or power loss mid-stage | Next pass's recovery sweep appends an `evaluation-abandoned` terminal record and returns the lifecycle record to `ready_for_draft` before deriving readiness |
 | Record in `evaluating` with no open-attempt record | Recovering owner appends an `origin: orphan-recovery` open record and its `evaluation-orphaned` terminal record, returns the record to `ready_for_draft`, marks the pass degraded |
@@ -899,7 +1011,9 @@ predecessor's abandoned work beyond the attempts its own sweep settled.
 11. Evaluation never creates, consumes, or resets recurrence evidence; a
     returned candidate keeps its evidence, count, and group identity.
 12. Every claimed subject has exactly one retained terminal-attempt record per
-    pass, and no `(lifecycle_id, candidate_id)` is claimed twice in one pass.
+    pass; a subject refused before the claim has none, because it was never
+    claimed; and no `(lifecycle_id, candidate_id)` is prepared or claimed twice
+    in one pass.
 13. `evaluation_execution.available` is true if and only if execution
     **authority** is present, computed from the same live facts the stage uses
     and failing closed on unknown authority. It is an authority claim, not a
@@ -908,14 +1022,21 @@ predecessor's abandoned work beyond the attempts its own sweep settled.
     reservation, halt, or pass-local attempted-set reasons, each of which is a
     named stop reason. `executor_unavailable` is reported only when `available`
     is false.
-14. Every term of the reservation formula is mechanically enforced by an
-    existing or specified bounded process-group call with terminate-then-kill
-    cleanup and a named terminal refusal; no term is an unenforced estimate.
-15. The stage never starts an invocation whose computed worst-case bound,
-    including termination overhead, exceeds the remaining pass time less the
-    deadline margin.
+14. Every term of the formula is mechanically enforced: subprocess terms by a
+    bounded process-group call with terminate-then-kill cleanup, and
+    deterministic in-process terms by the bounded deterministic helper with a
+    declared size ceiling and a between-item deadline. Every term has a named
+    refusal and no term is an unenforced estimate.
+15. No deterministic preparation, materialization, re-hashing, packet
+    construction, or packet validation occurs after the claim; the claimed
+    stage contains only bounded model, harness, evaluator, and settlement
+    work. The stage never starts preparation whose computed
+    worst case, preparation and termination overhead included, exceeds the
+    remaining pass time less the deadline margin, and never claims when the
+    claimed bound alone no longer fits.
 16. Every started authoring call and started trial batch spends allowance;
-    recovery, readiness derivation, ordering, and reservation never do.
+    recovery, readiness derivation, ordering, admission, preparation, and
+    pre-claim refusal never do.
 17. Repair outcomes remain report-only and never enter this stage.
 18. The pass keeps exactly one writer lease and one owner.
 
@@ -945,9 +1066,13 @@ predecessor's abandoned work beyond the attempts its own sweep settled.
 - **AC-E4:** A `pass` result produces no install, publication, or forward
   lifecycle transition, and no estate mutation.
 - **AC-E5:** Every failure row in the failure model that occurs while the lease
-  is held leaves the lifecycle record in `ready_for_draft` with exactly one
-  appended terminal-attempt record, and a later pass can claim the same
-  candidate again.
+  is held **after the claim** leaves the lifecycle record in `ready_for_draft`
+  with exactly one appended terminal-attempt record, and a later pass can claim
+  the same candidate again. Every **pre-claim** refusal row leaves the
+  lifecycle record untouched in `ready_for_draft`, writes no attempt record and
+  no result, discards its scratch root, retains its stable refusal code in the
+  run report, and is reproduced identically by a later pass over the same
+  bytes.
 - **AC-E6:** After simulated lease loss the fenced-out pass performs zero
   durable writes — no transition, no result, no terminal-attempt record, no
   durable accounting or run-report row — and surfaces `lease_lost` only as a
@@ -974,16 +1099,24 @@ predecessor's abandoned work beyond the attempts its own sweep settled.
   `open_attempt_id` and `terminal_attempt_id` values, **including when the
   second replay uses a different run and result directory**, which changes the
   certificate receipt digest without changing `result_id`.
-- **AC-E11:** The stage computes the full worst-case bound — authoring,
+- **AC-E11:** The stage computes the full worst-case bound — materialization,
+  re-hashing, packet construction, packet validation, revalidation, authoring,
   attestation, trials, compile, certify, settlement, and termination overhead —
-  before claiming, and refuses with `pass_deadline_reservation_unmet` without
-  writing an open-attempt record when remaining pass time is below that bound
-  plus the deadline margin. Every completed pass finishes inside the
-  3,600-second deadline with the margin intact.
+  **before preparation begins**, and refuses with
+  `pass_deadline_reservation_unmet` without writing a scratch root or an
+  open-attempt record when remaining pass time is below that bound plus the
+  deadline margin. The claim-admission re-assertion of `claimed_bound` never
+  fails on a correctly declared bound, and no deterministic preparation step
+  runs after the claim. Every completed pass finishes inside the 3,600-second
+  deadline with the margin intact.
 - **AC-E14:** Every bounded subprocess the stage starts is terminated within
   its declared bound plus `termination_grace`, its whole process group is gone,
   and the breach surfaces as its named terminal refusal — including
-  `shadow-certify`'s nested `shadow-verify` child.
+  `shadow-certify`'s nested `shadow-verify` child. Every deterministic
+  in-process term refuses within its bound too: an over-ceiling inventory is
+  refused as `preparation-oversize` before any byte is copied, and an overrun
+  preparation or revalidation refuses as `preparation-deadline-exceeded` or
+  `revalidation-deadline-exceeded` and leaves no scratch root and no record.
 - **AC-E12:** For every permutation of execution authority, including each
   authoring-authority sub-condition of E2b, a routing row's
   `evaluation_execution.available` and its computed reasons exactly match the
@@ -1006,9 +1139,10 @@ predecessor's abandoned work beyond the attempts its own sweep settled.
   publication, or admission authority.
 - **AC-E13:** With two ready candidates where the first-sorted fails
   terminally, the second is still claimed and evaluated in the same pass while
-  allowance and reservation permit, and neither subject is claimed twice; in a
-  later pass the previously attempted subject sorts after any never-attempted
-  subject.
+  allowance and reservation permit, and neither subject is prepared or claimed
+  twice; a subject refused before the claim likewise blocks its successors
+  neither in this pass nor the next; in a later pass the previously attempted
+  subject sorts after any never-attempted subject.
 
 ## Check contract
 
@@ -1017,12 +1151,12 @@ predecessor's abandoned work beyond the attempts its own sweep settled.
 | CHK-01 | AC-E1, AC-E2 | One lifecycle record with three distinct current occurrences, shadow-ready recommendation, one staged package; healthy fixture evaluator and fixture author | One result retained; manifest `candidate_inventory` equals revision `files`; final state `ready_for_draft`; exactly one open record and one terminal record naming it | No result, a result naming a different candidate id, an unsettled open record, or any record written twice |
 | CHK-02 | AC-E3a, AC-E3b | CHK-01 with two distinct authorizing profiles | Result lists both `profile_id`s, all three canonical occurrence ids, record version, `packet_id`, suite id, harness digest, executor identities, and no pass/lease/timing field; open record's key set is exactly the nine declared fields; terminal record names that `open_attempt_id`, outcome, stop reason, `retained_by_pass_id`, `settle_time`, durations, `result_id` | Any authority absent or mismatched, a pass/lease/timing field in the result, or an outcome/result field in the open record |
 | CHK-03 | AC-E4, AC-E16 | CHK-01 forced to `pass` | Skill roots byte-identical before and after; no publisher call; no transition other than in and out of `evaluating`; the certificate reports `authoritative: false` | Any estate mutation, publication, forward transition, or an `authoritative: true` certificate from this stage |
-| CHK-04 | AC-E5 | One fixture per lease-held failure row: tampered package, packet refusal, authoring refusal, malformed authoring result, invalid suite, compile refusal, execute failure, certify `stale` | Each leaves `ready_for_draft`, appends exactly one terminal record with its named outcome, and a second pass re-claims the same candidate | Any row leaving `evaluating`, appending no terminal record, appending two, or blocking re-claim |
-| CHK-05 | AC-E6 | Six fixtures: lease assertion forced to fail mid-stage; open record left unsettled by a killed pass; two unsettled open records for one subject and version; two terminal records naming one open record; record in `evaluating` with no open record; record not in `evaluating` with an unsettled open record | A byte-level snapshot of the whole data directory before and after the fenced-out pass is identical, and its `lease_lost` appears only in process output; the next pass sweeps in `(claim_time, open_attempt_id)` order before readiness derivation, appends `evaluation-abandoned` with `recovered_after_owner_loss` attributed to itself; collision recovers the earliest and supersedes the rest, unhealthy; settled-twice takes the earliest, unhealthy; orphan appends an `origin: orphan-recovery` pair, degraded; not-required appends `recovery-not-required` with no transition | Any durable byte written by the fenced-out pass, a durable `lease_lost` accounting row, an unsettled open record surviving a sweep, non-deterministic recovery order, an overwritten record, or a terminal record naming no open record |
+| CHK-04 | AC-E5 | Two fixture groups. Post-claim: authoring refusal, malformed authoring result, invalid suite, compile refusal, execute failure, certify `stale`. Pre-claim: over-ceiling inventory, tampered package at preparation, tampered package at revalidation, packet validator refusal, lifecycle version changed between preparation and claim | Each post-claim row leaves `ready_for_draft`, appends exactly one terminal record with its named outcome, and a second pass re-claims the same candidate. Each pre-claim row leaves the lifecycle record byte-identical, writes no open record, no terminal record, and no result, leaves no scratch root, carries its stable refusal code in the run report, and reproduces identically in a second pass | Any post-claim row leaving `evaluating`, appending no terminal record, appending two, or blocking re-claim; any pre-claim row transitioning the record, writing any attempt record, leaving scratch behind, or refusing non-deterministically |
+| CHK-05 | AC-E6 | Six fixtures: lease assertion forced to fail mid-stage; open record left unsettled by a killed pass; two unsettled open records for one subject and version; two terminal records naming one open record; record in `evaluating` with no open record; record not in `evaluating` with an unsettled open record | A byte-level snapshot of every durable root — lifecycle records, `attempts/`, `results/`, `packets/`, accounting, run reports, but not the non-authoritative scratch root — before and after the fenced-out pass is identical, and its `lease_lost` appears only in process output; the next pass deletes every scratch root not belonging to it; the next pass sweeps in `(claim_time, open_attempt_id)` order before readiness derivation, appends `evaluation-abandoned` with `recovered_after_owner_loss` attributed to itself; collision recovers the earliest and supersedes the rest, unhealthy; settled-twice takes the earliest, unhealthy; orphan appends an `origin: orphan-recovery` pair, degraded; not-required appends `recovery-not-required` with no transition | Any durable byte written by the fenced-out pass, a durable `lease_lost` accounting row, an unsettled open record surviving a sweep, non-deterministic recovery order, an overwritten record, or a terminal record naming no open record |
 | CHK-06 | AC-E7 | Run CHK-04's certify-`stale` fixture, then supply a fourth matching occurrence | Reviewer group context includes the same `lifecycle_id`; no new lifecycle record | A new lifecycle id appears for the same procedure |
 | CHK-07 | AC-E8 | Packets built with, in turn: an extra unknown key, an estate-census field, a transcript fragment, an absolute path, a UUID occurrence id, a `profile_id`, a credential-shaped token | Each refused with its stable `shadow-packet-*` code before any model call; adapter invocation carries exactly one packet path argument; retained packet bytes re-validate | Any prohibited content reaching the model, a silently stripped key, or a second adapter input path |
-| CHK-08 | AC-E9, AC-E13 | Two ready candidates where the first-sorted always fails terminally, with allowance for two; then a variant with allowance for one; then zero ready candidates | Run one evaluates both subjects, each exactly once, and reconciles; run two stops with `evaluation_allowance_spent`; run three stops with `eligible_input_exhausted` listing near-miss and already-attempted reasons; a later pass sorts the attempted subject after a never-attempted one | A failing candidate blocking its successor, any subject claimed twice in one pass, or unused allowance with no stop reason |
-| CHK-09 | AC-E11, AC-E14, and sets the unresolved allowances | One real configured evaluator, one candidate, natural pass; a synthetic run with remaining pass time set just below the computed bound; and one deliberately overrunning fixture per bounded term (author, executor call, compile, certify with a sleeping nested `shadow-verify`, lifecycle transition) | Every term of the printed formula is present and finite before the claim; the synthetic run refuses with `pass_deadline_reservation_unmet` and writes no open record; each overrun fixture is terminated within its bound plus `termination_grace`, leaves no surviving process in the group, and surfaces its named refusal; retained per-call and per-phase cost becomes the configured `author_call_bound`, `executor_call_bound`, `compile_bound`, `certify_bound`, `lifecycle_transition_bound`, `record_write_bound`, `termination_grace`, and `deadline_margin` | A missing or infinite formula term, a start accepted below the bound, an open record written by a refused reservation, a surviving child process after any bound, or allowances configured without this measurement or an owner-recorded provisional bound |
+| CHK-08 | AC-E9, AC-E13 | Two ready candidates where the first-sorted always fails terminally, with allowance for two; then a variant with allowance for one; then zero ready candidates | Run one evaluates both subjects, each exactly once, and reconciles; run two stops with `evaluation_allowance_spent`; run three stops with `eligible_input_exhausted` listing near-miss, already-attempted, and pre-claim refusal reasons; a variant whose first-sorted subject is refused before the claim still evaluates the second and spends no allowance on the refusal; a later pass sorts the attempted subject after a never-attempted one | A failing or pre-claim-refused candidate blocking its successor, any subject prepared or claimed twice in one pass, allowance spent on a pre-claim refusal, or unused allowance with no stop reason |
+| CHK-09 | AC-E11, AC-E14, and sets the unresolved allowances | One real configured evaluator, one candidate, natural pass; two synthetic runs with remaining pass time set just below the candidate-admission bound and just below the claim-admission bound; one deliberately overrunning fixture per bounded subprocess term (author, executor call, compile, certify with a sleeping nested `shadow-verify`, lifecycle transition); one over-ceiling revision inventory; and one artificially slowed materialization and one slowed revalidation | Every term of the printed formula — preparation, revalidation, authoring, attestation, trials, compile, certify, settlement, termination — is present and finite **before preparation starts**; the natural run performs zero materialization, re-hashing, packet build, or packet validation after the claim, proved by an ordered phase trace; the synthetic runs refuse with `pass_deadline_reservation_unmet` writing neither scratch nor open record; each overrun subprocess fixture is terminated within its bound plus `termination_grace` with no surviving process in its group; the over-ceiling inventory refuses `preparation-oversize` with zero bytes copied; the slowed fixtures refuse `preparation-deadline-exceeded` and `revalidation-deadline-exceeded`; retained per-call and per-phase cost becomes the configured `author_call_bound`, `author_doctor_bound`, `executor_call_bound`, `compile_bound`, `certify_bound`, `lifecycle_transition_bound`, `record_write_bound`, `lifecycle_read_bound`, `packet_build_bound`, `packet_validate_bound`, `package_file_ceiling`, `package_bytes_ceiling`, `prepare_throughput`, `hash_throughput`, `termination_grace`, and `deadline_margin` | A missing or infinite formula term, any deterministic preparation observed after the claim, a start accepted below any admission bound, a scratch root or open record written by a refused admission, a surviving child process after any bound, an unrefused over-ceiling inventory, or allowances configured without this measurement or an owner-recorded provisional bound |
 | CHK-10 | AC-E10, AC-E3a | CHK-01 run twice over unchanged evidence with **both** a pinned deterministic author fixture returning a fixed case set and a pinned deterministic executor fixture returning fixed trial output, and with the second run given a **different run and result directory** | Identical `result_id` across both runs even though the certificate `receipt_id` and `result_dir` differ; distinct `open_attempt_id` and `terminal_attempt_id`; both terminal records name the same `result_id` and different open records; the retained result contains no path-bearing field | Differing `result_id` when only the run root changed, identical attempt identities across passes, or any `result_dir`, `run_dir`, `reason`, or receipt digest inside the result identity domain |
 | CHK-11 | AC-E12, AC-E15 | The authority permutation matrix: evaluator unconfigured, configured-unhealthy, healthy-unattested, suite authority missing, package unavailable, malformed authority object, all-present; plus one permutation per E2b authoring sub-condition: `evaluation_input_owner` absent, invalid key set, `enabled: false`, empty `author_model`, authoring adapter digest mismatched, author doctor unhealthy, and `shadow-author-packet` absent | Each permutation's routing row reports the matching computed reason and `available` value; every authoring sub-condition yields `shadow-authoring-authority-unavailable` and a malformed authority object yields `shadow-execution-authority-unknown`; in the all-present case the adapter is invoked exactly once with `--operation shadow-author` and a single `--packet` path under the configured `author_model`, and no `v2-input-owner-run` or `configured_adapters` path is entered; declines under `available: true` carry allowance, reservation, halt, or attempted-set stop reasons rather than authority reasons | Any row claiming authority the host lacks, any stage start under `available: false`, an `executor_unavailable` report under `available: true`, an authority reason used for a scheduling decline, a second adapter input path, or a hard-coded blocker constant surviving in `profile_evaluation_routing.py` |
 
@@ -1096,13 +1230,23 @@ first restored pass runs the recovery sweep before deriving readiness.
       the sealed `evaluation_input_owner.author_model`, health-checked by the
       existing role doctor, with no new config key, no registry entry, and no
       installed-capability owner call.
-- [ ] The stage computes a full-invocation worst-case bound covering authoring,
-      attestation, trials, compile, certify, settlement, and termination
-      overhead, and refuses to start below it without writing any record.
-- [ ] Every term of that bound is mechanically enforced by a bounded
-      process-group call with terminate-then-kill cleanup and a named terminal
-      refusal, including `shadow-certify`'s nested verification subprocess, and
-      halt is checked between bounded operations only.
+- [ ] All deterministic preparation — materialization, re-hashing, packet
+      construction, packet validation — completes before the lifecycle claim,
+      and an immediately pre-claim revalidation re-asserts the exact lifecycle
+      version and record digest, the package digest, and the packet id.
+- [ ] The stage computes a full worst-case bound covering preparation,
+      revalidation, authoring, attestation, trials, compile, certify,
+      settlement, and termination overhead, and refuses before preparation
+      begins when it does not fit, writing neither a scratch root nor a record.
+- [ ] Every term of that bound is mechanically enforced: subprocess terms by a
+      bounded process-group call with terminate-then-kill cleanup, including
+      `shadow-certify`'s nested verification subprocess, and deterministic
+      in-process terms by a declared size ceiling plus a between-item deadline;
+      each has a named refusal, and halt is checked between bounded operations
+      only.
+- [ ] A pre-claim refusal changes no lifecycle state, writes no attempt record
+      and no result, discards its scratch root, and is retained as run-report
+      evidence that a later pass reproduces deterministically.
 - [ ] One scheduled pass claims ready candidates derived from existing
       dispositions and lifecycle authority, ordered by last attempt then
       earliest occurrence then lifecycle id, with no new queue row.
@@ -1112,7 +1256,9 @@ first restored pass runs the recovery sweep before deriving readiness.
       by scan, and collision, settled-twice, superseded, and orphan cases behave
       as tabulated.
 - [ ] The materialized package re-hashes to the claimed `candidate_id` before
-      any packet is built.
+      any packet is built and again immediately before the claim, and
+      preparation writes only to a pass-local scratch root outside every
+      durable record root.
 - [ ] `shadow-compile`, `shadow-execute`, and `shadow-certify` run unmodified
       and produce one certificate covering triggering, task performance, and
       overall regression.
@@ -1163,19 +1309,25 @@ Reframe status becomes CLEAR when a round-three design review records all of:
    invocation showing a single `--packet` argument, the content-pinned adapter,
    and the configured `author_model`, and confirming that the resulting
    certificate reports `authoritative: false`.
-4. **A proven finite and enforced reservation** — CHK-09 evidence showing the
-   whole formula, term by term, computed before a claim; a refusal with
-   `pass_deadline_reservation_unmet` and no record written when remaining time
-   is insufficient; and one overrun fixture per bounded term (author, executor
-   call, compile, certify with a sleeping nested `shadow-verify`, lifecycle
-   transition) terminated within its bound plus `termination_grace` with no
-   surviving process in the group and its named refusal surfaced. Acceptance
+4. **A proven finite and enforced reservation covering the whole stage** —
+   CHK-09 evidence showing the entire formula, term by term including
+   preparation and revalidation, computed **before preparation starts**; an
+   ordered phase trace proving no materialization, re-hashing, packet build, or
+   packet validation occurs after the claim; a refusal with
+   `pass_deadline_reservation_unmet` writing neither scratch nor record when
+   remaining time is insufficient; one overrun fixture per bounded subprocess
+   term (author, executor call, compile, certify with a sleeping nested
+   `shadow-verify`, lifecycle transition) terminated within its bound plus
+   `termination_grace` with no surviving process in the group; and the
+   `preparation-oversize`, `preparation-deadline-exceeded`, and
+   `revalidation-deadline-exceeded` refusals demonstrated. Acceptance
    must also record that halt is deliberately not observed inside
    `shadow-execute`, and that the reservation rather than interruption is what
    protects the pass deadline.
 5. **Acceptance of the append-only fenced-recovery regime** — that a fenced-out
-   pass writes zero durable bytes and that `lease_lost` is process-return
-   evidence only; that the next valid owner retains the durable outcome and
+   pass writes zero durable bytes into any durable record root, that a
+   non-authoritative scratch root is not such a byte and is swept by the next
+   owner, and that `lease_lost` is process-return evidence only; that the next valid owner retains the durable outcome and
    stop reason; that one immutable open record settled by one immutable
    terminal record is sufficient recovery authority; and that the tabulated
    collision, settled-twice, supersession, not-required, and orphan behaviors
