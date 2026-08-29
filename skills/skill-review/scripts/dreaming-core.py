@@ -52,6 +52,11 @@ from profile_audit_disposition import (
     build_profile_audit_disposition,
     validate_profile_audit_disposition,
 )
+from profile_evaluation_routing import (
+    EvaluationRoutingError,
+    build_evaluation_routing_row,
+    summarize_evaluation_routing,
+)
 from task_pass_accounting import (
     TaskPassAccountingError,
     build_task_pass_accounting_receipt,
@@ -3361,6 +3366,144 @@ class DreamingRuntime:
             return existing
         atomic_json(path, disposition, mode=0o400)
         return disposition
+
+    def _retained_profile_audit_dispositions(self) -> list[dict[str, Any]]:
+        """Load every retained disposition, refusing misplaced or duplicate rows."""
+        loaded: dict[str, dict[str, Any]] = {}
+        roots = (
+            (3, self.paths.profile_audit_dispositions),
+            (2, self.paths.prior_profile_audit_dispositions),
+            (1, self.paths.legacy_profile_audit_dispositions),
+        )
+        for contract_version, root in roots:
+            if not root.is_dir():
+                continue
+            for path in sorted(root.glob("*.json")):
+                try:
+                    disposition = validate_profile_audit_disposition(
+                        read_json(path, {})
+                    )
+                except ProfileAuditDispositionError as error:
+                    raise RuntimeFailure(
+                        "profile-audit-disposition-invalid",
+                        f"{path}: {error.reason}",
+                    ) from error
+                if (
+                    disposition["profile_audit_contract_version"] != contract_version
+                    or path.stem != disposition["profile_id"].removeprefix("sha256:")
+                ):
+                    raise RuntimeFailure(
+                        "profile-audit-disposition-invalid", f"{path}: misplaced"
+                    )
+                if disposition["profile_id"] in loaded:
+                    raise RuntimeFailure(
+                        "profile-audit-disposition-invalid",
+                        f"{disposition['profile_id']}: duplicate-versions",
+                    )
+                loaded[disposition["profile_id"]] = disposition
+        return [loaded[profile_id] for profile_id in sorted(loaded)]
+
+    def derive_evaluation_routing(self) -> dict[str, Any]:
+        """Give every retained catalog audit one terminal evaluation route."""
+        rows: list[dict[str, Any]] = []
+        for disposition in self._retained_profile_audit_dispositions():
+            group = disposition.get("candidate_group_id")
+            record = (
+                self._candidate_lifecycle_call("read", group)
+                if isinstance(group, str)
+                and disposition.get("boundary_relation")
+                not in {"boundary-conflict", "boundary-unresolved"}
+                else None
+            )
+            try:
+                rows.append(
+                    build_evaluation_routing_row(
+                        disposition=disposition,
+                        lifecycle_record=record,
+                        now=self.now(),
+                    )
+                )
+            except EvaluationRoutingError as error:
+                raise RuntimeFailure(
+                    "evaluation-routing-invalid",
+                    f"{disposition['profile_id']}: {error.reason}",
+                ) from error
+        try:
+            summary = summarize_evaluation_routing(rows)
+        except EvaluationRoutingError as error:
+            raise RuntimeFailure(
+                "evaluation-routing-invalid", error.reason
+            ) from error
+        return {
+            "schema_version": 1,
+            "status": "derived",
+            "rows": rows,
+            "summary": summary,
+        }
+
+    def handoff_candidate_for_evaluation(self, lifecycle_id: str) -> dict[str, Any]:
+        """Enter the existing shadow evaluation state for one routed candidate."""
+        routing = self.derive_evaluation_routing()
+        matched = [
+            row
+            for row in routing["rows"]
+            if isinstance(row["evaluation_subject"], dict)
+            and row["evaluation_subject"]["lifecycle_id"] == lifecycle_id
+        ]
+        if not matched:
+            raise RuntimeFailure("evaluation-handoff-not-routed", lifecycle_id)
+        if len({digest(row["evaluation_subject"]) for row in matched}) != 1:
+            raise RuntimeFailure("evaluation-handoff-ambiguous", lifecycle_id)
+        subject = matched[0]["evaluation_subject"]
+        record = self._candidate_lifecycle_call("read", lifecycle_id)
+        if (
+            candidate_record_digest(record) != subject["record_sha256"]
+            or record.get("record_version") != subject["record_version"]
+        ):
+            raise RuntimeFailure("evaluation-handoff-stale", lifecycle_id)
+        handoff = {
+            "lifecycle_id": lifecycle_id,
+            "candidate_id": subject["candidate_id"],
+            "proposed_name": subject["proposed_name"],
+            "package_path": subject["package_path"],
+            "current_occurrence_count": subject["current_occurrence_count"],
+            "profile_ids": sorted(row["profile_id"] for row in matched),
+            "shadow_only": True,
+        }
+        if record.get("state") == "evaluating":
+            return {
+                **handoff,
+                "status": "already-evaluating",
+                "changed": False,
+                "record_version": subject["record_version"],
+                "record_sha256": subject["record_sha256"],
+            }
+        transitioned = self._candidate_lifecycle_call(
+            "transition",
+            lifecycle_id,
+            "--to",
+            "evaluating",
+            "--reason",
+            "profile-audit-evaluation-handoff",
+            "--candidate-id",
+            subject["candidate_id"],
+            "--expected-version",
+            str(subject["record_version"]),
+            "--expected-record-sha256",
+            subject["record_sha256"],
+        )
+        if (
+            transitioned.get("state") != "evaluating"
+            or transitioned.get("candidate_id") != subject["candidate_id"]
+        ):
+            raise RuntimeFailure("evaluation-handoff-refused", lifecycle_id)
+        return {
+            **handoff,
+            "status": "evaluating",
+            "changed": True,
+            "record_version": transitioned["record_version"],
+            "record_sha256": transitioned["record_sha256"],
+        }
 
     def review_profile(
         self,
@@ -10008,6 +10151,12 @@ def scheduled_run() -> dict[str, Any]:
             "stop_reason": {"profiles": None, "reviews": None},
         },
         "publication": [],
+        "evaluation_routing": {
+            "schema_version": 1,
+            "status": "pending",
+            "summary": None,
+            "rows": [],
+        },
         "errors": adapter_errors,
         "legacy_records_imported": imported_legacy,
     }
@@ -11683,6 +11832,25 @@ def scheduled_run() -> dict[str, Any]:
             "reviews": review_stop_reason,
         }
         report["errors"].append({"phase": "accounting", "code": code})
+    try:
+        routing = core.derive_evaluation_routing()
+        report["evaluation_routing"] = {
+            "schema_version": routing["schema_version"],
+            "status": routing["status"],
+            "summary": routing["summary"],
+            "rows": routing["rows"],
+        }
+    except RuntimeFailure as error:
+        report["evaluation_routing"] = {
+            "schema_version": 1,
+            "status": "refused",
+            "code": error.code,
+            "summary": None,
+            "rows": [],
+        }
+        report["errors"].append(
+            {"phase": "evaluation-routing", "code": error.code}
+        )
     for publisher_name, publisher in retired_publishers.items():
         try:
             publisher.call("remove")
@@ -11939,6 +12107,28 @@ def collect_profile_candidate(
     }
 
 
+def evaluation_routing() -> dict[str, Any]:
+    paths = default_paths()
+    core = DreamingRuntime(paths, [])
+    return {
+        "ok": True,
+        "runtime": "dreaming-core",
+        "command": "evaluation-routing",
+        **core.derive_evaluation_routing(),
+    }
+
+
+def handoff_evaluation(lifecycle_id: str) -> dict[str, Any]:
+    paths = default_paths()
+    core = DreamingRuntime(paths, [])
+    return {
+        "ok": True,
+        "runtime": "dreaming-core",
+        "command": "handoff-evaluation",
+        **core.handoff_candidate_for_evaluation(lifecycle_id),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command")
@@ -11967,6 +12157,9 @@ def build_parser() -> argparse.ArgumentParser:
     collect_profile.add_argument("--profile-id", required=True)
     collect_profile.add_argument("--package", required=True)
     collect_profile.add_argument("--proposed-name", required=True)
+    subcommands.add_parser("evaluation-routing")
+    handoff = subcommands.add_parser("handoff-evaluation")
+    handoff.add_argument("--lifecycle-id", required=True)
     return parser
 
 
@@ -12022,6 +12215,10 @@ def main() -> None:
                 Path(args.package),
                 args.proposed_name,
             )
+        elif args.command == "evaluation-routing":
+            report = evaluation_routing()
+        elif args.command == "handoff-evaluation":
+            report = handoff_evaluation(args.lifecycle_id)
         else:
             report = selftest(require_config=args.command == "doctor")
         print(json.dumps(report, sort_keys=True))
