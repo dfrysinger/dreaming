@@ -147,7 +147,10 @@ class VendorAdapterTest(unittest.TestCase):
                 {
                     "source_event_ids": ["event-1", "event-3"],
                 }
-            ]
+            ],
+            "occurrence_context": {
+                "candidate_groups": [],
+            },
         }
         catalog_context = {
             "skills": [
@@ -164,6 +167,7 @@ class VendorAdapterTest(unittest.TestCase):
         )
         self.assertEqual(context["reviewer_contract"], "profile-catalog-audit-v1")
         self.assertEqual(context["catalog_skill_names"], ["fixture-skill"])
+        self.assertEqual(context["candidate_groups"], [])
         self.assertEqual(
             [
                 (item["source_event_id"], item["catalog_skill_name"])
@@ -185,6 +189,10 @@ class VendorAdapterTest(unittest.TestCase):
         self.assertEqual(
             schema["properties"]["terminal_route"]["enum"],
             ["discard", "skill", "support_file"],
+        )
+        self.assertEqual(
+            schema["properties"]["catalog_audit"]["required"],
+            ["outcome", "skill_name", "candidate_group_id"],
         )
         prompt = json.loads(
             vendor_module.review_prompt(snapshot, audit_profile_context)
@@ -634,6 +642,7 @@ class VendorAdapterTest(unittest.TestCase):
                     "selected_profile_id": reusable_profile["profile_id"],
                     "selected_task_key": reusable_profile["task_key"],
                     "prior_overlaps": [],
+                    "candidate_groups": [],
                 }
             )
         )
@@ -1213,6 +1222,7 @@ def review_payload(prompt):
           "catalog_audit":{
             "outcome":"missed-skill",
             "skill_name":skill["name"],
+            "candidate_group_id":None,
           },
         })
     if "occurrence_boundary" in required:

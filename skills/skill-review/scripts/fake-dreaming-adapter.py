@@ -244,6 +244,8 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                         ),
                     }
                 )
+                if state.get("legacy_task_profile_receipt"):
+                    profiles[-1].pop("goal_event_id")
             result = {
                 "status": "ok",
                 "mutation_started": False,
@@ -389,6 +391,11 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
             ),
         }
         if args.task_profile_id:
+            occurrence_context = (
+                load(Path(args.task_occurrence_context), {})
+                if args.task_occurrence_context
+                else {}
+            )
             audit_receipt = load(Path(args.task_profile_receipt), {})
             selected = [
                 profile
@@ -513,6 +520,7 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
             result["catalog_audit"] = {
                 "outcome": catalog_outcome,
                 "skill_name": catalog_skill_name,
+                "candidate_group_id": state.get("catalog_candidate_group_id"),
                 "reviewer_contract": "profile-catalog-audit-v1",
                 "catalog_sha256": digest(catalog_names),
                 "catalog_skill_names": catalog_names,
@@ -521,6 +529,9 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                 ),
                 "skill_load_trace": load_trace,
                 "skill_load_trace_sha256": digest(load_trace),
+                "candidate_groups": occurrence_context.get(
+                    "candidate_groups", []
+                ),
             }
             prior_ids = state.get(
                 "occurrence_prior_ids_by_profile", {}

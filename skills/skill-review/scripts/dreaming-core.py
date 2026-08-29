@@ -76,6 +76,8 @@ TASK_PROFILE_CAPABILITY = "task-profile-v2"
 TASK_PROFILE_SNAPSHOT_CONTRACT_VERSION = 1
 TASK_OCCURRENCE_REVIEW_CONTRACT = "profile-catalog-review-occurrence-v1"
 TASK_OCCURRENCE_CORRECTION_CONTRACT = "profile-boundary-correction-v1"
+MAX_CANDIDATE_GROUPS_PER_REVIEW = 20
+MAX_CANDIDATE_GROUP_CONTEXT_BYTES = 48_000
 ROLES = {
     "session-source": {
         "protocol": "dreaming.session-source",
@@ -1215,6 +1217,7 @@ class DreamingRuntime:
         require_catalog_audit: bool = False,
         catalog_snapshot: dict[str, Any] | None = None,
         catalog_profile: dict[str, Any] | None = None,
+        candidate_groups: list[dict[str, Any]] | None = None,
     ) -> dict[str, Any]:
         if result.get("status") != "ok":
             raise RuntimeFailure("executor-failed", "review result status is not ok")
@@ -1252,6 +1255,8 @@ class DreamingRuntime:
                 "tombstones_sha256",
                 "skill_load_trace",
                 "skill_load_trace_sha256",
+                "candidate_group_id",
+                "candidate_groups",
             }
             trace = catalog_audit.get("skill_load_trace")
             catalog_names = catalog_audit.get("catalog_skill_names")
@@ -1299,6 +1304,7 @@ class DreamingRuntime:
                 )
                 or not isinstance(catalog_snapshot, dict)
                 or not isinstance(catalog_profile, dict)
+                or catalog_audit.get("candidate_groups") != candidate_groups
                 or trace
                 != self._profile_skill_load_trace(
                     catalog_snapshot,
@@ -1313,6 +1319,29 @@ class DreamingRuntime:
             ):
                 raise RuntimeFailure(
                     "malformed-executor-result", "catalog_audit is invalid"
+                )
+            candidate_group_id = catalog_audit.get("candidate_group_id")
+            boundary_conflict = (
+                isinstance(result.get("occurrence_boundary"), dict)
+                and result["occurrence_boundary"].get("relation")
+                == "boundary-conflict"
+            )
+            if (
+                (catalog_audit["outcome"] != "no-covering-skill" or boundary_conflict)
+                and candidate_group_id is not None
+            ) or (
+                catalog_audit["outcome"] == "no-covering-skill"
+                and not boundary_conflict
+                and candidate_group_id is not None
+                and candidate_group_id
+                not in {
+                    item.get("lifecycle_id")
+                    for item in candidate_groups or []
+                    if isinstance(item, dict)
+                }
+            ):
+                raise RuntimeFailure(
+                    "malformed-executor-result", "catalog_audit candidate group is invalid"
                 )
         elif catalog_audit is not None:
             raise RuntimeFailure(
@@ -2064,6 +2093,14 @@ class DreamingRuntime:
         )
         if indexed is None:
             return TaskProfileBinding(status="absent")
+        # V1 receipts lack the goal-derived occurrence authority and catalog
+        # audit contract required by the current profile-review lifecycle.
+        if indexed.payload.get("schema_version") != 2:
+            return TaskProfileBinding(
+                status="unbound",
+                receipt=indexed,
+                reason="schema-version",
+            )
         snapshot = read_json(snapshot_path, {})
         receipt_identity = indexed.payload.get("executor_identity")
         if not compatible_task_profile_executor_identities(
@@ -2484,6 +2521,9 @@ class DreamingRuntime:
                 "skill_load_trace_sha256": prior_disposition[
                     "skill_load_trace_sha256"
                 ],
+                "candidate_group_id": prior_disposition[
+                    "candidate_group_id"
+                ],
             },
         }
         disposition = self._record_profile_audit_disposition(
@@ -2537,6 +2577,7 @@ class DreamingRuntime:
             raise RuntimeFailure(
                 "task-occurrence-overlap-limit", target.profile["profile_id"]
             )
+        candidate_groups = self._candidate_group_context_for()
         return {
             "review_contract": TASK_OCCURRENCE_REVIEW_CONTRACT,
             "selected_profile_id": target.profile["profile_id"],
@@ -2544,7 +2585,63 @@ class DreamingRuntime:
             "prior_overlaps": sorted(
                 overlaps, key=lambda item: item["resolution_sha256"]
             ),
+            "candidate_groups": candidate_groups,
         }
+
+    def _candidate_group_context_for(self) -> list[dict[str, Any]]:
+        """Return every eligible semantic group, or refuse an incomplete view."""
+        listing = self._candidate_lifecycle_call("list")
+        records = listing.get("records")
+        if not isinstance(records, list):
+            raise RuntimeFailure("candidate-lifecycle-failed", "candidate listing is malformed")
+        groups: list[dict[str, Any]] = []
+        for item in records:
+            if (
+                not isinstance(item, dict)
+                or not isinstance(item.get("lifecycle_id"), str)
+                or item.get("state")
+                not in {"collecting", "ready_for_draft", "expired", "rejected"}
+            ):
+                raise RuntimeFailure(
+                    "candidate-lifecycle-failed", "candidate listing is malformed"
+                )
+            record = self._candidate_lifecycle_call("read", item["lifecycle_id"])
+            record_sha256 = candidate_record_digest(record)
+            if (
+                record.get("lifecycle_id") != item["lifecycle_id"]
+                or record.get("record_version") != item.get("record_version")
+                or record_sha256 != item.get("record_sha256")
+            ):
+                raise RuntimeFailure(
+                    "candidate-lifecycle-failed", "candidate listing changed"
+                )
+            useful_occurrences = {
+                evidence["canonical_occurrence_id"]
+                for evidence in record.get("evidence", [])
+                if isinstance(evidence, dict)
+                and isinstance(evidence.get("canonical_occurrence_id"), str)
+                and (occurred_at := parse_time(evidence.get("occurred_at"))) is not None
+                and occurred_at <= datetime.fromtimestamp(self.now(), timezone.utc)
+                and datetime.fromtimestamp(self.now(), timezone.utc) - occurred_at
+                <= timedelta(days=30)
+            }
+            groups.append(
+                {
+                    "lifecycle_id": record["lifecycle_id"],
+                    "proposed_name": record["proposed_name"],
+                    "procedure": record["procedure"],
+                    "state": record["state"],
+                    "record_version": record["record_version"],
+                    "record_sha256": record_sha256,
+                    "useful_current_count": len(useful_occurrences),
+                }
+            )
+        groups.sort(key=lambda group: group["lifecycle_id"])
+        if len(groups) > MAX_CANDIDATE_GROUPS_PER_REVIEW:
+            raise RuntimeFailure("candidate-group-context-limit", "group-count")
+        if len(canonical(groups)) > MAX_CANDIDATE_GROUP_CONTEXT_BYTES:
+            raise RuntimeFailure("candidate-group-context-limit", "context-bytes")
+        return groups
 
     def _record_task_occurrence_resolution(
         self,
@@ -3444,6 +3541,13 @@ class DreamingRuntime:
                 profile_match,
                 occurrence_resolution,
             )
+            if (
+                shadow_candidate is not None
+                and isinstance(result.get("catalog_audit"), dict)
+            ):
+                result["catalog_audit"]["candidate_group_id"] = (
+                    shadow_candidate["lifecycle_id"]
+                )
         repair_recommendation = (
             {
                 "catalog_outcome": catalog_outcome,
@@ -3638,31 +3742,46 @@ class DreamingRuntime:
             }
         # Current evidence is source anchored; legacy branch remains v1 history.
 
+        audit = result.get("catalog_audit")
+        candidate_groups = (
+            audit.get("candidate_groups") if isinstance(audit, dict) else None
+        )
+        selected_group_id = (
+            audit.get("candidate_group_id") if isinstance(audit, dict) else None
+        )
+        if candidate_groups is None and audit is None:
+            candidate_groups = []
+        if not isinstance(candidate_groups, list):
+            raise RuntimeFailure(
+                "candidate-lifecycle-failed", "candidate group context is absent"
+            )
+        selected_group = next(
+            (
+                group
+                for group in candidate_groups
+                if isinstance(group, dict)
+                and group.get("lifecycle_id") == selected_group_id
+            ),
+            None,
+        )
         lifecycle_id = None
         expected_version = None
         expected_identity = None
-        listing = self._candidate_lifecycle_call("list")
-        for item in listing.get("records", []):
-            if not isinstance(item, dict) or not isinstance(
-                item.get("lifecycle_id"), str
+        if selected_group_id is not None:
+            if (
+                selected_group is None
+                or artifact["skill_name"] != selected_group.get("proposed_name")
+                or not isinstance(selected_group.get("record_version"), int)
+                or not isinstance(selected_group.get("record_sha256"), str)
             ):
                 raise RuntimeFailure(
-                    "candidate-lifecycle-failed",
-                    "candidate listing is malformed",
+                    "candidate-lifecycle-failed", "candidate group selection is invalid"
                 )
-            record = self._candidate_lifecycle_call(
-                "read", item["lifecycle_id"]
-            )
-            if (
-                record.get("proposed_name") == artifact["skill_name"]
-                and record.get("procedure") == procedure
-                and record.get("state")
-                in {"collecting", "ready_for_draft", "expired", "rejected"}
-            ):
-                lifecycle_id = record["lifecycle_id"]
-                expected_version = record["record_version"]
-                expected_identity = candidate_record_digest(record)
-                break
+            lifecycle_id = selected_group_id
+            expected_version = selected_group["record_version"]
+            expected_identity = selected_group["record_sha256"]
+            procedure = selected_group["procedure"]
+            observation["procedure_fingerprint"] = procedure["match_fingerprint"]
 
         staging_parent = self.paths.data / "candidates" / "v1" / "incoming"
         staging_parent.mkdir(parents=True, exist_ok=True)
@@ -4622,6 +4741,11 @@ class DreamingRuntime:
                     catalog_profile=(
                         profile_audit_target.profile
                         if profile_audit_target is not None
+                        else None
+                    ),
+                    candidate_groups=(
+                        occurrence_context.get("candidate_groups")
+                        if occurrence_context is not None
                         else None
                     ),
                 )
@@ -10434,9 +10558,13 @@ def scheduled_run() -> dict[str, Any]:
                 }
             )
             continue
-        if existing_receipt is not None and compatible_task_profile_executor_identities(
+        if (
+            existing_receipt is not None
+            and existing_receipt.payload.get("schema_version") == 2
+            and compatible_task_profile_executor_identities(
             existing_receipt.payload.get("executor_identity"),
             executors[executor_name].identity,
+            )
         ):
             conflicts = core.task_occurrence_conflicts_for(existing_receipt)
             if conflicts:

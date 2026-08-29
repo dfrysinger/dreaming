@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any, NoReturn
 
 CURRENT_PROFILE_AUDIT_CONTRACT_VERSION = 3
@@ -110,6 +111,7 @@ def build_profile_audit_disposition(
                 "skill_load_trace_sha256": catalog_audit[
                     "skill_load_trace_sha256"
                 ],
+                "candidate_group_id": catalog_audit["candidate_group_id"],
             }
             if contract_version == 3
             else {}
@@ -168,6 +170,7 @@ def validate_profile_audit_disposition(
             "tombstones_sha256",
             "skill_load_trace",
             "skill_load_trace_sha256",
+            "candidate_group_id",
         }
         if version == 3
         else set()
@@ -327,6 +330,29 @@ def validate_profile_audit_disposition(
             )
         ):
             _reject("disposition-catalog-audit")
+        candidate_group_id = disposition.get("candidate_group_id")
+        boundary_conflict = disposition.get("boundary_relation") in {
+            "boundary-conflict",
+            "boundary-unresolved",
+        }
+        if (
+            disposition["outcome"] == "no-covering-skill"
+            and not boundary_conflict
+            and (
+                not isinstance(candidate_group_id, str)
+                or not re.fullmatch(
+                    r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}",
+                    candidate_group_id,
+                )
+            )
+        ) or (
+            (
+                disposition["outcome"] != "no-covering-skill"
+                or boundary_conflict
+            )
+            and candidate_group_id is not None
+        ):
+            _reject("disposition-candidate-group")
         if (
             disposition["outcome"] == "no-covering-skill"
             and skill_name is not None

@@ -2574,6 +2574,102 @@ class RuntimeTest(unittest.TestCase):
             Path(refreshed["receipt"]),
         )
 
+    def test_legacy_v1_receipt_is_reprofiled_before_catalog_audit(self) -> None:
+        source_fixture = self.source_fixture([self.session("one", 10)])
+        executor_fixture = self.write(
+            "legacy-v1-reprofile-executor.json",
+            {
+                "legacy_task_profile_receipt": True,
+                "task_profiles": [
+                    {
+                        "source_event_ids": ["one-event-1"],
+                        "task_type": "legacy-reusable-procedure",
+                        "abstract_summary": "Retain a reusable fixture procedure.",
+                        "reuse_value": "reusable-procedure",
+                        "procedure": {
+                            "trigger": "A reusable fixture task is complete.",
+                            "outcome": "Retain the fixture procedure.",
+                            "actions": ["Retain the procedure."],
+                            "exclusions": ["Do not retain source details."],
+                        },
+                    }
+                ],
+            },
+        )
+        config = self.write(
+            "legacy-v1-reprofile-adapters.json",
+            {
+                "contract_version": 1,
+                "routes": ["fake>exec"],
+                "executor_order": ["exec"],
+                "sources": {
+                    "fake": {
+                        "argv": [
+                            sys.executable, str(FAKE), "--fixture",
+                            str(source_fixture), "--adapter-id", "fake",
+                            "--role", "session-source",
+                        ]
+                    }
+                },
+                "executors": {
+                    "exec": {
+                        "argv": [
+                            sys.executable, str(FAKE), "--fixture",
+                            str(executor_fixture), "--adapter-id", "exec",
+                            "--role", "review-executor",
+                        ]
+                    }
+                },
+                "publishers": {},
+            },
+        )
+
+        def run() -> dict:
+            completed = subprocess.run(
+                [sys.executable, str(RUNTIME_PATH), "run"],
+                env={
+                    **os.environ,
+                    "DREAMING_ADAPTER_CONFIG": str(config),
+                    "DREAMING_DATA_DIR": str(self.paths.data),
+                    "DREAMING_STATE_DIR": str(self.paths.state),
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                check=True,
+            )
+            return json.loads(completed.stdout)
+
+        first = run()
+        v1_receipt = json.loads(
+            next(self.paths.task_profile_receipts.glob("*.json")).read_text()
+        )
+        self.assertEqual(v1_receipt["schema_version"], 1)
+        self.assertEqual(first["review_budget"]["started_operations"], 0)
+        self.assertEqual(first["reviews"], [])
+        self.assertEqual(
+            json.loads(self.paths.queue.read_text())[0]["status"], "queued"
+        )
+        self.assertIn(
+            "profile-audit-receipt-unbound",
+            [item["code"] for item in first["profile_review_skips"]],
+        )
+
+        fixture = json.loads(executor_fixture.read_text())
+        fixture.pop("legacy_task_profile_receipt")
+        executor_fixture.write_text(json.dumps(fixture))
+        second = run()
+        receipts = [
+            json.loads(path.read_text())
+            for path in self.paths.task_profile_receipts.glob("*.json")
+        ]
+        self.assertEqual(sorted(item["schema_version"] for item in receipts), [1, 2])
+        self.assertEqual(len(second["profiles"]), 1)
+        self.assertEqual(second["review_budget"]["started_operations"], 1)
+        self.assertEqual(
+            json.loads(self.paths.queue.read_text())[0]["status"], "profile-audited"
+        )
+
     def test_compatible_executor_identity_drift_preserves_task_profile_receipt(
         self,
     ) -> None:
@@ -2729,7 +2825,11 @@ class RuntimeTest(unittest.TestCase):
             [("capability-change-executor", legacy)],
         )
         self.assertEqual(result["status"], "accepted")
-        attempt = json.loads(self.paths.attempts.read_text())[-1]
+        attempt = next(
+            item
+            for item in json.loads(self.paths.attempts.read_text())
+            if item["profile_id"] == receipt["profiles"][0]["profile_id"]
+        )
         self.assertEqual(
             attempt["task_profile_delivery"],
             "unsupported:profiled-by-other-executor",
@@ -3770,7 +3870,9 @@ elif sys.argv[1] == "run":
         )
 
     def test_profiled_create_uses_verified_task_observation(self) -> None:
-        fixture = self.source_fixture([self.session("one", 10)])
+        fixture = self.source_fixture(
+            [self.session("one", 10), self.session("two", 11)]
+        )
         source = self.adapter("session-source", "fake", fixture)
         self.init_skills_repo()
         procedure = {
@@ -3787,8 +3889,9 @@ elif sys.argv[1] == "run":
                 "summary": "A reusable fixture procedure was demonstrated",
                 "routing_reason": "The procedure has ordered reusable steps",
                 "require_task_profile_context": True,
-                "task_profiles": [
-                    {
+                "task_profiles_by_session": {
+                    "fake:one": [
+                        {
                         "source_event_ids": ["one-event-1"],
                         "task_type": "retain-fixture-procedure",
                         "abstract_summary": (
@@ -3796,8 +3899,20 @@ elif sys.argv[1] == "run":
                         ),
                         "reuse_value": "reusable-procedure",
                         "procedure": procedure,
-                    }
-                ],
+                        }
+                    ],
+                    "fake:two": [
+                        {
+                            "source_event_ids": ["two-event-1"],
+                            "task_type": "retain-related-fixture-procedure",
+                            "abstract_summary": (
+                                "Retain the same reusable procedure from related work."
+                            ),
+                            "reuse_value": "reusable-procedure",
+                            "procedure": procedure,
+                        }
+                    ],
+                },
                 "artifact": {
                     "operation": "create",
                     "skill_name": "profiled-procedure",
@@ -3856,6 +3971,30 @@ elif sys.argv[1] == "run":
                 executor,
                 receipt["profiles"][0]["profile_id"],
             )
+            group = core._candidate_group_context_for()[0]
+            executor_state = json.loads(executor_fixture.read_text())
+            executor_state["catalog_candidate_group_id"] = group["lifecycle_id"]
+            executor_state["artifact"]["skill_markdown"] = (
+                "---\nname: profiled-procedure\n"
+                "description: Handle the same profiled task through a revised draft\n---\n"
+                "# Revised profiled procedure\n"
+            )
+            executor_fixture.write_text(json.dumps(executor_state))
+            second_profiled = core.profile(
+                "fake", source, "fake:two", "exec", executor
+            )
+            second_receipt = json.loads(
+                Path(second_profiled["receipt"]).read_text()
+            )
+            second_result = core.review_profile(
+                "fake",
+                source,
+                "fake:two",
+                second_receipt["source_revision"],
+                "exec",
+                executor,
+                second_receipt["profiles"][0]["profile_id"],
+            )
         finally:
             subprocess.run(
                 [
@@ -3880,7 +4019,11 @@ elif sys.argv[1] == "run":
             result["policy_deferred"]["reason"],
             "task-profile-artifact-requires-evaluation",
         )
-        attempt = json.loads(self.paths.attempts.read_text())[-1]
+        attempt = next(
+            item
+            for item in json.loads(self.paths.attempts.read_text())
+            if item["profile_id"] == receipt["profiles"][0]["profile_id"]
+        )
         self.assertEqual(attempt["task_profile_delivery"], "delivered")
         self.assertEqual(
             attempt["task_profile_receipt_sha256"],
@@ -3895,6 +4038,11 @@ elif sys.argv[1] == "run":
         record = core._candidate_lifecycle_call(
             "read", shadow["lifecycle_id"]
         )
+        self.assertEqual(
+            second_result["policy_deferred"]["shadow_candidate"]["lifecycle_id"],
+            shadow["lifecycle_id"],
+        )
+        self.assertEqual(len(record["evidence"]), 2)
         self.assertEqual(record["evidence"][0]["canonical_occurrence_id"], shadow["canonical_occurrence_id"])
         self.assertEqual(
             record["evidence"][0]["occurred_at"],
@@ -3912,6 +4060,14 @@ elif sys.argv[1] == "run":
                     ),
                 }
             ),
+        )
+        dispositions = [
+            json.loads(path.read_text())
+            for path in self.paths.profile_audit_dispositions.glob("*.json")
+        ]
+        self.assertEqual(
+            {item["candidate_group_id"] for item in dispositions},
+            {shadow["lifecycle_id"]},
         )
 
     def test_profiled_patch_is_report_only_before_mutation(self) -> None:
@@ -4948,6 +5104,8 @@ elif command == "run":
                     "skill_load_trace_sha256": runtime_module.digest(
                         active_trace
                     ),
+                    "candidate_group_id": None,
+                    "candidate_groups": [],
                 },
             }
             return payload, snapshot, profile
@@ -4989,6 +5147,7 @@ elif command == "run":
                     require_catalog_audit=True,
                     catalog_snapshot=snapshot,
                     catalog_profile=profile,
+                    candidate_groups=[],
                 )["catalog_audit"]["outcome"]
                 for item, snapshot, profile in cases
             ],
@@ -5014,6 +5173,7 @@ elif command == "run":
                 require_catalog_audit=True,
                 catalog_snapshot=invalid_snapshot,
                 catalog_profile=invalid_profile,
+                candidate_groups=[],
             )
         fabricated, fabricated_snapshot, fabricated_profile = result(
             "correct-skill",
@@ -5045,6 +5205,7 @@ elif command == "run":
                 require_catalog_audit=True,
                 catalog_snapshot=fabricated_snapshot,
                 catalog_profile=fabricated_profile,
+                candidate_groups=[],
             )
         conflict_outcomes = []
         for outcome, skill_name, loaded in (
@@ -5072,6 +5233,7 @@ elif command == "run":
                     require_catalog_audit=True,
                     catalog_snapshot=conflict_snapshot,
                     catalog_profile=conflict_profile,
+                    candidate_groups=[],
                 )["catalog_audit"]["outcome"]
             )
         self.assertEqual(
@@ -5115,6 +5277,7 @@ elif command == "run":
                 require_catalog_audit=True,
                 catalog_snapshot=wrong_snapshot,
                 catalog_profile=wrong_profile,
+                candidate_groups=[],
             )
 
     def test_profile_audit_persists_new_and_same_occurrence_authority(self) -> None:

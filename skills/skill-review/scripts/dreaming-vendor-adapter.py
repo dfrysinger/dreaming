@@ -91,6 +91,8 @@ PROTOCOLS = {
     ),
 }
 MAX_TASK_PROFILE_CONTEXT_BYTES = 64_000
+MAX_CANDIDATE_GROUPS_PER_REVIEW = 20
+MAX_CANDIDATE_GROUP_CONTEXT_BYTES = 48_000
 CATALOG_AUDIT_REVIEW_CONTRACT = "profile-catalog-audit-v1"
 CATALOG_AUDIT_OUTCOMES = {
     "correct-skill",
@@ -1816,6 +1818,58 @@ def task_profile_catalog_audit_context(
                 "event_sha256": sha(event),
             }
         )
+    occurrence_context = task_profile_context.get("occurrence_context")
+    candidate_groups = (
+        occurrence_context.get("candidate_groups")
+        if isinstance(occurrence_context, dict)
+        else None
+    )
+    if (
+        not isinstance(candidate_groups, list)
+        or len(candidate_groups) > MAX_CANDIDATE_GROUPS_PER_REVIEW
+        or len(canonical(candidate_groups)) > MAX_CANDIDATE_GROUP_CONTEXT_BYTES
+        or any(
+            not isinstance(group, dict)
+            or set(group)
+            != {
+                "lifecycle_id",
+                "proposed_name",
+                "procedure",
+                "state",
+                "record_version",
+                "record_sha256",
+                "useful_current_count",
+            }
+            or not isinstance(group["lifecycle_id"], str)
+            or not re.fullmatch(
+                r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}",
+                group["lifecycle_id"],
+            )
+            or not isinstance(group["proposed_name"], str)
+            or not group["proposed_name"]
+            or not isinstance(group["procedure"], dict)
+            or group["state"]
+            not in {"collecting", "ready_for_draft", "expired", "rejected"}
+            or not isinstance(group["record_version"], int)
+            or group["record_version"] < 1
+            or not isinstance(group["record_sha256"], str)
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", group["record_sha256"])
+            or not isinstance(group["useful_current_count"], int)
+            or group["useful_current_count"] < 0
+            for group in candidate_groups
+        )
+        or candidate_groups
+        != sorted(candidate_groups, key=lambda group: group["lifecycle_id"])
+        or len(
+            {
+                group["lifecycle_id"]
+                for group in candidate_groups
+                if isinstance(group, dict)
+            }
+        )
+        != len(candidate_groups)
+    ):
+        raise AdapterError("candidate-group-context-invalid", "profile audit")
     return {
         "reviewer_contract": CATALOG_AUDIT_REVIEW_CONTRACT,
         "catalog_sha256": sha(catalog_skills),
@@ -1823,6 +1877,7 @@ def task_profile_catalog_audit_context(
         "tombstones_sha256": sha(tombstones),
         "skill_load_trace": load_trace,
         "skill_load_trace_sha256": sha(load_trace),
+        "candidate_groups": candidate_groups,
     }
 
 
@@ -1941,8 +1996,9 @@ def review_result_schema(
             "properties": {
                 "outcome": {"enum": sorted(CATALOG_AUDIT_OUTCOMES)},
                 "skill_name": {"type": ["string", "null"]},
+                "candidate_group_id": {"type": ["string", "null"]},
             },
-            "required": ["outcome", "skill_name"],
+            "required": ["outcome", "skill_name", "candidate_group_id"],
             "additionalProperties": False,
         }
         required.append("catalog_audit")
@@ -2158,7 +2214,11 @@ def review_prompt(
             "the first three outcomes and null for no-covering-skill. Correct "
             "skill emits no artifact. Missed skill emits a patch to the named "
             "skill. Wrong or incomplete skill emits a patch or support file for "
-            "the named skill. No covering skill emits a create artifact."
+            "the named skill. No covering skill emits a create artifact. For "
+            "no-covering-skill, select candidate_group_id only when one supplied "
+            "candidate group is semantically the same procedure; otherwise use "
+            "null to start a new group. For every other outcome and for a "
+            "boundary-conflict, candidate_group_id must be null."
         )
         reuse_order = [
             "patch an existing matching skill",
@@ -2765,7 +2825,7 @@ def executor_run(args: argparse.Namespace) -> None:
         decision = model_result.get("catalog_audit")
         if (
             not isinstance(decision, dict)
-            or set(decision) != {"outcome", "skill_name"}
+            or set(decision) != {"outcome", "skill_name", "candidate_group_id"}
             or decision.get("outcome") not in CATALOG_AUDIT_OUTCOMES
             or (
                 decision.get("skill_name") is not None
@@ -2795,6 +2855,22 @@ def executor_run(args: argparse.Namespace) -> None:
             isinstance(occurrence_boundary, dict)
             and occurrence_boundary.get("relation") == "boundary-conflict"
         )
+        candidate_group_id = decision["candidate_group_id"]
+        candidate_group_ids = {
+            group["lifecycle_id"] for group in audit_context["candidate_groups"]
+        }
+        if (
+            (outcome != "no-covering-skill" or boundary_conflict)
+            and candidate_group_id is not None
+        ) or (
+            outcome == "no-covering-skill"
+            and not boundary_conflict
+            and candidate_group_id is not None
+            and candidate_group_id not in candidate_group_ids
+        ):
+            raise AdapterError(
+                "malformed-executor-result", "catalog_audit candidate group"
+            )
         valid_semantic_outcome = (
             outcome == "correct-skill"
             and isinstance(skill_name, str)
