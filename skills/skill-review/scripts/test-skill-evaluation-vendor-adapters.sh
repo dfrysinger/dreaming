@@ -37,6 +37,12 @@ harness_path = root / "skills/skill-review/scripts/skill-evaluation-harness.py"
 harness_spec = importlib.util.spec_from_file_location("skill_evaluation_harness", harness_path)
 harness = importlib.util.module_from_spec(harness_spec)
 harness_spec.loader.exec_module(harness)
+adapter_spec = importlib.util.spec_from_file_location(
+    "dreaming_vendor_adapter_native_schema_guard", adapter
+)
+adapter_module = importlib.util.module_from_spec(adapter_spec)
+sys.modules[adapter_spec.name] = adapter_module
+adapter_spec.loader.exec_module(adapter_module)
 
 
 def canonical(value):
@@ -100,7 +106,7 @@ full_prompt = args[args.index("-p") + 1] if "-p" in args else ""
 prompt = next((value for value in args if value in {
     "fixture prompt", "DRIFT", "NOLOAD", "WRONGLOAD", "FALSETRIGGER", "TIMEOUT",
     "TOKENOVER", "FLOOD", "SCHEMA", "NOPATH", "NATIVEFAIL", "CURRENTCOPILOT",
-    "SHADOWCANDIDATE", "SHADOWCATALOG", "COMMANDLOAD", "MULTIREAD",
+    "SHADOWCANDIDATE", "SHADOWCATALOG", "COMMANDLOAD", "MULTIREAD", "NATIVEV2",
 }), "")
 comparator = full_prompt.startswith("BLIND_SKILL_EVALUATION_COMPARISON")
 answer = (
@@ -168,7 +174,27 @@ loaded_name = (
     else "approved-skill" if prompt == "SHADOWCATALOG" else "fixture-skill"
 )
 if vendor == "copilot":
-    if prompt in {"CURRENTCOPILOT", "SHADOWCANDIDATE", "SHADOWCATALOG"}:
+    if prompt == "NATIVEV2" or os.environ.get("FIXTURE_COPILOT_V2"):
+        events = [
+            {"type":"session.start","data":{"model":observed}},
+            {"type":"model.call_start","data":{"model":observed,"turn":0}},
+            {"id":"fixture-v2-call","type":"model.model_call_success","data":{
+                "responseChunk":{"usage":{
+                    "prompt_tokens":8349,
+                    "completion_tokens":103,
+                    "total_tokens":8452,
+                }},
+                "responseUsage":{
+                    "prompt_tokens":8349,
+                    "completion_tokens":103,
+                    "total_tokens":8452,
+                },
+            }},
+            {"type":"assistant.message","data":{"content":answer}},
+            {"type":"assistant.turn_end","data":{"content":answer}},
+            {"type":"session.task_complete","data":{"summary":answer}},
+        ]
+    elif prompt in {"CURRENTCOPILOT", "SHADOWCANDIDATE", "SHADOWCATALOG"}:
         events = [
             {"type":"session.skills_loaded","data":{"skills":[
                 {"name":loaded_name,"path":loaded_path,"enabled":True}
@@ -323,7 +349,7 @@ else:
             stderr=subprocess.PIPE,
         )
 
-    def base(self, vendor, timeout=10):
+    def base(self, vendor, timeout=10, token_budget=100):
         return [
             sys.executable,
             str(adapter),
@@ -340,19 +366,29 @@ else:
             "--timeout",
             str(timeout),
             "--token-budget",
-            "100",
+            str(token_budget),
             "--output-bytes",
             "100000",
         ]
 
-    def call(self, vendor, *args, check=True, adapter_timeout=120, cwd=None):
+    def call(
+        self,
+        vendor,
+        *args,
+        check=True,
+        adapter_timeout=120,
+        cwd=None,
+        token_budget=100,
+        extra_env=None,
+    ):
         started = time.monotonic()
         result = subprocess.run(
-            [*self.base(vendor, adapter_timeout), *map(str, args)],
+            [*self.base(vendor, adapter_timeout, token_budget), *map(str, args)],
             env={
                 **os.environ,
                 "DREAMING_EXECUTOR_TEST_ALLOW_ROOT": str(self.root),
                 "GH_TOKEN": "fixture-token",
+                **(extra_env or {}),
             },
             text=True,
             stdout=subprocess.PIPE,
@@ -360,7 +396,7 @@ else:
             cwd=cwd,
         )
         self.last_call = {
-            "argv": [*self.base(vendor, adapter_timeout), *map(str, args)],
+            "argv": [*self.base(vendor, adapter_timeout, token_budget), *map(str, args)],
             "duration_seconds": time.monotonic() - started,
             "returncode": result.returncode,
             "stdout": result.stdout,
@@ -371,7 +407,13 @@ else:
         return json.loads(result.stdout.splitlines()[-1])
 
     def comparator_call(
-        self, rubric_id, *args, check=True, binary=None, extra_env=None
+        self,
+        rubric_id,
+        *args,
+        check=True,
+        binary=None,
+        extra_env=None,
+        token_budget=100,
     ):
         harness_home = self.root / "harness-home"
         harness_home.mkdir(exist_ok=True)
@@ -395,7 +437,7 @@ else:
             "--timeout",
             "10",
             "--token-budget",
-            "100",
+            str(token_budget),
             "--output-bytes",
             "100000",
             *map(str, args),
@@ -1117,7 +1159,7 @@ else:
         )
         self.assertEqual(
             [event["data"]["total_tokens"] for event in copilot_events if event["kind"] == "usage"],
-            [15],
+            [25],
         )
         copilot_proof = harness.proof(
             copilot_events,
@@ -1178,6 +1220,73 @@ else:
         )
         self.assertEqual(response["error"]["code"], "executor-failed")
         self.assertEqual(response["error"]["message"], "fixture native failure")
+
+    def test_copilot_shape_b_run_and_comparator_share_usage_authority(self):
+        trial, trial_path = self.trial("copilot", prompt="NATIVEV2")
+        prepared = self.call(
+            "copilot", "prepare", "--trial", trial_path, token_budget=10000
+        )
+        record = {
+            "schema_version": 1,
+            "trial_id": trial["trial_id"],
+            "adapter_prepared": prepared["prepared"],
+            "execution": prepared["execution"],
+        }
+        record["prepared_digest"] = sha(record)
+        prepared_path = trial_path.parent / "prepared.json"
+        prepared_path.write_bytes(canonical(record) + b"\n")
+        run = self.call(
+            "copilot",
+            "run",
+            "--trial",
+            trial_path,
+            "--prepared",
+            prepared_path,
+            "--output",
+            trial["raw"],
+            check=False,
+            token_budget=10000,
+        )
+        self.assertNotIn("error", run)
+        native_records = [
+            json.loads(line)
+            for line in Path(trial["raw"]).read_text().splitlines()
+        ]
+        usage = next(
+            record for record in native_records if record["type"] == "dreaming.usage"
+        )
+        self.assertEqual(usage["total_tokens"], 8452)
+
+        rubric = {
+            "criteria": [
+                {"id": "quality", "description": "Prefer the complete answer."}
+            ]
+        }
+        packet = self.root / "shape-b-comparison-packet.json"
+        packet.write_bytes(
+            canonical(
+                {
+                    "schema_version": 1,
+                    "task_id": "shape-b",
+                    "task": "Compare the supplied answers.",
+                    "rubric": rubric,
+                    "A": "complete response",
+                    "B": "incomplete response",
+                }
+            )
+        )
+        comparison = self.comparator_call(
+            sha(rubric),
+            "compare",
+            "--packet",
+            packet,
+            "--output",
+            self.root / "shape-b-comparison-result.json",
+            check=False,
+            extra_env={"FIXTURE_COPILOT_V2": "1"},
+            token_budget=10000,
+        )
+        self.assertEqual(comparison.returncode, 0, comparison.stdout + comparison.stderr)
 
     def test_load_proof_activation_and_projection_drift_fail_closed(self):
         for vendor in ("copilot", "claude", "codex"):
@@ -1486,6 +1595,470 @@ else:
         )
         self.assertEqual(response["error"]["code"], "artifact-destination-exists")
         self.assertEqual(artifact_target.read_text(), "safe\n")
+
+
+class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
+    observed_types = {
+        "model.call_finished",
+        "model.captured_assignment_context",
+        "model.message",
+        "model.messages_snapshot",
+        "model.model_call_started",
+        "model.model_call_success",
+        "model.response",
+        "model.tool_execution",
+        "model.turn_ended",
+        "model.turn_started",
+        "session.mcp_server_removed",
+        "session.mcp_server_status_changed",
+        "session.mcp_servers_loaded",
+    }
+
+    def call_start(self, turn, requests=None):
+        return {
+            "type": "model.call_start",
+            "data": {
+                "model": "fixture-model",
+                "turn": turn,
+                **({"toolRequests": requests} if requests is not None else {}),
+            },
+        }
+
+    def call_success(self, event_id, prompt, completion, response_usage=None):
+        usage = {
+            "prompt_tokens": prompt,
+            "completion_tokens": completion,
+            "total_tokens": prompt + completion,
+        }
+        data = {"responseChunk": {"usage": usage}}
+        if response_usage is not None:
+            data["responseUsage"] = response_usage
+        return {
+            "id": event_id,
+            "type": "model.model_call_success",
+            "data": data,
+        }
+
+    def assert_usage_refusal(self, values, reason):
+        with self.assertRaises(adapter_module.AdapterError) as raised:
+            adapter_module.copilot_usage(values)
+        self.assertEqual(raised.exception.code, "usage-unproved")
+        self.assertEqual(raised.exception.message, reason)
+
+    def test_guard_a_exact_vocabulary_and_unknown_refusal(self):
+        expected = {
+            "abort",
+            "assistant.idle",
+            "assistant.message",
+            "assistant.message_delta",
+            "assistant.message_start",
+            "assistant.reasoning",
+            "assistant.tool_call_delta",
+            "assistant.turn_end",
+            "assistant.turn_start",
+            "external_tool.completed",
+            "external_tool.requested",
+            "hook.end",
+            "hook.start",
+            "model.call_start",
+            "permission.completed",
+            "permission.requested",
+            "result",
+            "session.background_tasks_changed",
+            "session.binary_asset",
+            "session.canvas.recorded",
+            "session.compaction_complete",
+            "session.compaction_start",
+            "session.context_changed",
+            "session.custom_agents_updated",
+            "session.error",
+            "session.info",
+            "session.mode_changed",
+            "session.model_change",
+            "session.permissions_changed",
+            "session.plan_changed",
+            "session.remote_steerable_changed",
+            "session.resume",
+            "session.shutdown",
+            "session.start",
+            "session.task_complete",
+            "session.truncation",
+            "session.usage_checkpoint",
+            "session.warning",
+            "session.autopilot_objective_changed",
+            "session.workspace_file_changed",
+            "session.schedule_created",
+            "session.schedule_cancelled",
+            "session.skills_loaded",
+            "session.tools_updated",
+            "skill.invoked",
+            "subagent.completed",
+            "subagent.failed",
+            "subagent.selected",
+            "subagent.started",
+            "system.message",
+            "system.notification",
+            "tool.execution_complete",
+            "tool.execution_partial_result",
+            "tool.execution_start",
+            "tool.user_requested",
+            "user.message",
+        } | self.observed_types
+        for event_type in sorted(self.observed_types):
+            with self.subTest(event_type=event_type):
+                adapter_module.validate_native_schema(
+                    "copilot", [{"type": event_type}]
+                )
+        adapter_module.validate_native_schema(
+            "copilot",
+            [{"events": [{"type": event_type} for event_type in sorted(self.observed_types)]}],
+        )
+        self.assertEqual(adapter_module.COPILOT_EVENT_TYPES, expected)
+        self.assertEqual(len(adapter_module.COPILOT_EVENT_TYPES), 69)
+        self.assertEqual(
+            adapter_module.SUPPORTED_SOURCE_VERSIONS,
+            {"copilot": 1, "claude": 1, "codex": 1},
+        )
+        for unknown in (
+            "unknown-native-schema-sentinel",
+            "model.model_call_success.future",
+        ):
+            with self.subTest(unknown=unknown):
+                with self.assertRaises(adapter_module.AdapterError) as raised:
+                    adapter_module.validate_native_schema(
+                        "copilot", [{"type": unknown}]
+                    )
+                self.assertEqual(raised.exception.code, "unsupported-native-schema")
+                self.assertEqual(raised.exception.message, f"copilot:{unknown}")
+
+    def test_guard_a_malformed_envelopes_still_refuse(self):
+        for values, message in (
+            ([{"events": 3}], "copilot:events"),
+            ([{"events": [1]}], "copilot:events"),
+            ([{"events": [{"type": "unknown-native-schema-sentinel"}]}],
+             "copilot:unknown-native-schema-sentinel"),
+        ):
+            with self.subTest(values=values):
+                with self.assertRaises(adapter_module.AdapterError) as raised:
+                    adapter_module.validate_native_schema("copilot", values)
+                self.assertEqual(raised.exception.code, "unsupported-native-schema")
+                self.assertEqual(raised.exception.message, message)
+
+    def test_guard_b_outer_iterator_is_direct_and_one_level_only(self):
+        direct = {"type": "session.start", "data": {"model": "fixture-model"}}
+        wrapped_first = {"type": "model.call_start", "data": {"model": "fixture-model"}}
+        wrapped_second = {"type": "assistant.message", "data": {"content": "outer"}}
+        nested = {
+            "type": "assistant.message",
+            "data": {
+                "content": "outer answer",
+                "snapshot": {
+                    "type": "model.call_start",
+                    "data": {
+                        "model": "nested-model",
+                        "toolRequests": [{"toolCallId": "nested-tool"}],
+                    },
+                    "usage": {"total_tokens": 999999},
+                },
+            },
+        }
+        values = [direct, {"events": [wrapped_first, wrapped_second]}, nested]
+        self.assertEqual(
+            list(adapter_module.copilot_outer_events(values)),
+            [direct, wrapped_first, wrapped_second, nested],
+        )
+
+    def test_guard_b_non_usage_readers_preserve_declared_outer_paths(self):
+        case = work / self._testMethodName
+        case.mkdir()
+        skill = case / "fixture-skill" / "SKILL.md"
+        skill.parent.mkdir()
+        skill.write_text("fixture\n")
+        values = [
+            {"type": "session.start", "data": {"model": "fixture-model"}},
+            self.call_start(0),
+            {
+                "type": "session.skills_loaded",
+                "data": {
+                    "skills": [
+                        {"name": "fixture-skill", "path": str(skill), "enabled": True}
+                    ]
+                },
+            },
+            {
+                "type": "assistant.message",
+                "data": {
+                    "content": "outer answer",
+                    "toolRequests": [
+                        {
+                            "name": "skill",
+                            "toolCallId": "outer-call",
+                            "arguments": {"skill": "fixture-skill"},
+                        }
+                    ],
+                    "snapshot": {
+                        "type": "skill.invoked",
+                        "data": {
+                            "skillName": "nested-skill",
+                            "resolvedPath": str(skill),
+                        },
+                    },
+                },
+            },
+            {
+                "type": "tool.execution_complete",
+                "data": {
+                    "toolCallId": "outer-call",
+                    "success": True,
+                    "result": {
+                        "content": 'Skill "fixture-skill" loaded successfully.'
+                    },
+                },
+            },
+            {"type": "assistant.turn_end", "data": {"content": "outer final"}},
+            {
+                "type": "session.error",
+                "data": {
+                    "message": "outer failure",
+                    "snapshot": {
+                        "type": "session.error",
+                        "data": {"message": "nested failure"},
+                    },
+                },
+            },
+            self.call_success("outer-usage", 10, 5),
+        ]
+        self.assertEqual(adapter_module.native_model("copilot", values), "fixture-model")
+        self.assertEqual(
+            adapter_module.native_detailed_usage("copilot", values),
+            {
+                "turns": 1,
+                "input_tokens": 10,
+                "output_tokens": 5,
+                "total_tokens": 15,
+                "tool_calls": 1,
+            },
+        )
+        self.assertEqual(
+            adapter_module.native_failure_message(
+                "copilot", "\n".join(json.dumps(value) for value in values), ""
+            ),
+            "outer failure",
+        )
+        self.assertEqual(
+            adapter_module.normalized_native_events("copilot", {"events": values}),
+            [
+                ("assistant_message", "outer answer", {"native_type": "assistant.message"}),
+                ("tool_result", 'Skill "fixture-skill" loaded successfully.', {"native_type": "tool.execution_complete"}),
+                ("final_answer", "outer final", {"native_type": "assistant.turn_end"}),
+            ],
+        )
+        evidence = adapter_module.native_skill_evidence(
+            "copilot", values, {"fixture-skill": skill}, case
+        )
+        self.assertEqual(len(evidence), 1)
+        self.assertEqual(evidence[0]["projected_name"], "fixture-skill")
+
+    def test_guard_c_shape_b_sums_deduplicates_and_ignores_order(self):
+        calls = [
+            (8390, 716),
+            (9156, 192),
+            (9376, 113),
+            (9518, 6),
+        ]
+        starts = [
+            self.call_start(
+                turn,
+                [{"toolCallId": f"tool-{turn}"}] if turn < 3 else [],
+            )
+            for turn in range(4)
+        ]
+        successes = [
+            self.call_success(f"usage-{turn}", prompt, completion)
+            for turn, (prompt, completion) in enumerate(calls)
+        ]
+        metadata = {
+            "type": "model.messages_snapshot",
+            "data": {
+                "messages": [
+                    {
+                        "type": "assistant.message",
+                        "outputTokens": 999999,
+                        "usage": {"total_tokens": 999999},
+                    }
+                ]
+            },
+        }
+        expected = {
+            "turns": 4,
+            "input_tokens": 36440,
+            "output_tokens": 1027,
+            "total_tokens": 37467,
+            "tool_calls": 3,
+        }
+        values = [*starts, metadata, *successes]
+        self.assertEqual(adapter_module.copilot_usage(values), expected)
+        self.assertEqual(
+            adapter_module.copilot_usage([*reversed(successes), metadata, *starts]),
+            expected,
+        )
+        self.assertEqual(
+            adapter_module.copilot_usage([*starts, metadata, *successes, *successes]),
+            expected,
+        )
+        self.assertEqual(adapter_module.native_token_usage("copilot", values), 37467)
+        self.assertEqual(adapter_module.native_detailed_usage("copilot", values), expected)
+
+    def test_guard_d_shape_b_refuses_malformed_ambiguous_and_incomplete_usage(self):
+        valid = self.call_success("usage-0", 10, 5)
+        malformed_cases = []
+        for label, mutation in (
+            ("missing", lambda usage: usage.pop("completion_tokens")),
+            ("bool", lambda usage: usage.__setitem__("prompt_tokens", True)),
+            ("float", lambda usage: usage.__setitem__("prompt_tokens", 10.0)),
+            ("negative", lambda usage: usage.__setitem__("prompt_tokens", -1)),
+            ("broken-sum", lambda usage: usage.__setitem__("total_tokens", 16)),
+        ):
+            item = json.loads(json.dumps(valid))
+            mutation(item["data"]["responseChunk"]["usage"])
+            malformed_cases.append((label, [self.call_start(0), item], "copilot:usage-malformed"))
+        missing_id = json.loads(json.dumps(valid))
+        missing_id.pop("id")
+        collision = json.loads(json.dumps(valid))
+        collision["data"]["responseChunk"]["usage"]["completion_tokens"] = 6
+        collision["data"]["responseChunk"]["usage"]["total_tokens"] = 16
+        contradictory = json.loads(json.dumps(valid))
+        contradictory["data"]["responseUsage"] = {
+            "prompt_tokens": 10,
+            "completion_tokens": 6,
+            "total_tokens": 16,
+        }
+        cases = [
+            *malformed_cases,
+            ("missing-id", [self.call_start(0), missing_id], "copilot:usage-ambiguous"),
+            ("colliding-id", [self.call_start(0), valid, collision], "copilot:usage-ambiguous"),
+            ("incomplete", [self.call_start(0), self.call_start(1), valid], "copilot:usage-incomplete"),
+            ("response-contradiction", [self.call_start(0), contradictory], "copilot:usage-contradiction"),
+        ]
+        for label, values, reason in cases:
+            with self.subTest(label=label):
+                self.assert_usage_refusal(values, reason)
+
+    def test_guard_e_legacy_shape_a_migrates_without_losing_compatibility(self):
+        candidate = [
+            self.call_start(0, [{"toolCallId": "current-skill-call"}]),
+            {
+                "type": "assistant.message",
+                "data": {
+                    "outputTokens": 15,
+                    "usage": {"input_tokens": 10, "output_tokens": 15},
+                    "toolRequests": [{"toolCallId": "current-skill-call"}],
+                },
+            },
+            {"type": "assistant.message", "data": {"outputTokens": 0, "toolRequests": []}},
+        ]
+        no_candidate = [
+            self.call_start(0),
+            {
+                "type": "assistant.message",
+                "data": {
+                    "outputTokens": 15,
+                    "usage": {"input_tokens": 10, "output_tokens": 15},
+                    "toolRequests": [],
+                },
+            },
+            {"type": "assistant.message", "data": {"outputTokens": 0, "toolRequests": []}},
+        ]
+        comparator = [
+            self.call_start(0),
+            {"type": "assistant.message", "data": {"outputTokens": 5}},
+            {"type": "session.usage_checkpoint", "usage": {"total_tokens": 15}},
+        ]
+        run = [
+            {"type": "session.start", "data": {"model": "fixture-model"}},
+            {"type": "session.usage_checkpoint", "usage": {"total_tokens": 15}},
+        ]
+        token_over = [
+            {"type": "session.start", "data": {"model": "fixture-model"}},
+            {"type": "session.usage_checkpoint", "usage": {"total_tokens": 1000}},
+        ]
+        cases = (
+            ("candidate", candidate, 25, {"turns": 1, "input_tokens": 10, "output_tokens": 15, "total_tokens": 25, "tool_calls": 1}),
+            ("no-candidate", no_candidate, 25, {"turns": 1, "input_tokens": 10, "output_tokens": 15, "total_tokens": 25, "tool_calls": 0}),
+            ("comparator", comparator, 15, {"turns": 1, "input_tokens": 10, "output_tokens": 5, "total_tokens": 15, "tool_calls": 0}),
+            ("run", run, 15, None),
+            ("token-over", token_over, 1000, None),
+        )
+        for label, values, expected_token, expected_detailed in cases:
+            with self.subTest(label=label, reader="token"):
+                self.assertEqual(
+                    adapter_module.native_token_usage("copilot", values), expected_token
+                )
+            with self.subTest(label=label, reader="detailed"):
+                self.assertEqual(
+                    adapter_module.native_detailed_usage("copilot", values),
+                    expected_detailed,
+                )
+
+    def test_guard_f_copilot_readers_share_one_usage_authority(self):
+        values = [self.call_start(0), self.call_success("usage-0", 8349, 103)]
+        authority = adapter_module.copilot_usage(values)
+        detailed = adapter_module.native_detailed_usage("copilot", values)
+        self.assertEqual(authority, detailed)
+        self.assertEqual(adapter_module.native_token_usage("copilot", values), 8452)
+        self.assertEqual(detailed["total_tokens"], 8452)
+
+    def test_guard_g_completeness_and_shape_coexistence_are_fail_closed(self):
+        shape_b = self.call_success("usage-0", 10, 15)
+        equal_shape_a = {
+            "type": "assistant.message",
+            "data": {"usage": {"input_tokens": 10, "output_tokens": 15}},
+        }
+        unequal_components = {
+            "type": "assistant.message",
+            "data": {"usage": {"input_tokens": 15, "output_tokens": 10}},
+        }
+        total_only = {
+            "type": "session.usage_checkpoint",
+            "usage": {"total_tokens": 25},
+        }
+        pair_conflict = {
+            "type": "assistant.message",
+            "data": {"usage": {"input_tokens": 9, "output_tokens": 16}},
+        }
+        total_conflict = {
+            "type": "session.usage_checkpoint",
+            "usage": {"total_tokens": 26},
+        }
+        bare_output = {
+            "type": "assistant.message",
+            "data": {"outputTokens": 15},
+        }
+        expected = {
+            "turns": 1,
+            "input_tokens": 10,
+            "output_tokens": 15,
+            "total_tokens": 25,
+            "tool_calls": 0,
+        }
+        self.assertEqual(
+            adapter_module.copilot_usage([self.call_start(0), equal_shape_a, shape_b]),
+            expected,
+        )
+        self.assertEqual(
+            adapter_module.copilot_usage([self.call_start(0), total_only, shape_b]),
+            expected,
+        )
+        for label, values, reason in (
+            ("started-without-success", [self.call_start(0)], "copilot:usage-incomplete"),
+            ("unequal-components", [self.call_start(0), unequal_components, shape_b], "copilot:usage-contradiction"),
+            ("total-only-conflict", [self.call_start(0), total_conflict, shape_b], "copilot:usage-contradiction"),
+            ("pair-conflict", [self.call_start(0), equal_shape_a, pair_conflict], "copilot:usage-ambiguous"),
+            ("mixed-shape-conflict", [self.call_start(0), equal_shape_a, total_conflict], "copilot:usage-contradiction"),
+            ("bare-output", [bare_output], "copilot:usage-incomplete"),
+        ):
+            with self.subTest(label=label):
+                self.assert_usage_refusal(values, reason)
 
 
 unittest.main(verbosity=2)
