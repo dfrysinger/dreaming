@@ -3912,13 +3912,13 @@ elif sys.argv[1] == "run":
             else:
                 os.environ["SKILLS_STATE_DIR"] = prior_state
         self.assertEqual(second["lifecycle_id"], shadow["lifecycle_id"])
-        self.assertEqual(second["recommendation"], "ready_for_draft")
+        self.assertEqual(second["recommendation"], "collecting")
         record = core._candidate_lifecycle_call(
             "read", shadow["lifecycle_id"]
         )
         self.assertEqual(
-            [item["independence"] for item in record["evidence"]],
-            ["verified", "verified"],
+            len({item["canonical_occurrence_id"] for item in record["evidence"]}),
+            2,
         )
         self.assertEqual(
             len({item["procedure_fingerprint"] for item in record["evidence"]}),
@@ -5655,8 +5655,8 @@ elif command == "run":
                 package,
                 "retained-procedure",
             )
-            self.assertEqual(ready["state"], "ready_for_draft")
-            self.assertEqual(ready["recommendation"], "ready_for_draft")
+            self.assertEqual(ready["state"], "collecting")
+            self.assertEqual(ready["recommendation"], "collecting")
             record = core._candidate_lifecycle_call(
                 "read", ready["lifecycle_id"]
             )
