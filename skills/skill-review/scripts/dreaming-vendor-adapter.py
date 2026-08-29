@@ -1399,6 +1399,12 @@ def sandbox_profile(
         rules.append(
             f'(allow file-read-metadata (literal "{sandbox_quote(parent)}"))'
         )
+    # The executable's own path components must stay stat-able or CFBundle
+    # cannot represent the main bundle and the platform trust path aborts.
+    for parent in binary_path.resolve().parents:
+        rules.append(
+            f'(allow file-read-metadata (literal "{sandbox_quote(parent)}"))'
+        )
     if vendor == "claude":
         for path in (
             real_home / ".claude.json",

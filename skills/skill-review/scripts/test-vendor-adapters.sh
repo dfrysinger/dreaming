@@ -1949,6 +1949,12 @@ print(json.dumps({"ok": True}))
             profile,
         )
         self.assertNotIn("Library/Keychains/login.keychain-db", profile)
+        for parent in Path(self.env["DREAMING_COPILOT_BIN"]).resolve().parents:
+            self.assertIn(
+                "(allow file-read-metadata (literal "
+                f'"{vendor_module.sandbox_quote(parent)}"))',
+                profile,
+            )
         def author_args(token_budget, result_path, draft_path):
             return argparse.Namespace(
                 vendor="copilot",
@@ -2404,6 +2410,75 @@ print(json.dumps({"ok": True}))
                 stderr=subprocess.PIPE,
             )
             self.assertNotEqual(denied_home.returncode, 0)
+
+    def test_executor_sandbox_allows_executable_parent_metadata_only(self):
+        work = self.case / "parent-metadata-work"
+        work.mkdir()
+        tool_dir = self.case / "denied-tree" / "bin"
+        tool_dir.mkdir(parents=True)
+        tool = tool_dir / "fixture-tool"
+        tool.write_text(
+            "#!/bin/sh\n"
+            '/usr/bin/stat -f %m "$1" >/dev/null 2>&1 || exit 3\n'
+            '/bin/ls "$1" >/dev/null 2>&1 && exit 4\n'
+            "echo initialized\n"
+        )
+        tool.chmod(0o755)
+        home = Path.home().resolve()
+        self.assertTrue(tool.resolve().is_relative_to(home))
+        profile_path = vendor_module.sandbox_profile(work, str(tool), [], "isolated")
+        profile = profile_path.read_text()
+        self.assertIn(
+            f'(deny file-read* file-write* (subpath "{home}"))', profile
+        )
+        for parent in tool.resolve().parents:
+            quoted = vendor_module.sandbox_quote(parent)
+            self.assertIn(
+                f'(allow file-read-metadata (literal "{quoted}"))', profile
+            )
+            for forbidden in (
+                f'(allow file-read* (literal "{quoted}"))',
+                f'(allow file-read-data (literal "{quoted}"))',
+                f'(allow file-read* file-write* (literal "{quoted}"))',
+                f'(allow file-read* (subpath "{quoted}"))',
+                f'(allow file-read* file-write* (subpath "{quoted}"))',
+            ):
+                self.assertNotIn(forbidden, profile)
+        environment = {**os.environ, "HOME": str(home)}
+        executed = subprocess.run(
+            [
+                "/usr/bin/sandbox-exec",
+                "-f",
+                str(profile_path),
+                str(tool),
+                str(tool_dir),
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(executed.returncode, 0, executed.stderr)
+        self.assertIn("initialized", executed.stdout)
+        private = self.case / "private-content"
+        private.mkdir()
+        canary = private / "transcript.jsonl"
+        canary.write_text("private\n")
+        denied = subprocess.run(
+            [
+                "/usr/bin/sandbox-exec",
+                "-f",
+                str(profile_path),
+                "/bin/cat",
+                str(canary),
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(denied.returncode, 0)
+        vendor_module.prove_boundary(
+            work, environment, str(tool), [str(private)], "isolated"
+        )
 
     def test_publishers_reconcile_one_immutable_bundle(self):
         paths = module.RuntimePaths(
