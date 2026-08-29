@@ -306,34 +306,46 @@ A complete trial result and a complete comparator result. Not "a validator
 error" — the run cannot produce evidence, and the comparator cannot produce a
 verdict, on the only CLI the host has.
 
-**2. What caused the block?**
-The exact-type constraint first refused 13 real types, and — behind it — the generic
-recursive `usage` scan is the sole, accidental source of Copilot token numbers,
-which returns nothing for detailed usage on this CLI version. During successor
-proof, the same constraint correctly refused one newly observed
-`1.0.82-2` policy-provenance event.
+**2. Which constraint creates the blocker, and where did it come from?**
+The exact-literal vocabulary is a fail-closed policy boundary: every transport
+event must be reviewed before it can enter the adapter. It first refused 13
+measured `1.0.82-1` types and, during successor proof, correctly refused one
+newly measured `1.0.82-2` policy-provenance type. Behind the original refusal,
+the inherited generic recursive `usage` scan was the sole accidental source of
+Copilot token numbers and returned no detailed usage. The constraint remains
+binding, but the assumption that its 69-member reviewed vocabulary was complete
+for the current CLI was invalidated by the exact live refusal.
 
-**3. What is rejected outright?**
-Removing or weakening fail-closed validation: no prefix admission, no
-passthrough, no unknown-event tolerance, and no silent `max`/fallback across
-contradictory usage authorities. Also rejected: a registry, a second parser, or
-a version-keyed vocabulary service for a single current caller. Also rejected:
-inventing a name for an unobserved failure event, or tolerating a model call
-whose token cost was never reported.
+**3. What concrete invariant fails if the constraint changes?**
+Weakening exact admission would allow an unreviewed future event shape to reach
+the adapter without a design decision, violating I2's reviewed-vocabulary
+boundary and the no-raw-output refusal contract. Leaving the reviewed
+managed-settings event excluded fails the supported-caller invariant instead:
+an otherwise valid `1.0.82-2` run intermittently cannot produce either a trial
+result or comparator verdict even though the generated schema proves that event
+claims no semantic or token authority. The invariant-preserving change is one
+literal member plus an inertness guard, not a weaker admission rule.
 
-**4. What is selected?**
-The existing validator plus one explicit current-Copilot usage adapter: grow the
-literal set by 14, add one narrow outer-event iterator, and add **one canonical
-parser per shape** — the current Shape B authority and a canonical Shape A
-authority — behind a single aggregation entry point that both the run and the
-comparator consume. Two parsers, one authority, one entry point, no registry and
-no new module. The fourteenth type is opaque metadata whose public generated
-schema is guarded with nested decoys; it adds no semantic reader.
+**4. What is the simplest design without the invalidated constraint?**
+Treat the predecessor's 69-member set as measured history rather than a complete
+current-version list. Add only `session.managed_settings_resolved` to the
+existing set and prove its complete generated-schema shape inert under the
+already-implemented outer-event readers. The Round-2 Shape A/Shape B usage
+architecture remains unchanged.
 
-**5. What would reopen this?**
+**5. Which option has fewer trusted components and maintenance surfaces?**
+The selected 69 → 70 literal edit plus one fixture reuses the existing
+validator, iterator, readers, error surfaces, tests, and digest pin. Prefix
+admission, unknown-event passthrough, a version-keyed registry, or a
+managed-settings parser would each add a trusted rule or owner and protect no
+supported behavior.
+
+**Revisit conditions.**
 A CLI version where usage is cumulative, where transport events lack stable
-ids, where the usage object appears nested inside another admitted event, or
-where a second independent native token total appears. Each has a check.
+ids, where the usage object appears nested inside another admitted event, where
+a second independent native token total appears, where a generated
+managed-settings schema adds a declared usage path, or where another exact
+managed-settings event is emitted reopens this record.
 
 The selected Round-3 architecture is otherwise ready to become **CLEAR**. G2
 establishes a deterministic, order-safe aggregation
@@ -360,9 +372,9 @@ token field at a declared usage path reopens it.
 
 | # | Layer | Location | Effect |
 |---|---|---|---|
-| L1 | Exact vocabulary set | `:157-214`, 56 members | Grows 56 → 70: exactly the 14. Only edit to the vocabulary. |
-| L2 | Native admission | `validate_native_schema:5203-5236`; callers `:4279`, `:5813` | Unchanged code; refusal set shrinks by exactly 14. |
-| L3 | Session transcript admission | `_copilot_events:620-642`, `unsupported-source-schema` | Same constant, second consumer, also widened. Its `mapping` (`:626-634`) has no entry for any of the 14 and unmapped types are skipped at `:644`, so projection is unchanged — asserted, not assumed. |
+| L1 | Exact vocabulary set | predecessor `540fafb`, 69 members | Grows 69 → 70 by adding only `session.managed_settings_resolved`; cumulatively the set is the original 56 plus the 14 measured additions. |
+| L2 | Native admission | `validate_native_schema:5203-5236`; callers `:4279`, `:5813` | Unchanged code; cumulative refusal set shrinks by 14 from the original base, and by only the managed-settings event from predecessor `540fafb`. |
+| L3 | Session transcript admission | `_copilot_events:620-642`, `unsupported-source-schema` | Same constant, second consumer, widened by the same one-member Round-3 delta. Its `mapping` (`:626-634`) has no entry for any of the 14 cumulative additions and unmapped types are skipped at `:644`, so projection is unchanged — asserted, not assumed. |
 | L4 | Model identity | `native_model:5275-5308` | Copilot branch scoped to outer events. Measured identical (single 1→1, multi 1→1 distinct models). Claude/Codex untouched. |
 | L5 | Token usage | `native_token_usage:5310-5342` | Copilot branch replaced by the new authority. Claude/Codex generic path untouched. |
 | L6 | Detailed usage, turns, tool calls | `native_detailed_usage:5344-5432`; `turns += 1` at `:5359` | Copilot usage replaced by the new authority; turns stay exact outer `model.call_start`; tool calls stay exact outer `data.toolRequests`. Measured identical outer-vs-recursive (0→0, 3→3). |
@@ -953,9 +965,10 @@ None of the three is exercised by any existing fixture.
 Guards are written and executed **before** the production edit. Each is expected
 to be red except where noted.
 
-- **G-A — vocabulary and sentinel.** Assert the 14 are currently refused
-  (red after the change becomes green), and that a sentinel type outside the set
-  is refused both before and after (green throughout). Guards AC-2, AC-3.
+- **G-A — Round-2 vocabulary and sentinel (already executed).** The 13
+  `1.0.82-1` additions were refused before the Round-2 edit and are accepted at
+  predecessor `540fafb`; a sentinel outside the set remains refused throughout.
+  Guards the first 13 assertions of AC-2 and AC-3.
 - **G-B — direct-versus-nested iterator.** Assert `copilot_outer_events` yields
   transport events only, using a stream whose events embed objects that would
   match every Copilot type predicate if recursion were used. Guards AC-6, AC-7,
@@ -982,7 +995,9 @@ to be red except where noted.
   Shape B; conflicting Shape A sources; a bare `data.outputTokens`. Each asserts
   the exact refusal reason or the exact accepted triple. Guards AC-18, AC-27
   through AC-30, T19, T20, T21.
-- **G-H — managed-settings metadata.** Add one complete
+- **G-H — managed-settings metadata.** Before the Round-3 production edit,
+  assert that `session.managed_settings_resolved` alone is refused while the 13
+  Round-2 literals are accepted and the sentinel remains refused. Then add one complete
   `session.managed_settings_resolved` fixture using the public generated schema,
   including `data.settings` with nested event-, tool-, and usage-shaped decoys.
   Compare every Copilot semantic reader and comparator gate with and without the
@@ -1114,13 +1129,14 @@ synthetic ids. They are not hand-invented shapes and carry no captured content.
 This slice is done when, and only when, all of the following hold. It is
 specific to this work order.
 
-1. Guards G-A through G-H exist, were executed before the applicable production
-   edit, and
-   their pre-change red or green signal was recorded — including G-E's split
-   signal, green for stream success and red for the migrated numbers, and G-H's
-   red signal for the fourteenth exact type.
-2. `COPILOT_EVENT_TYPES` contains exactly its previous 56 members plus exactly
-   the 14 measured types — 70 literal members — and no other vocabulary edit.
+1. Guards G-A through G-G retain their recorded pre-Round-2 signals, and G-H is
+   executed before the Round-3 production edit. G-E retains its split signal,
+   green for stream success and red for migrated numbers; G-H records the
+   fourteenth type red, the 13 predecessor additions green, and the sentinel
+   green-by-refusal before the edit.
+2. `COPILOT_EVENT_TYPES` grows from the predecessor's 69 members to 70 by adding
+   only `session.managed_settings_resolved`; cumulatively it contains the
+   original 56 plus exactly the 14 measured additions.
 3. `validate_native_schema` is unmodified.
 4. `copilot_outer_events` exists, yields transport events only, and every
    Copilot branch of `native_model`, `native_token_usage`,
