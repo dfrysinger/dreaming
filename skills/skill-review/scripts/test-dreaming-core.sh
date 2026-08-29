@@ -2825,11 +2825,7 @@ class RuntimeTest(unittest.TestCase):
             [("capability-change-executor", legacy)],
         )
         self.assertEqual(result["status"], "accepted")
-        attempt = next(
-            item
-            for item in json.loads(self.paths.attempts.read_text())
-            if item["profile_id"] == receipt["profiles"][0]["profile_id"]
-        )
+        attempt = json.loads(self.paths.attempts.read_text())[-1]
         self.assertEqual(
             attempt["task_profile_delivery"],
             "unsupported:profiled-by-other-executor",

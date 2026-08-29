@@ -1727,7 +1727,10 @@ class DreamingRuntime:
             if isinstance(event, dict) and isinstance(event.get("source_event_id"), str)
         }
         profiles: list[dict[str, Any]] = []
-        legacy_profiles = all(isinstance(profile, dict) and "goal_event_id" not in profile for profile in model_profiles)
+        legacy_profiles = bool(model_profiles) and all(
+            isinstance(profile, dict) and "goal_event_id" not in profile
+            for profile in model_profiles
+        )
         expected_model_keys = {
             "source_event_ids", "goal_event_id", "task_type", "abstract_summary",
             "reuse_value", "procedure", "confidence", "sensitive_source", "task_state",
@@ -3823,6 +3826,29 @@ class DreamingRuntime:
         lifecycle_id = None
         expected_version = None
         expected_identity = None
+        if audit is None:
+            listing = self._candidate_lifecycle_call("list")
+            for item in listing.get("records", []):
+                if not isinstance(item, dict) or not isinstance(
+                    item.get("lifecycle_id"), str
+                ):
+                    raise RuntimeFailure(
+                        "candidate-lifecycle-failed",
+                        "candidate listing is malformed",
+                    )
+                record = self._candidate_lifecycle_call(
+                    "read", item["lifecycle_id"]
+                )
+                if (
+                    record.get("proposed_name") == artifact["skill_name"]
+                    and record.get("procedure") == procedure
+                    and record.get("state")
+                    in {"collecting", "ready_for_draft", "expired", "rejected"}
+                ):
+                    lifecycle_id = record["lifecycle_id"]
+                    expected_version = record["record_version"]
+                    expected_identity = candidate_record_digest(record)
+                    break
         if selected_group_id is not None:
             if (
                 selected_group is None
