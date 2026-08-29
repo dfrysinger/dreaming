@@ -461,6 +461,53 @@ class VendorAdapterTest(unittest.TestCase):
         )
         self.assertEqual(context["profiles"], [reusable_profile])
 
+    def test_review_preserves_occurrence_boundary(self):
+        (
+            snapshot,
+            _snapshot_value,
+            receipt_path,
+            _receipt,
+            reusable_profile,
+        ) = self._task_profile_review_fixture()
+        occurrence_context = self.case / "occurrence-context.json"
+        occurrence_context.write_text(
+            json.dumps(
+                {
+                    "review_contract": "profile-catalog-review-occurrence-v1",
+                    "selected_profile_id": reusable_profile["profile_id"],
+                    "selected_task_key": reusable_profile["task_key"],
+                    "prior_overlaps": [],
+                }
+            )
+        )
+        result_path = self.case / "occurrence-result.json"
+        response = self.run_adapter(
+            "copilot",
+            "review-executor",
+            "run",
+            "--snapshot",
+            snapshot,
+            "--result",
+            result_path,
+            "--task-profile-receipt",
+            receipt_path,
+            "--task-profile-executor",
+            "copilot",
+            "--task-profile-id",
+            reusable_profile["profile_id"],
+            "--task-occurrence-context",
+            occurrence_context,
+        )
+        expected = {
+            "relation": "new-occurrence",
+            "prior_canonical_occurrence_ids": [],
+        }
+        self.assertEqual(response["occurrence_boundary"], expected)
+        self.assertEqual(
+            json.loads(result_path.read_text())["occurrence_boundary"],
+            expected,
+        )
+
     def test_review_omits_context_when_receipt_has_no_reusable_profiles(self):
         (
             snapshot,
@@ -1031,6 +1078,16 @@ if vendor == "codex" and "--output-last-message" in args:
             "routing_reason":"no durable procedure","artifact":None,
             "evidence_event_ids":[]}
     )
+    if (
+          isinstance(payload, dict)
+          and "result_schema" in prompt
+          and "occurrence_boundary"
+          in json.loads(prompt)["result_schema"].get("required", [])
+    ):
+          payload["occurrence_boundary"] = {
+            "relation": "new-occurrence",
+            "prior_canonical_occurrence_ids": [],
+          }
     target.write_text(json.dumps(payload))
     raise SystemExit()
 if ("-p" in args or "--print" in args) and "plugin" not in args:
@@ -1088,6 +1145,16 @@ if ("-p" in args or "--print" in args) and "plugin" not in args:
             "routing_reason":"no durable procedure","artifact":None,
             "evidence_event_ids":[]}
     )
+    if (
+        isinstance(payload, dict)
+        and "result_schema" in prompt
+        and "occurrence_boundary"
+        in json.loads(prompt)["result_schema"].get("required", [])
+    ):
+        payload["occurrence_boundary"] = {
+          "relation": "new-occurrence",
+          "prior_canonical_occurrence_ids": [],
+        }
     print(json.dumps({"result":payload}))
     raise SystemExit()
 if "plugin" in args and ("marketplace" in args and "add" in args):

@@ -2552,6 +2552,28 @@ def executor_run(args: argparse.Namespace) -> None:
         "artifact": model_result["artifact"],
         "evidence_event_ids": model_result["evidence_event_ids"],
     }
+    if (
+        task_profile_context is not None
+        and isinstance(task_profile_context.get("occurrence_context"), dict)
+    ):
+        boundary = model_result.get("occurrence_boundary")
+        if (
+            not isinstance(boundary, dict)
+            or set(boundary)
+            != {"relation", "prior_canonical_occurrence_ids"}
+            or boundary.get("relation")
+            not in {"same-occurrence", "new-occurrence", "boundary-conflict"}
+            or not isinstance(boundary.get("prior_canonical_occurrence_ids"), list)
+            or len(boundary["prior_canonical_occurrence_ids"])
+            != len(set(boundary["prior_canonical_occurrence_ids"]))
+            or any(
+                not isinstance(item, str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", item)
+                for item in boundary["prior_canonical_occurrence_ids"]
+            )
+        ):
+            raise AdapterError("malformed-executor-result", "occurrence_boundary")
+        final["occurrence_boundary"] = boundary
     atomic_json(Path(args.result), final)
     emit({"ok": True, **final})
 
