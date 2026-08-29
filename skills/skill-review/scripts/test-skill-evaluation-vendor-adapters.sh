@@ -2152,6 +2152,63 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
             with self.subTest(label=label):
                 self.assert_usage_refusal(values, reason)
 
+    def test_guard_d_response_usage_cross_check_always_refuses_contradiction(self):
+        valid = self.call_success("usage-0", 10, 5)
+        expected = {
+            "turns": 1,
+            "input_tokens": 10,
+            "output_tokens": 5,
+            "total_tokens": 15,
+            "tool_calls": 0,
+        }
+        self.assertEqual(
+            adapter_module.copilot_usage([self.call_start(0), valid]), expected
+        )
+        cases = (
+            ("missing-prompt", {"completion_tokens": 5, "total_tokens": 15}),
+            ("missing-completion", {"prompt_tokens": 10, "total_tokens": 15}),
+            ("missing-total", {"prompt_tokens": 10, "completion_tokens": 5}),
+            ("bool-prompt", {"prompt_tokens": True, "completion_tokens": 5, "total_tokens": 6}),
+            ("bool-completion", {"prompt_tokens": 10, "completion_tokens": True, "total_tokens": 11}),
+            ("bool-total", {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": True}),
+            ("negative-prompt", {"prompt_tokens": -1, "completion_tokens": 5, "total_tokens": 4}),
+            ("negative-completion", {"prompt_tokens": 10, "completion_tokens": -1, "total_tokens": 9}),
+            ("negative-total", {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": -1}),
+            ("broken-sum", {"prompt_tokens": 10, "completion_tokens": 5, "total_tokens": 16}),
+            ("different-prompt", {"prompt_tokens": 9, "completion_tokens": 6, "total_tokens": 15}),
+            ("different-completion", {"prompt_tokens": 10, "completion_tokens": 4, "total_tokens": 14}),
+            ("different-total", {"prompt_tokens": 10, "completion_tokens": 6, "total_tokens": 16}),
+            ("wrong-shape-none", None),
+            ("wrong-shape-list", []),
+        )
+        for label, response_usage in cases:
+            with self.subTest(label=label):
+                item = json.loads(json.dumps(valid))
+                item["data"]["responseUsage"] = response_usage
+                self.assert_usage_refusal(
+                    [self.call_start(0), item], "copilot:usage-contradiction"
+                )
+
+    def test_guard_d_real_result_usage_is_not_a_token_authority(self):
+        result_usage = {
+            "type": "result",
+            "usage": {
+                "codeChanges": 1,
+                "premiumRequests": 2,
+                "sessionDurationMs": 3,
+                "totalApiDurationMs": 4,
+            },
+        }
+        values = [
+            self.call_start(0),
+            self.call_success("usage-0", 10, 5),
+        ]
+        self.assertEqual(
+            adapter_module.copilot_usage([*values, result_usage]),
+            adapter_module.copilot_usage(values),
+        )
+        self.assertIsNone(adapter_module.copilot_usage([result_usage]))
+
     def test_guard_e_legacy_shape_a_migrates_without_losing_compatibility(self):
         candidate = [
             self.call_start(0, [{"toolCallId": "current-skill-call"}]),

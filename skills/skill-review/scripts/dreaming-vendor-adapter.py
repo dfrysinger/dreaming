@@ -5264,7 +5264,11 @@ def copilot_call_usage(
             copilot_usage_error("usage-malformed")
         triple = copilot_usage_triple(response_chunk.get("usage"))
         if "responseUsage" in data:
-            if copilot_usage_triple(data["responseUsage"]) != triple:
+            try:
+                response_usage = copilot_usage_triple(data["responseUsage"])
+            except AdapterError:
+                copilot_usage_error("usage-contradiction")
+            if response_usage != triple:
                 copilot_usage_error("usage-contradiction")
         event_id = event.get("id")
         if not isinstance(event_id, str) or not event_id:
