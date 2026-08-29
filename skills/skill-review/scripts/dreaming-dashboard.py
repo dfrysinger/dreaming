@@ -79,6 +79,7 @@ PREVIEW_ELIGIBILITY_MARGIN_SECONDS = 10 * 60
 PREVIEW_RELEASE_RESERVE_SECONDS = 2
 DEFAULT_LIMIT = 25
 MAX_LIMIT = 100
+TASK_OPPORTUNITY_CAPACITY_DEFAULTS = {"profiles": 100, "reviews": 25}
 EVALUATION_SIDECARS = {
     ".agent-created",
     ".agent-created.json",
@@ -2683,6 +2684,20 @@ class DashboardData:
             ),
             key=lambda value: parse_time(value) or 0,
         )
+        names = self._dream_names()
+        evidence_items = [
+            {
+                "evidence_id": item["evidence_id"],
+                "task_key": safe_text(item["task_key"], 512),
+                "session_id": candidate_session_id(item),
+                "dream_name": self._dream_name(candidate_session_id(item), names),
+                "observed_at": candidate_occurrence_time(item),
+                "independence": item.get("independence", "canonical-occurrence"),
+                "canonical_occurrence_id": item.get("canonical_occurrence_id"),
+                "summary": safe_text(item["summary"], 4000),
+            }
+            for item in evidence
+        ]
         view = {
             "lifecycle_id": record["lifecycle_id"],
             "status": "shadow" if shadow_only else "lifecycle",
@@ -2725,6 +2740,7 @@ class DashboardData:
                 ),
                 "current_canonical_occurrences": len(current_occurrences),
             },
+            "evidence_items": evidence_items,
             "freshness": {
                 "created_at": lifecycle["created_at"],
                 "last_supported_at": lifecycle["last_supported_at"],
@@ -2804,7 +2820,6 @@ class DashboardData:
         if not detail:
             return view
         procedure = record["procedure"]
-        names = self._dream_names()
         return {
             **view,
             "procedure": {
@@ -2816,22 +2831,6 @@ class DashboardData:
                 ],
                 "match_fingerprint": procedure["match_fingerprint"],
             },
-            "evidence_items": [
-                {
-                    "evidence_id": item["evidence_id"],
-                    "task_key": safe_text(item["task_key"], 512),
-                    "session_id": candidate_session_id(item),
-                    "dream_name": self._dream_name(candidate_session_id(item), names),
-                    "observed_at": candidate_occurrence_time(item),
-                    "independence": item.get(
-                        "independence",
-                        "canonical-occurrence",
-                    ),
-                    "canonical_occurrence_id": item.get("canonical_occurrence_id"),
-                    "summary": safe_text(item["summary"], 4000),
-                }
-                for item in evidence
-            ],
             "candidate_revisions": [
                 {
                     "candidate_id": item["candidate_id"],
@@ -3517,6 +3516,50 @@ class DashboardData:
             "wrong-or-incomplete-skill": 0,
             "no-covering-skill": 0,
         }
+        occurrence_counts = {
+            "resolutions": 0,
+            "current_resolutions": 0,
+            "canonical_occurrences": 0,
+            "same_occurrence": 0,
+            "new_occurrence": 0,
+            "boundary_conflict": 0,
+            "boundary_unresolved": 0,
+        }
+        occurrence_by_resolution: dict[str, dict[str, Any]] = {}
+        all_occurrence_resolutions: set[str] = set()
+        superseded_resolutions: set[str] = set()
+        try:
+            occurrences = load_task_occurrences(occurrences_root)
+            all_occurrence_resolutions = {
+                item["resolution_sha256"] for item in occurrences
+            }
+            superseded_resolutions = {
+                item["supersedes_resolution_sha256"]
+                for item in occurrences
+                if item["supersedes_resolution_sha256"] is not None
+            }
+            current = [
+                item
+                for item in occurrences
+                if item["resolution_sha256"] not in superseded_resolutions
+            ]
+            occurrence_by_resolution = {
+                item["resolution_sha256"]: item for item in current
+            }
+            occurrence_counts["resolutions"] = len(occurrences)
+            occurrence_counts["current_resolutions"] = len(current)
+            occurrence_counts["canonical_occurrences"] = len(
+                {
+                    item["canonical_occurrence_id"]
+                    for item in current
+                    if item["canonical_occurrence_id"] is not None
+                }
+            )
+            for item in current:
+                occurrence_counts[item["boundary_relation"].replace("-", "_")] += 1
+        except TaskOccurrenceError as error:
+            errors.append(f"task-occurrence-invalid:{error.reason}")
+
         audited_profiles: set[str] = set()
         current_dispositions = regular_json_paths(
             dispositions_root / "v3", "profile-audit-disposition"
@@ -3533,6 +3576,34 @@ class DashboardData:
                 validated = validate_profile_audit_disposition(
                     disposition, receipt=receipt, profile=profile
                 )
+                if validated["profile_audit_contract_version"] == 3:
+                    resolution_sha256 = validated["occurrence_resolution_sha256"]
+                    resolution = occurrence_by_resolution.get(resolution_sha256)
+                    if resolution is None:
+                        reason = (
+                            "disposition-occurrence-superseded"
+                            if resolution_sha256 in all_occurrence_resolutions
+                            and resolution_sha256 in superseded_resolutions
+                            else "disposition-occurrence-unbound"
+                        )
+                        raise ProfileAuditDispositionError(reason)
+                    if any(
+                        validated[field] != resolution[field]
+                        for field in (
+                            "profile_id",
+                            "profile_sha256",
+                            "task_key",
+                            "profile_receipt_sha256",
+                            "snapshot_sha256",
+                            "source_revision",
+                            "qualified_session_id",
+                            "canonical_occurrence_id",
+                            "boundary_relation",
+                        )
+                    ):
+                        raise ProfileAuditDispositionError(
+                            "disposition-occurrence-mismatch"
+                        )
                 if profile_id in audited_profiles:
                     raise ProfileAuditDispositionError("duplicate-profile-disposition")
                 audited_profiles.add(profile_id)
@@ -3552,41 +3623,6 @@ class DashboardData:
             profile_counts["reusable"] - profile_counts["audited"]
         )
 
-        occurrence_counts = {
-            "resolutions": 0,
-            "current_resolutions": 0,
-            "canonical_occurrences": 0,
-            "same_occurrence": 0,
-            "new_occurrence": 0,
-            "boundary_conflict": 0,
-            "boundary_unresolved": 0,
-        }
-        try:
-            occurrences = load_task_occurrences(occurrences_root)
-            superseded = {
-                item["supersedes_resolution_sha256"]
-                for item in occurrences
-                if item["supersedes_resolution_sha256"] is not None
-            }
-            current = [
-                item
-                for item in occurrences
-                if item["resolution_sha256"] not in superseded
-            ]
-            occurrence_counts["resolutions"] = len(occurrences)
-            occurrence_counts["current_resolutions"] = len(current)
-            occurrence_counts["canonical_occurrences"] = len(
-                {
-                    item["canonical_occurrence_id"]
-                    for item in current
-                    if item["canonical_occurrence_id"] is not None
-                }
-            )
-            for item in current:
-                occurrence_counts[item["boundary_relation"].replace("-", "_")] += 1
-        except TaskOccurrenceError as error:
-            errors.append(f"task-occurrence-invalid:{error.reason}")
-
         accounting_totals = {
             "queue": {},
             "profile_operations": {},
@@ -3595,16 +3631,16 @@ class DashboardData:
             "review_operations": {},
             "review_terminals": {},
         }
-        capacity_limits = {"profiles": None, "reviews": None}
+        capacity_limits = dict(TASK_OPPORTUNITY_CAPACITY_DEFAULTS)
         try:
             config = self._adapter_config()
             for config_name, projection_name, maximum in (
                 ("max_profiles_per_run", "profiles", 500),
                 ("max_reviews_per_run", "reviews", 25),
             ):
-                value = config.get(config_name)
-                if value is None:
-                    continue
+                value = config.get(
+                    config_name, TASK_OPPORTUNITY_CAPACITY_DEFAULTS[projection_name]
+                )
                 if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
                     raise ValueError(config_name)
                 capacity_limits[projection_name] = value
@@ -3697,17 +3733,11 @@ class DashboardData:
                 errors.append(f"candidate-invalid:{row['source']}:{row['state_reason']}")
                 continue
             candidate_states[row["state"]] += 1
-            try:
-                record = self._candidate_record(
-                    self._candidate_records_root() / f"{row['lifecycle_id']}.json"
-                )
-                current_candidate_occurrences.update(
-                    item["canonical_occurrence_id"]
-                    for item in record["evidence"]
-                    if isinstance(item.get("canonical_occurrence_id"), str)
-                )
-            except CandidateInvalid as error:
-                errors.append(f"candidate-invalid:{row['lifecycle_id']}:{error.reason}")
+            current_candidate_occurrences.update(
+                item["canonical_occurrence_id"]
+                for item in row["evidence_items"]
+                if isinstance(item.get("canonical_occurrence_id"), str)
+            )
 
         status = (
             "unhealthy"

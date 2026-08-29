@@ -52,6 +52,11 @@ paths = dashboard.DashboardPaths(
     repo / "skills/skill-review/assets/dashboard", token,
     state / "skill-review/candidates/v1/records", data / "candidates/v1/packages",
 )
+no_candidate_paths = dashboard.DashboardPaths(
+    state, control, control / "skill-review", orchestrator, data, skills, repo,
+    repo / "skills/skill-review/assets/dashboard", token,
+    state / "no-candidate-records", data / "candidates/v1/packages",
+)
 
 session_id = "copilot:dashboard-accounting"
 snapshot = {
@@ -237,7 +242,17 @@ assert (
 ), candidate
 print("PASS  current lifecycle source_session_id evidence remains dashboard-readable")
 
-view = dashboard.DashboardData(paths).task_opportunities()
+candidate_rows, _ = dashboard.DashboardData(paths).candidate_rows()
+assert (
+    candidate_rows[0]["evidence_items"][0]["canonical_occurrence_id"]
+    == resolution["canonical_occurrence_id"]
+), candidate_rows
+data_with_rows = dashboard.DashboardData(paths)
+data_with_rows.candidate_rows = lambda: (candidate_rows, "fixture")
+data_with_rows._candidate_record = lambda _path: (_ for _ in ()).throw(
+    AssertionError("task opportunities reread a candidate record")
+)
+view = data_with_rows.task_opportunities()
 assert view["status"] == "reconciled", view
 assert view["profiles"] == {
     "receipts": 1, "profiles": 1, "reusable": 1, "no_learning": 0,
@@ -250,7 +265,20 @@ assert view["accounting"]["terminal_totals"]["queue"] == {
     "cached-current-receipt": 1, "eligible-deferred": 1, "newly-attempted": 1,
 }, view
 assert view["accounting"]["capacity_limits"] == {"profiles": 100, "reviews": 25}, view
-print("PASS  valid owner receipts reconcile profiles, audit, occurrence, capacity, backlog, and terminals")
+print("PASS  valid owner receipts reconcile profiles, audit, occurrence, capacity, backlog, and terminals without rereading candidates")
+
+(state / "adapters.json").write_text("{}", encoding="utf-8")
+view = dashboard.DashboardData(no_candidate_paths).task_opportunities()
+assert (
+    view["status"] == "reconciled"
+    and view["candidates"]["records"] == 0
+    and view["accounting"]["capacity_limits"] == {"profiles": 100, "reviews": 25}
+), view
+print("PASS  missing capacity settings project scheduler-effective defaults")
+(state / "adapters.json").write_text(
+    json.dumps({"max_profiles_per_run": 100, "max_reviews_per_run": 25}),
+    encoding="utf-8",
+)
 
 tampered = dict(accounting_receipt)
 tampered["totals"] = {**tampered["totals"], "queue": {"newly-attempted": 99}}
@@ -268,14 +296,84 @@ assert view["status"] == "unhealthy" and any(
     error.startswith("profile-receipt-invalid:malformed.json") for error in view["errors"]
 ), view
 print("PASS  malformed profile authority remains explicitly unhealthy")
+(data / "task-profiles/v1" / "malformed.json").unlink()
 
-(data / "task-occurrences/v2" / f"{resolution['resolution_sha256'].removeprefix('sha256:')}.json").unlink()
-try:
-    dashboard.DashboardData(paths).candidate_detail(lifecycle_id)
-    raise AssertionError("candidate with missing occurrence authority was accepted")
-except dashboard.DashboardError as error:
-    assert error.code == "candidate_invalid" and error.sources == [
-        "evidence_occurrence_unbound"
-    ], error
-print("PASS  current lifecycle evidence without its immutable occurrence fails closed")
+resolution_path = (
+    data / "task-occurrences/v2"
+    / f"{resolution['resolution_sha256'].removeprefix('sha256:')}.json"
+)
+resolution_text = resolution_path.read_text(encoding="utf-8")
+resolution_path.unlink()
+view = dashboard.DashboardData(no_candidate_paths).task_opportunities()
+assert (
+    view["status"] == "unhealthy"
+    and view["profiles"]["audited"] == 0
+    and view["catalog_audit_outcomes"]["no-covering-skill"] == 0
+    and any("disposition-occurrence-unbound" in error for error in view["errors"])
+), view
+print("PASS  deleted disposition occurrence authority is unhealthy without candidates")
+resolution_path.write_text(resolution_text, encoding="utf-8")
+
+mismatched_resolution = occurrences.build_resolution(
+    profile=profile,
+    receipt=receipt,
+    relation="boundary-unresolved",
+    review_contract="fixture-review-contract",
+    review_executor="fixture-reviewer",
+    review_executor_identity={"adapter_id": "fixture-reviewer"},
+    decision_at="2026-08-28T12:03:00Z",
+)
+mismatched_resolution_path = (
+    data / "task-occurrences/v2"
+    / f"{mismatched_resolution['resolution_sha256'].removeprefix('sha256:')}.json"
+)
+mismatched_resolution_path.write_text(json.dumps(mismatched_resolution), encoding="utf-8")
+mismatched_disposition = {
+    **disposition,
+    "occurrence_resolution_sha256": mismatched_resolution["resolution_sha256"],
+}
+mismatched_disposition["disposition_sha256"] = audits._digest(
+    {
+        key: value
+        for key, value in mismatched_disposition.items()
+        if key != "disposition_sha256"
+    }
+)
+disposition_path.write_text(json.dumps(mismatched_disposition), encoding="utf-8")
+view = dashboard.DashboardData(no_candidate_paths).task_opportunities()
+assert (
+    view["status"] == "unhealthy"
+    and view["profiles"]["audited"] == 0
+    and view["catalog_audit_outcomes"]["no-covering-skill"] == 0
+    and any("disposition-occurrence-mismatch" in error for error in view["errors"])
+), view
+print("PASS  mismatched disposition occurrence authority is unhealthy without candidates")
+mismatched_resolution_path.unlink()
+disposition_path.write_text(json.dumps(disposition), encoding="utf-8")
+
+superseding_resolution = occurrences.build_resolution(
+    profile=profile,
+    receipt=receipt,
+    relation="same-occurrence",
+    review_contract="fixture-review-contract",
+    review_executor="fixture-reviewer",
+    review_executor_identity={"adapter_id": "fixture-reviewer"},
+    decision_at="2026-08-28T12:03:00Z",
+    prior_occurrence_ids=[resolution["canonical_occurrence_id"]],
+    correction_attempt_sha256="sha256:" + "d" * 64,
+    supersedes_resolution_sha256=resolution["resolution_sha256"],
+)
+superseding_resolution_path = (
+    data / "task-occurrences/v2"
+    / f"{superseding_resolution['resolution_sha256'].removeprefix('sha256:')}.json"
+)
+superseding_resolution_path.write_text(json.dumps(superseding_resolution), encoding="utf-8")
+view = dashboard.DashboardData(no_candidate_paths).task_opportunities()
+assert (
+    view["status"] == "unhealthy"
+    and view["profiles"]["audited"] == 0
+    and view["catalog_audit_outcomes"]["no-covering-skill"] == 0
+    and any("disposition-occurrence-superseded" in error for error in view["errors"])
+), view
+print("PASS  superseded disposition occurrence authority is unhealthy without candidates")
 PY
