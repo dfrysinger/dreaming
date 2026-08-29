@@ -3272,7 +3272,11 @@ def normalize_evaluation_input_author_result(
 
 
 def evaluation_input_source_paths(args: argparse.Namespace) -> list[str]:
-    if args.operation == "author":
+    if args.operation == "shadow-author":
+        # The closed packet is the model's only input channel: no skill
+        # directory, suite, policy, config, routing, harness, or catalog.
+        values = [args.packet]
+    elif args.operation == "author":
         values = [
             args.skill_dir,
             args.suite,
@@ -3312,7 +3316,17 @@ def validate_evaluation_input_packet(
             "authoring-boundary-unavailable", "trusted packet validator missing"
         )
     output = work_path / "validated-authoring-packet.json"
-    if args.operation == "author":
+    if args.operation == "shadow-author":
+        command = [
+            sys.executable,
+            str(evaluator_path),
+            "shadow-author-packet",
+            "--validate",
+            sources[0],
+            "--output",
+            str(output),
+        ]
+    elif args.operation == "author":
         command = [
             sys.executable,
             str(evaluator_path),
@@ -3468,11 +3482,15 @@ def evaluation_input_author_run(args: argparse.Namespace) -> None:
             "authoring-boundary-unavailable",
             f"{args.vendor} CLI does not expose a qualified isolated no-tools authoring mode",
         )
-    if args.operation not in {"author", "repair", "review"} or not args.packet or not args.result:
+    if (
+        args.operation not in {"author", "repair", "review", "shadow-author"}
+        or not args.packet
+        or not args.result
+    ):
         raise AdapterError("missing-argument", "evaluation input model run")
     if not isinstance(args.model, str) or not args.model.strip() or args.model == "default":
         raise AdapterError("exact-model-unproved", "explicit model is required")
-    if args.operation in {"author", "repair"} and not args.draft_output:
+    if args.operation in {"author", "repair", "shadow-author"} and not args.draft_output:
         raise AdapterError("missing-argument", f"{args.operation} draft output")
     packet_path = Path(args.packet)
     if (
@@ -3490,6 +3508,7 @@ def evaluation_input_author_run(args: argparse.Namespace) -> None:
             "author": "safe_evaluation_input_authoring_packet",
             "repair": "safe_evaluation_input_repair_packet",
             "review": "safe_evaluation_input_review_packet",
+            "shadow-author": "safe_shadow_evaluation_authoring_packet",
         }[args.operation]
         or not isinstance(packet.get("packet_id"), str)
         or not isinstance(packet.get("candidate_id"), str)
@@ -3502,7 +3521,7 @@ def evaluation_input_author_run(args: argparse.Namespace) -> None:
     ) as work:
         work_path = Path(work).resolve()
         validate_evaluation_input_packet(args, packet, work_path)
-        if args.operation in {"author", "repair"}:
+        if args.operation in {"author", "repair", "shadow-author"}:
             schema = evaluation_input_author_schema(packet)
             prompt = evaluation_input_author_prompt(packet, schema)
         else:
@@ -3587,28 +3606,34 @@ def evaluation_input_author_run(args: argparse.Namespace) -> None:
                 [
                     *args.deny_root,
                     args.packet,
-                    args.skill_dir,
                     *(
-                        [
-                            args.suite,
-                            args.policy,
-                            args.config,
-                            args.routing,
-                            args.harness,
-                            args.catalog,
+                        []
+                        if args.operation == "shadow-author"
+                        else [
+                            args.skill_dir,
+                            *(
+                                [
+                                    args.suite,
+                                    args.policy,
+                                    args.config,
+                                    args.routing,
+                                    args.harness,
+                                    args.catalog,
+                                ]
+                                if args.operation == "author"
+                                else (
+                                    [
+                                        args.claim_id,
+                                        args.manifest,
+                                        args.validation,
+                                        args.original_author_model,
+                                        *(args.review or []),
+                                    ]
+                                    if args.operation == "repair"
+                                    else []
+                                )
+                            ),
                         ]
-                        if args.operation == "author"
-                        else (
-                            [
-                                args.claim_id,
-                                args.manifest,
-                                args.validation,
-                                args.original_author_model,
-                                *(args.review or []),
-                            ]
-                            if args.operation == "repair"
-                            else []
-                        )
                     ),
                 ],
                 "isolated",
@@ -3650,7 +3675,7 @@ def evaluation_input_author_run(args: argparse.Namespace) -> None:
         )
         model_result = (
             parse_evaluation_input_result(model_text)
-            if args.operation in {"author", "repair"}
+            if args.operation in {"author", "repair", "shadow-author"}
             else parse_evaluation_input_review_result(model_text)
         )
     common = {
@@ -3684,7 +3709,7 @@ def evaluation_input_author_run(args: argparse.Namespace) -> None:
         },
         "elapsed_ms": max(0, int((time.monotonic() - started) * 1000)),
     }
-    if args.operation in {"author", "repair"}:
+    if args.operation in {"author", "repair", "shadow-author"}:
         draft, summary, reason = normalize_evaluation_input_author_result(
             packet, model_result
         )
@@ -3725,7 +3750,7 @@ def evaluation_input_author_run(args: argparse.Namespace) -> None:
             "reason": reason,
         }
     operation["operation_id"] = sha(operation)
-    if args.operation in {"author", "repair"} and draft is not None:
+    if args.operation in {"author", "repair", "shadow-author"} and draft is not None:
         atomic_json(Path(args.draft_output), draft)
     atomic_json(Path(args.result), operation)
     emit({"ok": True, **operation})
@@ -6687,7 +6712,9 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--prepared")
     run.add_argument("--output")
     run.add_argument("--packet")
-    run.add_argument("--operation", choices=("author", "repair", "review"))
+    run.add_argument(
+        "--operation", choices=("author", "repair", "review", "shadow-author")
+    )
     run.add_argument("--draft-output")
     run.add_argument("--manifest")
     run.add_argument("--validation")

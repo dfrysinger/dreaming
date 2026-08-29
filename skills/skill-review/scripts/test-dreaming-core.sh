@@ -42,6 +42,15 @@ assert spec.loader is not None
 sys.modules[spec.name] = runtime_module
 spec.loader.exec_module(runtime_module)
 
+routing_spec = importlib.util.spec_from_file_location(
+    "profile_evaluation_routing_test",
+    SCRIPT_DIR / "profile_evaluation_routing.py",
+)
+routing_module = importlib.util.module_from_spec(routing_spec)
+assert routing_spec.loader is not None
+sys.modules[routing_spec.name] = routing_module
+routing_spec.loader.exec_module(routing_module)
+
 DreamingRuntime = runtime_module.DreamingRuntime
 ExecutableAdapter = runtime_module.ExecutableAdapter
 RuntimeFailure = runtime_module.RuntimeFailure
@@ -7676,10 +7685,23 @@ elif sys.argv[1] == "run":
         execution = row["evaluation_execution"]
         self.assertFalse(execution["available"])
         self.assertEqual(
-            execution["reasons"],
+            execution["reasons"], ["shadow-execution-authority-unknown"]
+        )
+        observed = core.derive_evaluation_routing(
+            execution_authority=runtime_module.shadow_execution_authority(
+                {"evaluators": {"shadow": {}}}, None
+            )
+        )["rows"][0]["evaluation_execution"]
+        self.assertFalse(observed["available"])
+        self.assertEqual(
+            observed["reasons"],
             [
-                "shadow-executor-authority-unconfigured",
+                "shadow-executor-unattested",
                 "shadow-suite-authority-unavailable",
+                "shadow-authoring-authority-unavailable",
+                "shadow-catalog-authority-unavailable",
+                "shadow-candidate-package-unavailable",
+                "shadow-allowance-unconfigured",
             ],
         )
         self.assertEqual(
@@ -7727,12 +7749,23 @@ elif sys.argv[1] == "run":
         }
         self.assertIn("evaluation-routing", commands)
         self.assertNotIn("handoff-evaluation", commands)
+        self.assertFalse(hasattr(runtime_module, "SHADOW_EXECUTION_BLOCKERS"))
         self.assertEqual(
-            runtime_module.SHADOW_EXECUTION_BLOCKERS,
-            (
-                "shadow-executor-authority-unconfigured",
-                "shadow-suite-authority-unavailable",
-            ),
+            runtime_module.default_shadow_execution_blockers(),
+            ["shadow-execution-authority-unknown"],
+        )
+        self.assertEqual(
+            runtime_module.shadow_execution_authority(None, None),
+            {
+                "evaluator_configured": False,
+                "evaluator_healthy": False,
+                "evaluator_attested": False,
+                "suite_authority": False,
+                "authoring_authority": False,
+                "catalog_authority": False,
+                "allowances_configured": False,
+                "candidate_package": False,
+            },
         )
 
     def test_expired_occurrence_keeps_candidate_below_the_gate(self) -> None:
@@ -7778,6 +7811,77 @@ elif sys.argv[1] == "run":
         self.assertIn(
             "fewer-than-three-current-distinct-occurrences", row["reasons"]
         )
+
+    def routed_row(self, execution_authority=None) -> dict:
+        self.clock = 1770249600
+        self.routing_disposition(
+            outcome="no-covering-skill",
+            marker="collecting",
+            skill_name=None,
+            loaded=False,
+            candidate_group_id=self.ROUTING_LIFECYCLE_ID,
+        )
+        record = self.routing_lifecycle_record(
+            occurrence_markers=["collecting", "second", "third"]
+        )
+        core, _calls = self.routing_core(record)
+        return core.derive_evaluation_routing(
+            execution_authority=execution_authority
+        )["rows"][0]
+
+    COMPLETE_EXECUTION_AUTHORITY = {
+        "evaluator_configured": True,
+        "evaluator_healthy": True,
+        "evaluator_attested": True,
+        "suite_authority": True,
+        "authoring_authority": True,
+        "catalog_authority": True,
+        "candidate_package": True,
+        "allowances_configured": True,
+    }
+
+    def test_routed_row_reports_complete_execution_authority(self) -> None:
+        row = self.routed_row(self.COMPLETE_EXECUTION_AUTHORITY)
+        self.assertEqual(row["route"], "candidate-evaluation")
+        self.assertEqual(
+            row["evaluation_execution"], {"available": True, "reasons": []}
+        )
+
+    def test_routed_row_reports_each_missing_execution_authority(self) -> None:
+        for fact, reason in routing_module.EXECUTION_AUTHORITY_FACTS:
+            row = self.routed_row(
+                {**self.COMPLETE_EXECUTION_AUTHORITY, fact: False}
+            )
+            self.assertEqual(
+                row["evaluation_execution"],
+                {"available": False, "reasons": [reason]},
+                fact,
+            )
+
+    def test_unreadable_execution_authority_fails_closed(self) -> None:
+        for authority in (
+            None,
+            {},
+            {"evaluator_configured": True},
+            {**self.COMPLETE_EXECUTION_AUTHORITY, "extra": True},
+            {**self.COMPLETE_EXECUTION_AUTHORITY, "suite_authority": "yes"},
+        ):
+            row = self.routed_row(authority)
+            self.assertEqual(
+                row["evaluation_execution"],
+                {
+                    "available": False,
+                    "reasons": ["shadow-execution-authority-unknown"],
+                },
+                json.dumps(authority, default=str),
+            )
+
+    def test_routed_row_never_grants_install_authority(self) -> None:
+        row = self.routed_row(self.COMPLETE_EXECUTION_AUTHORITY)
+        serialized = json.dumps(row).lower()
+        self.assertNotIn("install", serialized)
+        self.assertNotIn("publish", serialized)
+        self.assertNotIn("evaluating", serialized)
 
     def test_evaluation_routing_fails_closed_on_tampered_evidence(self) -> None:
         self.clock = 1770249600

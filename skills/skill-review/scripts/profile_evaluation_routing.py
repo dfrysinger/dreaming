@@ -31,17 +31,46 @@ UNRESOLVED_BOUNDARIES = frozenset({"boundary-conflict", "boundary-unresolved"})
 AUTHORING_READY_STATES = frozenset({"ready_for_draft", "evaluating"})
 REQUIRED_CURRENT_OCCURRENCES = 3
 CURRENT_OCCURRENCE_WINDOW = timedelta(days=30)
-# Prerequisites the funnel does not yet produce for the existing
-# shadow-compile/shadow-execute/shadow-certify flow.  A routed candidate names
-# them so the projection never implies an evaluation that cannot run, and no
-# code path enters the evaluating state while they are unmet.  See
-# docs/task-opportunity-shadow-evaluation-reframe.md.
-SHADOW_EXECUTION_BLOCKERS = (
-    "shadow-executor-authority-unconfigured",
-    "shadow-suite-authority-unavailable",
+# Execution authority is computed from live facts the caller has already
+# established, never asserted from a constant, so the projection can never
+# claim an evaluation the scheduled stage cannot run or hide one it can.  The
+# scheduled stage and this projection call derive_execution_authority on the
+# same facts.  See docs/task-opportunity-shadow-evaluation-reframe.md.
+EXECUTION_AUTHORITY_FACTS = (
+    ("evaluator_configured", "shadow-executor-unconfigured"),
+    ("evaluator_healthy", "shadow-executor-unhealthy"),
+    ("evaluator_attested", "shadow-executor-unattested"),
+    ("suite_authority", "shadow-suite-authority-unavailable"),
+    ("authoring_authority", "shadow-authoring-authority-unavailable"),
+    ("catalog_authority", "shadow-catalog-authority-unavailable"),
+    ("candidate_package", "shadow-candidate-package-unavailable"),
+    ("allowances_configured", "shadow-allowance-unconfigured"),
 )
+EXECUTION_AUTHORITY_KEYS = frozenset(name for name, _ in EXECUTION_AUTHORITY_FACTS)
+EXECUTION_AUTHORITY_UNKNOWN = "shadow-execution-authority-unknown"
 UUID_RE = re.compile(r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}")
 SHA256_RE = re.compile(r"sha256:[0-9a-f]{64}")
+
+
+def derive_execution_authority(authority: Any) -> dict[str, Any]:
+    """Compute shadow-execution availability from live authority facts.
+
+    Fail-closed by construction: availability is true only when every named
+    fact is explicitly true.  A missing, malformed, or partially populated
+    authority object is never a silent pass.
+    """
+    if not isinstance(authority, dict) or set(authority) != EXECUTION_AUTHORITY_KEYS:
+        return {"available": False, "reasons": [EXECUTION_AUTHORITY_UNKNOWN]}
+    reasons: list[str] = []
+    for name, code in EXECUTION_AUTHORITY_FACTS:
+        value = authority[name]
+        if value is True:
+            continue
+        if value is False:
+            reasons.append(code)
+        else:
+            return {"available": False, "reasons": [EXECUTION_AUTHORITY_UNKNOWN]}
+    return {"available": not reasons, "reasons": reasons}
 
 
 class EvaluationRoutingError(ValueError):
@@ -228,6 +257,7 @@ def build_evaluation_routing_row(
     *,
     disposition: dict[str, Any],
     lifecycle_record: dict[str, Any] | None = None,
+    execution_authority: Any = None,
     now: int,
 ) -> dict[str, Any]:
     """Route one immutable catalog-audit disposition to exactly one outcome."""
@@ -281,10 +311,7 @@ def build_evaluation_routing_row(
         else:
             route = "candidate-evaluation"
             subject = _evaluation_subject(record, occurrence_ids, evidence_ids)
-            execution = {
-                "available": not SHADOW_EXECUTION_BLOCKERS,
-                "reasons": list(SHADOW_EXECUTION_BLOCKERS),
-            }
+            execution = derive_execution_authority(execution_authority)
     decision = {
         "schema_version": EVALUATION_ROUTING_CONTRACT_VERSION,
         "kind": "profile_evaluation_routing_row",

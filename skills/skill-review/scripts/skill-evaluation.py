@@ -19,8 +19,8 @@ import tempfile
 import time
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
-from pathlib import Path
-from typing import Any
+from pathlib import Path, PurePosixPath
+from typing import Any, NoReturn
 
 sys.path.insert(0, os.path.dirname(os.path.realpath(__file__)))
 
@@ -86,7 +86,7 @@ AUTHORING_CATALOG_SCHEMA_VERSION = 1
 AUTHORING_PACKET_SCHEMA_VERSION = 1
 TRUSTED_MODEL_ENVIRONMENT_VERSION = 1
 TRUSTED_AUTHORING_ADAPTER_SHA256 = (
-    "sha256:85ec84fe121eeb7ec95958363f576f806bcb36d05f6a627c6bd3a1550be2cc31"
+    "sha256:0ab6c2dbfefe7339b3f90afdb0e174015d9a484cd0476c8863868a1e2a7b4a86"
 )
 AUTHORING_FIXTURE_SOURCE_KINDS = {"public", "synthetic"}
 AUTHORING_MAX_SKILL_CONTRACT_BYTES = 131_072
@@ -11047,6 +11047,590 @@ def shadow_certify(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+SHADOW_AUTHORING_PACKET_KIND = "safe_shadow_evaluation_authoring_packet"
+SHADOW_AUTHORING_PACKET_VERSION = 1
+SHADOW_AUTHORING_ROUTING_MODE = "catalog_plus_candidate"
+SHADOW_AUTHORING_MAX_PACKET_BYTES = 1_048_576
+# The five fixed cases the model may never redesign.  Only task_id and prompt
+# come back from the model; every routing, artifact, grader, fixture, and
+# semantic field below is a builder constant.
+SHADOW_AUTHORING_SUITE_TEMPLATE = {
+    "cases": [
+        {
+            "id": "routing-positive",
+            "class": "routing_positive",
+            "routing": {"candidate_load": True, "catalog_loads": []},
+            "artifacts": ["answer.txt"],
+            "deterministic_graders": ["candidate-answer"],
+            "fixture": "correct",
+            "semantic": False,
+        },
+        {
+            "id": "routing-close-negative",
+            "class": "routing_close_negative",
+            "routing": {"candidate_load": False, "catalog_loads": []},
+            "artifacts": ["answer.txt"],
+            "deterministic_graders": ["candidate-answer"],
+            "fixture": "correct",
+            "semantic": False,
+        },
+        {
+            "id": "routing-unrelated",
+            "class": "routing_unrelated",
+            "routing": {"candidate_load": False, "catalog_loads": []},
+            "artifacts": ["answer.txt"],
+            "deterministic_graders": ["candidate-answer"],
+            "fixture": "correct",
+            "semantic": False,
+        },
+        {
+            "id": "routing-conflict",
+            "class": "routing_conflict",
+            "routing": {"candidate_load": False, "catalog_loads": ["<conflict>"]},
+            "artifacts": ["answer.txt"],
+            "deterministic_graders": ["candidate-answer"],
+            "fixture": "correct",
+            "semantic": False,
+        },
+        {
+            "id": "task-value",
+            "class": "task_value",
+            "routing": {"candidate_load": True, "catalog_loads": []},
+            "artifacts": ["answer.txt"],
+            "deterministic_graders": ["candidate-answer"],
+            "fixture": "correct",
+            "semantic": False,
+        },
+    ]
+}
+SHADOW_AUTHORING_GRADERS = [
+    {
+        "id": "candidate-answer",
+        "type": "regex",
+        "safety": True,
+        "config": {"required": ["SUCCESS"], "forbidden": []},
+    }
+]
+SHADOW_AUTHORING_ENVIRONMENT = {
+    "fixture": "shadow-candidate-evaluation",
+    "context": "normal",
+}
+SHADOW_AUTHORING_CASE_KEYS = {
+    "id",
+    "class",
+    "routing",
+    "artifacts",
+    "deterministic_graders",
+    "fixture",
+    "semantic",
+}
+SHADOW_AUTHORING_PACKET_KEYS = {
+    "schema_version",
+    "kind",
+    "packet_id",
+    "lifecycle_id",
+    "candidate_id",
+    "candidate_contract",
+    "suite_template",
+    "conflict_reference",
+    "compilation_contract",
+    "executor_contract",
+    "harness_digest",
+    "routing_mode",
+}
+SHADOW_PACKET_REFUSALS = {
+    "schema": "shadow-packet-schema-invalid",
+    "unknown": "shadow-packet-unknown-field",
+    "source": "shadow-packet-prohibited-source",
+    "sensitive": "shadow-packet-sensitive-value",
+    "candidate": "shadow-packet-candidate-mismatch",
+    "template": "shadow-packet-template-drift",
+    "executor": "shadow-packet-executor-unattested",
+}
+SHADOW_UUID_RE = re.compile(
+    r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}"
+)
+SHADOW_PROFILE_ID_RE = re.compile(r"(?i)\bprofile[-_ ]?id\b")
+SHADOW_SKILL_NAME_RE = re.compile(r"[a-z][a-z0-9-]{2,63}")
+
+
+def shadow_candidate_package_identity(files: list[dict[str, Any]]) -> str:
+    """Reproduce the candidate-lifecycle immutable package identity exactly."""
+    encoded = json.dumps(files, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+
+def shadow_lifecycle_inventory(
+    inventory: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Project the packet inventory back into the lifecycle identity domain."""
+    return [
+        {
+            "path": item["path"],
+            "sha256": str(item["sha256"]).removeprefix("sha256:"),
+            "size": item["bytes"],
+        }
+        for item in inventory
+    ]
+
+
+class ShadowPacketError(EvaluationError):
+    """A refusal carrying one stable shadow-packet reason code."""
+
+    def __init__(self, code: str, detail: str):
+        super().__init__(f"{code}: {detail}")
+        self.code = code
+        self.detail = detail
+
+
+def shadow_packet_refuse(kind: str, detail: str) -> NoReturn:
+    raise ShadowPacketError(SHADOW_PACKET_REFUSALS[kind], detail)
+
+
+def shadow_packet_authority_digests(packet: dict[str, Any]) -> set[str]:
+    """Every digest the packet is itself allowed to name."""
+    values = {packet["candidate_id"], packet["harness_digest"]}
+    if isinstance(packet.get("packet_id"), str):
+        values.add(packet["packet_id"])
+    contract = packet.get("candidate_contract")
+    if isinstance(contract, dict):
+        for item in contract.get("inventory", []):
+            if isinstance(item, dict) and isinstance(item.get("sha256"), str):
+                values.add(item["sha256"])
+    executor = packet.get("executor_contract")
+    if isinstance(executor, dict):
+        for key in ("adapter_id", "adapter_executable_sha256", "identity_digest"):
+            if isinstance(executor.get(key), str):
+                values.add(executor[key])
+    return values
+
+
+def shadow_packet_scan_leaves(packet: dict[str, Any]) -> None:
+    """Reject any string leaf carrying a prohibited value."""
+    allowed = shadow_packet_authority_digests(packet)
+
+    def visit(value: Any, field: str) -> None:
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if not isinstance(key, str):
+                    shadow_packet_refuse("schema", f"{field} key")
+                visit(item, f"{field}.{key}")
+            return
+        if isinstance(value, list):
+            for index, item in enumerate(value):
+                visit(item, f"{field}[{index}]")
+            return
+        if isinstance(value, (bool, int, float)) or value is None:
+            return
+        if not isinstance(value, str):
+            shadow_packet_refuse("schema", field)
+        if PurePosixPath(value).is_absolute() or value.startswith("~"):
+            shadow_packet_refuse("sensitive", f"{field} names an absolute path")
+        for pattern, label in AUTHORING_DENIED_TEXT_PATTERNS:
+            if pattern.search(value):
+                shadow_packet_refuse("sensitive", f"{field} contains {label}")
+        for match in re.finditer(r"sha256:[0-9a-f]{64}", value):
+            if match.group(0) not in allowed:
+                shadow_packet_refuse(
+                    "sensitive", f"{field} names an undeclared digest"
+                )
+        if field != "packet.lifecycle_id" and SHADOW_UUID_RE.search(value):
+            shadow_packet_refuse("sensitive", f"{field} names a UUID identifier")
+        if SHADOW_PROFILE_ID_RE.search(value):
+            shadow_packet_refuse("sensitive", f"{field} names a profile identity")
+
+    visit(packet, "packet")
+
+
+def shadow_packet_conflict_reference(catalog_dir: Path) -> dict[str, str]:
+    """Read exactly the one catalog skill's name and SKILL.md description."""
+    if not catalog_dir.is_dir() or catalog_dir.is_symlink():
+        shadow_packet_refuse("source", "catalog snapshot must be a real directory")
+    entries = [path for path in sorted(catalog_dir.iterdir()) if not path.name.startswith(".")]
+    if len(entries) != 1 or entries[0].is_symlink() or not entries[0].is_dir():
+        shadow_packet_refuse("source", "catalog snapshot must hold exactly one skill")
+    skill = entries[0]
+    document = skill / "SKILL.md"
+    if document.is_symlink() or not document.is_file():
+        shadow_packet_refuse("source", "catalog skill has no SKILL.md")
+    content = document.read_text(encoding="utf-8", errors="strict")
+    if not content.startswith("---\n"):
+        shadow_packet_refuse("source", "catalog SKILL.md has no frontmatter")
+    closing = content.find("\n---\n", 4)
+    if closing < 0:
+        shadow_packet_refuse("source", "catalog SKILL.md frontmatter is not closed")
+    matches = re.findall(
+        r"^description:[ \t]*(.+?)[ \t]*$", content[4:closing], re.MULTILINE
+    )
+    if len(matches) != 1:
+        shadow_packet_refuse(
+            "source", "catalog SKILL.md must declare exactly one description"
+        )
+    description = matches[0].strip().strip("'\"")
+    if not description or len(description.encode()) > AUTHORING_MAX_DESCRIPTION_BYTES:
+        shadow_packet_refuse("source", "catalog description is unusable")
+    return {"name": skill.name, "description": description}
+
+
+def shadow_packet_candidate_contract(skill_dir: Path) -> dict[str, Any]:
+    """Read the proposed name, contract text, and inventory from the package."""
+    if not skill_dir.is_dir() or skill_dir.is_symlink():
+        shadow_packet_refuse("source", "candidate package must be a real directory")
+    document = skill_dir / "SKILL.md"
+    if document.is_symlink() or not document.is_file():
+        shadow_packet_refuse("candidate", "candidate package has no SKILL.md")
+    content = document.read_text(encoding="utf-8", errors="strict")
+    if not content.startswith("---\n"):
+        shadow_packet_refuse("candidate", "candidate SKILL.md has no frontmatter")
+    closing = content.find("\n---\n", 4)
+    if closing < 0:
+        shadow_packet_refuse("candidate", "candidate frontmatter is not closed")
+    names = re.findall(
+        r"^name:[ \t]*([a-z][a-z0-9-]{2,63})[ \t]*$", content[4:closing], re.MULTILINE
+    )
+    if len(names) != 1:
+        shadow_packet_refuse("candidate", "candidate SKILL.md name is not exact")
+    if len(content.encode()) > AUTHORING_MAX_SKILL_CONTRACT_BYTES:
+        shadow_packet_refuse("candidate", "candidate contract exceeds the size limit")
+    inventory = [
+        {"path": item["path"], "sha256": item["sha256"], "bytes": item["size"]}
+        for item in shadow_inventory(skill_dir)
+    ]
+    return {
+        "proposed_name": names[0],
+        "contract": content,
+        "inventory": inventory,
+    }
+
+
+def shadow_packet_executor_contract(executors: list[dict[str, Any]]) -> dict[str, Any]:
+    """Bind exactly one attested executor identity into the packet."""
+    if len(executors) != 1:
+        shadow_packet_refuse(
+            "executor", "shadow authoring binds exactly one executor identity"
+        )
+    executor = executors[0]
+    if executor.get("real_backend") is not True:
+        shadow_packet_refuse("executor", "executor does not attest a real backend")
+    return {
+        "identity_digest": shadow_sha(
+            {key: value for key, value in executor.items() if key != "name"}
+        ),
+        "adapter_id": executor["adapter_id"],
+        "adapter_executable_sha256": executor["adapter_executable_sha256"],
+        "model": executor["model"],
+        "limits": dict(executor["limits"]),
+    }
+
+
+def shadow_packet_template(conflict_name: str) -> dict[str, Any]:
+    cases = []
+    for case in SHADOW_AUTHORING_SUITE_TEMPLATE["cases"]:
+        routing = dict(case["routing"])
+        routing["catalog_loads"] = [
+            conflict_name if name == "<conflict>" else name
+            for name in routing["catalog_loads"]
+        ]
+        cases.append({**case, "routing": routing})
+    return {"cases": cases}
+
+
+def shadow_packet_compilation_contract() -> dict[str, Any]:
+    return {
+        "case_runtime": [
+            {
+                "id": case["id"],
+                "fixture": case["fixture"],
+                "artifacts": list(case["artifacts"]),
+                "semantic": case["semantic"],
+            }
+            for case in SHADOW_AUTHORING_SUITE_TEMPLATE["cases"]
+        ]
+    }
+
+
+def build_shadow_authoring_packet(
+    *,
+    lifecycle_id: str,
+    candidate_id: str,
+    skill_dir: Path,
+    catalog_dir: Path,
+    executors: list[dict[str, Any]],
+    harness: Path,
+) -> dict[str, Any]:
+    """Emit the closed candidate-blind packet from its four permitted roots."""
+    if not SHADOW_UUID_RE.fullmatch(lifecycle_id):
+        shadow_packet_refuse("schema", "lifecycle_id must be a canonical identity")
+    contract = shadow_packet_candidate_contract(skill_dir)
+    if (
+        shadow_candidate_package_identity(
+            shadow_lifecycle_inventory(contract["inventory"])
+        )
+        != candidate_id
+    ):
+        shadow_packet_refuse(
+            "candidate", "materialized package does not re-hash to candidate_id"
+        )
+    conflict = shadow_packet_conflict_reference(catalog_dir)
+    body = {
+        "schema_version": SHADOW_AUTHORING_PACKET_VERSION,
+        "kind": SHADOW_AUTHORING_PACKET_KIND,
+        "lifecycle_id": lifecycle_id,
+        "candidate_id": candidate_id,
+        "candidate_contract": contract,
+        "suite_template": shadow_packet_template(conflict["name"]),
+        "conflict_reference": conflict,
+        "compilation_contract": shadow_packet_compilation_contract(),
+        "executor_contract": shadow_packet_executor_contract(executors),
+        "harness_digest": sha256_file(harness),
+        "routing_mode": SHADOW_AUTHORING_ROUTING_MODE,
+    }
+    packet = {**body, "packet_id": shadow_sha(body)}
+    validate_shadow_authoring_packet(packet)
+    return packet
+
+
+def validate_shadow_authoring_packet(packet: Any) -> dict[str, Any]:
+    """Re-derive every builder-owned field and refuse any difference."""
+    if not isinstance(packet, dict):
+        shadow_packet_refuse("schema", "packet must be an object")
+    if set(packet) != SHADOW_AUTHORING_PACKET_KEYS:
+        shadow_packet_refuse(
+            "unknown",
+            "packet key set is "
+            + ",".join(sorted(set(packet) ^ SHADOW_AUTHORING_PACKET_KEYS)),
+        )
+    if (
+        packet["schema_version"] != SHADOW_AUTHORING_PACKET_VERSION
+        or packet["kind"] != SHADOW_AUTHORING_PACKET_KIND
+        or packet["routing_mode"] != SHADOW_AUTHORING_ROUTING_MODE
+    ):
+        shadow_packet_refuse("schema", "packet constants are wrong")
+    for field in ("lifecycle_id", "candidate_id", "packet_id", "harness_digest"):
+        if not isinstance(packet[field], str) or not packet[field]:
+            shadow_packet_refuse("schema", field)
+    if not SHADOW_UUID_RE.fullmatch(packet["lifecycle_id"]):
+        shadow_packet_refuse("schema", "lifecycle_id must be a canonical identity")
+    for field in ("candidate_id", "harness_digest"):
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", packet[field]):
+            shadow_packet_refuse("schema", field)
+    conflict = packet["conflict_reference"]
+    if not isinstance(conflict, dict) or set(conflict) != {"name", "description"}:
+        shadow_packet_refuse("unknown", "conflict_reference key set")
+    if not isinstance(conflict["name"], str) or not SHADOW_SKILL_NAME_RE.fullmatch(
+        conflict["name"]
+    ):
+        shadow_packet_refuse("schema", "conflict_reference.name")
+    try:
+        require_authoring_safe_text(
+            conflict["description"],
+            "conflict_reference.description",
+            maximum=AUTHORING_MAX_DESCRIPTION_BYTES,
+        )
+    except ShadowPacketError:
+        raise
+    except EvaluationError as error:
+        shadow_packet_refuse("sensitive", str(error))
+    contract = packet["candidate_contract"]
+    if not isinstance(contract, dict) or set(contract) != {
+        "proposed_name",
+        "contract",
+        "inventory",
+    }:
+        shadow_packet_refuse("unknown", "candidate_contract key set")
+    if not isinstance(contract["proposed_name"], str) or not SHADOW_SKILL_NAME_RE.fullmatch(
+        contract["proposed_name"]
+    ):
+        shadow_packet_refuse("schema", "candidate_contract.proposed_name")
+    if contract["proposed_name"] == conflict["name"]:
+        shadow_packet_refuse("candidate", "candidate cannot be its own conflict target")
+    if (
+        not isinstance(contract["contract"], str)
+        or not contract["contract"].startswith("---\n")
+        or len(contract["contract"].encode()) > AUTHORING_MAX_SKILL_CONTRACT_BYTES
+    ):
+        shadow_packet_refuse("schema", "candidate_contract.contract")
+    inventory = contract["inventory"]
+    if not isinstance(inventory, list) or not inventory:
+        shadow_packet_refuse("schema", "candidate_contract.inventory")
+    for index, item in enumerate(inventory):
+        field = f"candidate_contract.inventory[{index}]"
+        if not isinstance(item, dict) or set(item) != {"path", "sha256", "bytes"}:
+            shadow_packet_refuse("unknown", field)
+        if (
+            not isinstance(item["path"], str)
+            or PurePosixPath(item["path"]).is_absolute()
+            or ".." in PurePosixPath(item["path"]).parts
+            or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(item["sha256"]))
+            or isinstance(item["bytes"], bool)
+            or not isinstance(item["bytes"], int)
+            or item["bytes"] < 0
+        ):
+            shadow_packet_refuse("schema", field)
+    if (
+        shadow_candidate_package_identity(shadow_lifecycle_inventory(inventory))
+        != packet["candidate_id"]
+    ):
+        shadow_packet_refuse("candidate", "inventory does not re-hash to candidate_id")
+    if packet["suite_template"] != shadow_packet_template(conflict["name"]):
+        shadow_packet_refuse("template", "suite_template is not the fixed template")
+    if packet["compilation_contract"] != shadow_packet_compilation_contract():
+        shadow_packet_refuse("template", "compilation_contract drifted")
+    executor = packet["executor_contract"]
+    if not isinstance(executor, dict) or set(executor) != {
+        "identity_digest",
+        "adapter_id",
+        "adapter_executable_sha256",
+        "model",
+        "limits",
+    }:
+        shadow_packet_refuse("unknown", "executor_contract key set")
+    for field in ("identity_digest", "adapter_id", "adapter_executable_sha256"):
+        if not re.fullmatch(r"sha256:[0-9a-f]{64}", str(executor[field])):
+            shadow_packet_refuse("executor", f"executor_contract.{field}")
+    if not isinstance(executor["model"], str) or not executor["model"] or executor[
+        "model"
+    ] == "default":
+        shadow_packet_refuse("executor", "executor_contract.model must be exact")
+    limits = executor["limits"]
+    if not isinstance(limits, dict) or set(limits) != {
+        "timeout_seconds",
+        "token_budget",
+        "turn_budget",
+        "tool_budget",
+        "output_bytes",
+    }:
+        shadow_packet_refuse("unknown", "executor_contract.limits key set")
+    for key, value in limits.items():
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            shadow_packet_refuse("executor", f"executor_contract.limits.{key}")
+    body = {key: value for key, value in packet.items() if key != "packet_id"}
+    if shadow_sha(body) != packet["packet_id"]:
+        shadow_packet_refuse("schema", "packet_id does not bind the packet body")
+    shadow_packet_scan_leaves(packet)
+    return packet
+
+
+def shadow_author_packet(args: argparse.Namespace) -> dict[str, Any]:
+    if args.validate:
+        path = resolve_path(Path(args.validate), "shadow authoring packet")
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > (
+            SHADOW_AUTHORING_MAX_PACKET_BYTES
+        ):
+            shadow_packet_refuse("schema", "packet file is unusable")
+        packet = validate_shadow_authoring_packet(load_json(path))
+    else:
+        required = (
+            args.lifecycle_id,
+            args.candidate_id,
+            args.skill_dir,
+            args.catalog_dir,
+            args.executors,
+            args.harness,
+        )
+        if not all(required):
+            shadow_packet_refuse("schema", "packet build inputs are incomplete")
+        packet = build_shadow_authoring_packet(
+            lifecycle_id=args.lifecycle_id,
+            candidate_id=args.candidate_id,
+            skill_dir=resolve_path(Path(args.skill_dir), "candidate package"),
+            catalog_dir=resolve_path(Path(args.catalog_dir), "catalog snapshot"),
+            executors=shadow_executors(Path(args.executors).resolve()),
+            harness=require_trusted_harness(Path(args.harness)),
+        )
+    if args.output:
+        atomic_write(Path(args.output), packet)
+    return {
+        "packet_id": packet["packet_id"],
+        "candidate_id": packet["candidate_id"],
+        "lifecycle_id": packet["lifecycle_id"],
+        "routing_mode": packet["routing_mode"],
+        "conflict_skill": packet["conflict_reference"]["name"],
+        "case_count": len(packet["suite_template"]["cases"]),
+    }
+
+
+def assemble_shadow_suite(
+    packet: dict[str, Any], draft: dict[str, Any]
+) -> dict[str, Any]:
+    """Merge the fixed template with the model's task ids and prompts only."""
+    validate_shadow_authoring_packet(packet)
+    if (
+        not isinstance(draft, dict)
+        or draft.get("schema_version") != 1
+        or draft.get("kind") != "safe_evaluation_input_draft"
+        or draft.get("packet_id") != packet["packet_id"]
+        or draft.get("candidate_id") != packet["candidate_id"]
+        or not isinstance(draft.get("cases"), list)
+    ):
+        shadow_packet_refuse("schema", "authored draft does not bind this packet")
+    template = packet["suite_template"]["cases"]
+    authored = draft["cases"]
+    if len(authored) != len(template):
+        shadow_packet_refuse("template", "authored case count")
+    cases = []
+    for case, source in zip(template, authored):
+        if (
+            not isinstance(source, dict)
+            or source.get("id") != case["id"]
+            or source.get("class") != case["class"]
+        ):
+            shadow_packet_refuse("template", f"authored case {case['id']}")
+        cases.append(
+            {
+                "id": case["id"],
+                "class": case["class"],
+                "task_id": require_text(source.get("task_id"), "authored task_id"),
+                "prompt": require_authoring_safe_text(
+                    source.get("prompt"), "authored prompt", maximum=4096
+                ),
+                "critical": True,
+                "routing": {
+                    "candidate_load": case["routing"]["candidate_load"],
+                    "catalog_loads": list(case["routing"]["catalog_loads"]),
+                },
+                "artifacts": list(case["artifacts"]),
+                "graders": list(case["deterministic_graders"]),
+                "fixture": case["fixture"],
+            }
+        )
+    if leaks_identity_marker(
+        [packet["candidate_contract"]["proposed_name"]],
+        " ".join(case["prompt"] for case in cases),
+    ):
+        shadow_packet_refuse("sensitive", "authored prompt names the candidate skill")
+    return {
+        "schema_version": SHADOW_SUITE_VERSION,
+        "kind": "shadow_candidate_evaluation_suite",
+        "routing_mode": packet["routing_mode"],
+        "environment": dict(SHADOW_AUTHORING_ENVIRONMENT),
+        "graders": [dict(grader) for grader in SHADOW_AUTHORING_GRADERS],
+        "cases": cases,
+    }
+
+
+def shadow_author_suite(args: argparse.Namespace) -> dict[str, Any]:
+    packet = load_json(resolve_path(Path(args.packet), "shadow authoring packet"))
+    draft = load_json(resolve_path(Path(args.draft), "shadow authoring draft"))
+    suite = assemble_shadow_suite(packet, draft)
+    output = Path(args.output)
+    atomic_write(output, suite)
+    catalog_dir = resolve_path(Path(args.catalog_dir), "catalog snapshot")
+    _inventory, skills = shadow_catalog(catalog_dir)
+    accepted, suite_id = shadow_suite(output, skills)
+    if accepted["routing_mode"] != SHADOW_AUTHORING_ROUTING_MODE:
+        shadow_packet_refuse("schema", "assembled suite is not catalog-plus-candidate")
+    return {
+        "suite": str(output),
+        "suite_id": suite_id,
+        "packet_id": packet["packet_id"],
+        "routing_mode": accepted["routing_mode"],
+        "environment_id": accepted["environment_id"],
+        "case_count": len(accepted["cases"]),
+        "catalog_skills": [item["name"] for item in skills],
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     commands = parser.add_subparsers(dest="command", required=True)
@@ -11341,6 +11925,20 @@ def build_parser() -> argparse.ArgumentParser:
     v2_waiver_validate_parser.add_argument("--waiver", required=True)
     v2_waiver_validate_parser.add_argument("--suite")
     v2_waiver_validate_parser.add_argument("--policy")
+    shadow_packet_parser = commands.add_parser("shadow-author-packet")
+    shadow_packet_parser.add_argument("--validate")
+    shadow_packet_parser.add_argument("--lifecycle-id")
+    shadow_packet_parser.add_argument("--candidate-id")
+    shadow_packet_parser.add_argument("--skill-dir")
+    shadow_packet_parser.add_argument("--catalog-dir")
+    shadow_packet_parser.add_argument("--executors")
+    shadow_packet_parser.add_argument("--harness")
+    shadow_packet_parser.add_argument("--output")
+    shadow_suite_parser = commands.add_parser("shadow-author-suite")
+    shadow_suite_parser.add_argument("--packet", required=True)
+    shadow_suite_parser.add_argument("--draft", required=True)
+    shadow_suite_parser.add_argument("--catalog-dir", required=True)
+    shadow_suite_parser.add_argument("--output", required=True)
     shadow_compile_parser = commands.add_parser("shadow-compile")
     shadow_compile_parser.add_argument("skill_dir")
     shadow_compile_parser.add_argument("--suite", required=True)
@@ -11409,6 +12007,8 @@ def main() -> int:
             "v2-authority-validate": v2_authority_validate,
             "v2-waive": v2_waive,
             "v2-waiver-validate": v2_waiver_validate,
+            "shadow-author-packet": shadow_author_packet,
+            "shadow-author-suite": shadow_author_suite,
             "shadow-compile": shadow_compile,
             "shadow-execute": shadow_execute,
             "shadow-certify": shadow_certify,
