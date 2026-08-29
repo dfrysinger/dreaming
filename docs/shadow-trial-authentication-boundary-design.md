@@ -126,6 +126,7 @@ existing reviewed argv contracts.
 | Adapter identity is exact-keyed and version-pinned to `1` | `skill-evaluation-harness.py:57`, `:682`; `skill-evaluation.py:10734`, `:10770` | Only if those three schemas are changed together in a separate work order. Treated as frozen here. |
 | Credential root must equal the invoking account home | `scripts/build-evaluation-input-source.py:289` | Only if a supported host separates the account home from the credential home. |
 | File-resident Copilot credentials are sufficient for real model execution under a synthetic `HOME` | **Measured**, this round. Retained proof root: `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/shadow-trial-auth-probe` | If a supported host stops storing a file-resident credential, or Copilot changes where it reads authentication from. See the revisit gate in the reframe record. |
+| macOS `sandbox-exec` `process-path` discriminates on the exact executable path, so it can confine reads to one binary location | **Measured**, this round. Retained proof root: `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/shadow-trial-auth-sbpl-probe` | If the platform sandbox implementation changes, or if CHK-A3/CHK-A16 cannot reproduce the discrimination under the generated adapter policy. |
 
 ### The challenged rule, precisely
 
@@ -135,10 +136,10 @@ fixed minimal environment and continues to pass routing-supplied argv only. It
 gains no allowlist, no passthrough, and no knowledge of credentials.
 
 What changes is the **adapter's own argv**, which the harness already forwards
-verbatim, and which already carries `--binary` and `--deny-root`. Adding
-`--credential-root` to that argv is the same class of change as those two, is
-covered by the same `_require_role_argv` config enforcement
-(`dreaming-core.py:9533`), and does not create a caller allowlist.
+verbatim, and which already accepts `--credential-root` as a defined adapter
+argument (`dreaming-vendor-adapter.py:6851`). Adding it to the *configured*
+evaluator argv creates no caller allowlist: the harness still learns nothing
+about credentials and gains no environment surface.
 
 ## Reframe record — status CLEAR
 
@@ -168,8 +169,9 @@ mechanism evidence).
 
 ### Evidence that closed the premise
 
-Two probes, both retained under
-`~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/shadow-trial-auth-probe`.
+Three probes. Probes 1 and 2 are retained under
+`~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/shadow-trial-auth-probe`;
+probe 3 under its own root, named below.
 No secret content was recorded, transcribed, or included in this document.
 
 1. **Redacted source-structure probe.** Presence-only booleans:
@@ -184,14 +186,33 @@ No secret content was recorded, transcribed, or included in this document.
    `GH_TOKEN`, no `GITHUB_TOKEN`, no keychain projection, no parent
    environment. Result: `gpt-5-mini` exited `0` with 26 JSON events, the
    assistant returned `AUTH_OK`, and no authentication error was raised.
+3. **Platform `process-path` mechanism probe.** Retained under
+   `~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/shadow-trial-auth-sbpl-probe`.
+   Under `sandbox-exec` on macOS, a dummy credential path was guarded by
+   `deny file-read* (subpath …)` plus
+   `allow file-read* (require-all (subpath …) (process-path "/bin/cat"))`.
+   Reading through the exact `/bin/cat` path succeeded (`rc=0`, marker
+   returned); reading the same bytes through a copy of the same binary at a
+   different path was denied and killed (`rc=137`). No credential material was
+   involved: the fixture used a dummy file.
 
-**What this evidence does and does not establish.** It establishes the
-*mechanism*: file-only projected authentication is reachable on the supported
-host, so the architecture below is not speculative. It does **not** establish
-the sandbox process-path confinement (CHK-A3, CHK-A16), the identity closure
-(CHK-A8), or the live end-to-end stage result (CHK-A1). Round 2 must verify
-that this revision closes D1–D6 and T1; the executed checks remain the
-acceptance boundary.
+**What this evidence does and does not establish.** Probes 1 and 2 establish
+the *authentication mechanism*: file-only projected authentication is reachable
+on the supported host, so the architecture below is not speculative. Probe 3
+establishes the *confinement primitive*: `process-path` discriminates on the
+exact executable path, not merely on the executable's contents, which is the
+property A3 depends on. Together they remove the two premise risks that would
+have made this design speculative.
+
+They do **not** establish the final generated adapter policy, nor real Copilot
+behavior under it — the emitted rule set, its effective ordering, and the real
+CLI's reads remain unproved until CHK-A3 and CHK-A16 execute. They also do not
+establish the identity closure (CHK-A8) or the live end-to-end stage result
+(CHK-A1). Probe 3 is a **prerequisite** for those checks, not a substitute for
+them.
+
+Round 2 must verify that this revision closes D1–D6, T1, and R1; the executed
+checks remain the acceptance boundary.
 
 **Revisit gate.** Reopen if a supported host ceases to hold a file-resident
 credential, if Copilot changes where it reads authentication from, or if the
@@ -213,7 +234,7 @@ discovery order. Rows added this round are marked *(R2)*.
 | L5 | Harness attestation equality | `skill-evaluation-harness.py:682` | `set(response) != EXECUTOR_IDENTITY_KEYS` → refuse | No |
 | L6 | Harness shadow attest superset | `skill-evaluation-harness.py:1888`, `:1939` | Adds `real_backend`, `real_backend_source` only | No |
 | L7 | Harness trial prepare/run/normalize/collect | `skill-evaluation-harness.py:1955` | Per-trial protocol | No |
-| L8 | Adapter argv surface | `dreaming-vendor-adapter.py:6850` | `--binary`, `--credential-root`, `--deny-root` | No (flag already exists) |
+| L8 | Adapter argv surface | `dreaming-vendor-adapter.py:6850` | `--binary`, `--credential-root`, `--deny-root` are all defined adapter arguments (none of them is required by config today) | No (flag already exists) |
 | L9 | Adapter credential root resolution | `dreaming-vendor-adapter.py:4656` | Defaults to `Path.home()` | **Yes** |
 | L10 | Adapter credential projection | `dreaming-vendor-adapter.py:1198` | `copy_auth_file`, silent on missing | **Yes** |
 | L11 | Adapter token acquisition | `dreaming-vendor-adapter.py:1249` | `gh auth token`, account-home bound, 10 s | Reused, not changed |
@@ -233,7 +254,7 @@ discovery order. Rows added this round are marked *(R2)*.
 | L19a | Adapter prepared-drift equality *(R2)* | `dreaming-vendor-adapter.py:5784` | `prepared["adapter_prepared"] == expected_prepared` | No (shape unchanged) |
 | L20 | Adapter doctor | `dreaming-vendor-adapter.py:6192` | Health, auth predicate `is_file()` at `:6211`, canaries `:6233` | **Yes** |
 | L21 | Adapter boundary prover | `dreaming-vendor-adapter.py:1497` | `prove_boundary` private-data refusal | No (must keep passing) |
-| L22 | Evaluator config argv requirement | `dreaming-core.py:170`, `:9533` | `SHADOW_EXECUTOR_REQUIRED_ARGV` | **Yes** |
+| L22 | Evaluator config argv requirement | `dreaming-core.py:170`, `:9533` | `SHADOW_EXECUTOR_REQUIRED_ARGV`, today exactly `("--shadow-contract", "--model")` | **Yes** (adds `--credential-root` as the third flag) |
 | L23 | Strict config loader | `dreaming-core.py:9597` | Raises `RuntimeFailure` for the **whole** config | No (behavior relied on) |
 | L23a | Strict config validator *(R2, D6)* | `dreaming-core.py:9838` | `validate_adapter_config` uses the strict loader | No (behavior relied on) |
 | L24 | Shadow execution authority | `dreaming-core.py:9554` | Stage availability | No |
@@ -253,8 +274,23 @@ credential projection and by adding **no** new identity surface.
 
 Add `--credential-root <account home>` to `SHADOW_EXECUTOR_REQUIRED_ARGV`
 (`dreaming-core.py:170`), so that `_require_role_argv` (`:9533`) refuses any
-evaluator entry lacking it, exactly as it already does for `--binary` and
-`--deny-root`.
+evaluator entry lacking it.
+
+**Exact current fact (R1).** `SHADOW_EXECUTOR_REQUIRED_ARGV` is today
+`("--shadow-contract", "--model")` and nothing more; `dreaming-core.py` contains
+no reference to `--binary` or `--deny-root` at all. `--credential-root`
+therefore becomes the **third** required configured flag, alongside
+`--shadow-contract` and `--model`. Revision 2's claim that the same enforcement
+already covers `--binary` and `--deny-root` was false and is withdrawn.
+
+**`--binary` stays adapter-owned.** Executable selection remains the adapter's
+responsibility and is *attested*, not configured: the resolved executable is
+pinned into the identity as `cli_executable_sha256`
+(`dreaming-vendor-adapter.py:4006`) and is the subject of the `process-path`
+confinement in A3. No new configured requirement is added for it, and none is
+added for `--deny-root`, because the existing design does not need one.
+Widening the required-argv tuple beyond the single flag this boundary needs
+would be an unreviewed config-contract change.
 
 The adapter validates the argument in this order, and **refuses before any
 projection, any profile emission, and any model launch**:
@@ -385,6 +421,15 @@ implementation must restructure what it emits — for example by not emitting th
 broad trial-root read grant over those two subpaths at all — until the executed
 proof passes. The executed proof, not the rule text, is the acceptance
 boundary.
+
+**Platform prerequisite, already measured.** Probe 3 in the reframe record
+confirmed on `sandbox-exec` that `deny file-read* (subpath …)` plus
+`allow file-read* (require-all (subpath …) (process-path "<exact binary>"))`
+permits the exact binary path and denies a byte-identical copy at another path.
+That closes the question of whether the primitive can express this confinement
+at all. It does **not** close whether the adapter's generated policy achieves
+it, or how the real Copilot CLI behaves under it; those remain CHK-A3 and
+CHK-A16.
 
 **Precedent and constraint.** `process-path` confinement is already used in
 this same profile for `network-outbound` (`:4985`). The existing refusal of
@@ -592,7 +637,7 @@ enforcing layer.
 |---|---|---|---|
 | CHK-A1 | End to end | Real Copilot trial under synthetic `HOME` completes with a real verdict; no `authentication-required`, no `infrastructure_error` | at |
 | CHK-A2 | Adapter argv | Shadow invocation without `--credential-root` refuses with `shadow-credential-root-missing`, launching no CLI | past |
-| CHK-A3 | Sandbox, executed | Under the emitted profile, the CLI process path reads a projected file successfully **and** a non-CLI process path reading the same file is denied | at + past |
+| CHK-A3 | Sandbox, executed | Under the **adapter-generated** profile, the CLI process path reads a projected file successfully **and** a non-CLI process path reading the same file is denied. The platform primitive is already proved (reframe probe 3); this check proves the generated policy and the real CLI | at + past |
 | CHK-A4 | Adapter argv | Account home accepted; a different existing directory, a raw symlink to the account home, a non-existent path, and a file are each refused with the specific code, before projection | at + past |
 | CHK-A5 | Executor env | The emitted trial environment contains neither `GH_TOKEN` nor `GITHUB_TOKEN`, and its key set is otherwise unchanged from today | at |
 | CHK-A6 | Projection completeness | Each of: missing file, mode `0644`, zero size, symlinked destination raises `shadow-credential-projection-incomplete`; a complete projection passes | at + past |
@@ -653,7 +698,7 @@ bundles, and it changes for exactly one reason: the shared adapter byte digest.
 Its argv and every other identity field are unchanged. Revision 1's claim that
 a comparator config group must be regenerated is withdrawn.
 
-## Round 1 finding resolution
+## Round 1 and Round 2 finding resolution
 
 | ID | Reviewer | Finding | Revised section | Disposition |
 |---|---|---|---|---|
@@ -664,6 +709,7 @@ a comparator config group must be regenerated is withdrawn.
 | D5 | Opus | Raw symlink refusal must occur before `expanduser`/`resolve` and is stricter than the cited builder predicate | A1; AC-T4; F4b; CHK-A4 | **Accepted.** Ordering is specified explicitly and the divergence from `build-evaluation-input-source.py:289` (which resolves first, making its `is_symlink()` vacuous) is documented as a deliberate tightening. |
 | D6 | Opus | Removing `--credential-root` makes strict `configured_adapters`/`validate_adapter_config` fail globally, so it is not a valid rollback | Rollback section; AC-T16; AC-T17; L23a; CHK-A19 | **Accepted.** Primary rollback is deleting the evaluator entry. The missing flag is retained only as a negative fail-closed test and is explicitly not a rollback and not "today's behavior". |
 | T1 | Terra | Executor identity is validated against exact key sets in both the harness and the evaluator, so any added identity key is rejected at runtime | A4; L3; L5; L25; I10; CHK-A8 | **Accepted.** No key is added. CHK-A8 asserts the exact existing key set plus the two shadow keys, and asserts the expected `sandbox_id`. |
+| R1 | Opus (Round 2) | Revision 2's A1 falsely claimed `_require_role_argv` already requires `--binary` and `--deny-root`; `SHADOW_EXECUTOR_REQUIRED_ARGV` is today exactly `("--shadow-contract", "--model")` and `dreaming-core.py` references neither other flag | A1 ("Exact current fact" and "`--binary` stays adapter-owned"); the challenged-rule paragraph; L8; L22 | **Accepted.** The false clause is withdrawn. `--credential-root` becomes the **third** required configured flag alongside `--shadow-contract` and `--model`. `--binary` selection stays adapter-owned and is attested through `cli_executable_sha256` and the A3 `process-path` confinement; no new configured requirement is added for `--binary` or `--deny-root`, because the existing design does not need one. |
 
 ## Definition of Done: shadow trial authentication boundary
 
