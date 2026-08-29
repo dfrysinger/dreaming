@@ -2583,6 +2583,60 @@ print(json.dumps({"ok": True}))
                 vendor_module.parse_evaluation_input_result(refused)
             self.assertEqual(raised.exception.code, "malformed-authoring-result")
 
+        # Two different fenced results are ambiguous however they are carried,
+        # and the whole stream is resolved before any line-level candidate can
+        # return one.  A compact one-line body is the sharp case: the per-line
+        # bare-JSON scan would otherwise return the last body and never consult
+        # the fence contract at all.
+        other = {**draft, "summary": "second fenced answer"}
+        compact = f"```json\n{json.dumps(draft)}\n```"
+        compact_other = f"```json\n{json.dumps(other)}\n```"
+        event = lambda content: json.dumps(
+            {"type": "assistant.message", "data": {"content": content}}
+        )
+        for ambiguous in (
+            f"{compact}\n{compact_other}",
+            "\n".join([event(compact), event(compact_other)]),
+            "\n".join([event(compact), json.dumps({"model.response": compact_other})]),
+            f"{compact}\n{event(compact_other)}",
+        ):
+            with self.assertRaises(vendor_module.AdapterError) as raised:
+                vendor_module.parse_evaluation_input_result(ambiguous)
+            self.assertEqual(raised.exception.code, "malformed-authoring-result")
+            self.assertIn("ambiguous", raised.exception.message)
+
+        # The same fenced answer repeated across event fields is not ambiguous,
+        # which is exactly what the copilot CLI emits: one answer echoed by
+        # assistant.message, model.message, model.response, and the snapshot.
+        echoed = "\n".join(
+            [
+                json.dumps({"type": "session.info", "data": {}}),
+                event(compact),
+                json.dumps({"type": "model.message", "data": {"content": compact}}),
+                json.dumps({"type": "model.response", "data": {"text": compact}}),
+                json.dumps(
+                    {
+                        "type": "model.messages_snapshot",
+                        "data": {"messages": [{"content": compact}]},
+                    }
+                ),
+                json.dumps({"type": "result", "exitCode": 0}),
+            ]
+        )
+        self.assertEqual(vendor_module.parse_evaluation_input_result(echoed), draft)
+
+        # A streaming delta carrying half a fence is a transport fragment, not
+        # a second answer, so the completed message still resolves.
+        streamed = "\n".join(
+            [
+                json.dumps(
+                    {"type": "assistant.message_delta", "data": {"deltaContent": "```"}}
+                ),
+                event(compact),
+            ]
+        )
+        self.assertEqual(vendor_module.parse_evaluation_input_result(streamed), draft)
+
         # A fenced object that parses but does not satisfy the schema keeps the
         # normalizer's existing explicit refusal, for every authoring packet.
         invalid = {**draft, "cases": draft["cases"][:1]}
@@ -2623,6 +2677,27 @@ print(json.dumps({"ok": True}))
                 "```json\n{\"decision\": \"maybe\"}\n```"
             )
         self.assertEqual(raised.exception.code, "malformed-review-result")
+
+        review_compact = f"```json\n{json.dumps(review)}\n```"
+        review_other = f"```json\n{json.dumps({**review, 'summary': 'other'})}\n```"
+        for ambiguous in (
+            f"{review_compact}\n{review_other}",
+            "\n".join([event(review_compact), event(review_other)]),
+        ):
+            with self.assertRaises(vendor_module.AdapterError) as raised:
+                vendor_module.parse_evaluation_input_review_result(ambiguous)
+            self.assertEqual(raised.exception.code, "malformed-review-result")
+            self.assertIn("ambiguous", raised.exception.message)
+        self.assertEqual(
+            vendor_module.parse_evaluation_input_review_result(
+                "\n".join([event(review_compact), event(review_compact)])
+            ),
+            review,
+        )
+        self.assertEqual(
+            vendor_module.parse_evaluation_input_review_result(json.dumps(review)),
+            review,
+        )
 
     def test_publishers_reconcile_one_immutable_bundle(self):
         paths = module.RuntimePaths(

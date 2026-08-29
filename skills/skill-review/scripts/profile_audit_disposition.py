@@ -353,9 +353,13 @@ def validate_profile_audit_disposition(
             "boundary-conflict",
             "boundary-unresolved",
         }
+        # A no-covering-skill review that produced no artifact never binds a
+        # candidate group, so an absent id is a terminal non-executable state
+        # rather than corruption.  A present id must still be exact.
         if (
             disposition["outcome"] == "no-covering-skill"
             and not boundary_conflict
+            and candidate_group_id is not None
             and (
                 not isinstance(candidate_group_id, str)
                 or not re.fullmatch(

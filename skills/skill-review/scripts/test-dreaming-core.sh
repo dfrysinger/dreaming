@@ -7387,6 +7387,7 @@ elif sys.argv[1] == "run":
         candidate_group_id: str | None = None,
         contract_version: int = 3,
         persist: bool = True,
+        terminal_route: str | None = None,
     ) -> dict:
         digest = runtime_module.digest
         receipt = {
@@ -7415,7 +7416,8 @@ elif sys.argv[1] == "run":
             else []
         )
         review_result = {
-            "terminal_route": "discard" if outcome == "correct-skill" else "skill",
+            "terminal_route": terminal_route
+            or ("discard" if outcome == "correct-skill" else "skill"),
             "summary": f"Routing fixture {marker}",
             "routing_reason": "Exercise one evaluation route.",
             "catalog_audit": {
@@ -7650,6 +7652,115 @@ elif sys.argv[1] == "run":
             [row["decision_sha256"] for row in routing["rows"]],
             [row["decision_sha256"] for row in repeated["rows"]],
         )
+
+    def test_unbound_no_cover_row_is_terminal_not_projection_poison(self) -> None:
+        # A no-covering-skill review that discarded its work binds no candidate
+        # group.  That row is legitimate, so it takes one terminal route and
+        # every other retained disposition still projects.
+        self.clock = 1770249600
+        self.routing_disposition(
+            outcome="no-covering-skill",
+            marker="discarded",
+            skill_name=None,
+            loaded=False,
+            candidate_group_id=None,
+            terminal_route="discard",
+        )
+        self.routing_disposition(outcome="correct-skill", marker="correct")
+        self.routing_disposition(
+            outcome="missed-skill", marker="missed", loaded=False
+        )
+        self.routing_disposition(
+            outcome="wrong-or-incomplete-skill", marker="wrong"
+        )
+        self.routing_disposition(
+            outcome="no-covering-skill",
+            marker="conflicted",
+            skill_name=None,
+            loaded=False,
+            boundary="boundary-conflict",
+        )
+        self.routing_disposition(
+            outcome="no-covering-skill",
+            marker="ready",
+            skill_name=None,
+            loaded=False,
+            candidate_group_id=self.ROUTING_LIFECYCLE_ID,
+        )
+        record = self.routing_lifecycle_record(
+            occurrence_markers=["ready", "second", "third"]
+        )
+        core, _calls = self.routing_core(record)
+        routing = core.derive_evaluation_routing()
+        by_marker = {row["task_key"]: row for row in routing["rows"]}
+        self.assertEqual(len(routing["rows"]), 6)
+
+        unbound = by_marker["task:discarded"]
+        self.assertEqual(unbound["route"], "recurrence-ineligible")
+        self.assertEqual(unbound["reasons"], ["no-candidate-group-bound"])
+        self.assertIsNone(unbound["candidate_group_id"])
+        self.assertFalse(unbound["requires_evaluation"])
+        self.assertIsNone(unbound["evaluation_subject"])
+        self.assertIsNone(unbound["evaluation_execution"])
+
+        # All four catalog outcomes still reach their own terminal route, and
+        # the gated candidate still becomes executable.
+        self.assertEqual(by_marker["task:correct"]["route"], "no-change")
+        self.assertEqual(
+            by_marker["task:missed"]["route"], "repair-recommendation"
+        )
+        self.assertEqual(
+            by_marker["task:wrong"]["route"], "repair-recommendation"
+        )
+        self.assertEqual(
+            by_marker["task:conflicted"]["reasons"], ["boundary-not-one-to-one"]
+        )
+        self.assertEqual(by_marker["task:ready"]["route"], "candidate-evaluation")
+        self.assertTrue(by_marker["task:ready"]["requires_evaluation"])
+        self.assertEqual(routing["summary"]["total"], 6)
+        self.assertEqual(routing["summary"]["routes"]["recurrence-ineligible"], 2)
+        self.assertEqual(routing["summary"]["requires_evaluation"], 1)
+
+        # Replaying the projection is byte-identical, and the standalone
+        # evaluation-routing command reports the same terminal rows.
+        self.assertEqual(
+            [row["decision_sha256"] for row in routing["rows"]],
+            [
+                row["decision_sha256"]
+                for row in core.derive_evaluation_routing()["rows"]
+            ],
+        )
+        with mock.patch.object(runtime_module, "default_paths", lambda: self.paths):
+            with mock.patch.object(
+                runtime_module.DreamingRuntime,
+                "_candidate_lifecycle_call",
+                lambda _self, *arguments: core._candidate_lifecycle_call(*arguments),
+            ):
+                standalone = runtime_module.evaluation_routing()
+        self.assertTrue(standalone["ok"])
+        self.assertEqual(standalone["status"], "derived")
+        self.assertEqual(len(standalone["rows"]), 6)
+        standalone_by_marker = {row["task_key"]: row for row in standalone["rows"]}
+        self.assertEqual(
+            standalone_by_marker["task:discarded"]["route"], "recurrence-ineligible"
+        )
+        self.assertEqual(
+            standalone_by_marker["task:discarded"]["reasons"],
+            ["no-candidate-group-bound"],
+        )
+
+        # A present but malformed group id is still corruption and still fails
+        # closed for the whole projection.
+        path = (
+            self.paths.profile_audit_dispositions
+            / f"{by_marker['task:discarded']['profile_id'].removeprefix('sha256:')}.json"
+        )
+        tampered = json.loads(path.read_text())
+        tampered["candidate_group_id"] = "not-a-uuid"
+        os.chmod(path, 0o600)
+        path.write_text(json.dumps(tampered))
+        with self.assertRaisesRegex(RuntimeFailure, "profile-audit-disposition"):
+            core.derive_evaluation_routing()
 
     def test_gated_candidate_names_an_unexecutable_evaluation(self) -> None:
         self.clock = 1770249600

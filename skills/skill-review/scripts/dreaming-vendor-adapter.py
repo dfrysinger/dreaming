@@ -3098,49 +3098,146 @@ def evaluation_input_review_prompt(
 
 
 JSON_FENCE_OPENERS = ("```", "```json")
+JSON_FENCE_MARKER = "```"
+FENCE_SCAN_DEPTH = 6
 
 
-def fenced_json_object(text: str) -> dict[str, Any] | None:
-    """Return the one JSON object carried by a single Markdown fence.
+class AmbiguousFence(Exception):
+    """One response carried no single unambiguous fenced JSON object."""
+
+    def __init__(self, detail: str):
+        super().__init__(detail)
+        self.detail = detail
+
+
+def _fenced_json_blocks(text: str) -> list[str]:
+    """Split one text into the bodies of its ``` and ```json fences.
 
     Deterministic line scan rather than a regular expression, so a match can
-    never span two fences or pick one fence out of several. Returns ``None``
-    unless the text holds exactly one terminated ``` or ```json fence enclosing
-    a JSON object; two fences, an unterminated fence, malformed JSON, and any
-    non-object payload all stay with the caller's existing refusal.
-
-    Text outside the single fence is ignored, matching the surrounding
-    contract: the callers already scan an arbitrary event stream line by line
-    and accept a payload embedded in unrelated text. Requiring exactly one
-    fence is what keeps the choice unambiguous.
+    never span two fences or pick one fence out of several. Every line whose
+    strip starts with ``` is a delimiter, so a language-tagged block such as
+    ```bash is paired and skipped instead of leaving its closer to masquerade
+    as the next opener. An odd number of delimiters is an unterminated fence
+    and refuses.
     """
-    if "```" not in text:
-        return None
+    if JSON_FENCE_MARKER not in text:
+        return []
+    delimiters = [
+        (index, line.strip())
+        for index, line in enumerate(text.splitlines())
+        if line.strip().startswith(JSON_FENCE_MARKER)
+    ]
+    if len(delimiters) % 2:
+        raise AmbiguousFence("unterminated fence")
     lines = text.splitlines()
     blocks: list[str] = []
-    index = 0
-    while index < len(lines):
-        if lines[index].strip() in JSON_FENCE_OPENERS:
-            body: list[str] = []
-            closed = False
-            index += 1
-            while index < len(lines):
-                if lines[index].strip() == "```":
-                    closed = True
-                    break
-                body.append(lines[index])
-                index += 1
-            if not closed:
-                return None
-            blocks.append("\n".join(body))
-        index += 1
-    if len(blocks) != 1:
-        return None
+    for position in range(0, len(delimiters), 2):
+        opener_index, opener = delimiters[position]
+        closer_index, _ = delimiters[position + 1]
+        if opener in JSON_FENCE_OPENERS:
+            blocks.append("\n".join(lines[opener_index + 1 : closer_index]))
+    return blocks
+
+
+def _collect_fenced_objects(
+    value: Any, found: dict[str, dict[str, Any]], depth: int = 0
+) -> None:
+    """Gather every distinct fenced JSON object reachable inside one value.
+
+    Nested strings are walked too, because the vendor CLI returns a JSONL
+    event stream whose fenced answer lives inside content strings. Identity is
+    the canonical payload, not the occurrence: a real copilot stream repeats
+    the same answer fence across assistant.message, model.message,
+    model.response, model.messages_snapshot, and model.model_call_success, and
+    those repetitions carry no ambiguity.
+
+    An event field is a transport fragment rather than the model's complete
+    answer, so a truncated or malformed fence inside one is skipped instead of
+    refusing: streaming delta events legitimately carry half a fence. Nothing
+    is accepted silently, because a stream whose only fence is unusable ends
+    with no candidate and keeps the caller's explicit refusal.
+    """
+    if depth > FENCE_SCAN_DEPTH:
+        return
+    if isinstance(value, dict):
+        for child in value.values():
+            _collect_fenced_objects(child, found, depth + 1)
+        return
+    if isinstance(value, list):
+        for child in value:
+            _collect_fenced_objects(child, found, depth + 1)
+        return
+    if not isinstance(value, str):
+        return
     try:
-        value = json.loads(blocks[0])
+        blocks = _fenced_json_blocks(value)
+    except AmbiguousFence:
+        blocks = []
+    for block in blocks:
+        try:
+            payload = json.loads(block)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(payload, dict):
+            continue
+        found[json.dumps(payload, sort_keys=True, separators=(",", ":"))] = payload
+    try:
+        parsed = json.loads(value)
     except json.JSONDecodeError:
+        return
+    _collect_fenced_objects(parsed, found, depth + 1)
+
+
+def stream_fenced_json_object(text: str) -> dict[str, Any] | None:
+    """Resolve the one fenced JSON object carried by a whole response.
+
+    The complete response is examined before any line-level candidate may
+    return a fenced result: the raw text, then every nested string of every
+    line that parses as JSON. Exactly one fenced object may survive.
+
+    The raw text is the model's own answer, so it is held to the strict
+    contract: more than one fence, an unterminated fence, malformed fenced
+    JSON, and a non-object fenced payload all refuse. Event fields are held to
+    the distinctness contract described in ``_collect_fenced_objects``. Two
+    different fenced objects anywhere in the response refuse, so no caller can
+    silently pick one fence out of several.
+
+    ``None`` means no usable fence is present at all, which leaves the caller's
+    existing bare-JSON and event precedence untouched.
+    """
+    found: dict[str, dict[str, Any]] = {}
+    blocks = _fenced_json_blocks(text)
+    if len(blocks) > 1:
+        raise AmbiguousFence("more than one fence in the response text")
+    for block in blocks:
+        try:
+            payload = json.loads(block)
+        except json.JSONDecodeError as error:
+            raise AmbiguousFence("malformed fenced JSON") from error
+        if not isinstance(payload, dict):
+            raise AmbiguousFence("fenced payload is not an object")
+        found[json.dumps(payload, sort_keys=True, separators=(",", ":"))] = payload
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        try:
+            parsed = json.loads(stripped)
+        except json.JSONDecodeError:
+            continue
+        _collect_fenced_objects(parsed, found)
+    if not found:
         return None
-    return value if isinstance(value, dict) else None
+    if len(found) > 1:
+        raise AmbiguousFence("more than one distinct fenced JSON object")
+    return next(iter(found.values()))
+
+
+def _resolve_stream_fence(text: str, code: str) -> dict[str, Any] | None:
+    try:
+        return stream_fenced_json_object(text)
+    except AmbiguousFence as error:
+        raise AdapterError(code, f"model fenced result is ambiguous: {error.detail}")
 
 
 def find_evaluation_input_result(value: Any) -> dict[str, Any] | None:
@@ -3160,15 +3257,13 @@ def find_evaluation_input_result(value: Any) -> dict[str, Any] | None:
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError:
-            fenced = fenced_json_object(value)
-            if fenced is None:
-                return None
-            return find_evaluation_input_result(fenced)
+            return None
         return find_evaluation_input_result(parsed)
     return None
 
 
 def parse_evaluation_input_result(text: str) -> dict[str, Any]:
+    fenced = _resolve_stream_fence(text, "malformed-authoring-result")
     candidates = [line.strip() for line in text.splitlines() if line.strip()]
     candidates.append(text.strip())
     for candidate in reversed(candidates):
@@ -3179,7 +3274,6 @@ def parse_evaluation_input_result(text: str) -> dict[str, Any]:
         found = find_evaluation_input_result(value)
         if found is not None:
             return found
-    fenced = fenced_json_object(text)
     if fenced is not None:
         found = find_evaluation_input_result(fenced)
         if found is not None:
@@ -3208,15 +3302,13 @@ def find_evaluation_input_review_result(
         try:
             parsed = json.loads(value)
         except json.JSONDecodeError:
-            fenced = fenced_json_object(value)
-            if fenced is None:
-                return None
-            return find_evaluation_input_review_result(fenced)
+            return None
         return find_evaluation_input_review_result(parsed)
     return None
 
 
 def parse_evaluation_input_review_result(text: str) -> dict[str, Any]:
+    fenced = _resolve_stream_fence(text, "malformed-review-result")
     candidates = [line.strip() for line in text.splitlines() if line.strip()]
     candidates.append(text.strip())
     for candidate in reversed(candidates):
@@ -3227,7 +3319,6 @@ def parse_evaluation_input_review_result(text: str) -> dict[str, Any]:
         found = find_evaluation_input_review_result(value)
         if found is not None:
             return found
-    fenced = fenced_json_object(text)
     if fenced is not None:
         found = find_evaluation_input_review_result(fenced)
         if found is not None:

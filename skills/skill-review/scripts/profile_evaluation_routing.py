@@ -298,6 +298,12 @@ def build_evaluation_routing_row(
     elif boundary_relation in UNRESOLVED_BOUNDARIES:
         _assert_unbound(lifecycle_record, "boundary-conflict-unbound")
         route, reasons = "recurrence-ineligible", ["boundary-not-one-to-one"]
+    elif candidate_group_id is None:
+        # A no-covering-skill review that discarded its work binds no candidate
+        # group.  That row is terminal and non-executable, not corrupt, so it is
+        # routed rather than allowed to abort every other row's projection.
+        _assert_unbound(lifecycle_record, "unbound-disposition-unbound")
+        route, reasons = "recurrence-ineligible", ["no-candidate-group-bound"]
     else:
         if not isinstance(candidate_group_id, str) or not UUID_RE.fullmatch(
             candidate_group_id
