@@ -5031,6 +5031,168 @@ elif command == "run":
             1,
         )
 
+    def test_unresolved_correction_replays_once_per_contract(self) -> None:
+        source_fixture = self.source_fixture(
+            [self.session("one", 10, event_count=3)]
+        )
+        source = self.adapter("session-source", "fake", source_fixture)
+        procedure = {
+            "trigger": "A reusable fixture task is complete.",
+            "outcome": "Retain the fixture procedure.",
+            "actions": ["Retain the ordered procedure."],
+            "exclusions": ["Do not retain source details."],
+        }
+        prior_template = {
+            "source_event_ids": ["one-event-1"],
+            "task_type": "prior-task",
+            "abstract_summary": "The prior reusable task.",
+            "reuse_value": "reusable-procedure",
+            "procedure": procedure,
+        }
+        conflict_template = {
+            "source_event_ids": [
+                "one-event-1",
+                "one-event-2",
+                "one-event-3",
+            ],
+            "task_type": "merged-task",
+            "abstract_summary": "A merged old and new task.",
+            "reuse_value": "reusable-procedure",
+            "procedure": procedure,
+        }
+        executor_fixture = self.write(
+            "unresolved-occurrence-correction-executor.json",
+            {
+                "terminal_route": "discard",
+                "artifact": None,
+                "require_task_profile_context": True,
+                "require_task_profile_id": True,
+                "require_task_occurrence_context": True,
+                "task_profiles": [prior_template, conflict_template],
+                "task_profile_corrections": [
+                    prior_template,
+                    conflict_template,
+                ],
+            },
+        )
+        executor = self.adapter("review-executor", "exec", executor_fixture)
+        core = self.core({("fake", "exec")})
+        profiled = core.profile("fake", source, "fake:one", "exec", executor)
+        receipt = runtime_module.TaskProfileReceipt(
+            Path(profiled["receipt"]),
+            json.loads(Path(profiled["receipt"]).read_text()),
+        )
+        prior_profile, conflict_profile = receipt.payload["profiles"]
+        prior = core.review_profile(
+            "fake",
+            source,
+            "fake:one",
+            receipt.payload["source_revision"],
+            "exec",
+            executor,
+            prior_profile["profile_id"],
+        )
+        state = json.loads(executor_fixture.read_text())
+        state["occurrence_relation_by_profile"] = {
+            conflict_profile["profile_id"]: "boundary-conflict"
+        }
+        state["occurrence_prior_ids_by_profile"] = {
+            conflict_profile["profile_id"]: [
+                prior["canonical_occurrence_id"]
+            ]
+        }
+        executor_fixture.write_text(json.dumps(state))
+        conflict_result = core.review_profile(
+            "fake",
+            source,
+            "fake:one",
+            receipt.payload["source_revision"],
+            "exec",
+            executor,
+            conflict_profile["profile_id"],
+        )
+        conflict = core.task_occurrence_resolution_for(
+            runtime_module.ProfileAuditTarget(receipt, conflict_profile)
+        )
+        self.assertEqual(conflict_result["status"], "boundary-conflict")
+        self.assertEqual(conflict["boundary_relation"], "boundary-conflict")
+        started = 0
+
+        def record_start() -> None:
+            nonlocal started
+            started += 1
+
+        unresolved = core.correct_task_occurrence_conflict(
+            "fake",
+            source,
+            receipt,
+            conflict,
+            "exec",
+            executor,
+            on_profile_operation_start=record_start,
+        )
+        self.assertEqual(unresolved["status"], "boundary-unresolved")
+        self.assertEqual(started, 1)
+        active = core.task_occurrence_resolution_for(
+            runtime_module.ProfileAuditTarget(receipt, conflict_profile)
+        )
+        self.assertEqual(active["boundary_relation"], "boundary-unresolved")
+        self.assertEqual(
+            active["supersedes_resolution_sha256"],
+            conflict["resolution_sha256"],
+        )
+        replay = core.correct_task_occurrence_conflict(
+            "fake",
+            source,
+            receipt,
+            active,
+            "exec",
+            executor,
+            on_profile_operation_start=record_start,
+        )
+        self.assertTrue(replay["cached"])
+        self.assertEqual(started, 1)
+
+        with mock.patch.object(
+            runtime_module,
+            "TASK_OCCURRENCE_CORRECTION_CONTRACT",
+            "profile-boundary-correction-v2",
+        ):
+            reopened = core.review_profile(
+                "fake",
+                source,
+                "fake:one",
+                receipt.payload["source_revision"],
+                "exec",
+                executor,
+                conflict_profile["profile_id"],
+            )
+            self.assertEqual(reopened["status"], "boundary-conflict")
+            retried = core.correct_task_occurrence_conflict(
+                "fake",
+                source,
+                receipt,
+                active,
+                "exec",
+                executor,
+                on_profile_operation_start=record_start,
+            )
+            self.assertEqual(retried["status"], "boundary-unresolved")
+            self.assertFalse(retried["cached"])
+            self.assertEqual(started, 2)
+            latest = core.task_occurrence_resolution_for(
+                runtime_module.ProfileAuditTarget(receipt, conflict_profile)
+            )
+            self.assertEqual(latest["boundary_relation"], "boundary-unresolved")
+            self.assertEqual(
+                latest["supersedes_resolution_sha256"],
+                active["resolution_sha256"],
+            )
+        self.assertEqual(
+            len(list(self.paths.task_occurrence_corrections.glob("*.json"))),
+            2,
+        )
+
     def test_scheduled_conflict_correction_fills_profile_and_review_capacity(self) -> None:
         source_fixture = self.source_fixture(
             [self.session("one", 10, event_count=3)]

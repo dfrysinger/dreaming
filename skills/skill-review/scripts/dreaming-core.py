@@ -1983,6 +1983,24 @@ class DreamingRuntime:
             raise RuntimeFailure(
                 "task-occurrence-resolution-invalid", error.reason
             ) from error
+        resolution_ids = {
+            resolution["resolution_sha256"] for resolution in bound
+        }
+        superseded_ids = {
+            resolution["supersedes_resolution_sha256"]
+            for resolution in bound
+            if resolution["supersedes_resolution_sha256"] is not None
+        }
+        if not superseded_ids.issubset(resolution_ids):
+            raise RuntimeFailure(
+                "task-occurrence-resolution-invalid",
+                "supersession-target",
+            )
+        bound = [
+            resolution
+            for resolution in bound
+            if resolution["resolution_sha256"] not in superseded_ids
+        ]
         if len(bound) > 1:
             raise RuntimeFailure(
                 "task-occurrence-resolution-invalid",
@@ -2339,24 +2357,43 @@ class DreamingRuntime:
             profile["task_key"] for profile in receipt.payload["profiles"]
         }
         try:
-            resolutions = load_task_occurrence_resolutions(
-                self.paths.task_occurrence_resolutions
-            )
+            resolutions = [
+                self._validate_task_occurrence_provenance(resolution)
+                for resolution in load_task_occurrence_resolutions(
+                    self.paths.task_occurrence_resolutions
+                )
+                if (
+                    resolution.get("task_key") in task_keys
+                    and resolution.get("profile_receipt_sha256")
+                    == receipt.payload["receipt_sha256"]
+                )
+            ]
         except TaskOccurrenceError as error:
             raise RuntimeFailure(
                 "task-occurrence-resolution-invalid", error.reason
             ) from error
-        conflicts = []
-        for resolution in resolutions:
-            resolution = self._validate_task_occurrence_provenance(resolution)
+        resolution_ids = {
+            resolution["resolution_sha256"] for resolution in resolutions
+        }
+        superseded_ids = {
+            resolution["supersedes_resolution_sha256"]
+            for resolution in resolutions
+            if resolution["supersedes_resolution_sha256"] is not None
+        }
+        if not superseded_ids.issubset(resolution_ids):
+            raise RuntimeFailure(
+                "task-occurrence-resolution-invalid",
+                "supersession-target",
+            )
+        return [
+            resolution
+            for resolution in resolutions
             if (
-                resolution["task_key"] in task_keys
-                and resolution["profile_receipt_sha256"]
-                == receipt.payload["receipt_sha256"]
-                and resolution["boundary_relation"] == "boundary-conflict"
-            ):
-                conflicts.append(resolution)
-        return conflicts
+                resolution["resolution_sha256"] not in superseded_ids
+                and resolution["boundary_relation"]
+                in {"boundary-conflict", "boundary-unresolved"}
+            )
+        ]
 
     def task_occurrence_correction_attempt_for(
         self, conflict: dict[str, Any]
@@ -2892,8 +2929,17 @@ class DreamingRuntime:
             and existing_resolution["boundary_relation"]
             in {"boundary-conflict", "boundary-unresolved"}
         ):
+            status = existing_resolution["boundary_relation"]
+            if (
+                status == "boundary-unresolved"
+                and self.task_occurrence_correction_attempt_for(
+                    existing_resolution
+                )
+                is None
+            ):
+                status = "boundary-conflict"
             return {
-                "status": existing_resolution["boundary_relation"],
+                "status": status,
                 "profile_id": profile_id,
                 "occurrence_resolution_sha256": existing_resolution[
                     "resolution_sha256"
@@ -10645,7 +10691,11 @@ def scheduled_run() -> dict[str, Any]:
                         "code": result["status"],
                     }
                 )
-            elif report["review_budget"]["started_operations"] == started_before:
+            elif (
+                report["review_budget"]["started_operations"] == started_before
+                and result["status"]
+                not in {"boundary-conflict", "boundary-unresolved"}
+            ):
                 review_row["outcome"] = "invalid-unbound"
                 report["profile_review_skips"].append(
                     {
@@ -10656,8 +10706,9 @@ def scheduled_run() -> dict[str, Any]:
                 )
             else:
                 review_row["outcome"] = (
-                    "boundary-conflict"
-                    if result["status"] == "boundary-conflict"
+                    result["status"]
+                    if result["status"]
+                    in {"boundary-conflict", "boundary-unresolved"}
                     else "newly-attempted"
                 )
                 if report["review_budget"]["started_operations"] > started_before:
