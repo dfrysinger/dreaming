@@ -4,10 +4,19 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from typing import Any, NoReturn
 
-CURRENT_PROFILE_AUDIT_CONTRACT_VERSION = 2
-KNOWN_PROFILE_AUDIT_CONTRACT_VERSIONS = frozenset({1, 2})
+CURRENT_PROFILE_AUDIT_CONTRACT_VERSION = 3
+KNOWN_PROFILE_AUDIT_CONTRACT_VERSIONS = frozenset({1, 2, 3})
+CATALOG_AUDIT_OUTCOMES = frozenset(
+    {
+        "correct-skill",
+        "missed-skill",
+        "wrong-or-incomplete-skill",
+        "no-covering-skill",
+    }
+)
 
 
 class ProfileAuditDispositionError(ValueError):
@@ -40,8 +49,11 @@ def build_profile_audit_disposition(
     reviewed_at: int,
     occurrence_resolution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    catalog_audit = review_result.get("catalog_audit")
     contract_version = (
-        CURRENT_PROFILE_AUDIT_CONTRACT_VERSION
+        3
+        if occurrence_resolution is not None and isinstance(catalog_audit, dict)
+        else 2
         if occurrence_resolution is not None
         else 1
     )
@@ -61,10 +73,11 @@ def build_profile_audit_disposition(
         "profile_executor_identity": receipt["executor_identity"],
         "review_executor": review_executor,
         "review_executor_identity": review_executor_identity,
-        # The four catalog-audit outcomes are deliberately not represented until
-        # their reviewer contract exists.  This only claims successful terminal
-        # execution of the current full-review contract.
-        "outcome": f"reviewed-terminal-v{contract_version}",
+        "outcome": (
+            catalog_audit["outcome"]
+            if contract_version == 3
+            else f"reviewed-terminal-v{contract_version}"
+        ),
         "terminal_route": review_result["terminal_route"],
         "summary": review_result["summary"],
         "routing_reason": review_result["routing_reason"],
@@ -83,6 +96,24 @@ def build_profile_audit_disposition(
                 ],
             }
             if occurrence_resolution is not None
+            else {}
+        ),
+        **(
+            {
+                "reviewer_contract": catalog_audit["reviewer_contract"],
+                "catalog_skill_name": catalog_audit["skill_name"],
+                "catalog_sha256": catalog_audit["catalog_sha256"],
+                "catalog_skill_names": catalog_audit[
+                    "catalog_skill_names"
+                ],
+                "tombstones_sha256": catalog_audit["tombstones_sha256"],
+                "skill_load_trace": catalog_audit["skill_load_trace"],
+                "skill_load_trace_sha256": catalog_audit[
+                    "skill_load_trace_sha256"
+                ],
+                "candidate_group_id": catalog_audit["candidate_group_id"],
+            }
+            if contract_version == 3
             else {}
         ),
     }
@@ -121,16 +152,32 @@ def validate_profile_audit_disposition(
         "reviewed_at",
     }
     version = disposition.get("profile_audit_contract_version")
-    versioned_keys = (
+    occurrence_keys = (
         {
             "occurrence_resolution_sha256",
             "canonical_occurrence_id",
             "boundary_relation",
         }
-        if version == 2
+        if version in {2, 3}
         else set()
     )
-    expected_keys = common_keys | versioned_keys | {"disposition_sha256"}
+    catalog_keys = (
+        {
+            "reviewer_contract",
+            "catalog_skill_name",
+            "catalog_sha256",
+            "catalog_skill_names",
+            "tombstones_sha256",
+            "skill_load_trace",
+            "skill_load_trace_sha256",
+            "candidate_group_id",
+        }
+        if version == 3
+        else set()
+    )
+    expected_keys = common_keys | occurrence_keys | catalog_keys | {
+        "disposition_sha256"
+    }
     if set(disposition) != expected_keys:
         _reject("disposition-shape")
     body = {
@@ -146,8 +193,12 @@ def validate_profile_audit_disposition(
         or disposition.get("kind") != "task_profile_audit_disposition"
         or disposition.get("profile_audit_contract_version")
         not in KNOWN_PROFILE_AUDIT_CONTRACT_VERSIONS
-        or disposition.get("outcome") != f"reviewed-terminal-v{version}"
     ):
+        _reject("disposition-contract")
+    if version in {1, 2}:
+        if disposition.get("outcome") != f"reviewed-terminal-v{version}":
+            _reject("disposition-contract")
+    elif disposition.get("outcome") not in CATALOG_AUDIT_OUTCOMES:
         _reject("disposition-contract")
     expected = {
         "profile_id": profile.get("profile_id"),
@@ -191,7 +242,7 @@ def validate_profile_audit_disposition(
         or not isinstance(disposition.get("reviewed_at"), int)
     ):
         _reject("disposition-metadata")
-    if version == 2:
+    if version in {2, 3}:
         if (
             disposition.get("boundary_relation")
             not in {
@@ -220,4 +271,112 @@ def validate_profile_audit_disposition(
                 _reject("disposition-occurrence")
         elif canonical_occurrence_id is not None:
             _reject("disposition-occurrence")
+    if version == 3:
+        trace = disposition.get("skill_load_trace")
+        skill_name = disposition.get("catalog_skill_name")
+        catalog_names = disposition.get("catalog_skill_names")
+        loaded_names = (
+            {
+                item.get("catalog_skill_name")
+                for item in trace
+                if isinstance(item, dict)
+                and isinstance(item.get("catalog_skill_name"), str)
+            }
+            if isinstance(trace, list)
+            else set()
+        )
+        if (
+            disposition.get("reviewer_contract") != "profile-catalog-audit-v1"
+            or not isinstance(trace, list)
+            or not isinstance(catalog_names, list)
+            or catalog_names != sorted(set(catalog_names))
+            or any(
+                not isinstance(name, str) or not name
+                for name in catalog_names
+            )
+            or _digest(trace) != disposition.get("skill_load_trace_sha256")
+            or any(
+                not isinstance(item, dict)
+                or set(item)
+                != {
+                    "source_event_id",
+                    "invoked_name",
+                    "catalog_skill_name",
+                    "event_sha256",
+                }
+                or not isinstance(item.get("source_event_id"), str)
+                or not item["source_event_id"]
+                or not isinstance(item.get("invoked_name"), str)
+                or not item["invoked_name"]
+                or (
+                    item.get("catalog_skill_name") is not None
+                    and (
+                        not isinstance(item["catalog_skill_name"], str)
+                        or not item["catalog_skill_name"]
+                    )
+                )
+                or not isinstance(item.get("event_sha256"), str)
+                or not item["event_sha256"].startswith("sha256:")
+                for item in trace
+            )
+            or any(
+                not isinstance(disposition.get(field), str)
+                or not disposition[field].startswith("sha256:")
+                for field in ("catalog_sha256", "tombstones_sha256")
+            )
+            or (
+                skill_name is not None
+                and (not isinstance(skill_name, str) or not skill_name.strip())
+            )
+        ):
+            _reject("disposition-catalog-audit")
+        candidate_group_id = disposition.get("candidate_group_id")
+        boundary_conflict = disposition.get("boundary_relation") in {
+            "boundary-conflict",
+            "boundary-unresolved",
+        }
+        if (
+            disposition["outcome"] == "no-covering-skill"
+            and not boundary_conflict
+            and (
+                not isinstance(candidate_group_id, str)
+                or not re.fullmatch(
+                    r"[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}",
+                    candidate_group_id,
+                )
+            )
+        ) or (
+            (
+                disposition["outcome"] != "no-covering-skill"
+                or boundary_conflict
+            )
+            and candidate_group_id is not None
+        ):
+            _reject("disposition-candidate-group")
+        if (
+            disposition["outcome"] == "no-covering-skill"
+            and skill_name is not None
+        ) or (
+            disposition["outcome"] != "no-covering-skill"
+            and not isinstance(skill_name, str)
+        ) or (
+            disposition["outcome"] == "correct-skill"
+            and (
+                skill_name not in catalog_names
+                or skill_name not in loaded_names
+            )
+        ) or (
+            disposition["outcome"] == "missed-skill"
+            and (
+                skill_name not in catalog_names
+                or skill_name in loaded_names
+            )
+        ) or (
+            disposition["outcome"] == "wrong-or-incomplete-skill"
+            and (
+                skill_name not in catalog_names
+                or skill_name not in loaded_names
+            )
+        ):
+            _reject("disposition-catalog-audit")
     return disposition

@@ -43,6 +43,7 @@ from remote_subject_policy import (
 )
 from task_profile_receipt import (
     TaskProfileReceiptError,
+    compatible_task_profile_executor_identities,
     validate_task_profile_receipt,
 )
 from profile_audit_disposition import (
@@ -75,6 +76,27 @@ TASK_PROFILE_CAPABILITY = "task-profile-v2"
 TASK_PROFILE_SNAPSHOT_CONTRACT_VERSION = 1
 TASK_OCCURRENCE_REVIEW_CONTRACT = "profile-catalog-review-occurrence-v1"
 TASK_OCCURRENCE_CORRECTION_CONTRACT = "profile-boundary-correction-v1"
+MAX_CANDIDATE_GROUPS_PER_REVIEW = 20
+MAX_CANDIDATE_GROUP_CONTEXT_BYTES = 48_000
+CANDIDATE_LIFECYCLE_STATES = {
+    "collecting",
+    "legacy_probation",
+    "ready_for_draft",
+    "evaluating",
+    "portfolio_pending",
+    "admitted",
+    "expired",
+    "rejected",
+    "quarantined",
+    "absorbed",
+    "archived",
+}
+ELIGIBLE_CANDIDATE_GROUP_STATES = {
+    "collecting",
+    "ready_for_draft",
+    "expired",
+    "rejected",
+}
 ROLES = {
     "session-source": {
         "protocol": "dreaming.session-source",
@@ -549,6 +571,10 @@ class RuntimePaths:
 
     @property
     def profile_audit_dispositions(self) -> Path:
+        return self.state / "profile-audit-dispositions" / "v3"
+
+    @property
+    def prior_profile_audit_dispositions(self) -> Path:
         return self.state / "profile-audit-dispositions" / "v2"
 
     @property
@@ -1120,7 +1146,98 @@ class DreamingRuntime:
             atomic_json(path, snapshot, mode=0o400)
         return path, inspected
 
-    def _validated_review_result(self, result: dict[str, Any]) -> dict[str, Any]:
+    @staticmethod
+    def _profile_skill_load_trace(
+        snapshot: dict[str, Any],
+        profile: dict[str, Any],
+        catalog_names: list[str],
+    ) -> list[dict[str, Any]]:
+        events = snapshot.get("events")
+        source_event_ids = profile.get("source_event_ids")
+        if not isinstance(events, list) or not isinstance(
+            source_event_ids, list
+        ) or not source_event_ids:
+            raise RuntimeFailure(
+                "malformed-executor-result", "catalog_audit source evidence"
+            )
+        positions = {
+            event.get("source_event_id"): index
+            for index, event in enumerate(events)
+            if isinstance(event, dict)
+            and isinstance(event.get("source_event_id"), str)
+        }
+        if any(event_id not in positions for event_id in source_event_ids):
+            raise RuntimeFailure(
+                "malformed-executor-result", "catalog_audit source evidence"
+            )
+        trace: list[dict[str, Any]] = []
+        first = positions[source_event_ids[0]]
+        last = positions[source_event_ids[-1]]
+        for event in events[first : last + 1]:
+            if (
+                not isinstance(event, dict)
+                or event.get("kind") != "tool_call"
+                or str(event.get("tool_name", "")).casefold() != "skill"
+            ):
+                continue
+            raw_input = event.get("text")
+            try:
+                parsed_input = (
+                    json.loads(raw_input)
+                    if isinstance(raw_input, str)
+                    else raw_input
+                )
+            except json.JSONDecodeError as error:
+                raise RuntimeFailure(
+                    "malformed-executor-result",
+                    "catalog_audit skill invocation",
+                ) from error
+            invoked_name = None
+            if isinstance(parsed_input, dict):
+                invoked_name = parsed_input.get(
+                    "skill",
+                    parsed_input.get(
+                        "skillName", parsed_input.get("name")
+                    ),
+                )
+            if not isinstance(invoked_name, str) or not invoked_name.strip():
+                raise RuntimeFailure(
+                    "malformed-executor-result",
+                    "catalog_audit skill invocation",
+                )
+            invoked_name = invoked_name.strip().lstrip("/")
+            projected_name = invoked_name
+            if (
+                projected_name not in catalog_names
+                and ":" in projected_name
+            ):
+                suffix = projected_name.rsplit(":", 1)[1]
+                projected_name = (
+                    suffix if suffix in catalog_names else projected_name
+                )
+            trace.append(
+                {
+                    "source_event_id": event["source_event_id"],
+                    "invoked_name": invoked_name,
+                    "catalog_skill_name": (
+                        projected_name
+                        if projected_name in catalog_names
+                        else None
+                    ),
+                    "event_sha256": digest(event),
+                }
+            )
+        return trace
+
+    def _validated_review_result(
+        self,
+        result: dict[str, Any],
+        *,
+        require_catalog_audit: bool = False,
+        catalog_snapshot: dict[str, Any] | None = None,
+        catalog_profile: dict[str, Any] | None = None,
+        candidate_groups: list[dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
         if result.get("status") != "ok":
             raise RuntimeFailure("executor-failed", "review result status is not ok")
         if result.get("completion_sentinel") != "DREAMING_REVIEW_COMPLETE":
@@ -1142,6 +1259,114 @@ class DreamingRuntime:
                 )
         artifact = result.get("artifact")
         evidence_event_ids = result.get("evidence_event_ids")
+        catalog_audit = result.get("catalog_audit")
+        if require_catalog_audit:
+            if not isinstance(catalog_audit, dict):
+                raise RuntimeFailure(
+                    "malformed-executor-result", "catalog_audit is required"
+                )
+            expected_audit_keys = {
+                "outcome",
+                "skill_name",
+                "reviewer_contract",
+                "catalog_sha256",
+                "catalog_skill_names",
+                "tombstones_sha256",
+                "skill_load_trace",
+                "skill_load_trace_sha256",
+                "candidate_group_id",
+                "candidate_groups",
+            }
+            trace = catalog_audit.get("skill_load_trace")
+            catalog_names = catalog_audit.get("catalog_skill_names")
+            if (
+                set(catalog_audit) != expected_audit_keys
+                or catalog_audit.get("outcome")
+                not in {
+                    "correct-skill",
+                    "missed-skill",
+                    "wrong-or-incomplete-skill",
+                    "no-covering-skill",
+                }
+                or catalog_audit.get("reviewer_contract")
+                != "profile-catalog-audit-v1"
+                or not isinstance(trace, list)
+                or digest(trace) != catalog_audit.get("skill_load_trace_sha256")
+                or any(
+                    not isinstance(item, dict)
+                    or set(item)
+                    != {
+                        "source_event_id",
+                        "invoked_name",
+                        "catalog_skill_name",
+                        "event_sha256",
+                    }
+                    or not isinstance(item.get("source_event_id"), str)
+                    or not item["source_event_id"]
+                    or not isinstance(item.get("invoked_name"), str)
+                    or not item["invoked_name"]
+                    or (
+                        item.get("catalog_skill_name") is not None
+                        and (
+                            not isinstance(item["catalog_skill_name"], str)
+                            or not item["catalog_skill_name"]
+                        )
+                    )
+                    or not isinstance(item.get("event_sha256"), str)
+                    or not item["event_sha256"].startswith("sha256:")
+                    for item in trace
+                )
+                or not isinstance(catalog_names, list)
+                or catalog_names != sorted(set(catalog_names))
+                or any(
+                    not isinstance(name, str) or not name for name in catalog_names
+                )
+                or not isinstance(catalog_snapshot, dict)
+                or not isinstance(catalog_profile, dict)
+                or catalog_audit.get("candidate_groups") != candidate_groups
+                or trace
+                != self._profile_skill_load_trace(
+                    catalog_snapshot,
+                    catalog_profile,
+                    catalog_names,
+                )
+                or any(
+                    not isinstance(catalog_audit.get(field), str)
+                    or not catalog_audit[field].startswith("sha256:")
+                    for field in ("catalog_sha256", "tombstones_sha256")
+                )
+            ):
+                raise RuntimeFailure(
+                    "malformed-executor-result", "catalog_audit is invalid"
+                )
+            candidate_group_id = catalog_audit.get("candidate_group_id")
+            boundary_conflict = (
+                isinstance(result.get("occurrence_boundary"), dict)
+                and result["occurrence_boundary"].get("relation")
+                == "boundary-conflict"
+            )
+            if (
+                (catalog_audit["outcome"] != "no-covering-skill" or boundary_conflict)
+                and candidate_group_id is not None
+            ) or (
+                catalog_audit["outcome"] == "no-covering-skill"
+                and not boundary_conflict
+                and candidate_group_id is not None
+                and candidate_group_id
+                not in {
+                    item.get("lifecycle_id")
+                    for item in candidate_groups or []
+                    if isinstance(item, dict)
+                }
+            ):
+                raise RuntimeFailure(
+                    "malformed-executor-result", "catalog_audit candidate group is invalid"
+                )
+        elif catalog_audit is not None:
+            raise RuntimeFailure(
+                "malformed-executor-result",
+                "catalog_audit is only valid for profile review",
+            )
         if destination in {"discard", "instruction", "factual_memory"}:
             if artifact is not None:
                 raise RuntimeFailure(
@@ -1153,6 +1378,46 @@ class DreamingRuntime:
                     "malformed-executor-result",
                     f"{destination} must not cite evidence events",
                 )
+            if require_catalog_audit:
+                skill_name = catalog_audit["skill_name"]
+                loaded_names = {
+                    item.get("catalog_skill_name")
+                    for item in catalog_audit["skill_load_trace"]
+                    if isinstance(item, dict)
+                }
+                outcome = catalog_audit["outcome"]
+                occurrence_boundary = result.get("occurrence_boundary")
+                boundary_conflict = (
+                    isinstance(occurrence_boundary, dict)
+                    and occurrence_boundary.get("relation")
+                    == "boundary-conflict"
+                )
+                valid_semantic_outcome = (
+                    outcome == "correct-skill"
+                    and isinstance(skill_name, str)
+                    and skill_name in catalog_audit["catalog_skill_names"]
+                    and skill_name in loaded_names
+                ) or (
+                    outcome == "missed-skill"
+                    and isinstance(skill_name, str)
+                    and skill_name in catalog_audit["catalog_skill_names"]
+                    and skill_name not in loaded_names
+                ) or (
+                    outcome == "wrong-or-incomplete-skill"
+                    and isinstance(skill_name, str)
+                    and skill_name in catalog_audit["catalog_skill_names"]
+                    and skill_name in loaded_names
+                ) or (
+                    outcome == "no-covering-skill"
+                    and skill_name is None
+                )
+                if not valid_semantic_outcome or (
+                    not boundary_conflict and outcome != "correct-skill"
+                ) or destination != "discard":
+                    raise RuntimeFailure(
+                        "malformed-executor-result",
+                        "catalog_audit route is invalid",
+                    )
             return result
         if not isinstance(artifact, dict):
             raise RuntimeFailure(
@@ -1274,6 +1539,71 @@ class DreamingRuntime:
                 "malformed-executor-result",
                 "support_file operation requires at least one support file",
             )
+        if require_catalog_audit:
+            outcome = catalog_audit["outcome"]
+            skill_name = catalog_audit["skill_name"]
+            loaded_trace = catalog_audit["skill_load_trace"]
+            catalog_names = catalog_audit["catalog_skill_names"]
+            valid_catalog_route = (
+                outcome == "missed-skill"
+                and isinstance(skill_name, str)
+                and skill_name in catalog_names
+                and skill_name
+                not in {
+                    item.get("catalog_skill_name")
+                    for item in loaded_trace
+                    if isinstance(item, dict)
+                }
+                and destination == "skill"
+                and operation == "patch"
+                and artifact["skill_name"] == skill_name
+            ) or (
+                outcome == "wrong-or-incomplete-skill"
+                and isinstance(skill_name, str)
+                and skill_name in catalog_names
+                and skill_name
+                in {
+                    item.get("catalog_skill_name")
+                    for item in loaded_trace
+                    if isinstance(item, dict)
+                }
+                and destination in {"skill", "support_file"}
+                and operation in {"patch", "support_file"}
+                and artifact["skill_name"] == skill_name
+            ) or (
+                outcome == "no-covering-skill"
+                and skill_name is None
+                and destination == "skill"
+                and operation == "create"
+                and artifact["skill_name"] not in catalog_names
+            )
+            selected_group = next(
+                (
+                    group
+                    for group in candidate_groups or []
+                    if isinstance(group, dict)
+                    and group.get("lifecycle_id")
+                    == catalog_audit["candidate_group_id"]
+                ),
+                None,
+            )
+            if (
+                catalog_audit["candidate_group_id"] is not None
+                and (
+                    not isinstance(selected_group, dict)
+                    or artifact["skill_name"]
+                    != selected_group.get("proposed_name")
+                )
+            ):
+                raise RuntimeFailure(
+                    "malformed-executor-result",
+                    "catalog_audit candidate group artifact is invalid",
+                )
+            if not valid_catalog_route:
+                raise RuntimeFailure(
+                    "malformed-executor-result",
+                    "catalog_audit route is invalid",
+                )
         if not isinstance(evidence_event_ids, list):
             raise RuntimeFailure(
                 "evidence-anchor-invalid", "evidence_event_ids must be a list"
@@ -1397,7 +1727,10 @@ class DreamingRuntime:
             if isinstance(event, dict) and isinstance(event.get("source_event_id"), str)
         }
         profiles: list[dict[str, Any]] = []
-        legacy_profiles = all(isinstance(profile, dict) and "goal_event_id" not in profile for profile in model_profiles)
+        legacy_profiles = bool(model_profiles) and all(
+            isinstance(profile, dict) and "goal_event_id" not in profile
+            for profile in model_profiles
+        )
         expected_model_keys = {
             "source_event_ids", "goal_event_id", "task_type", "abstract_summary",
             "reuse_value", "procedure", "confidence", "sensitive_source", "task_state",
@@ -1804,17 +2137,34 @@ class DreamingRuntime:
         )
         if indexed is None:
             return TaskProfileBinding(status="absent")
+        # V1 receipts lack the goal-derived occurrence authority and catalog
+        # audit contract required by the current profile-review lifecycle.
+        if indexed.payload.get("schema_version") != 2:
+            return TaskProfileBinding(
+                status="unbound",
+                receipt=indexed,
+                reason="schema-version",
+            )
         snapshot = read_json(snapshot_path, {})
+        receipt_identity = indexed.payload.get("executor_identity")
+        if not compatible_task_profile_executor_identities(
+            receipt_identity, executor_identity
+        ):
+            return TaskProfileBinding(
+                status="unbound",
+                receipt=indexed,
+                reason="executor-identity",
+            )
         try:
             context = validate_task_profile_receipt(
                 indexed.payload,
                 snapshot,
                 receipt_path=indexed.path,
                 expected_executor=executor_id,
-                expected_executor_identity=executor_identity,
+                expected_executor_identity=receipt_identity,
             )
         except TaskProfileReceiptError as error:
-            if error.reason in {"snapshot-sha256", "executor-identity"}:
+            if error.reason == "snapshot-sha256":
                 return TaskProfileBinding(
                     status="unbound",
                     receipt=indexed,
@@ -1879,17 +2229,21 @@ class DreamingRuntime:
         ]
 
     def _profile_audit_disposition_path(
-        self, profile_id: str, *, contract_version: int = 2
+        self, profile_id: str, *, contract_version: int = 3
     ) -> Path:
         if not isinstance(profile_id, str) or not re.fullmatch(
             r"sha256:[0-9a-f]{64}", profile_id
         ):
             raise RuntimeFailure("profile-audit-disposition-invalid", "profile-id")
-        root = (
-            self.paths.profile_audit_dispositions
-            if contract_version == 2
-            else self.paths.legacy_profile_audit_dispositions
-        )
+        root = {
+            3: self.paths.profile_audit_dispositions,
+            2: self.paths.prior_profile_audit_dispositions,
+            1: self.paths.legacy_profile_audit_dispositions,
+        }.get(contract_version)
+        if root is None:
+            raise RuntimeFailure(
+                "profile-audit-disposition-invalid", "contract-version"
+            )
         return (
             root
             / f"{profile_id.removeprefix('sha256:')}.json"
@@ -2122,13 +2476,38 @@ class DreamingRuntime:
         prior_disposition = self.profile_audit_disposition_for(prior_target)
         if (
             prior_disposition is None
-            or prior_disposition["profile_audit_contract_version"] != 2
+            or prior_disposition["profile_audit_contract_version"]
+            != CURRENT_PROFILE_AUDIT_CONTRACT_VERSION
             or prior_disposition["boundary_relation"]
             not in {"same-occurrence", "new-occurrence"}
         ):
             raise RuntimeFailure(
                 "task-occurrence-resolution-invalid",
                 "reuse-origin-disposition",
+            )
+        target_snapshot_path = (
+            self.paths.snapshots
+            / (
+                target.receipt.payload["snapshot_sha256"].removeprefix(
+                    "sha256:"
+                )
+                + ".json"
+            )
+        )
+        target_snapshot = read_json(target_snapshot_path, {})
+        if (
+            digest(target_snapshot)
+            != target.receipt.payload["snapshot_sha256"]
+            or self._profile_skill_load_trace(
+                target_snapshot,
+                target.profile,
+                prior_disposition["catalog_skill_names"],
+            )
+            != prior_disposition["skill_load_trace"]
+        ):
+            raise RuntimeFailure(
+                "task-occurrence-resolution-invalid",
+                "reuse-catalog-load-trace",
             )
         decision_at = (
             datetime.fromtimestamp(self.now(), timezone.utc)
@@ -2167,6 +2546,29 @@ class DreamingRuntime:
                 "Reused the exact task occurrence's terminal catalog audit: "
                 + prior_disposition["routing_reason"]
             ),
+            "catalog_audit": {
+                "outcome": prior_disposition["outcome"],
+                "skill_name": prior_disposition["catalog_skill_name"],
+                "reviewer_contract": prior_disposition[
+                    "reviewer_contract"
+                ],
+                "catalog_sha256": prior_disposition["catalog_sha256"],
+                "catalog_skill_names": prior_disposition[
+                    "catalog_skill_names"
+                ],
+                "tombstones_sha256": prior_disposition[
+                    "tombstones_sha256"
+                ],
+                "skill_load_trace": prior_disposition[
+                    "skill_load_trace"
+                ],
+                "skill_load_trace_sha256": prior_disposition[
+                    "skill_load_trace_sha256"
+                ],
+                "candidate_group_id": prior_disposition[
+                    "candidate_group_id"
+                ],
+            },
         }
         disposition = self._record_profile_audit_disposition(
             target,
@@ -2219,6 +2621,7 @@ class DreamingRuntime:
             raise RuntimeFailure(
                 "task-occurrence-overlap-limit", target.profile["profile_id"]
             )
+        candidate_groups = self._candidate_group_context_for()
         return {
             "review_contract": TASK_OCCURRENCE_REVIEW_CONTRACT,
             "selected_profile_id": target.profile["profile_id"],
@@ -2226,7 +2629,78 @@ class DreamingRuntime:
             "prior_overlaps": sorted(
                 overlaps, key=lambda item: item["resolution_sha256"]
             ),
+            "candidate_groups": candidate_groups,
         }
+
+    def _candidate_group_context_for(self) -> list[dict[str, Any]]:
+        """Return every eligible semantic group, or refuse an incomplete view."""
+        listing = self._candidate_lifecycle_call("list")
+        records = listing.get("records")
+        if not isinstance(records, list):
+            raise RuntimeFailure("candidate-lifecycle-failed", "candidate listing is malformed")
+        groups: list[dict[str, Any]] = []
+        expected_listing_keys = {
+            "candidate_id",
+            "lifecycle_id",
+            "record_sha256",
+            "record_version",
+            "shadow_only",
+            "state",
+        }
+        for item in records:
+            if (
+                not isinstance(item, dict)
+                or set(item) != expected_listing_keys
+                or not isinstance(item.get("lifecycle_id"), str)
+                or not isinstance(item.get("candidate_id"), str)
+                or not isinstance(item.get("record_sha256"), str)
+                or not isinstance(item.get("record_version"), int)
+                or item["record_version"] < 1
+                or item.get("shadow_only") is not True
+                or item.get("state") not in CANDIDATE_LIFECYCLE_STATES
+            ):
+                raise RuntimeFailure(
+                    "candidate-lifecycle-failed", "candidate listing is malformed"
+                )
+            if item["state"] not in ELIGIBLE_CANDIDATE_GROUP_STATES:
+                continue
+            record = self._candidate_lifecycle_call("read", item["lifecycle_id"])
+            record_sha256 = candidate_record_digest(record)
+            if (
+                record.get("lifecycle_id") != item["lifecycle_id"]
+                or record.get("record_version") != item.get("record_version")
+                or record_sha256 != item.get("record_sha256")
+            ):
+                raise RuntimeFailure(
+                    "candidate-lifecycle-failed", "candidate listing changed"
+                )
+            useful_occurrences = {
+                evidence["canonical_occurrence_id"]
+                for evidence in record.get("evidence", [])
+                if isinstance(evidence, dict)
+                and isinstance(evidence.get("canonical_occurrence_id"), str)
+                and (occurred_at := parse_time(evidence.get("occurred_at"))) is not None
+                and occurred_at <= datetime.fromtimestamp(self.now(), timezone.utc)
+                and datetime.fromtimestamp(self.now(), timezone.utc) - occurred_at
+                <= timedelta(days=30)
+            }
+            groups.append(
+                {
+                    "lifecycle_id": record["lifecycle_id"],
+                    "proposed_name": record["proposed_name"],
+                    "procedure": record["procedure"],
+                    "state": record["state"],
+                    "record_version": record["record_version"],
+                    "record_sha256": record_sha256,
+                    "useful_current_count": len(useful_occurrences),
+                }
+            )
+        groups.sort(key=lambda group: group["lifecycle_id"])
+        if len(groups) > MAX_CANDIDATE_GROUPS_PER_REVIEW:
+            raise RuntimeFailure("candidate-group-context-limit", "group-count")
+        if len(canonical(groups)) > MAX_CANDIDATE_GROUP_CONTEXT_BYTES:
+            raise RuntimeFailure("candidate-group-context-limit", "context-bytes")
+        return groups
 
     def _record_task_occurrence_resolution(
         self,
@@ -2655,7 +3129,14 @@ class DreamingRuntime:
         legacy_path = self._profile_audit_disposition_path(
             target.profile["profile_id"], contract_version=1
         )
-        paths = [path for path in (current_path, legacy_path) if path.exists()]
+        prior_path = self._profile_audit_disposition_path(
+            target.profile["profile_id"], contract_version=2
+        )
+        paths = [
+            path
+            for path in (current_path, prior_path, legacy_path)
+            if path.exists()
+        ]
         if not paths:
             return None
         if len(paths) > 1:
@@ -2733,7 +3214,20 @@ class DreamingRuntime:
                 "profile-audit-disposition-invalid",
                 f"{origin_path}: origin-profile",
             )
-        if disposition["profile_audit_contract_version"] == 2:
+        if (
+            disposition["profile_audit_contract_version"] == 3
+            and disposition["skill_load_trace"]
+            != self._profile_skill_load_trace(
+                origin_snapshot,
+                origin_profile,
+                disposition["catalog_skill_names"],
+            )
+        ):
+            raise RuntimeFailure(
+                "profile-audit-disposition-invalid",
+                f"{origin_path}: catalog-load-trace",
+            )
+        if disposition["profile_audit_contract_version"] in {2, 3}:
             try:
                 occurrence_path = task_occurrence_resolution_path(
                     self.paths.task_occurrence_resolutions,
@@ -2840,6 +3334,7 @@ class DreamingRuntime:
                 "draft_reviews",
                 "artifact_commit",
                 "policy_deferred",
+                "catalog_audit",
             )
             if key in result
         }
@@ -2852,9 +3347,7 @@ class DreamingRuntime:
             reviewed_at=self.now(),
             occurrence_resolution=occurrence_resolution,
         )
-        contract_version = (
-            2 if occurrence_resolution is not None else 1
-        )
+        contract_version = disposition["profile_audit_contract_version"]
         path = self._profile_audit_disposition_path(
             target.profile["profile_id"],
             contract_version=contract_version,
@@ -3060,6 +3553,11 @@ class DreamingRuntime:
             task_profile_evidence_present
             or task_profile_receipt is not None
         )
+        catalog_outcome = (
+            result.get("catalog_audit", {}).get("outcome")
+            if isinstance(result.get("catalog_audit"), dict)
+            else None
+        )
         source_updated_at = parse_time(reviewed_identity.get("updated_at"))
         if source_updated_at is None:
             raise RuntimeFailure(
@@ -3068,7 +3566,13 @@ class DreamingRuntime:
             )
         age_seconds = max(0, self.now() - int(source_updated_at.timestamp()))
         reason: str | None = None
-        if task_profile_evidence_present:
+        if (
+            task_profile_evidence_present
+            and catalog_outcome
+            in {"missed-skill", "wrong-or-incomplete-skill"}
+        ):
+            reason = "task-profile-repair-requires-evaluation"
+        elif task_profile_evidence_present:
             reason = "task-profile-artifact-requires-evaluation"
         elif age_seconds > self.max_autonomous_session_age_seconds:
             reason = "historical-source-outside-mutation-window"
@@ -3096,6 +3600,24 @@ class DreamingRuntime:
                 profile_match,
                 occurrence_resolution,
             )
+            if (
+                shadow_candidate is not None
+                and isinstance(result.get("catalog_audit"), dict)
+            ):
+                result["catalog_audit"]["candidate_group_id"] = (
+                    shadow_candidate["lifecycle_id"]
+                )
+        repair_recommendation = (
+            {
+                "catalog_outcome": catalog_outcome,
+                "operation": artifact["operation"],
+                "skill_name": artifact["skill_name"],
+                "artifact_sha256": digest(artifact),
+                "report_only": True,
+            }
+            if reason == "task-profile-repair-requires-evaluation"
+            else None
+        )
         deferred = dict(result)
         deferred_context = deferred.get("transcript_context")
         deferred["terminal_route"] = "discard"
@@ -3119,6 +3641,11 @@ class DreamingRuntime:
             **(
                 {"shadow_candidate": shadow_candidate}
                 if shadow_candidate is not None
+                else {}
+            ),
+            **(
+                {"repair_recommendation": repair_recommendation}
+                if repair_recommendation is not None
                 else {}
             ),
         }
@@ -3274,31 +3801,69 @@ class DreamingRuntime:
             }
         # Current evidence is source anchored; legacy branch remains v1 history.
 
+        audit = result.get("catalog_audit")
+        candidate_groups = (
+            audit.get("candidate_groups") if isinstance(audit, dict) else None
+        )
+        selected_group_id = (
+            audit.get("candidate_group_id") if isinstance(audit, dict) else None
+        )
+        if candidate_groups is None and audit is None:
+            candidate_groups = []
+        if not isinstance(candidate_groups, list):
+            raise RuntimeFailure(
+                "candidate-lifecycle-failed", "candidate group context is absent"
+            )
+        selected_group = next(
+            (
+                group
+                for group in candidate_groups
+                if isinstance(group, dict)
+                and group.get("lifecycle_id") == selected_group_id
+            ),
+            None,
+        )
         lifecycle_id = None
         expected_version = None
         expected_identity = None
-        listing = self._candidate_lifecycle_call("list")
-        for item in listing.get("records", []):
-            if not isinstance(item, dict) or not isinstance(
-                item.get("lifecycle_id"), str
+        if audit is None:
+            listing = self._candidate_lifecycle_call("list")
+            for item in listing.get("records", []):
+                if not isinstance(item, dict) or not isinstance(
+                    item.get("lifecycle_id"), str
+                ):
+                    raise RuntimeFailure(
+                        "candidate-lifecycle-failed",
+                        "candidate listing is malformed",
+                    )
+                record = self._candidate_lifecycle_call(
+                    "read", item["lifecycle_id"]
+                )
+                if (
+                    record.get("proposed_name") == artifact["skill_name"]
+                    and record.get("procedure") == procedure
+                    and record.get("state")
+                    in {"collecting", "ready_for_draft", "expired", "rejected"}
+                ):
+                    lifecycle_id = record["lifecycle_id"]
+                    expected_version = record["record_version"]
+                    expected_identity = candidate_record_digest(record)
+                    break
+        if selected_group_id is not None:
+            if (
+                selected_group is None
+                or artifact["skill_name"] != selected_group.get("proposed_name")
+                or not isinstance(selected_group.get("record_version"), int)
+                or not isinstance(selected_group.get("record_sha256"), str)
             ):
                 raise RuntimeFailure(
-                    "candidate-lifecycle-failed",
-                    "candidate listing is malformed",
+                    "candidate-lifecycle-failed", "candidate group selection is invalid"
                 )
-            record = self._candidate_lifecycle_call(
-                "read", item["lifecycle_id"]
-            )
-            if (
-                record.get("proposed_name") == artifact["skill_name"]
-                and record.get("procedure") == procedure
-                and record.get("state")
-                in {"collecting", "ready_for_draft", "expired", "rejected"}
-            ):
-                lifecycle_id = record["lifecycle_id"]
-                expected_version = record["record_version"]
-                expected_identity = candidate_record_digest(record)
-                break
+            lifecycle_id = selected_group_id
+            expected_version = selected_group["record_version"]
+            expected_identity = selected_group["record_sha256"]
+            procedure = selected_group["procedure"]
+            observation["procedure_fingerprint"] = procedure["match_fingerprint"]
 
         staging_parent = self.paths.data / "candidates" / "v1" / "incoming"
         staging_parent.mkdir(parents=True, exist_ok=True)
@@ -4108,8 +4673,12 @@ class DreamingRuntime:
                 if profile_audit_target is not None:
                     if (
                         executor_id != profile_audit_target.receipt.payload["executor"]
-                        or executor.identity
-                        != profile_audit_target.receipt.payload["executor_identity"]
+                        or not compatible_task_profile_executor_identities(
+                            profile_audit_target.receipt.payload[
+                                "executor_identity"
+                            ],
+                            executor.identity,
+                        )
                     ):
                         raise RuntimeFailure(
                             "profile-audit-executor-mismatch", executor_id
@@ -4243,7 +4812,25 @@ class DreamingRuntime:
                         reviewed_identity["source_revision"],
                     )
                     raise RuntimeFailure("result-channel-mismatch", executor_id)
-                result = self._validated_review_result(result)
+                result = self._validated_review_result(
+                    result,
+                    require_catalog_audit=profile_audit_target is not None,
+                    catalog_snapshot=(
+                        read_json(snapshot_path, {})
+                        if profile_audit_target is not None
+                        else None
+                    ),
+                    catalog_profile=(
+                        profile_audit_target.profile
+                        if profile_audit_target is not None
+                        else None
+                    ),
+                    candidate_groups=(
+                        occurrence_context.get("candidate_groups")
+                        if occurrence_context is not None
+                        else None
+                    ),
+                )
                 occurrence_resolution = existing_occurrence_resolution
                 if (
                     profile_audit_target is not None
@@ -10055,8 +10642,11 @@ def scheduled_run() -> dict[str, Any]:
             continue
         if (
             existing_receipt is not None
-            and existing_receipt.payload.get("executor_identity")
-            == executors[executor_name].identity
+            and existing_receipt.payload.get("schema_version") == 2
+            and compatible_task_profile_executor_identities(
+            existing_receipt.payload.get("executor_identity"),
+            executors[executor_name].identity,
+            )
         ):
             conflicts = core.task_occurrence_conflicts_for(existing_receipt)
             if conflicts:

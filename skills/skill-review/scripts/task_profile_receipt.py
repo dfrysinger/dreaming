@@ -28,6 +28,35 @@ def _reject(reason: str) -> NoReturn:
     raise TaskProfileReceiptError(reason)
 
 
+def compatible_task_profile_executor_identities(
+    receipt_identity: Any,
+    current_identity: Any,
+) -> bool:
+    if not isinstance(receipt_identity, dict) or not isinstance(
+        current_identity, dict
+    ):
+        return False
+    ignored = {"adapter_sha256", "capabilities"}
+    if {
+        key: value
+        for key, value in receipt_identity.items()
+        if key not in ignored
+    } != {
+        key: value
+        for key, value in current_identity.items()
+        if key not in ignored
+    }:
+        return False
+    receipt_capabilities = receipt_identity.get("capabilities")
+    current_capabilities = current_identity.get("capabilities")
+    return (
+        isinstance(receipt_capabilities, list)
+        and isinstance(current_capabilities, list)
+        and "task-profile-v2" in receipt_capabilities
+        and set(receipt_capabilities).issubset(current_capabilities)
+    )
+
+
 def validate_task_profile_receipt(
     receipt: Any,
     snapshot: Any,
