@@ -1,23 +1,36 @@
-# Copilot native event schema and usage authority — critical work order (Round 2)
+# Copilot native event schema and usage authority — critical work order (Round 3)
 
-Status: design only. No runtime code is authorized by this document.
+Status: compatibility reframe. Runtime changes pause until this revision passes
+paired design review.
 
 Base: `f63f55b` (`feature/copilot-native-event-schema`).
+Current implementation predecessor: `540fafb`.
 Owner component: `skills/skill-review/scripts/dreaming-vendor-adapter.py`.
-Observed subject: GitHub Copilot CLI `1.0.82-1`.
+Observed subjects: GitHub Copilot CLI `1.0.82-1` and `1.0.82-2`.
 
 Round 1 (`f604d49`) proposed a purely additive vocabulary change. The blocking
-guard G1 was executed before implementation and **falsified that premise**. This
-revision is the executable Round-2 work order that the measurement supports, and
-it additionally resolves the four paired Round-1 review findings — Terra **T1**
-and Opus **E1**, **E2**, **E3** — recorded in full at the end of the document.
+guard G1 was executed before implementation and **falsified that premise**.
+Round 2 became the executable measured-usage work order and resolved the four
+paired Round-1 review findings — Terra **T1** and Opus **E1**, **E2**, **E3** —
+recorded in full at the end of the document.
+
+Round 3 is a narrow compatibility reframe triggered during the post-review live
+proof of `540fafb`. Copilot CLI updated in place from `1.0.82-1` to `1.0.82-2`;
+one run correctly refused the newly emitted exact type
+`session.managed_settings_resolved`, while later runs that did not emit it
+completed. The public generated Copilot SDK schema identifies that event as an
+ephemeral managed-policy provenance snapshot. Its declared payload contains
+booleans, `managedKeys`, `source`, and optional `settings` below
+`data.settings`; it has no declared Shape A or Shape B usage path. This revision
+adds that one measured type as opaque metadata and adds a nested-decoy guard
+against the optional settings payload. It does not reopen the usage architecture.
 
 ---
 
 ## Objective
 
 Restore a complete Copilot trial result and a complete comparator result on
-Copilot CLI `1.0.82-1` by (a) admitting the exact 13 observed event types into
+Copilot CLI `1.0.82-2` by (a) admitting the exact 14 observed event types into
 the existing literal vocabulary and (b) replacing the accidental generic
 recursive token-usage reading with one explicit, event-scoped, deduplicated
 Copilot usage authority that the evaluation run and the comparator both use,
@@ -40,8 +53,8 @@ or contradictory usage.
 9. Transport redesign or trace-projection redesign.
 10. Implementing or interpreting MCP functionality. MCP lifecycle events are
     admitted as opaque metadata.
-11. Compatibility with unobserved or future CLI versions. Refusal on a future
-    unknown type is the designed signal.
+11. Compatibility with unobserved or future CLI versions after `1.0.82-2`.
+    Refusal on a future unknown type remains the designed signal.
 12. Any change to Claude or Codex vocabularies, shape validation, or usage
     derivation. All four vendor branches other than `copilot` stay byte-equal in
     behaviour.
@@ -81,6 +94,42 @@ Copilot `1.0.82-1` emits 13 types absent from `COPILOT_EVENT_TYPES`
 `model.response`, `model.tool_execution`, `model.turn_ended`,
 `model.turn_started`, `session.mcp_server_removed`,
 `session.mcp_server_status_changed`, `session.mcp_servers_loaded`.
+
+### Round-3 drift observed on `1.0.82-2`
+
+The first successor proof after implementation review refused before raw output:
+
+```
+unsupported-native-schema: copilot:session.managed_settings_resolved
+```
+
+The exact same frozen adapter later completed against `1.0.82-2` when that
+ephemeral event was not emitted, establishing that this is an intermittent
+startup-policy event rather than a new mandatory usage carrier.
+
+The public generated Copilot SDK contract supplies the missing shape evidence:
+
+- event type: `session.managed_settings_resolved`;
+- purpose: an ephemeral snapshot of effective enterprise managed settings and
+  contributing channels, emitted when policy is applied at session start,
+  resume, or account switch;
+- required data: `bypassPermissionsDisabled`, `deviceManaged`, `failClosed`,
+  `managedKeys`, `serverManaged`, and `source`;
+- optional data: `clientManaged`, `permissionsAllowIntersected`,
+  `sandboxEnabledByUndeterminedPolicy`, and `settings`;
+- the potentially nested effective policy is at `data.settings`, not at
+  `<event>.usage`, `<event>.data.usage`, `<event>.data.outputTokens`, or
+  `data.responseChunk.usage`.
+
+Evidence:
+`github/copilot-sdk` generated `SessionManagedSettingsResolvedData` in
+`python/copilot/generated/session_events.py` and
+`rust/src/generated/session_events.rs`, plus its cross-language serialization
+fixtures. A bounded four-run fresh-home probe did not reproduce the ephemeral
+event and retained no prompt, policy value, credential, or raw JSONL. The
+schema, combined with the already-implemented outer-event iterator, is enough
+to classify it as opaque non-usage metadata: even an adversarial nested
+`data.settings` object is not traversed by any Copilot reader.
 
 ### G1 — structural inertness probe (executed, blocking guard)
 
@@ -235,6 +284,7 @@ depends on an unnamed, unvalidated, recursion-discovered field.
 | Shape A and Shape B declared paths are disjoint | Shape B lives at `data.responseChunk.usage`, two levels below `data`; G2 measured the only Shape-A-path `usage` dicts on real streams as belonging to `result`, with no token field | If a CLI version places call usage at `data.usage`. |
 | G2 observed only all-success turns | both G2 streams exited 0 with `model.call_start` == `model.model_call_success` (1==1, 4==4) | On the first capture containing a failed, retried, or cancelled model call. Until then the design refuses such streams rather than modelling them (finding E2). |
 | `id` stability is proved for `model.model_call_success` only | G2 recorded `id_present`/`ids_all_distinct` for the 5 success events; it recorded nothing about `model.call_start` ids | If a capture proves a stable id on `model.call_start`; only then may turns be deduplicated rather than counted. |
+| Managed-settings resolution is metadata, not usage | Copilot SDK generated schema places policy provenance and optional effective settings under `data`, with no declared Shape A or Shape B usage path | If a later generated schema adds a token field at one of the declared usage paths, or if the CLI emits a different managed-settings event type. |
 
 ### The challenged rules, precisely
 
@@ -249,7 +299,7 @@ Two inherited rules are challenged, and only these two:
 
 ---
 
-## Reframe record — status CLEAR
+## Reframe record — status OPEN pending Round-3 design review
 
 **1. What user outcome is blocked?**
 A complete trial result and a complete comparator result. Not "a validator
@@ -257,9 +307,11 @@ error" — the run cannot produce evidence, and the comparator cannot produce a
 verdict, on the only CLI the host has.
 
 **2. What caused the block?**
-The exact-type constraint refused 13 real types, and — behind it — the generic
+The exact-type constraint first refused 13 real types, and — behind it — the generic
 recursive `usage` scan is the sole, accidental source of Copilot token numbers,
-which returns nothing for detailed usage on this CLI version.
+which returns nothing for detailed usage on this CLI version. During successor
+proof, the same constraint correctly refused one newly observed
+`1.0.82-2` policy-provenance event.
 
 **3. What is rejected outright?**
 Removing or weakening fail-closed validation: no prefix admission, no
@@ -271,18 +323,20 @@ whose token cost was never reported.
 
 **4. What is selected?**
 The existing validator plus one explicit current-Copilot usage adapter: grow the
-literal set by 13, add one narrow outer-event iterator, and add **one canonical
+literal set by 14, add one narrow outer-event iterator, and add **one canonical
 parser per shape** — the current Shape B authority and a canonical Shape A
 authority — behind a single aggregation entry point that both the run and the
 comparator consume. Two parsers, one authority, one entry point, no registry and
-no new module.
+no new module. The fourteenth type is opaque metadata whose public generated
+schema is guarded with nested decoys; it adds no semantic reader.
 
 **5. What would reopen this?**
 A CLI version where usage is cumulative, where transport events lack stable
 ids, where the usage object appears nested inside another admitted event, or
 where a second independent native token total appears. Each has a check.
 
-**Status is CLEAR.** G2 establishes a deterministic, order-safe aggregation
+The selected Round-3 architecture is otherwise ready to become **CLEAR**. G2
+establishes a deterministic, order-safe aggregation
 rule — sum per-call `prompt`/`completion`/`total` over transport events
 deduplicated by stable `id`, with a completeness check against outer
 `model.call_start` — and the legacy shape is expressible as one closed canonical
@@ -292,15 +346,23 @@ two learns anything new. CLEAR is contingent on exactly that: if the canonical
 Shape A parser could not be expressed inside `dreaming-vendor-adapter.py`
 without a new component, this would return to OPEN.
 
+The Round-3 trigger is addressed by the revised work order, not by a permissive
+implementation: the exact type is measured from the refused live run, its
+payload authority comes from the public generated SDK schema, and the new guard
+places recursive type-, tool-, trace-, and usage-shaped decoys inside
+`data.settings`. This record closes to **CLEAR** only after paired design review
+finds no unresolved material issue. Any new event name or any managed-settings
+token field at a declared usage path reopens it.
+
 ---
 
 ## Enumeration of enforcement layers
 
 | # | Layer | Location | Effect |
 |---|---|---|---|
-| L1 | Exact vocabulary set | `:157-214`, 56 members | Grows 56 → 69: exactly the 13. Only edit to the vocabulary. |
-| L2 | Native admission | `validate_native_schema:5203-5236`; callers `:4279`, `:5813` | Unchanged code; refusal set shrinks by exactly 13. |
-| L3 | Session transcript admission | `_copilot_events:620-642`, `unsupported-source-schema` | Same constant, second consumer, also widened. Its `mapping` (`:626-634`) has no entry for any of the 13 and unmapped types are skipped at `:644`, so projection is unchanged — asserted, not assumed. |
+| L1 | Exact vocabulary set | `:157-214`, 56 members | Grows 56 → 70: exactly the 14. Only edit to the vocabulary. |
+| L2 | Native admission | `validate_native_schema:5203-5236`; callers `:4279`, `:5813` | Unchanged code; refusal set shrinks by exactly 14. |
+| L3 | Session transcript admission | `_copilot_events:620-642`, `unsupported-source-schema` | Same constant, second consumer, also widened. Its `mapping` (`:626-634`) has no entry for any of the 14 and unmapped types are skipped at `:644`, so projection is unchanged — asserted, not assumed. |
 | L4 | Model identity | `native_model:5275-5308` | Copilot branch scoped to outer events. Measured identical (single 1→1, multi 1→1 distinct models). Claude/Codex untouched. |
 | L5 | Token usage | `native_token_usage:5310-5342` | Copilot branch replaced by the new authority. Claude/Codex generic path untouched. |
 | L6 | Detailed usage, turns, tool calls | `native_detailed_usage:5344-5432`; `turns += 1` at `:5359` | Copilot usage replaced by the new authority; turns stay exact outer `model.call_start`; tool calls stay exact outer `data.toolRequests`. Measured identical outer-vs-recursive (0→0, 3→3). |
@@ -322,10 +384,14 @@ branches, `SUPPORTED_SOURCE_VERSIONS`.
 
 ## Selected architecture
 
-### A1 — Vocabulary: add exactly 13 literal members
+### A1 — Vocabulary: add exactly 14 literal members
 
-`COPILOT_EVENT_TYPES` grows 56 → 69. Literal strings only. No prefix, wildcard,
+`COPILOT_EVENT_TYPES` grows 56 → 70. Literal strings only. No prefix, wildcard,
 regex, passthrough, or registry. `validate_native_schema` itself is unmodified.
+
+The fourteenth member is `session.managed_settings_resolved`. It remains opaque:
+no match set or semantic reader consumes it, and its optional `data.settings`
+payload is never recursively traversed.
 
 No shape validation is added at the admission boundary: the Copilot boundary
 validates `type` only by design (`:5237`, `:5258` guard the deeper checks for
@@ -628,7 +694,7 @@ else. G1 measured the other 12 inert across 12 variants each.
 | Fixtures | existing fixture CLI | new harness |
 | Byte pin | `TRUSTED_AUTHORING_ADAPTER_SHA256` + existing ratchet | new pin |
 
-New code is four things: 13 literal strings, one outer-event iterator, two
+New code is four things: 14 literal strings, one outer-event iterator, two
 shape parsers (`copilot_call_usage`, `copilot_legacy_usage`), and the single
 aggregation entry point `copilot_usage` that both readers call. No new module,
 file, class hierarchy, service, or configuration surface.
@@ -638,13 +704,13 @@ file, class hierarchy, service, or configuration surface.
 ## Source-to-runtime data flow
 
 ```
-Copilot CLI 1.0.82-1 --output-format json  →  stdout JSONL
+Copilot CLI 1.0.82-2 --output-format json  →  stdout JSONL
         │
         ▼
 native_objects (:5170)                 refuses non-JSON / non-object   [unchanged]
         │
         ▼
-validate_native_schema (:5203)         type ∈ COPILOT_EVENT_TYPES      [set 56 → 69]
+validate_native_schema (:5203)         type ∈ COPILOT_EVENT_TYPES      [set 56 → 70]
         │                              else unsupported-native-schema  [unchanged]
         ▼
 copilot_outer_events(values)           transport events only           [NEW]
@@ -680,9 +746,9 @@ Second, independent path, unchanged in behaviour:
 
 ```
 ~/.copilot session-state JSONL
-   → _copilot_events (:620)   type ∈ COPILOT_EVENT_TYPES  [set 56 → 69]
+   → _copilot_events (:620)   type ∈ COPILOT_EVENT_TYPES  [set 56 → 70]
                               else unsupported-source-schema
-   → mapping (:626) has no entry for the 13 → skipped at :644 → projection identical
+   → mapping (:626) has no entry for the 14 → skipped at :644 → projection identical
 ```
 
 ---
@@ -789,13 +855,13 @@ None of the three is exercised by any existing fixture.
 
 - **AC-1.** A fixture stream reproducing the exact observed vocabulary is
   accepted by `validate_native_schema` for `copilot`.
-- **AC-2.** Each of the 13 types, presented individually in an otherwise minimal
-  valid stream, is accepted — 13 separate assertions.
+- **AC-2.** Each of the 14 types, presented individually in an otherwise minimal
+  valid stream, is accepted — 14 separate assertions.
 - **AC-3.** A sentinel type outside the set is still refused with
   `unsupported-native-schema`, and no raw output file exists afterwards.
 - **AC-4.** Malformed envelopes are still refused: non-JSON line, non-object
   event, `{"events": 3}`, `{"events": [1]}`.
-- **AC-5.** A transcript containing the 13 is accepted by `_copilot_events` and
+- **AC-5.** A transcript containing the 14 is accepted by `_copilot_events` and
   projects identically to the same file with them removed.
 - **AC-6.** `copilot_outer_events` yields exactly the transport events: one per
   top-level value, or the members of a one-level `{"events": [...]}` envelope,
@@ -804,7 +870,7 @@ None of the three is exercised by any existing fixture.
   and the comparator `event_types`/`tool_event`/`model.call_start`-count gate
   return results identical to the pre-change recursive implementation on the
   retained real streams.
-- **AC-8.** Those same results are unchanged when the 13 are inserted, removed,
+- **AC-8.** Those same results are unchanged when the 14 are inserted, removed,
   reordered, duplicated, or interleaved.
 - **AC-9.** A single-call stream yields `input_tokens = prompt_tokens`,
   `output_tokens = completion_tokens`, `total_tokens = total_tokens`,
@@ -874,6 +940,11 @@ None of the three is exercised by any existing fixture.
 - **AC-33.** No Copilot reader other than the usage authority changes its result
   on any fixture or retained real stream; the declared nested paths of I6b
   continue to be read.
+- **AC-34.** A full public-schema `session.managed_settings_resolved` event is
+  admitted as opaque metadata. Adding or removing it leaves model, usage,
+  turns, tools, activation, trace, failure, and comparator-gate results
+  identical, even when `data.settings` contains nested objects shaped like
+  transport events, tool requests, or token usage.
 
 ---
 
@@ -882,7 +953,7 @@ None of the three is exercised by any existing fixture.
 Guards are written and executed **before** the production edit. Each is expected
 to be red except where noted.
 
-- **G-A — vocabulary and sentinel.** Assert the 13 are currently refused
+- **G-A — vocabulary and sentinel.** Assert the 14 are currently refused
   (red after the change becomes green), and that a sentinel type outside the set
   is refused both before and after (green throughout). Guards AC-2, AC-3.
 - **G-B — direct-versus-nested iterator.** Assert `copilot_outer_events` yields
@@ -911,8 +982,15 @@ to be red except where noted.
   Shape B; conflicting Shape A sources; a bare `data.outputTokens`. Each asserts
   the exact refusal reason or the exact accepted triple. Guards AC-18, AC-27
   through AC-30, T19, T20, T21.
+- **G-H — managed-settings metadata.** Add one complete
+  `session.managed_settings_resolved` fixture using the public generated schema,
+  including `data.settings` with nested event-, tool-, and usage-shaped decoys.
+  Compare every Copilot semantic reader and comparator gate with and without the
+  event; every result must be identical. Guards AC-34 and the Round-3 revisit
+  condition.
 
-**G-A through G-G are the pre-implementation guard set.** The already-executed
+**G-A through G-H are the pre-implementation guard set.** G-H is added before
+the Round-3 production edit. The already-executed
 G1 and G2 probes are their evidentiary basis and are not repeated.
 
 ---
@@ -922,7 +1000,7 @@ G1 and G2 probes are their evidentiary basis and are not repeated.
 | ID | Layer | Check | Fixture-only? |
 |---|---|---|---|
 | CHK-1 | L1/L2 | observed-vocabulary fixture accepted | yes |
-| CHK-2 | L1/L2 | 13 individual acceptance assertions | yes |
+| CHK-2 | L1/L2 | 14 individual acceptance assertions | yes |
 | CHK-3 | L2/L12 | sentinel still refused, no raw file; test source unmodified | yes |
 | CHK-4 | L2 | malformed envelopes still refused | yes |
 | CHK-5 | L3 | transcript acceptance and projection invariance | yes |
@@ -931,7 +1009,7 @@ G1 and G2 probes are their evidentiary basis and are not repeated.
 | CHK-8 | L7 | `native_skill_evidence` identical | yes |
 | CHK-9 | L8 | `normalized_native_events` identical | yes |
 | CHK-10 | L9 | comparator `event_types` / `tool_event` / call-start count identical | yes |
-| CHK-11 | L4-L10 | all of CHK-7..CHK-10 hold under insert / remove / reorder / duplicate / interleave of the 13 | yes |
+| CHK-11 | L4-L10 | all of CHK-7..CHK-10 hold under insert / remove / reorder / duplicate / interleave of the 14 | yes |
 | CHK-12 | L5/L6 | usage field validation: required fields, non-bool ints, non-negative, `total == prompt + completion` | yes |
 | CHK-13 | L5/L6 | dedup by `id`: duplicating every usage event changes nothing | yes |
 | CHK-14 | L5/L6 | order invariance: reversal and interleaving change nothing | yes |
@@ -952,9 +1030,10 @@ G1 and G2 probes are their evidentiary basis and are not repeated.
 | CHK-29 | L5/L6 | bare `data.outputTokens` with no usage mapping refuses `copilot:usage-incomplete` | yes |
 | CHK-30 | L11/L13 | `TOKENOVER` still raises `token-limit-exceeded` with the identical number; the run-branch legacy stream still yields `native_detailed_usage is None` with the total supplied through the existing fallback | yes |
 | CHK-31 | L4-L10 | the declared nested paths of I6b are still read: model identity, turns, tool calls, skill activation, trace, failure message, and the comparator gate produce identical results on every fixture and retained real stream | yes |
+| CHK-32 | L1-L10 | full-schema managed-settings event is admitted and semantically inert despite nested settings decoys | yes |
 
 Every check except CHK-25 is auth-independent and model-independent. Ordering:
-guards G-A..G-G, then CHK-1..CHK-24 and CHK-26..CHK-31, then CHK-25.
+guards G-A..G-H, then CHK-1..CHK-24 and CHK-26..CHK-32, then CHK-25.
 
 **Fixture derivation rule.** Usage fixtures reproduce the exact numeric shapes
 measured in G2 — the single-call triple and the four-call sequence — with
@@ -964,7 +1043,7 @@ synthetic ids. They are not hand-invented shapes and carry no captured content.
 
 ## Rollback and fail-closed evidence
 
-- **Primary rollback:** revert the 13 vocabulary additions, the outer-event
+- **Primary rollback:** revert the 14 vocabulary additions, the outer-event
   iterator, and the usage parser, then recompute the adapter pin. The boundary
   returns to explicit refusal with the identical code and message, and Copilot
   usage returns to the generic recursive scan.
@@ -1035,11 +1114,13 @@ synthetic ids. They are not hand-invented shapes and carry no captured content.
 This slice is done when, and only when, all of the following hold. It is
 specific to this work order.
 
-1. Guards G-A through G-G exist, were executed before the production edit, and
+1. Guards G-A through G-H exist, were executed before the applicable production
+   edit, and
    their pre-change red or green signal was recorded — including G-E's split
-   signal, green for stream success and red for the migrated numbers.
+   signal, green for stream success and red for the migrated numbers, and G-H's
+   red signal for the fourteenth exact type.
 2. `COPILOT_EVENT_TYPES` contains exactly its previous 56 members plus exactly
-   the 13 measured types — 69 literal members — and no other vocabulary edit.
+   the 14 measured types — 70 literal members — and no other vocabulary edit.
 3. `validate_native_schema` is unmodified.
 4. `copilot_outer_events` exists, yields transport events only, and every
    Copilot branch of `native_model`, `native_token_usage`,
@@ -1063,7 +1144,7 @@ specific to this work order.
    implicit: Shape B's `max` → `sum` (AC-10), and the Shape A migration to one
    canonical authority with the exact numbers of the A5 table (AC-17).
 10. Every check except CHK-25 passes — CHK-1 through CHK-24 and CHK-26 through
-    CHK-31; the 13 per-type acceptance assertions exist individually; the
+    CHK-32; the 14 per-type acceptance assertions exist individually; the
     sentinel test is green and its source unchanged.
 11. Every legacy Shape A fixture stream still succeeds, `TOKENOVER` still
     exceeds with the identical number (CHK-30), each stream produces the exact
@@ -1087,6 +1168,9 @@ specific to this work order.
     coverage.
 19. I6b holds: every non-usage Copilot reader still reads its declared nested
     paths, proved identical by CHK-31.
+20. The complete public-schema `session.managed_settings_resolved` fixture,
+    including adversarial nested `data.settings` decoys, is semantically inert
+    under every Copilot reader and comparator gate (AC-34/CHK-32).
 
 Shipping the vocabulary without the usage authority is the measured F2 state and
 must not be recorded as done. Shipping the Shape B authority while leaving Shape
