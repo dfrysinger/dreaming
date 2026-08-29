@@ -174,7 +174,7 @@ loaded_name = (
     else "approved-skill" if prompt == "SHADOWCATALOG" else "fixture-skill"
 )
 if vendor == "copilot":
-    if prompt == "NATIVEV2" or os.environ.get("FIXTURE_COPILOT_V2"):
+    if prompt == "NATIVEV2" or "NATIVEV2" in full_prompt:
         events = [
             {"type":"session.start","data":{"model":observed}},
             {"type":"model.call_start","data":{"model":observed,"turn":0}},
@@ -1222,9 +1222,11 @@ else:
         self.assertEqual(response["error"]["message"], "fixture native failure")
 
     def test_copilot_shape_b_run_and_comparator_share_usage_authority(self):
+        accepted_budget = 10000
+        refused_budget = 8451
         trial, trial_path = self.trial("copilot", prompt="NATIVEV2")
         prepared = self.call(
-            "copilot", "prepare", "--trial", trial_path, token_budget=10000
+            "copilot", "prepare", "--trial", trial_path, token_budget=accepted_budget
         )
         record = {
             "schema_version": 1,
@@ -1245,17 +1247,21 @@ else:
             "--output",
             trial["raw"],
             check=False,
-            token_budget=10000,
+            token_budget=accepted_budget,
         )
-        self.assertNotIn("error", run)
-        native_records = [
-            json.loads(line)
-            for line in Path(trial["raw"]).read_text().splitlines()
-        ]
-        usage = next(
-            record for record in native_records if record["type"] == "dreaming.usage"
-        )
-        self.assertEqual(usage["total_tokens"], 8452)
+        with self.subTest(boundary="run-accepts-complete-metered-stream"):
+            self.assertNotIn("error", run)
+            if "error" not in run:
+                native_records = [
+                    json.loads(line)
+                    for line in Path(trial["raw"]).read_text().splitlines()
+                ]
+                usage = next(
+                    record
+                    for record in native_records
+                    if record["type"] == "dreaming.usage"
+                )
+                self.assertEqual(usage["total_tokens"], 8452)
 
         rubric = {
             "criteria": [
@@ -1268,7 +1274,7 @@ else:
                 {
                     "schema_version": 1,
                     "task_id": "shape-b",
-                    "task": "Compare the supplied answers.",
+                    "task": "NATIVEV2: Compare the supplied answers.",
                     "rubric": rubric,
                     "A": "complete response",
                     "B": "incomplete response",
@@ -1283,10 +1289,72 @@ else:
             "--output",
             self.root / "shape-b-comparison-result.json",
             check=False,
-            extra_env={"FIXTURE_COPILOT_V2": "1"},
-            token_budget=10000,
+            token_budget=accepted_budget,
         )
-        self.assertEqual(comparison.returncode, 0, comparison.stdout + comparison.stderr)
+        with self.subTest(boundary="comparator-accepts-complete-metered-stream"):
+            self.assertEqual(
+                comparison.returncode, 0, comparison.stdout + comparison.stderr
+            )
+
+        refused, refused_path = self.trial(
+            "copilot", treatment="control", prompt="NATIVEV2"
+        )
+        refused_prepared = self.call(
+            "copilot",
+            "prepare",
+            "--trial",
+            refused_path,
+            token_budget=refused_budget,
+        )
+        refused_record = {
+            "schema_version": 1,
+            "trial_id": refused["trial_id"],
+            "adapter_prepared": refused_prepared["prepared"],
+            "execution": refused_prepared["execution"],
+        }
+        refused_record["prepared_digest"] = sha(refused_record)
+        refused_prepared_path = refused_path.parent / "prepared.json"
+        refused_prepared_path.write_bytes(canonical(refused_record) + b"\n")
+        refused_run = self.call(
+            "copilot",
+            "run",
+            "--trial",
+            refused_path,
+            "--prepared",
+            refused_prepared_path,
+            "--output",
+            refused["raw"],
+            check=False,
+            token_budget=refused_budget,
+        )
+        expected_refusal = {
+            "code": "token-limit-exceeded",
+            "message": f"8452 > {refused_budget}",
+        }
+        with self.subTest(boundary="run-refuses-the-same-metered-total"):
+            self.assertEqual(refused_run.get("error"), expected_refusal)
+            self.assertFalse(Path(refused["raw"]).exists())
+
+        refused_output = self.root / "shape-b-refused-comparison-result.json"
+        refused_comparison = self.comparator_call(
+            sha(rubric),
+            "compare",
+            "--packet",
+            packet,
+            "--output",
+            refused_output,
+            check=False,
+            token_budget=refused_budget,
+        )
+        with self.subTest(boundary="comparator-refuses-the-same-metered-total"):
+            self.assertNotEqual(
+                refused_comparison.returncode,
+                0,
+                refused_comparison.stdout + refused_comparison.stderr,
+            )
+            refusal = json.loads(refused_comparison.stdout.splitlines()[-1])
+            self.assertEqual(refusal.get("error"), expected_refusal)
+            self.assertFalse(refused_output.exists())
 
     def test_load_proof_activation_and_projection_drift_fail_closed(self):
         for vendor in ("copilot", "claude", "codex"):
@@ -1924,6 +1992,8 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
             malformed_cases.append((label, [self.call_start(0), item], "copilot:usage-malformed"))
         missing_id = json.loads(json.dumps(valid))
         missing_id.pop("id")
+        empty_id = json.loads(json.dumps(valid))
+        empty_id["id"] = ""
         collision = json.loads(json.dumps(valid))
         collision["data"]["responseChunk"]["usage"]["completion_tokens"] = 6
         collision["data"]["responseChunk"]["usage"]["total_tokens"] = 16
@@ -1936,6 +2006,7 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
         cases = [
             *malformed_cases,
             ("missing-id", [self.call_start(0), missing_id], "copilot:usage-ambiguous"),
+            ("empty-id", [self.call_start(0), empty_id], "copilot:usage-ambiguous"),
             ("colliding-id", [self.call_start(0), valid, collision], "copilot:usage-ambiguous"),
             ("incomplete", [self.call_start(0), self.call_start(1), valid], "copilot:usage-incomplete"),
             ("response-contradiction", [self.call_start(0), contradictory], "copilot:usage-contradiction"),
