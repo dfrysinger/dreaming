@@ -4711,9 +4711,10 @@ def shadow_credential_root_authority(args: argparse.Namespace) -> Path:
     """Refuse a shadow credential root that is not the invoking account home.
 
     The raw argument is checked for a symlink before expansion or resolution,
-    which is deliberately stricter than resolving first: resolution follows the
-    link and would accept it silently.  This authority belongs to the command
-    boundary only, so profile construction stays independently testable.
+    then the lexically expanded path is checked again before resolution. This
+    catches both literal and tilde-prefixed links without allowing resolution
+    to launder either form. This authority belongs to the command boundary
+    only, so profile construction stays independently testable.
     """
     raw = getattr(args, "credential_root", None)
     if not raw:
@@ -4721,7 +4722,10 @@ def shadow_credential_root_authority(args: argparse.Namespace) -> Path:
     candidate = Path(raw)
     if candidate.is_symlink():
         raise AdapterError("shadow-credential-root-symlink", args.vendor)
-    resolved = candidate.expanduser().resolve()
+    expanded = candidate.expanduser()
+    if expanded.is_symlink():
+        raise AdapterError("shadow-credential-root-symlink", args.vendor)
+    resolved = expanded.resolve()
     if not resolved.is_dir():
         raise AdapterError("shadow-credential-root-invalid", args.vendor)
     if resolved != Path(pwd.getpwuid(os.getuid()).pw_dir).resolve():
@@ -5114,6 +5118,15 @@ def evaluation_sandbox_profile(
                     f'(allow file-read* (literal "{sandbox_quote(path)}"))'
                 )
     if shadow_copilot:
+        for path in (Path("/Library/Keychains"),):
+            rules.append(
+                '(deny file-read* file-read-metadata (subpath '
+                f'"{sandbox_quote(path)}"))'
+            )
+            rules.append(
+                '(deny file-read* file-read-metadata (literal '
+                f'"{sandbox_quote(path)}"))'
+            )
         for relative in SHADOW_DENIED_CREDENTIAL_ROOTS:
             rules.append(
                 '(deny file-read* file-read-metadata (subpath '

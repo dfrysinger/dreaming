@@ -298,8 +298,10 @@ projection, any profile emission, and any model launch**:
 1. the flag is present and non-empty;
 2. `Path(raw).is_symlink()` is false — checked on the **raw** argument, before
    `expanduser()` and before `resolve()`;
-3. the path exists and is a directory;
-4. `Path(raw).expanduser().resolve() == Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()`.
+3. `Path(raw).expanduser().is_symlink()` is false — the second check catches a
+   tilde-prefixed link before `resolve()` can launder it;
+4. the path exists and is a directory;
+5. `Path(raw).expanduser().resolve() == Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()`.
 
 **Deliberate divergence from the builder precedent (D5).**
 `scripts/build-evaluation-input-source.py:289` resolves first and *then* calls

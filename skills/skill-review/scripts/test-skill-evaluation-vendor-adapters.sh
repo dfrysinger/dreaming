@@ -1758,6 +1758,9 @@ else:
             "char b[4096];size_t n;"
             "while((n=fread(b,1,sizeof b,f))>0){fwrite(b,1,n,stdout);}"
             "fclose(f);return 0;}"
+            "if(argc>=3&&!strcmp(argv[1],\"--guard-open\")){"
+            "FILE *f=fopen(argv[2],\"rb\");if(!f){return 1;}"
+            "fclose(f);return 0;}"
             "return 0;}\n"
         )
 
@@ -1780,6 +1783,21 @@ else:
                 str(profile),
                 str(reader),
                 "--guard-read",
+                str(target),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    def sandboxed_open(self, profile, reader, target):
+        return subprocess.run(
+            [
+                "/usr/bin/sandbox-exec",
+                "-f",
+                str(profile),
+                str(reader),
+                "--guard-open",
                 str(target),
             ],
             stdout=subprocess.PIPE,
@@ -1817,6 +1835,15 @@ else:
             path = credentials / relative
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(f"{marker}-{relative}\n")
+        user_keychain = credentials / "Library/Keychains/dummy.keychain"
+        user_keychain.parent.mkdir(parents=True)
+        user_keychain.write_text(f"{marker}-user-keychain\n")
+        system_keychain = Path("/Library/Keychains/System.keychain")
+        self.assertTrue(
+            system_keychain.is_file() and os.access(system_keychain, os.R_OK),
+            "the supported macOS host must expose a readable system keychain "
+            "fixture so the shadow denial is discriminating",
+        )
         reader = self.compile_guard_reader(self.bin / "guard-copilot")
         relocated = self.compile_guard_reader(self.bin / "guard-copilot-relocated")
         relocated.write_bytes(reader.read_bytes())
@@ -1886,6 +1913,25 @@ else:
             )
             self.assertNotIn(marker, denied.stdout)
 
+        for keychain in (user_keychain, system_keychain):
+            readable = subprocess.run(
+                [str(relocated), "--guard-open", str(keychain)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            self.assertEqual(
+                readable.returncode,
+                0,
+                f"keychain denial fixture is not readable before sandboxing: {keychain}",
+            )
+            denied = self.sandboxed_open(profile, relocated, keychain)
+            self.assertNotEqual(
+                denied.returncode,
+                0,
+                f"shadow profile allowed non-CLI keychain read: {keychain}",
+            )
+
     def authority_argv(self, credential_root, *args, omit_root=False):
         argv = [
             sys.executable,
@@ -1938,6 +1984,8 @@ else:
         other.mkdir()
         link = work / f"{self._testMethodName}-link"
         link.symlink_to(account_home)
+        tilde_link = work / f"{self._testMethodName}-tilde-link"
+        tilde_link.symlink_to(account_home)
         missing = work / f"{self._testMethodName}-missing"
         regular = work / f"{self._testMethodName}-file"
         regular.write_text("not a directory\n")
@@ -1966,6 +2014,21 @@ else:
                 [],
                 f"{code} projected into the trial home before refusing",
             )
+
+        trial, path = self.trial("copilot", prompt="authority tilde symlink")
+        result, payload = self.authority_call(
+            f"~/{tilde_link.name}",
+            "--shadow-contract",
+            "prepare",
+            "--trial",
+            path,
+            env={"HOME": str(work)},
+        )
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(
+            payload["error"]["code"], "shadow-credential-root-symlink"
+        )
+        self.assertEqual(sorted(Path(trial["home"]).iterdir()), [])
 
         result, payload = self.authority_call(
             account_home, "--shadow-contract", "version"
@@ -2155,7 +2218,14 @@ else:
                 namespace(True), shadow_trial_spec, shadow_environment
             )
         ).read_text()
-        self.assertNotIn("Library/Keychains", shadow_profile)
+        self.assertIn(
+            '(deny file-read* file-read-metadata (subpath "/Library/Keychains"))',
+            shadow_profile,
+        )
+        self.assertNotIn(
+            '(allow file-read* (subpath "/Library/Keychains"))',
+            shadow_profile,
+        )
 
     def test_shadow_credential_usability_refuses_before_the_model(self):
         """CHK-A17.
