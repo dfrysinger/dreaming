@@ -31,9 +31,10 @@ and the routing mode changes from `candidate_only` to `catalog_plus_candidate`
 because the harness makes a `candidate_only` `pass` unreachable by
 construction. Revision 6 corrects one static count: the claimed stage writes
 four durable objects, not three, so `max_records_per_candidate` and every
-statement derived from it now say four. T1, T3, R1-R3, N1-N2, M1, M2, and
-O4-O6 are carried forward unchanged. Reframe status remains OPEN pending final
-reviewer verification.
+statement derived from it now say four. Revision 7 closes the design phase: it
+separates static design clearance from runtime proof, records both reviewers'
+final static clearance, and moves reframe status to CLEAR. T1, T3, R1-R3,
+N1-N2, M1, M2, and O4-O6 are carried forward unchanged.
 
 ## Lane
 
@@ -120,7 +121,12 @@ mid-evaluation. It is not a local fix inside one function.
 | Minimum conforming suite is five cases, one per required routing class | Derived from `skill-evaluation.py:10706-10711`, which requires exactly the set `routing_positive`, `routing_close_negative`, `routing_unrelated`, `routing_conflict`, `task_value` | The three gates are all observable | The evaluator changes its required class set |
 | Numeric values of `max_evaluations_per_run`, the evaluation stage second budget, per-call `timeout_seconds` / `token_budget` / `turn_budget` / `tool_budget` / `output_bytes`, every reservation term (`author_call_bound`, `author_doctor_bound`, `compile_bound`, `certify_bound`, `settlement_bound`, `deadline_margin`), and every preparation term (`package_file_ceiling`, `package_bytes_ceiling`, `catalog_file_ceiling`, `catalog_bytes_ceiling`, `prepare_throughput`, `hash_throughput`, `packet_build_bound`, `packet_validate_bound`, `lifecycle_read_bound`) | **Unresolved policy decision.** No measured shadow-trial cost exists in this repository; the only shadow runs are deterministic fixtures in `test-shadow-mutation-boundary.sh` | Bounded model cost and a deadline-safe pass | Set them from CHK-09's measured single-candidate run, or record an owner-set provisional bound with the measurement scheduled; do not hard-code a number before one of those. Enforcement of each term is settled here; only the numbers are open |
 
-**Reframe status: OPEN.**
+**Reframe status: CLEAR** as of revision 7, on the static paired-review
+evidence recorded in "Design clearance and development-loop proof gates" below.
+Clearance authorizes writing the implementation. It does not authorize landing
+it: the runtime proof gates named in that section remain mandatory before the
+pull request, before landing, and before this work order's Definition of Done
+can be checked.
 
 ### Reframe record
 
@@ -497,7 +503,10 @@ attested against the derived executors document, shadow suite authority
 available (template constant plus `shadow-compile` subcommand plus resolvable
 harness digest), shadow authoring authority available exactly as enumerated in
 E2b, catalog authority available (a current readable census whose
-`snapshot_sha256` verifies), and the candidate package materializable.
+`snapshot_sha256` verifies), the candidate package materializable, and every
+allowance and reservation term explicitly configured by the owner. That last
+condition is why no number is defaulted: an unconfigured bound is an absent
+authority, not a value to guess.
 
 **Fail-closed.** Missing, malformed, or partially populated authority yields
 `available: false` with reason `shadow-execution-authority-unknown`. Availability
@@ -505,7 +514,8 @@ is true only when every named condition is explicitly true. Computed reason
 codes are stable: `shadow-executor-unconfigured`, `shadow-executor-unhealthy`,
 `shadow-executor-unattested`, `shadow-suite-authority-unavailable`,
 `shadow-authoring-authority-unavailable`, `shadow-catalog-authority-unavailable`,
-`shadow-candidate-package-unavailable`, `shadow-execution-authority-unknown`.
+`shadow-candidate-package-unavailable`, `shadow-allowance-unconfigured`,
+`shadow-execution-authority-unknown`.
 
 The scheduled stage and the routing projection consume the **same** derivation
 function on the same facts, so the row cannot disagree with the stage.
@@ -894,7 +904,7 @@ pass start (lease held)
   -> select conflict target from the owner-recomputed skill_load_trace;
        materialize that one census instance into scratch/catalog and
        re-hash it to its census inventory_sha256
-  -> build shadow-author-packet (closed schema, three source roots)
+  -> build shadow-author-packet (closed schema, four source roots)
   -> validate packet; refuse on any prohibited field, source, or value
   -> prepare_id = f(lifecycle, candidate, version, record digest,
        package_digest, packet_id, executors document)
@@ -1334,6 +1344,12 @@ predecessor's abandoned work beyond the attempts its own sweep settled.
 
 ## Check contract
 
+These checks are development-loop evidence: they are executed against the
+implementation, not against this document, and several carry the proof gates
+tabulated under "Design clearance and development-loop proof gates". They are
+mandatory before the pull request and before the Definition of Done, and they
+are not prerequisites for writing the code that produces them.
+
 | Check | Criterion | Setup | Pass evidence | Failure evidence |
 | --- | --- | --- | --- | --- |
 | CHK-01 | AC-E1, AC-E2 | One lifecycle record with three distinct current occurrences, shadow-ready recommendation, one staged package; one census fixture whose skill-load trace names one resolvable incumbent; healthy fixture evaluator and fixture author | One result retained; manifest `candidate_inventory` equals revision `files`; final state `ready_for_draft`; exactly one open record and one terminal record naming it | No result, a result naming a different candidate id, an unsettled open record, or any record written twice |
@@ -1347,7 +1363,7 @@ predecessor's abandoned work beyond the attempts its own sweep settled.
 | CHK-08 | AC-E9, AC-E13 | Two ready candidates where the first-sorted always fails terminally, with allowance for two; then a variant with allowance for one; then zero ready candidates | Run one evaluates both subjects, each exactly once, and reconciles; run two stops with `evaluation_allowance_spent`; run three stops with `eligible_input_exhausted` listing near-miss, already-attempted, and pre-claim refusal reasons; a variant whose first-sorted subject is refused before the claim still evaluates the second and spends no allowance on the refusal; a later pass sorts the attempted subject after a never-attempted one | A failing or pre-claim-refused candidate blocking its successor, any subject prepared or claimed twice in one pass, allowance spent on a pre-claim refusal, or unused allowance with no stop reason |
 | CHK-09 | AC-E11, AC-E14, AC-E18, and sets the unresolved allowances | One real configured evaluator with a real backend, one candidate, one genuine census incumbent as the conflict target, natural pass; two synthetic runs with remaining pass time set just below the candidate-admission bound and just below the claim-admission bound; one deliberately overrunning fixture per bounded subprocess term (author, executor call, compile, certify with a sleeping nested `shadow-verify`, lifecycle transition); one over-ceiling revision inventory; one artificially slowed materialization and one slowed revalidation; and one durable-write counter over the natural run | Every term of the printed formula — preparation, revalidation, authoring, attestation, trials, compile, certify, settlement, termination — is present and finite **before preparation starts**; the natural run performs zero materialization, re-hashing, packet build, or packet validation after the claim, proved by an ordered phase trace; the synthetic runs refuse with `pass_deadline_reservation_unmet` writing neither scratch nor open record; each overrun subprocess fixture is terminated within its bound plus `termination_grace` with no surviving process in its group; the over-ceiling inventory refuses `preparation-oversize` with zero bytes copied; the slowed fixtures refuse `preparation-deadline-exceeded` and `revalidation-deadline-exceeded`; the natural run's claimed stage performs exactly four durable record writes — open-attempt, retained packet, semantic result, terminal-attempt — matching the `max_records_per_candidate` term of the printed formula; retained per-call and per-phase cost becomes the configured `author_call_bound`, `author_doctor_bound`, `executor_call_bound`, `compile_bound`, `certify_bound`, `lifecycle_transition_bound`, `record_write_bound`, `lifecycle_read_bound`, `packet_build_bound`, `packet_validate_bound`, `package_file_ceiling`, `package_bytes_ceiling`, `prepare_throughput`, `hash_throughput`, `termination_grace`, and `deadline_margin` additionally, the natural run reaches a certificate status derived from real trials, and if that status is `pass` it is recorded as the parent Definition of Done's triggering, task-performance, and overall-regression evidence, with the routing gate proving exact candidate and catalog loads for all five classes | Any pass claimed from a fixture executor, a weakened gate, an inconclusive result reported as a pass, a missing or infinite formula term, any deterministic preparation observed after the claim, a start accepted below any admission bound, a scratch root or open record written by a refused admission, a surviving child process after any bound, a durable record write not counted by `max_records_per_candidate`, an unrefused over-ceiling inventory, or allowances configured without this measurement or an owner-recorded provisional bound |
 | CHK-10 | AC-E10, AC-E3a | CHK-01 run twice over unchanged evidence with **both** a pinned deterministic author fixture returning a fixed case set and a pinned deterministic executor fixture returning fixed trial output, and with the second run given a **different run and result directory** | Identical `result_id` across both runs even though the certificate `receipt_id` and `result_dir` differ; distinct `open_attempt_id` and `terminal_attempt_id`; both terminal records name the same `result_id` and different open records; the retained result contains no path-bearing field | Differing `result_id` when only the run root changed, identical attempt identities across passes, or any `result_dir`, `run_dir`, `reason`, or receipt digest inside the result identity domain |
-| CHK-11 | AC-E12, AC-E15 | The authority permutation matrix: evaluator unconfigured, configured-unhealthy, healthy-unattested, suite authority missing, package unavailable, census absent or digest-mismatched, malformed authority object, all-present; plus one permutation per E2b authoring sub-condition: `evaluation_input_owner` absent, invalid key set, `enabled: false`, empty `author_model`, authoring adapter digest mismatched, author doctor unhealthy, and `shadow-author-packet` absent | Each permutation's routing row reports the matching computed reason and `available` value; every authoring sub-condition yields `shadow-authoring-authority-unavailable`, an absent or unverifiable census yields `shadow-catalog-authority-unavailable`, and a malformed authority object yields `shadow-execution-authority-unknown`; in the all-present case the adapter is invoked exactly once with `--operation shadow-author` and a single `--packet` path under the configured `author_model`, and no `v2-input-owner-run` or `configured_adapters` path is entered; declines under `available: true` carry allowance, reservation, halt, or attempted-set stop reasons rather than authority reasons | Any row claiming authority the host lacks, any stage start under `available: false`, an `executor_unavailable` report under `available: true`, an authority reason used for a scheduling decline, a second adapter input path, or a hard-coded blocker constant surviving in `profile_evaluation_routing.py` |
+| CHK-11 | AC-E12, AC-E15 | The authority permutation matrix: evaluator unconfigured, configured-unhealthy, healthy-unattested, suite authority missing, package unavailable, census absent or digest-mismatched, malformed authority object, all-present; plus one permutation per E2b authoring sub-condition: `evaluation_input_owner` absent, invalid key set, `enabled: false`, empty `author_model`, authoring adapter digest mismatched, author doctor unhealthy, and `shadow-author-packet` absent; plus one permutation with every other authority present and one reservation allowance unconfigured | Each permutation's routing row reports the matching computed reason and `available` value; every authoring sub-condition yields `shadow-authoring-authority-unavailable`, an absent or unverifiable census yields `shadow-catalog-authority-unavailable`, an unconfigured allowance yields `shadow-allowance-unconfigured` with `available: false` and no defaulted value anywhere in the row, and a malformed authority object yields `shadow-execution-authority-unknown`; in the all-present case the adapter is invoked exactly once with `--operation shadow-author` and a single `--packet` path under the configured `author_model`, and no `v2-input-owner-run` or `configured_adapters` path is entered; declines under `available: true` carry allowance, reservation, halt, or attempted-set stop reasons rather than authority reasons | Any row claiming authority the host lacks, any stage start under `available: false`, an `executor_unavailable` report under `available: true`, an authority reason used for a scheduling decline, a second adapter input path, or a hard-coded blocker constant surviving in `profile_evaluation_routing.py` |
 
 CHK-01 through CHK-08 and CHK-10 through CHK-12 are deterministic and run with
 fixture author and evaluator adapters in the standalone suites. CHK-03's
@@ -1499,76 +1515,128 @@ first restored pass runs the recovery sweep before deriving readiness.
       stop reason, and accounting reconciles the subjects that pass claimed plus
       the attempts its sweep settled.
 - [ ] A passing result grants no install, publication, or admission authority.
+- [ ] Every allowance and bound is read from explicit owner-provided
+      configuration; a missing value makes the stage fail closed and
+      unavailable rather than defaulting, and any provisional value is recorded
+      as provisional with its measurement scheduled.
 - [ ] CHK-01 through CHK-08 and CHK-10 through CHK-12 pass deterministically;
       CHK-09 records the measured cost that sets the configured allowances and
       the one real-backend certificate status.
+- [ ] Development-loop proof gates PG-1 through PG-7 are all recorded. They are
+      runtime evidence, so they are produced by the implementation rather than
+      required before it, but none of this Definition of Done is complete
+      without them.
 - [ ] The plan baton, this work order, and the local commits are complete, and
       the slice has a reviewed PR targeting `feature/multi-cli-dreaming`.
 
-## Changing reframe status from OPEN to CLEAR
+## Design clearance and development-loop proof gates
 
-Reframe status becomes CLEAR when a round-three design review records all of:
+Design-doc closes on static evidence. Runtime evidence belongs to
+development-loop, which cannot run before the code that produces it exists.
+The previous revision conflated the two: it required an attestation trace, a
+model-authored suite, timeout fixtures, a replay trace, a measured allowance,
+and a real-backend certificate before clearance, then forbade starting the
+stage until all of them existed. Nothing could ever satisfy it. Revision 7
+splits the list at that seam.
 
-1. **Owner approval of the extension framing** — that registering a fourth
-   adapter role, adding a shadow subject mode to the existing authoring
-   boundary, adding three append-only record types, and adding one
-   bounded-subprocess wrapper are extensions of existing authorities rather than
-   the forbidden second queue, owner, scheduler, transport, catalog stage, or
-   classifier.
-2. **A dry-run attestation trace** showing the configured
-   `skill-evaluation-executor` adapter's `version` response satisfying
-   `shadow_attest` against the derived executors document, proving E1 needs no
-   invented identity.
-3. **One validated shadow suite** produced from the fixed template plus five
-   model-authored prompts, accepted by `shadow_suite` in
-   `catalog_plus_candidate` routing mode against a one-skill catalog
-   materialized from the census, with the `routing_conflict` case naming that
-   one skill, proving E2 and E2c need no catalog audit stage and no second
-   authoring stack; together with one trace of the exact E2b
-   invocation showing a single `--packet` argument, the content-pinned adapter,
-   and the configured `author_model`, and confirming that the resulting
-   certificate reports `authoritative: false`.
-4. **A proven finite and enforced reservation covering the whole stage** —
-   CHK-09 evidence showing the entire formula, term by term including
-   preparation and revalidation, computed **before preparation starts**; an
-   ordered phase trace proving no materialization, re-hashing, packet build, or
-   packet validation occurs after the claim; a refusal with
-   `pass_deadline_reservation_unmet` writing neither scratch nor record when
-   remaining time is insufficient; one overrun fixture per bounded subprocess
-   term (author, executor call, compile, certify with a sleeping nested
-   `shadow-verify`, lifecycle transition) terminated within its bound plus
-   `termination_grace` with no surviving process in the group; and the
-   `preparation-oversize`, `preparation-deadline-exceeded`, and
-   `revalidation-deadline-exceeded` refusals demonstrated. Acceptance
-   must also record that halt is deliberately not observed inside
-   `shadow-execute`, and that the reservation rather than interruption is what
-   protects the pass deadline.
-5. **Acceptance of the append-only fenced-recovery regime** — that a fenced-out
-   pass writes zero durable bytes into any durable record root, that a
-   non-authoritative scratch root is not such a byte and is swept by the next
-   owner, and that `lease_lost` is process-return evidence only; that the next valid owner retains the durable outcome and
-   stop reason; that one immutable open record settled by one immutable
-   terminal record is sufficient recovery authority; and that the tabulated
-   collision, settled-twice, supersession, not-required, and orphan behaviors
-   are correct.
-6. **A replay trace across two run roots** showing an identical `result_id`
-   while the certificate `receipt_id` and `result_dir` differ, proving the N1
-   identity domain is path-independent.
-7. **A resolved allowance decision** — either CHK-09's measured per-call and
-   per-phase cost, or an explicit owner-set provisional bound with the
-   measurement scheduled, replacing the "unresolved policy decision" row in the
-   constraint table.
-8. **Owner acceptance of the catalog reuse** — that reading one already-derived
-   census record and copying one installed skill's bytes into a pass-local
-   snapshot is reuse of an existing authority rather than a second catalog
-   stage, that first-catalog-load-in-the-owner-recomputed-trace is a
-   behavioral rather than semantic selector, and that a one-skill catalog is
-   sufficient to prove triggering, task performance, and overall regression;
-   together with acceptance that the certificate's `authoritative` bit is
-   retained but never obeyed, since it is adapter-attested.
-9. **Confirmation that no revisit condition in the constraint table has
-   fired**, in particular the pass-deadline, packet-prohibition, receipt-digest,
-   and authoring-identity rows, given the added stage.
+### Static design clearance, recorded at `fe38fe0`
 
-Until all nine are recorded, implementation returns to this document rather
-than starting the stage.
+Two independent reviewers read the work order to a fixed point. Terra's final
+round found one static defect, the four-write reservation under-count, and that
+defect is fixed at `fe38fe0`. Opus cleared `71145af` and read `fe38fe0` as
+regression-free. The following architecture decisions are therefore **cleared**,
+and each is a static property of this document that a reviewer can check by
+reading it against the cited code:
+
+1. **Existing owner and registry reuse.** The stage is a bounded stage inside
+   the one existing scheduled owner pass. Registering a fourth adapter role,
+   adding a shadow subject mode to the existing authoring boundary, adding two
+   append-only record types, and adding one bounded-subprocess wrapper are
+   extensions of existing authorities. No second queue, owner, scheduler,
+   transcript transport, catalog stage, or deterministic semantic classifier is
+   introduced. See "Reuse contract" and the non-goals.
+2. **Exact packet and config authority.** The closed, versioned
+   shadow-author-packet schema in E2 names its permitted fields, its four
+   permitted source roots, its prohibited fields and sources, its
+   `additionalProperties: false` behavior, and its stable refusal codes. E2b
+   names the exact packet-only invocation, the content-pinned unregistered
+   adapter, the sealed `evaluation_input_owner.author_model`, and the existing
+   doctor predicate that pins the vendor. No authoring config key and no
+   adapter registry entry are added, so no configured host breaks.
+3. **Append-only recovery model.** One immutable open-attempt record written
+   before the claim, settled by appending one immutable terminal-attempt record
+   naming its digest; openness derived by scan; a fenced-out pass writing zero
+   durable bytes; `lease_lost` as process-return evidence only; the next valid
+   owner retaining the durable outcome and stop reason; and the tabulated
+   collision, settled-twice, supersession, not-required, and orphan behaviors.
+   E6 and "Lease loss and recovery" are internally consistent and leave no
+   mutable state and no in-place rewrite.
+4. **Enforced-bound design.** Every term of the worst-case formula names an
+   existing enforced timeout or a specified minimal bounded wrapper, with a
+   named terminal refusal, cleanup overhead, and a finite operation and
+   subprocess count. All deterministic preparation precedes the claim, the
+   claim-admission re-assertion is defensive, and settlement counts all four
+   durable writes. What is cleared here is that the design is mechanically
+   enforceable, not that any number is right.
+5. **Census catalog reuse.** The approved target catalog in E2c is one skill
+   materialized from an already-derived estate-census physical instance, in a
+   snapshot the pass already builds and the owner already reads. Conflict-target
+   selection is the first catalog load in the owner-recomputed
+   `skill_load_trace`, a behavioral fact, not a semantic judgement. This is
+   reuse of an existing authority, not a second catalog-audit stage.
+6. **Truthful pass semantics.** `catalog_plus_candidate` is selected because
+   `shadow_aggregate` makes a `candidate_only` `pass` unreachable by
+   construction (`skill-evaluation-harness.py:2137-2139`), so the parent
+   funnel's Definition of Done could not otherwise be met. No gate is weakened,
+   no fixture result is manufactured, and an inconclusive diagnostic is never
+   reported as a pass.
+7. **No install or publication authority.** A passing result grants none. The
+   certificate's `authoritative` bit may become true in
+   `catalog_plus_candidate` mode with a real backend, and the stage still never
+   reads it: `evaluating` has no forward edge to any install-bearing state, and
+   the stage takes the identical exit for every status. Two independent
+   prohibitions, neither depending on the bit's value.
+8. **No revisit condition has fired.** Every row of the constraint-provenance
+   table was re-read against the added stage, in particular the pass-deadline,
+   packet-prohibition, receipt-digest, and authoring-identity rows. The one
+   deliberately unresolved row is the numeric-allowance row, which is a policy
+   decision rather than a fired revisit condition; see below.
+
+Implementation may begin from this clearance. If implementation discovers that
+any cleared decision above is unbuildable as written, work returns to this
+document and the status returns to OPEN with the concrete blocker recorded,
+rather than being worked around in code.
+
+### Numbers stay unresolved in the design
+
+No numeric value is baked into this design, and implementation must not invent
+a default. The implementation reads every allowance and bound from explicit
+owner-provided configuration. Where a required value is absent, the stage is
+**fail-closed**: `evaluation_execution.available` computes false with a named
+reason, the routing projection says so, and the stage runs nothing. An owner
+may set an explicit provisional value to unblock the first runs, which is
+recorded as a provisional bound with the measurement scheduled; CHK-09 then
+replaces it with measured cost. A silently defaulted number is the failure mode
+this rule exists to prevent, because it would make the reservation an estimate
+rather than a declared policy.
+
+### Development-loop proof gates
+
+These gates are runtime evidence. They are **mandatory before the pull request,
+before landing, and before this work order's Definition of Done can be
+checked**, and they no longer block writing the implementation that produces
+them. Each names the check that carries it.
+
+| Gate | Evidence required | Carried by |
+| --- | --- | --- |
+| PG-1 attestation | A dry-run trace showing the configured `skill-evaluation-executor` adapter's `version` response satisfying `shadow_attest` against the derived executors document, proving E1 needs no invented identity | CHK-01, CHK-11 |
+| PG-2 authored suite | One validated shadow suite from the fixed template plus five model-authored prompts, accepted by `shadow_suite` in `catalog_plus_candidate` mode against the one-skill census catalog with the `routing_conflict` case naming that skill; plus one trace of the exact E2b invocation showing a single `--packet` argument, `--vendor copilot`, the content-pinned adapter, and the configured `author_model` | CHK-01, CHK-07, CHK-11, CHK-12 |
+| PG-3 enforced reservation | The whole formula computed term by term before preparation starts; an ordered phase trace showing no deterministic preparation after the claim; a `pass_deadline_reservation_unmet` refusal writing neither scratch nor record; one overrun fixture per bounded subprocess term terminated within its bound plus `termination_grace` with no surviving process group; and the `preparation-oversize`, `preparation-deadline-exceeded`, and `revalidation-deadline-exceeded` refusals demonstrated. The record must also state that halt is deliberately not observed inside `shadow-execute`, and that the reservation rather than interruption protects the pass deadline | CHK-09 |
+| PG-4 recovery fixtures | The lease-loss, unsettled-open, collision, settled-twice, orphan, and not-required fixtures behaving as tabulated, with a byte-level durable-root snapshot proving the fenced-out pass wrote nothing | CHK-05 |
+| PG-5 replay determinism | A replay trace across two run roots showing an identical `result_id` while the certificate `receipt_id` and `result_dir` differ, proving the N1 identity domain is path-independent | CHK-10 |
+| PG-6 allowance resolution | Either CHK-09's measured per-call and per-phase cost, or an owner-set provisional bound with the measurement scheduled, replacing the unresolved-policy row in the constraint table | CHK-09 |
+| PG-7 truthful pass | One real-backend run reaching a certificate status derived from real trials, with the routing gate proving exact candidate and catalog loads for all five classes; if that status is `pass`, it is the parent Definition of Done's triggering, task-performance, and overall-regression evidence | CHK-09 |
+
+A gate that fails is not a design failure by itself. It becomes one, and
+reopens this document, only when the failure shows a cleared decision above is
+wrong rather than an implementation defect or a mis-set number.
