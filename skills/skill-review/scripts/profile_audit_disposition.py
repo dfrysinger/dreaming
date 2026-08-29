@@ -123,9 +123,16 @@ def build_profile_audit_disposition(
 def validate_profile_audit_disposition(
     disposition: Any,
     *,
-    receipt: dict[str, Any],
-    profile: dict[str, Any],
+    receipt: dict[str, Any] | None = None,
+    profile: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    """Validate one disposition.
+
+    Omitting ``receipt`` and ``profile`` validates the disposition's own
+    immutable identity, shape, and catalog-audit invariants without the
+    originating profile binding.  Read-only projections use that form; the
+    review admission path always supplies both.
+    """
     if not isinstance(disposition, dict):
         _reject("disposition-shape")
     common_keys = {
@@ -200,17 +207,28 @@ def validate_profile_audit_disposition(
             _reject("disposition-contract")
     elif disposition.get("outcome") not in CATALOG_AUDIT_OUTCOMES:
         _reject("disposition-contract")
-    expected = {
-        "profile_id": profile.get("profile_id"),
-        "task_key": profile.get("task_key"),
-        "profile_sha256": _digest(profile),
-        "qualified_session_id": receipt.get("qualified_session_id"),
-    }
-    if any(disposition.get(key) != value for key, value in expected.items()):
+    if receipt is not None and profile is not None:
+        expected = {
+            "profile_id": profile.get("profile_id"),
+            "task_key": profile.get("task_key"),
+            "profile_sha256": _digest(profile),
+            "qualified_session_id": receipt.get("qualified_session_id"),
+        }
+        if any(disposition.get(key) != value for key, value in expected.items()):
+            _reject("disposition-binding")
+    elif receipt is not None or profile is not None:
         _reject("disposition-binding")
     if (
         disposition.get("terminal_route")
         not in {"instruction", "factual_memory", "skill", "support_file", "discard"}
+        or not isinstance(disposition.get("profile_id"), str)
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", disposition["profile_id"])
+        or not isinstance(disposition.get("task_key"), str)
+        or not disposition["task_key"].strip()
+        or not isinstance(disposition.get("profile_sha256"), str)
+        or not disposition["profile_sha256"].startswith("sha256:")
+        or not isinstance(disposition.get("qualified_session_id"), str)
+        or not disposition["qualified_session_id"].strip()
         or any(
             not isinstance(disposition.get(field), str)
             or not disposition[field].strip()
@@ -335,9 +353,13 @@ def validate_profile_audit_disposition(
             "boundary-conflict",
             "boundary-unresolved",
         }
+        # A no-covering-skill review that produced no artifact never binds a
+        # candidate group, so an absent id is a terminal non-executable state
+        # rather than corruption.  A present id must still be exact.
         if (
             disposition["outcome"] == "no-covering-skill"
             and not boundary_conflict
+            and candidate_group_id is not None
             and (
                 not isinstance(candidate_group_id, str)
                 or not re.fullmatch(

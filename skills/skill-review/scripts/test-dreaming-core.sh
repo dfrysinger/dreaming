@@ -24,7 +24,7 @@ import sys
 import tempfile
 import unittest
 from unittest import mock
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 SCRIPT_DIR = Path(sys.argv[1]).resolve()
@@ -41,6 +41,15 @@ runtime_module = importlib.util.module_from_spec(spec)
 assert spec.loader is not None
 sys.modules[spec.name] = runtime_module
 spec.loader.exec_module(runtime_module)
+
+routing_spec = importlib.util.spec_from_file_location(
+    "profile_evaluation_routing_test",
+    SCRIPT_DIR / "profile_evaluation_routing.py",
+)
+routing_module = importlib.util.module_from_spec(routing_spec)
+assert routing_spec.loader is not None
+sys.modules[routing_spec.name] = routing_module
+routing_spec.loader.exec_module(routing_module)
 
 DreamingRuntime = runtime_module.DreamingRuntime
 ExecutableAdapter = runtime_module.ExecutableAdapter
@@ -7364,6 +7373,713 @@ elif sys.argv[1] == "run":
         os.chmod(bundle / "learned-skill" / "SKILL.md", 0o444)
         with self.assertRaisesRegex(RuntimeFailure, "bundle-inventory-mismatch"):
             core.verify_bundle(bundle, first["bundle_id"])
+
+    ROUTING_LIFECYCLE_ID = "3f3f3f3f-1111-4222-8333-444444444444"
+
+    def routing_disposition(
+        self,
+        *,
+        outcome: str,
+        marker: str,
+        skill_name: str | None = "existing-skill",
+        loaded: bool = True,
+        boundary: str = "new-occurrence",
+        candidate_group_id: str | None = None,
+        contract_version: int = 3,
+        persist: bool = True,
+        terminal_route: str | None = None,
+    ) -> dict:
+        digest = runtime_module.digest
+        receipt = {
+            "receipt_sha256": digest({"receipt": marker}),
+            "profile_set_id": digest({"set": marker}),
+            "snapshot_sha256": digest({"snapshot": marker}),
+            "qualified_session_id": f"fake:routing-{marker}",
+            "source_revision": f"revision-{marker}",
+            "executor": "exec",
+            "executor_identity": {"adapter_id": "fixture"},
+        }
+        profile = {
+            "profile_id": digest({"profile": marker}),
+            "task_key": f"task:{marker}",
+        }
+        trace = (
+            [
+                {
+                    "source_event_id": f"{marker}-event-2",
+                    "invoked_name": skill_name,
+                    "catalog_skill_name": skill_name,
+                    "event_sha256": digest({"event": marker}),
+                }
+            ]
+            if loaded
+            else []
+        )
+        review_result = {
+            "terminal_route": terminal_route
+            or ("discard" if outcome == "correct-skill" else "skill"),
+            "summary": f"Routing fixture {marker}",
+            "routing_reason": "Exercise one evaluation route.",
+            "catalog_audit": {
+                "outcome": outcome,
+                "skill_name": skill_name,
+                "reviewer_contract": "profile-catalog-audit-v1",
+                "catalog_sha256": digest({"catalog": marker}),
+                "catalog_skill_names": ["existing-skill"],
+                "tombstones_sha256": digest({"tombstones": marker}),
+                "skill_load_trace": trace,
+                "skill_load_trace_sha256": digest(trace),
+                "candidate_group_id": candidate_group_id,
+            },
+        }
+        occurrence_resolution = {
+            "resolution_sha256": digest({"resolution": marker}),
+            "canonical_occurrence_id": (
+                None
+                if boundary in {"boundary-conflict", "boundary-unresolved"}
+                else digest({"occurrence": marker})
+            ),
+            "boundary_relation": boundary,
+        }
+        disposition = runtime_module.build_profile_audit_disposition(
+            receipt=receipt,
+            profile=profile,
+            review_executor="exec",
+            review_executor_identity={"adapter_id": "fixture"},
+            review_result=(
+                review_result
+                if contract_version == 3
+                else {
+                    key: value
+                    for key, value in review_result.items()
+                    if key != "catalog_audit"
+                }
+            ),
+            reviewed_at=self.clock,
+            occurrence_resolution=(
+                occurrence_resolution if contract_version >= 2 else None
+            ),
+        )
+        if persist:
+            root = {
+                3: self.paths.profile_audit_dispositions,
+                2: self.paths.prior_profile_audit_dispositions,
+                1: self.paths.legacy_profile_audit_dispositions,
+            }[contract_version]
+            root.mkdir(parents=True, exist_ok=True)
+            path = (
+                root
+                / f"{disposition['profile_id'].removeprefix('sha256:')}.json"
+            )
+            path.write_text(json.dumps(disposition, sort_keys=True))
+        return disposition
+
+    def routing_lifecycle_record(
+        self,
+        *,
+        occurrence_markers: list[str],
+        state: str = "ready_for_draft",
+        evaluation_status: str = "shadow_ready",
+        recommendation: str = "ready_for_draft",
+        age_days: dict[str, int] | None = None,
+    ) -> dict:
+        digest = runtime_module.digest
+        lifecycle_id = self.ROUTING_LIFECYCLE_ID
+        files = [
+            {
+                "path": "SKILL.md",
+                "sha256": hashlib.sha256(b"routed candidate").hexdigest(),
+                "size": len(b"routed candidate"),
+            }
+        ]
+        candidate_id = runtime_module.candidate_record_digest(files)
+        observed = datetime.fromtimestamp(self.clock, timezone.utc)
+        evidence = []
+        for marker in occurrence_markers:
+            offset = (age_days or {}).get(marker, 1)
+            occurred = observed - timedelta(days=offset)
+            evidence.append(
+                {
+                    "canonical_occurrence_id": digest({"occurrence": marker}),
+                    "evidence_id": digest({"evidence": marker}),
+                    "occurred_at": occurred.isoformat(),
+                }
+            )
+        return {
+            "lifecycle_id": lifecycle_id,
+            "state": state,
+            "proposed_name": "routed-candidate",
+            "publication": {"status": "shadow_only"},
+            "record_version": 4,
+            "current_candidate_id": candidate_id,
+            "candidate_revisions": [
+                {
+                    "candidate_id": candidate_id,
+                    "package_path": (
+                        f"candidates/v1/packages/{lifecycle_id}/{candidate_id}"
+                    ),
+                    "files": files,
+                    "staged_at": observed.isoformat(),
+                }
+            ],
+            "evaluation": {
+                "status": evaluation_status,
+                "last_evaluated_at": observed.isoformat(),
+                "history": [
+                    {
+                        "evaluation_id": digest({"evaluation": lifecycle_id}),
+                        "evaluated_at": observed.isoformat(),
+                        "recommendation": recommendation,
+                        "reasons": [],
+                        "candidate_id": candidate_id,
+                        "shadow_only": True,
+                    }
+                ],
+            },
+            "evidence": evidence,
+            "blockers": {
+                "covering_lifecycle_ids": [],
+                "tombstone_ids": [],
+                "uncertain": False,
+            },
+        }
+
+    def routing_core(self, record: dict | None) -> tuple[DreamingRuntime, list]:
+        core = self.core({("fake", "exec")})
+        calls: list[tuple[str, ...]] = []
+        state = {"record": record}
+
+        def lifecycle(*arguments: str) -> dict:
+            calls.append(arguments)
+            if arguments[0] == "read":
+                if state["record"] is None or arguments[1] != (
+                    state["record"]["lifecycle_id"]
+                ):
+                    raise RuntimeFailure("candidate-lifecycle-failed", "missing")
+                return state["record"]
+            if arguments[0] == "transition":
+                moved = json.loads(json.dumps(state["record"]))
+                moved["state"] = arguments[arguments.index("--to") + 1]
+                moved["record_version"] += 1
+                state["record"] = moved
+                return {
+                    "candidate_id": moved["current_candidate_id"],
+                    "lifecycle_id": moved["lifecycle_id"],
+                    "record_sha256": runtime_module.candidate_record_digest(moved),
+                    "record_version": moved["record_version"],
+                    "shadow_only": True,
+                    "state": moved["state"],
+                }
+            raise RuntimeFailure("candidate-lifecycle-failed", arguments[0])
+
+        core._candidate_lifecycle_call = lifecycle  # type: ignore[assignment]
+        return core, calls
+
+    def test_evaluation_routing_gives_each_outcome_one_terminal_route(self) -> None:
+        self.clock = 1770249600
+        self.routing_disposition(outcome="correct-skill", marker="correct")
+        self.routing_disposition(
+            outcome="missed-skill", marker="missed", loaded=False
+        )
+        self.routing_disposition(
+            outcome="wrong-or-incomplete-skill", marker="wrong"
+        )
+        self.routing_disposition(
+            outcome="no-covering-skill",
+            marker="conflicted",
+            skill_name=None,
+            loaded=False,
+            boundary="boundary-conflict",
+        )
+        self.routing_disposition(
+            outcome="no-covering-skill",
+            marker="collecting",
+            skill_name=None,
+            loaded=False,
+            candidate_group_id=self.ROUTING_LIFECYCLE_ID,
+        )
+        self.routing_disposition(
+            outcome="correct-skill", marker="legacy", contract_version=1
+        )
+        record = self.routing_lifecycle_record(
+            occurrence_markers=["collecting", "second"],
+            state="collecting",
+            evaluation_status="not_ready",
+            recommendation="collecting",
+        )
+        core, _calls = self.routing_core(record)
+        routing = core.derive_evaluation_routing()
+        routes = {
+            row["outcome"]
+            if row["profile_audit_contract_version"] == 3
+            else "legacy": row["route"]
+            for row in routing["rows"]
+        }
+        self.assertEqual(routes["correct-skill"], "no-change")
+        self.assertEqual(routes["missed-skill"], "repair-recommendation")
+        self.assertEqual(
+            routes["wrong-or-incomplete-skill"], "repair-recommendation"
+        )
+        self.assertEqual(routes["legacy"], "legacy-not-routable")
+        by_marker = {row["task_key"]: row for row in routing["rows"]}
+        self.assertEqual(
+            by_marker["task:conflicted"]["route"], "recurrence-ineligible"
+        )
+        collecting = by_marker["task:collecting"]
+        self.assertEqual(collecting["route"], "awaiting-recurrence")
+        self.assertIn(
+            "fewer-than-three-current-distinct-occurrences",
+            collecting["reasons"],
+        )
+        self.assertIsNone(collecting["evaluation_subject"])
+        self.assertEqual(
+            [row["requires_evaluation"] for row in routing["rows"]],
+            [False] * 6,
+        )
+        self.assertEqual(
+            [row["evaluation_execution"] for row in routing["rows"]],
+            [None] * 6,
+        )
+        self.assertEqual(routing["summary"]["executable_evaluation"], 0)
+        self.assertEqual(routing["summary"]["total"], 6)
+        self.assertEqual(routing["summary"]["requires_evaluation"], 0)
+        self.assertEqual(
+            sum(routing["summary"]["routes"].values()),
+            routing["summary"]["total"],
+        )
+        repeated = core.derive_evaluation_routing()
+        self.assertEqual(
+            [row["decision_sha256"] for row in routing["rows"]],
+            [row["decision_sha256"] for row in repeated["rows"]],
+        )
+
+    def test_unbound_no_cover_row_is_terminal_not_projection_poison(self) -> None:
+        # A no-covering-skill review that discarded its work binds no candidate
+        # group.  That row is legitimate, so it takes one terminal route and
+        # every other retained disposition still projects.
+        self.clock = 1770249600
+        self.routing_disposition(
+            outcome="no-covering-skill",
+            marker="discarded",
+            skill_name=None,
+            loaded=False,
+            candidate_group_id=None,
+            terminal_route="discard",
+        )
+        self.routing_disposition(outcome="correct-skill", marker="correct")
+        self.routing_disposition(
+            outcome="missed-skill", marker="missed", loaded=False
+        )
+        self.routing_disposition(
+            outcome="wrong-or-incomplete-skill", marker="wrong"
+        )
+        self.routing_disposition(
+            outcome="no-covering-skill",
+            marker="conflicted",
+            skill_name=None,
+            loaded=False,
+            boundary="boundary-conflict",
+        )
+        self.routing_disposition(
+            outcome="no-covering-skill",
+            marker="ready",
+            skill_name=None,
+            loaded=False,
+            candidate_group_id=self.ROUTING_LIFECYCLE_ID,
+        )
+        record = self.routing_lifecycle_record(
+            occurrence_markers=["ready", "second", "third"]
+        )
+        core, _calls = self.routing_core(record)
+        routing = core.derive_evaluation_routing()
+        by_marker = {row["task_key"]: row for row in routing["rows"]}
+        self.assertEqual(len(routing["rows"]), 6)
+
+        unbound = by_marker["task:discarded"]
+        self.assertEqual(unbound["route"], "recurrence-ineligible")
+        self.assertEqual(unbound["reasons"], ["no-candidate-group-bound"])
+        self.assertIsNone(unbound["candidate_group_id"])
+        self.assertFalse(unbound["requires_evaluation"])
+        self.assertIsNone(unbound["evaluation_subject"])
+        self.assertIsNone(unbound["evaluation_execution"])
+
+        # All four catalog outcomes still reach their own terminal route, and
+        # the gated candidate still becomes executable.
+        self.assertEqual(by_marker["task:correct"]["route"], "no-change")
+        self.assertEqual(
+            by_marker["task:missed"]["route"], "repair-recommendation"
+        )
+        self.assertEqual(
+            by_marker["task:wrong"]["route"], "repair-recommendation"
+        )
+        self.assertEqual(
+            by_marker["task:conflicted"]["reasons"], ["boundary-not-one-to-one"]
+        )
+        self.assertEqual(by_marker["task:ready"]["route"], "candidate-evaluation")
+        self.assertTrue(by_marker["task:ready"]["requires_evaluation"])
+        self.assertEqual(routing["summary"]["total"], 6)
+        self.assertEqual(routing["summary"]["routes"]["recurrence-ineligible"], 2)
+        self.assertEqual(routing["summary"]["requires_evaluation"], 1)
+
+        # Replaying the projection is byte-identical, and the standalone
+        # evaluation-routing command reports the same terminal rows.
+        self.assertEqual(
+            [row["decision_sha256"] for row in routing["rows"]],
+            [
+                row["decision_sha256"]
+                for row in core.derive_evaluation_routing()["rows"]
+            ],
+        )
+        with mock.patch.object(runtime_module, "default_paths", lambda: self.paths):
+            with mock.patch.object(
+                runtime_module.DreamingRuntime,
+                "_candidate_lifecycle_call",
+                lambda _self, *arguments: core._candidate_lifecycle_call(*arguments),
+            ):
+                standalone = runtime_module.evaluation_routing()
+        self.assertTrue(standalone["ok"])
+        self.assertEqual(standalone["status"], "derived")
+        self.assertEqual(len(standalone["rows"]), 6)
+        standalone_by_marker = {row["task_key"]: row for row in standalone["rows"]}
+        self.assertEqual(
+            standalone_by_marker["task:discarded"]["route"], "recurrence-ineligible"
+        )
+        self.assertEqual(
+            standalone_by_marker["task:discarded"]["reasons"],
+            ["no-candidate-group-bound"],
+        )
+
+        # A present but malformed group id is still corruption and still fails
+        # closed for the whole projection.
+        path = (
+            self.paths.profile_audit_dispositions
+            / f"{by_marker['task:discarded']['profile_id'].removeprefix('sha256:')}.json"
+        )
+        tampered = json.loads(path.read_text())
+        tampered["candidate_group_id"] = "not-a-uuid"
+        os.chmod(path, 0o600)
+        path.write_text(json.dumps(tampered))
+        with self.assertRaisesRegex(RuntimeFailure, "profile-audit-disposition"):
+            core.derive_evaluation_routing()
+
+    def test_gated_candidate_names_an_unexecutable_evaluation(self) -> None:
+        self.clock = 1770249600
+        self.routing_disposition(
+            outcome="no-covering-skill",
+            marker="collecting",
+            skill_name=None,
+            loaded=False,
+            candidate_group_id=self.ROUTING_LIFECYCLE_ID,
+        )
+        record = self.routing_lifecycle_record(
+            occurrence_markers=["collecting", "second", "third"]
+        )
+        core, calls = self.routing_core(record)
+        routing = core.derive_evaluation_routing()
+        row = routing["rows"][0]
+        self.assertEqual(row["route"], "candidate-evaluation")
+        self.assertTrue(row["requires_evaluation"])
+        subject = row["evaluation_subject"]
+        self.assertEqual(subject["lifecycle_id"], self.ROUTING_LIFECYCLE_ID)
+        self.assertEqual(
+            subject["candidate_id"], record["current_candidate_id"]
+        )
+        self.assertEqual(
+            subject["package_path"],
+            record["candidate_revisions"][0]["package_path"],
+        )
+        self.assertEqual(subject["current_occurrence_count"], 3)
+        self.assertEqual(
+            subject["record_sha256"],
+            runtime_module.candidate_record_digest(record),
+        )
+        execution = row["evaluation_execution"]
+        self.assertFalse(execution["available"])
+        self.assertEqual(
+            execution["reasons"], ["shadow-execution-authority-unknown"]
+        )
+        observed = core.derive_evaluation_routing(
+            execution_authority=runtime_module.shadow_execution_authority(
+                {"evaluators": {"shadow": {}}}, None
+            )
+        )["rows"][0]["evaluation_execution"]
+        self.assertFalse(observed["available"])
+        self.assertEqual(
+            observed["reasons"],
+            [
+                "shadow-executor-unattested",
+                "shadow-suite-authority-unavailable",
+                "shadow-authoring-authority-unavailable",
+                "shadow-catalog-authority-unavailable",
+                "shadow-candidate-package-unavailable",
+                "shadow-allowance-unconfigured",
+            ],
+        )
+        self.assertEqual(
+            routing["execution_blockers"], execution["reasons"]
+        )
+        self.assertEqual(routing["summary"]["requires_evaluation"], 1)
+        self.assertEqual(routing["summary"]["executable_evaluation"], 0)
+        self.assertEqual(
+            [call for call in calls if call and call[0] == "transition"], []
+        )
+        self.assertEqual(
+            core.derive_evaluation_routing()["rows"][0]["decision_sha256"],
+            row["decision_sha256"],
+        )
+
+    def test_no_runtime_path_enters_the_evaluating_state(self) -> None:
+        self.clock = 1770249600
+        for marker, outcome, group in (
+            ("collecting", "no-covering-skill", self.ROUTING_LIFECYCLE_ID),
+            ("correct", "correct-skill", None),
+            ("missed", "missed-skill", None),
+        ):
+            self.routing_disposition(
+                outcome=outcome,
+                marker=marker,
+                skill_name=None if outcome == "no-covering-skill" else "existing-skill",
+                loaded=outcome not in {"no-covering-skill", "missed-skill"},
+                candidate_group_id=group,
+            )
+        record = self.routing_lifecycle_record(
+            occurrence_markers=["collecting", "second", "third"]
+        )
+        core, calls = self.routing_core(record)
+        core.derive_evaluation_routing()
+        self.assertEqual(
+            [call for call in calls if call and call[0] != "read"], []
+        )
+        self.assertEqual(record["state"], "ready_for_draft")
+        self.assertFalse(hasattr(core, "handoff_candidate_for_evaluation"))
+        parser = runtime_module.build_parser()
+        commands = {
+            name
+            for action in parser._actions
+            for name in getattr(action, "choices", None) or ()
+        }
+        self.assertIn("evaluation-routing", commands)
+        self.assertNotIn("handoff-evaluation", commands)
+        self.assertFalse(hasattr(runtime_module, "SHADOW_EXECUTION_BLOCKERS"))
+        self.assertEqual(
+            runtime_module.default_shadow_execution_blockers(),
+            ["shadow-execution-authority-unknown"],
+        )
+        self.assertEqual(
+            runtime_module.shadow_execution_authority(None, None),
+            {
+                "evaluator_configured": False,
+                "evaluator_healthy": False,
+                "evaluator_attested": False,
+                "suite_authority": False,
+                "authoring_authority": False,
+                "catalog_authority": False,
+                "allowances_configured": False,
+                "candidate_package": False,
+            },
+        )
+
+    def test_expired_occurrence_keeps_candidate_below_the_gate(self) -> None:
+        self.clock = 1770249600
+        self.routing_disposition(
+            outcome="no-covering-skill",
+            marker="collecting",
+            skill_name=None,
+            loaded=False,
+            candidate_group_id=self.ROUTING_LIFECYCLE_ID,
+        )
+        record = self.routing_lifecycle_record(
+            occurrence_markers=["collecting", "second", "third"],
+            age_days={"third": 45},
+        )
+        core, calls = self.routing_core(record)
+        row = core.derive_evaluation_routing()["rows"][0]
+        self.assertEqual(row["route"], "awaiting-recurrence")
+        self.assertIn(
+            "fewer-than-three-current-distinct-occurrences", row["reasons"]
+        )
+        self.assertIsNone(row["evaluation_subject"])
+        self.assertIsNone(row["evaluation_execution"])
+        self.assertEqual(
+            [call for call in calls if call and call[0] == "transition"], []
+        )
+
+    def test_repeated_occurrence_cannot_reach_the_gate_alone(self) -> None:
+        self.clock = 1770249600
+        self.routing_disposition(
+            outcome="no-covering-skill",
+            marker="collecting",
+            skill_name=None,
+            loaded=False,
+            candidate_group_id=self.ROUTING_LIFECYCLE_ID,
+        )
+        record = self.routing_lifecycle_record(
+            occurrence_markers=["collecting", "collecting", "collecting"]
+        )
+        core, _calls = self.routing_core(record)
+        row = core.derive_evaluation_routing()["rows"][0]
+        self.assertEqual(row["route"], "awaiting-recurrence")
+        self.assertIn(
+            "fewer-than-three-current-distinct-occurrences", row["reasons"]
+        )
+
+    def routed_row(self, execution_authority=None) -> dict:
+        self.clock = 1770249600
+        self.routing_disposition(
+            outcome="no-covering-skill",
+            marker="collecting",
+            skill_name=None,
+            loaded=False,
+            candidate_group_id=self.ROUTING_LIFECYCLE_ID,
+        )
+        record = self.routing_lifecycle_record(
+            occurrence_markers=["collecting", "second", "third"]
+        )
+        core, _calls = self.routing_core(record)
+        return core.derive_evaluation_routing(
+            execution_authority=execution_authority
+        )["rows"][0]
+
+    COMPLETE_EXECUTION_AUTHORITY = {
+        "evaluator_configured": True,
+        "evaluator_healthy": True,
+        "evaluator_attested": True,
+        "suite_authority": True,
+        "authoring_authority": True,
+        "catalog_authority": True,
+        "candidate_package": True,
+        "allowances_configured": True,
+    }
+
+    def test_routed_row_reports_complete_execution_authority(self) -> None:
+        row = self.routed_row(self.COMPLETE_EXECUTION_AUTHORITY)
+        self.assertEqual(row["route"], "candidate-evaluation")
+        self.assertEqual(
+            row["evaluation_execution"], {"available": True, "reasons": []}
+        )
+
+    def test_routed_row_reports_each_missing_execution_authority(self) -> None:
+        for fact, reason in routing_module.EXECUTION_AUTHORITY_FACTS:
+            row = self.routed_row(
+                {**self.COMPLETE_EXECUTION_AUTHORITY, fact: False}
+            )
+            self.assertEqual(
+                row["evaluation_execution"],
+                {"available": False, "reasons": [reason]},
+                fact,
+            )
+
+    def test_unreadable_execution_authority_fails_closed(self) -> None:
+        for authority in (
+            None,
+            {},
+            {"evaluator_configured": True},
+            {**self.COMPLETE_EXECUTION_AUTHORITY, "extra": True},
+            {**self.COMPLETE_EXECUTION_AUTHORITY, "suite_authority": "yes"},
+        ):
+            row = self.routed_row(authority)
+            self.assertEqual(
+                row["evaluation_execution"],
+                {
+                    "available": False,
+                    "reasons": ["shadow-execution-authority-unknown"],
+                },
+                json.dumps(authority, default=str),
+            )
+
+    def test_routed_row_never_grants_install_authority(self) -> None:
+        row = self.routed_row(self.COMPLETE_EXECUTION_AUTHORITY)
+        serialized = json.dumps(row).lower()
+        self.assertNotIn("install", serialized)
+        self.assertNotIn("publish", serialized)
+        self.assertNotIn("evaluating", serialized)
+
+    def test_evaluation_routing_fails_closed_on_tampered_evidence(self) -> None:
+        self.clock = 1770249600
+        disposition = self.routing_disposition(
+            outcome="no-covering-skill",
+            marker="collecting",
+            skill_name=None,
+            loaded=False,
+            candidate_group_id=self.ROUTING_LIFECYCLE_ID,
+        )
+        record = self.routing_lifecycle_record(
+            occurrence_markers=["collecting", "second", "third"]
+        )
+        tampered_package = json.loads(json.dumps(record))
+        tampered_package["candidate_revisions"][0]["files"][0]["size"] += 1
+        core, _calls = self.routing_core(tampered_package)
+        with self.assertRaisesRegex(
+            RuntimeFailure, "evaluation-routing-invalid"
+        ):
+            core.derive_evaluation_routing()
+
+        foreign = json.loads(json.dumps(record))
+        foreign["lifecycle_id"] = "aaaaaaaa-1111-4222-8333-444444444444"
+        core, _calls = self.routing_core(foreign)
+        with self.assertRaisesRegex(
+            RuntimeFailure, "candidate-lifecycle-failed"
+        ):
+            core.derive_evaluation_routing()
+
+        path = (
+            self.paths.profile_audit_dispositions
+            / f"{disposition['profile_id'].removeprefix('sha256:')}.json"
+        )
+        mutated = json.loads(path.read_text())
+        mutated["summary"] = "rewritten by a report snapshot"
+        path.write_text(json.dumps(mutated, sort_keys=True))
+        core, _calls = self.routing_core(record)
+        with self.assertRaisesRegex(
+            RuntimeFailure, "profile-audit-disposition-invalid"
+        ):
+            core.derive_evaluation_routing()
+
+    def test_repair_recommendation_cannot_bind_a_candidate_subject(self) -> None:
+        self.clock = 1770249600
+        disposition = self.routing_disposition(
+            outcome="missed-skill", marker="missed", loaded=False, persist=False
+        )
+        record = self.routing_lifecycle_record(
+            occurrence_markers=["collecting", "second", "third"]
+        )
+        row = runtime_module.build_evaluation_routing_row(
+            disposition=disposition, lifecycle_record=None, now=self.clock
+        )
+        self.assertEqual(row["route"], "repair-recommendation")
+        self.assertFalse(row["requires_evaluation"])
+        self.assertIsNone(row["evaluation_subject"])
+        self.assertEqual(row["catalog_skill_name"], "existing-skill")
+        with self.assertRaisesRegex(
+            runtime_module.EvaluationRoutingError, "repair-recommendation-unbound"
+        ):
+            runtime_module.build_evaluation_routing_row(
+                disposition=disposition,
+                lifecycle_record=record,
+                now=self.clock,
+            )
+
+    def test_duplicate_disposition_versions_refuse_routing(self) -> None:
+        self.clock = 1770249600
+        disposition = self.routing_disposition(
+            outcome="correct-skill", marker="correct"
+        )
+        legacy_root = self.paths.legacy_profile_audit_dispositions
+        legacy_root.mkdir(parents=True, exist_ok=True)
+        (
+            legacy_root
+            / f"{disposition['profile_id'].removeprefix('sha256:')}.json"
+        ).write_text(
+            (
+                self.paths.profile_audit_dispositions
+                / f"{disposition['profile_id'].removeprefix('sha256:')}.json"
+            ).read_text()
+        )
+        core, _calls = self.routing_core(None)
+        with self.assertRaisesRegex(
+            RuntimeFailure, "profile-audit-disposition-invalid"
+        ):
+            core.derive_evaluation_routing()
 
     def test_publisher_rejects_orchestration_skill_leak(self) -> None:
         leaked = self.paths.skills / "skill-review"

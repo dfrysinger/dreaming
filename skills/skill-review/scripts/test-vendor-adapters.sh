@@ -1949,6 +1949,12 @@ print(json.dumps({"ok": True}))
             profile,
         )
         self.assertNotIn("Library/Keychains/login.keychain-db", profile)
+        for parent in Path(self.env["DREAMING_COPILOT_BIN"]).resolve().parents:
+            self.assertIn(
+                "(allow file-read-metadata (literal "
+                f'"{vendor_module.sandbox_quote(parent)}"))',
+                profile,
+            )
         def author_args(token_budget, result_path, draft_path):
             return argparse.Namespace(
                 vendor="copilot",
@@ -2404,6 +2410,294 @@ print(json.dumps({"ok": True}))
                 stderr=subprocess.PIPE,
             )
             self.assertNotEqual(denied_home.returncode, 0)
+
+    def test_executor_sandbox_allows_executable_parent_metadata_only(self):
+        work = self.case / "parent-metadata-work"
+        work.mkdir()
+        tool_dir = self.case / "denied-tree" / "bin"
+        tool_dir.mkdir(parents=True)
+        tool = tool_dir / "fixture-tool"
+        tool.write_text(
+            "#!/bin/sh\n"
+            '/usr/bin/stat -f %m "$1" >/dev/null 2>&1 || exit 3\n'
+            '/bin/ls "$1" >/dev/null 2>&1 && exit 4\n'
+            "echo initialized\n"
+        )
+        tool.chmod(0o755)
+        home = Path.home().resolve()
+        self.assertTrue(tool.resolve().is_relative_to(home))
+        profile_path = vendor_module.sandbox_profile(work, str(tool), [], "isolated")
+        profile = profile_path.read_text()
+        self.assertIn(
+            f'(deny file-read* file-write* (subpath "{home}"))', profile
+        )
+        for parent in tool.resolve().parents:
+            quoted = vendor_module.sandbox_quote(parent)
+            self.assertIn(
+                f'(allow file-read-metadata (literal "{quoted}"))', profile
+            )
+            for forbidden in (
+                f'(allow file-read* (literal "{quoted}"))',
+                f'(allow file-read-data (literal "{quoted}"))',
+                f'(allow file-read* file-write* (literal "{quoted}"))',
+                f'(allow file-read* (subpath "{quoted}"))',
+                f'(allow file-read* file-write* (subpath "{quoted}"))',
+            ):
+                self.assertNotIn(forbidden, profile)
+        environment = {**os.environ, "HOME": str(home)}
+        executed = subprocess.run(
+            [
+                "/usr/bin/sandbox-exec",
+                "-f",
+                str(profile_path),
+                str(tool),
+                str(tool_dir),
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(executed.returncode, 0, executed.stderr)
+        self.assertIn("initialized", executed.stdout)
+        private = self.case / "private-content"
+        private.mkdir()
+        canary = private / "transcript.jsonl"
+        canary.write_text("private\n")
+        denied = subprocess.run(
+            [
+                "/usr/bin/sandbox-exec",
+                "-f",
+                str(profile_path),
+                "/bin/cat",
+                str(canary),
+            ],
+            env=environment,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(denied.returncode, 0)
+        vendor_module.prove_boundary(
+            work, environment, str(tool), [str(private)], "isolated"
+        )
+
+    def test_authoring_result_parser_accepts_one_fence_only(self):
+        def packet_for(kind):
+            template = [
+                {
+                    "id": f"case-{index}",
+                    "class": f"class-{index}",
+                    "deterministic_graders": [],
+                }
+                for index in range(2)
+            ]
+            packet = {
+                "kind": kind,
+                "packet_id": "sha256:" + "1" * 64,
+                "candidate_id": "sha256:" + "2" * 64,
+                "compilation_contract": {
+                    "case_runtime": [
+                        {
+                            "id": case["id"],
+                            "fixture": {},
+                            "artifacts": [],
+                            "semantic": {},
+                        }
+                        for case in template
+                    ]
+                },
+            }
+            if kind == "safe_evaluation_input_repair_packet":
+                packet["initial_suite"] = {"cases": template}
+            else:
+                packet["suite_template"] = {"cases": template}
+            return packet
+
+        draft = {
+            "outcome": "draft",
+            "summary": "fenced draft",
+            "cases": [
+                {
+                    "id": f"case-{index}",
+                    "task_id": f"fixture-task-{index}",
+                    "prompt": f"perform observed task {index}",
+                }
+                for index in range(2)
+            ],
+        }
+        body = json.dumps(draft, indent=2)
+        labelled = f"```json\n{body}\n```"
+        unlabelled = f"```\n{body}\n```"
+
+        # Bare JSON keeps working, and the existing per-line precedence is
+        # unchanged: the last parseable line still wins.
+        bare = json.dumps(draft)
+        self.assertEqual(vendor_module.parse_evaluation_input_result(bare), draft)
+        superseding = {**draft, "summary": "later line wins"}
+        stream = "\n".join(
+            [json.dumps({**draft, "summary": "earlier"}), json.dumps(superseding)]
+        )
+        self.assertEqual(
+            vendor_module.parse_evaluation_input_result(stream)["summary"],
+            "later line wins",
+        )
+
+        for text in (labelled, unlabelled):
+            self.assertEqual(vendor_module.parse_evaluation_input_result(text), draft)
+
+        # The fence is also reachable inside an event-stream message field,
+        # which is how the copilot CLI actually returns it.
+        event_stream = "\n".join(
+            [
+                json.dumps({"type": "session.info", "data": {}}),
+                json.dumps(
+                    {"type": "assistant.message", "data": {"content": labelled}}
+                ),
+                json.dumps({"type": "result", "exitCode": 0}),
+            ]
+        )
+        self.assertEqual(
+            vendor_module.parse_evaluation_input_result(event_stream), draft
+        )
+
+        # One fence embedded in the model's own commentary is still
+        # unambiguous, and the callers already tolerate unrelated surrounding
+        # lines, so it is accepted.
+        for surrounded in (
+            f"here is the draft\n{labelled}",
+            f"{labelled}\nthat is the whole set",
+            f"lead in\n{labelled}\ntrail out",
+        ):
+            self.assertEqual(
+                vendor_module.parse_evaluation_input_result(surrounded), draft
+            )
+
+        for refused in (
+            "the model explained itself and returned no JSON at all",
+            f"{labelled}\n{unlabelled}",
+            f"{labelled}\n```json\n{body}\n",
+            f"```json\n{body}\n",
+            "```json\n[1, 2, 3]\n```",
+            "```json\n{not json at all}\n```",
+        ):
+            with self.assertRaises(vendor_module.AdapterError) as raised:
+                vendor_module.parse_evaluation_input_result(refused)
+            self.assertEqual(raised.exception.code, "malformed-authoring-result")
+
+        # Two different fenced results are ambiguous however they are carried,
+        # and the whole stream is resolved before any line-level candidate can
+        # return one.  A compact one-line body is the sharp case: the per-line
+        # bare-JSON scan would otherwise return the last body and never consult
+        # the fence contract at all.
+        other = {**draft, "summary": "second fenced answer"}
+        compact = f"```json\n{json.dumps(draft)}\n```"
+        compact_other = f"```json\n{json.dumps(other)}\n```"
+        event = lambda content: json.dumps(
+            {"type": "assistant.message", "data": {"content": content}}
+        )
+        for ambiguous in (
+            f"{compact}\n{compact_other}",
+            "\n".join([event(compact), event(compact_other)]),
+            "\n".join([event(compact), json.dumps({"model.response": compact_other})]),
+            f"{compact}\n{event(compact_other)}",
+        ):
+            with self.assertRaises(vendor_module.AdapterError) as raised:
+                vendor_module.parse_evaluation_input_result(ambiguous)
+            self.assertEqual(raised.exception.code, "malformed-authoring-result")
+            self.assertIn("ambiguous", raised.exception.message)
+
+        # The same fenced answer repeated across event fields is not ambiguous,
+        # which is exactly what the copilot CLI emits: one answer echoed by
+        # assistant.message, model.message, model.response, and the snapshot.
+        echoed = "\n".join(
+            [
+                json.dumps({"type": "session.info", "data": {}}),
+                event(compact),
+                json.dumps({"type": "model.message", "data": {"content": compact}}),
+                json.dumps({"type": "model.response", "data": {"text": compact}}),
+                json.dumps(
+                    {
+                        "type": "model.messages_snapshot",
+                        "data": {"messages": [{"content": compact}]},
+                    }
+                ),
+                json.dumps({"type": "result", "exitCode": 0}),
+            ]
+        )
+        self.assertEqual(vendor_module.parse_evaluation_input_result(echoed), draft)
+
+        # A streaming delta carrying half a fence is a transport fragment, not
+        # a second answer, so the completed message still resolves.
+        streamed = "\n".join(
+            [
+                json.dumps(
+                    {"type": "assistant.message_delta", "data": {"deltaContent": "```"}}
+                ),
+                event(compact),
+            ]
+        )
+        self.assertEqual(vendor_module.parse_evaluation_input_result(streamed), draft)
+
+        # A fenced object that parses but does not satisfy the schema keeps the
+        # normalizer's existing explicit refusal, for every authoring packet.
+        invalid = {**draft, "cases": draft["cases"][:1]}
+        for kind in (
+            "safe_shadow_evaluation_authoring_packet",
+            "safe_evaluation_input_authoring_packet",
+            "safe_evaluation_input_repair_packet",
+        ):
+            packet = packet_for(kind)
+            parsed = vendor_module.parse_evaluation_input_result(
+                f"```json\n{json.dumps(draft)}\n```"
+            )
+            normalized, summary, reason = (
+                vendor_module.normalize_evaluation_input_author_result(packet, parsed)
+            )
+            self.assertEqual(summary, "fenced draft")
+            self.assertIsNone(reason)
+            self.assertEqual(len(normalized["cases"]), 2)
+            rejected = vendor_module.parse_evaluation_input_result(
+                f"```json\n{json.dumps(invalid)}\n```"
+            )
+            with self.assertRaises(vendor_module.AdapterError) as raised:
+                vendor_module.normalize_evaluation_input_author_result(
+                    packet, rejected
+                )
+            self.assertEqual(raised.exception.code, "malformed-authoring-result")
+
+        # The review parser shares the same fence contract and refusals.
+        review = {"decision": "accept", "summary": "exact manifest", "reason": None}
+        self.assertEqual(
+            vendor_module.parse_evaluation_input_review_result(
+                f"```json\n{json.dumps(review)}\n```"
+            ),
+            review,
+        )
+        with self.assertRaises(vendor_module.AdapterError) as raised:
+            vendor_module.parse_evaluation_input_review_result(
+                "```json\n{\"decision\": \"maybe\"}\n```"
+            )
+        self.assertEqual(raised.exception.code, "malformed-review-result")
+
+        review_compact = f"```json\n{json.dumps(review)}\n```"
+        review_other = f"```json\n{json.dumps({**review, 'summary': 'other'})}\n```"
+        for ambiguous in (
+            f"{review_compact}\n{review_other}",
+            "\n".join([event(review_compact), event(review_other)]),
+        ):
+            with self.assertRaises(vendor_module.AdapterError) as raised:
+                vendor_module.parse_evaluation_input_review_result(ambiguous)
+            self.assertEqual(raised.exception.code, "malformed-review-result")
+            self.assertIn("ambiguous", raised.exception.message)
+        self.assertEqual(
+            vendor_module.parse_evaluation_input_review_result(
+                "\n".join([event(review_compact), event(review_compact)])
+            ),
+            review,
+        )
+        self.assertEqual(
+            vendor_module.parse_evaluation_input_review_result(json.dumps(review)),
+            review,
+        )
 
     def test_publishers_reconcile_one_immutable_bundle(self):
         paths = module.RuntimePaths(

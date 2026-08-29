@@ -52,6 +52,15 @@ from profile_audit_disposition import (
     build_profile_audit_disposition,
     validate_profile_audit_disposition,
 )
+from shadow_evaluation_preparation import (
+    allowance_authority as shadow_allowance_authority,
+)
+from profile_evaluation_routing import (
+    EvaluationRoutingError,
+    build_evaluation_routing_row,
+    derive_execution_authority,
+    summarize_evaluation_routing,
+)
 from task_pass_accounting import (
     TaskPassAccountingError,
     build_task_pass_accounting_receipt,
@@ -119,6 +128,18 @@ ROLES = {
             "exact-inventory",
         },
     },
+    "skill-evaluation-executor": {
+        "protocol": "dreaming.skill-evaluation-executor",
+        "capabilities": {
+            "isolated-control",
+            "isolated-candidate",
+            "skill-load-proof",
+            "bounded-tools",
+            "normalized-trace",
+            "artifact-export",
+            "exact-execution-identity",
+        },
+    },
 }
 EVENT_KINDS = {
     "user_message",
@@ -141,7 +162,12 @@ ROLE_CONFIG_KEYS = {
     "sources": "session-source",
     "executors": "review-executor",
     "publishers": "skill-publisher",
+    "evaluators": "skill-evaluation-executor",
 }
+# A shadow evaluation executor must name its exact model and shadow contract in
+# argv, because evaluation_identity refuses model=default and only emits the
+# shadow limit and backend attestation fields under --shadow-contract.
+SHADOW_EXECUTOR_REQUIRED_ARGV = ("--shadow-contract", "--model")
 REVIEW_DESTINATIONS = {
     "instruction",
     "factual_memory",
@@ -3361,6 +3387,92 @@ class DreamingRuntime:
             return existing
         atomic_json(path, disposition, mode=0o400)
         return disposition
+
+    def _retained_profile_audit_dispositions(self) -> list[dict[str, Any]]:
+        """Load every retained disposition, refusing misplaced or duplicate rows."""
+        loaded: dict[str, dict[str, Any]] = {}
+        roots = (
+            (3, self.paths.profile_audit_dispositions),
+            (2, self.paths.prior_profile_audit_dispositions),
+            (1, self.paths.legacy_profile_audit_dispositions),
+        )
+        for contract_version, root in roots:
+            if not root.is_dir():
+                continue
+            for path in sorted(root.glob("*.json")):
+                try:
+                    disposition = validate_profile_audit_disposition(
+                        read_json(path, {})
+                    )
+                except ProfileAuditDispositionError as error:
+                    raise RuntimeFailure(
+                        "profile-audit-disposition-invalid",
+                        f"{path}: {error.reason}",
+                    ) from error
+                if (
+                    disposition["profile_audit_contract_version"] != contract_version
+                    or path.stem != disposition["profile_id"].removeprefix("sha256:")
+                ):
+                    raise RuntimeFailure(
+                        "profile-audit-disposition-invalid", f"{path}: misplaced"
+                    )
+                if disposition["profile_id"] in loaded:
+                    raise RuntimeFailure(
+                        "profile-audit-disposition-invalid",
+                        f"{disposition['profile_id']}: duplicate-versions",
+                    )
+                loaded[disposition["profile_id"]] = disposition
+        return [loaded[profile_id] for profile_id in sorted(loaded)]
+
+    def derive_evaluation_routing(
+        self, execution_authority: Any = None
+    ) -> dict[str, Any]:
+        """Give every retained catalog audit one terminal evaluation route."""
+        rows: list[dict[str, Any]] = []
+        for disposition in self._retained_profile_audit_dispositions():
+            group = disposition.get("candidate_group_id")
+            record = (
+                self._candidate_lifecycle_call("read", group)
+                if isinstance(group, str)
+                and disposition.get("boundary_relation")
+                not in {"boundary-conflict", "boundary-unresolved"}
+                else None
+            )
+            try:
+                rows.append(
+                    build_evaluation_routing_row(
+                        disposition=disposition,
+                        lifecycle_record=record,
+                        execution_authority=execution_authority,
+                        now=self.now(),
+                    )
+                )
+            except EvaluationRoutingError as error:
+                raise RuntimeFailure(
+                    "evaluation-routing-invalid",
+                    f"{disposition['profile_id']}: {error.reason}",
+                ) from error
+        try:
+            summary = summarize_evaluation_routing(rows)
+        except EvaluationRoutingError as error:
+            raise RuntimeFailure(
+                "evaluation-routing-invalid", error.reason
+            ) from error
+        return {
+            "schema_version": 1,
+            "status": "derived",
+            "rows": rows,
+            "summary": summary,
+            "execution_blockers": self.evaluation_execution_blockers(
+                execution_authority
+            ),
+        }
+
+    def evaluation_execution_blockers(
+        self, execution_authority: Any = None
+    ) -> list[str]:
+        """Name why a routed candidate cannot yet reach the shadow evaluator."""
+        return derive_execution_authority(execution_authority)["reasons"]
 
     def review_profile(
         self,
@@ -9419,6 +9531,69 @@ def reconcile_evaluation_input_owner(owner: dict[str, Any]) -> dict[str, Any]:
     return values[0]
 
 
+def _require_role_argv(role: str, key: str, name: str, argv: list[str]) -> None:
+    """Refuse an adapter whose argv cannot satisfy its role contract."""
+    if role != "skill-evaluation-executor":
+        return
+    missing = [
+        flag for flag in SHADOW_EXECUTOR_REQUIRED_ARGV if flag not in argv
+    ]
+    if missing:
+        raise RuntimeFailure(
+            "invalid-adapter-config",
+            f"{key}.{name}.argv must carry {' '.join(missing)}",
+        )
+    model = argv[argv.index("--model") + 1] if "--model" in argv[:-1] else None
+    if not model or model == "default" or model.startswith("-"):
+        raise RuntimeFailure(
+            "invalid-adapter-config",
+            f"{key}.{name}.argv must name an exact model",
+        )
+
+
+def shadow_execution_authority(
+    config: dict[str, Any] | None,
+    adapters: dict[str, dict[str, Any]] | None,
+) -> dict[str, bool]:
+    """Observe, without a model call, what the shadow stage could actually do.
+
+    Only the host-wide facts are observable here.  The per-candidate facts -
+    executor attestation, the authored suite, the census-derived catalog, and
+    the materialized package - are produced by preparation inside the claimed
+    stage, which this contract does not yet run, so they are reported absent
+    rather than assumed.
+    """
+    entries = (config or {}).get("evaluators")
+    evaluator_configured = bool(
+        isinstance(entries, dict)
+        and entries
+        and (adapters is None or adapters.get("skill-evaluation-executor"))
+    )
+    owner = (config or {}).get("evaluation_input_owner")
+    authoring = bool(
+        isinstance(owner, dict)
+        and isinstance(owner.get("author_model"), str)
+        and owner["author_model"]
+        and owner["author_model"] != "default"
+    )
+    allowances, _values = shadow_allowance_authority(config)
+    return {
+        "evaluator_configured": evaluator_configured,
+        "evaluator_healthy": evaluator_configured,
+        "evaluator_attested": False,
+        "suite_authority": False,
+        "authoring_authority": authoring,
+        "catalog_authority": False,
+        "candidate_package": False,
+        "allowances_configured": allowances,
+    }
+
+
+def default_shadow_execution_blockers() -> list[str]:
+    """Name why no host can run the shadow stage before a config is read."""
+    return derive_execution_authority(None)["reasons"]
+
+
 def configured_adapters(
     config: dict[str, Any],
 ) -> tuple[dict[str, dict[str, ExecutableAdapter]], list[dict[str, Any]]]:
@@ -9442,6 +9617,7 @@ def configured_adapters(
                 raise RuntimeFailure(
                     "invalid-adapter-config", f"{key}.{name}.argv is invalid"
                 )
+            _require_role_argv(role, key, name, argv)
             timeout = entry.get("timeout", 30)
             run_timeout = entry.get("run_timeout", timeout)
             if (
@@ -9510,6 +9686,7 @@ def configured_adapters_tolerant(
                     "invalid-adapter-config", f"{key}.{name}.argv is invalid"
                 )
             try:
+                _require_role_argv(role, key, name, argv)
                 timeout = entry.get("timeout", 30)
                 run_timeout = entry.get("run_timeout", timeout)
                 if (
@@ -10008,6 +10185,13 @@ def scheduled_run() -> dict[str, Any]:
             "stop_reason": {"profiles": None, "reviews": None},
         },
         "publication": [],
+        "evaluation_routing": {
+            "schema_version": 1,
+            "status": "pending",
+            "summary": None,
+            "rows": [],
+            "execution_blockers": default_shadow_execution_blockers(),
+        },
         "errors": adapter_errors,
         "legacy_records_imported": imported_legacy,
     }
@@ -11683,6 +11867,29 @@ def scheduled_run() -> dict[str, Any]:
             "reviews": review_stop_reason,
         }
         report["errors"].append({"phase": "accounting", "code": code})
+    try:
+        routing = core.derive_evaluation_routing(
+            execution_authority=shadow_execution_authority(config, adapters)
+        )
+        report["evaluation_routing"] = {
+            "schema_version": routing["schema_version"],
+            "status": routing["status"],
+            "summary": routing["summary"],
+            "rows": routing["rows"],
+            "execution_blockers": routing["execution_blockers"],
+        }
+    except RuntimeFailure as error:
+        report["evaluation_routing"] = {
+            "schema_version": 1,
+            "status": "refused",
+            "code": error.code,
+            "summary": None,
+            "rows": [],
+            "execution_blockers": default_shadow_execution_blockers(),
+        }
+        report["errors"].append(
+            {"phase": "evaluation-routing", "code": error.code}
+        )
     for publisher_name, publisher in retired_publishers.items():
         try:
             publisher.call("remove")
@@ -11939,6 +12146,17 @@ def collect_profile_candidate(
     }
 
 
+def evaluation_routing() -> dict[str, Any]:
+    paths = default_paths()
+    core = DreamingRuntime(paths, [])
+    return {
+        "ok": True,
+        "runtime": "dreaming-core",
+        "command": "evaluation-routing",
+        **core.derive_evaluation_routing(),
+    }
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subcommands = parser.add_subparsers(dest="command")
@@ -11967,6 +12185,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect_profile.add_argument("--profile-id", required=True)
     collect_profile.add_argument("--package", required=True)
     collect_profile.add_argument("--proposed-name", required=True)
+    subcommands.add_parser("evaluation-routing")
     return parser
 
 
@@ -12022,6 +12241,8 @@ def main() -> None:
                 Path(args.package),
                 args.proposed_name,
             )
+        elif args.command == "evaluation-routing":
+            report = evaluation_routing()
         else:
             report = selftest(require_config=args.command == "doctor")
         print(json.dumps(report, sort_keys=True))
