@@ -86,16 +86,49 @@ PY
 
 make_observation() {
   local path="$1" task="$2" session="$3" observed="$4" independence="${5:-verified}" fingerprint="${6:-a}"
-  python3 - "$path" "$task" "$session" "$observed" "$independence" "$fingerprint" <<'PY'
+  python3 - "$path" "$task" "$session" "$observed" "$independence" "$fingerprint" "$SCRIPT_DIR" "$DREAMING_DATA_ROOT" <<'PY'
 import json, sys
-path, task, session, observed, independence, char = sys.argv[1:]
-import hashlib
-occurrence = "sha256:" + hashlib.sha256(("occurrence:" + task).encode()).hexdigest()
-resolution = "sha256:" + hashlib.sha256(("resolution:" + task).encode()).hexdigest()
+from pathlib import Path
+
+path, task, session, observed, independence, char, script_dir, data_root = sys.argv[1:]
+sys.path.insert(0, script_dir)
+from task_occurrence import build_resolution, digest, persist
+
+task_key = digest({"fixture_task": task})
+profile = {
+  "profile_id": digest({"fixture_profile": task}),
+  "task_key": task_key,
+  "source_event_ids": [f"{task}-goal"],
+  "goal_event_id": f"{task}-goal",
+  "occurred_at": observed,
+}
+receipt = {
+  "schema_version": 2,
+  "receipt_sha256": digest({"fixture_receipt": task}),
+  "snapshot_sha256": digest({"fixture_snapshot": task}),
+  "source_revision": digest({"fixture_revision": task}),
+  "qualified_session_id": session,
+}
+resolution = build_resolution(
+  profile=profile,
+  receipt=receipt,
+  relation="new-occurrence",
+  review_contract="candidate-lifecycle-test-v1",
+  review_executor="fixture",
+  review_executor_identity={"kind": "fixture"},
+  decision_at="2026-02-05T00:00:00Z",
+)
+persist(
+  Path(data_root) / "task-occurrences" / "v2",
+  Path(data_root) / "unused-task-occurrence-index.json",
+  resolution,
+  project=False,
+)
 json.dump({
-  "task_key": task, "source_session_id": session,
-  "canonical_occurrence_id": occurrence, "occurred_at": observed,
-  "decision_at": "2026-02-05T00:00:00Z", "resolution_sha256": resolution,
+  "task_key": task_key, "source_session_id": session,
+  "canonical_occurrence_id": resolution["canonical_occurrence_id"],
+  "occurred_at": observed, "decision_at": "2026-02-05T00:00:00Z",
+  "resolution_sha256": resolution["resolution_sha256"],
   "summary": "A deterministic observation.",
   "procedure_fingerprint": "sha256:" + char * 64,
 }, open(path, "w", encoding="utf-8"), sort_keys=True)
@@ -191,6 +224,29 @@ cp "$REC" "$TMP/pre-illegal-transition.json"
 expect_refusal production-transition run transition "$LID" --to admitted --reason test-production --expected-version "$(version_of "$REC")"
 cmp -s "$REC" "$TMP/pre-illegal-transition.json" || fail "illegal transition changed record"
 pass "malformed records, unknown states, and production transitions fail closed"
+
+ONE_RESOLUTION="$(json_get 'json.load(open(0))["resolution_sha256"].removeprefix("sha256:")' "$TMP/fixtures/one.json")"
+ONE_RESOLUTION_PATH="$DREAMING_DATA_ROOT/task-occurrences/v2/$ONE_RESOLUTION.json"
+cp "$ONE_RESOLUTION_PATH" "$TMP/one-resolution.json"
+rm "$ONE_RESOLUTION_PATH"
+expect_refusal missing-occurrence-authority run validate "$LID"
+mv "$TMP/one-resolution.json" "$ONE_RESOLUTION_PATH"
+chmod 400 "$ONE_RESOLUTION_PATH"
+run validate "$LID" >/dev/null
+cp "$TMP/fixtures/one.json" "$TMP/fixtures/unbound-occurrence.json"
+python3 - "$TMP/fixtures/unbound-occurrence.json" <<'PY'
+import json, sys
+path = sys.argv[1]
+value = json.load(open(path))
+value["resolution_sha256"] = "sha256:" + "f" * 64
+json.dump(value, open(path, "w"), sort_keys=True)
+PY
+make_package "$TMP/unbound-package" unbound unbound-fixture
+expect_refusal unbound-occurrence run collect \
+  --procedure "$TMP/fixtures/procedure.json" \
+  --observation "$TMP/fixtures/unbound-occurrence.json" \
+  --package "$TMP/unbound-package" --proposed-name unbound-fixture
+pass "current recurrence evidence requires matching immutable occurrence authority"
 
 make_observation "$TMP/fixtures/two.json" task-two session-two 2026-02-04T00:00:00Z
 make_package "$TMP/package-two" two
@@ -354,6 +410,36 @@ assert len(record["evidence"]) == 2
 assert [x["to_state"] for x in record["lifecycle"]["transition_history"]] == ["collecting", "expired", "collecting"]
 PY
 pass "expiration and reopen preserve append-only evidence and transition history"
+
+LEGACY_PROC="$TMP/fixtures/legacy-procedure.json"
+LEGACY_OBS="$TMP/fixtures/legacy-observation.json"
+LEGACY_PACKAGE="$TMP/legacy-package"
+make_procedure "$LEGACY_PROC"
+make_legacy_observation "$LEGACY_OBS" legacy-task session-legacy 2026-02-04T00:00:00Z
+make_package "$LEGACY_PACKAGE" legacy legacy-fixture
+LEGACY_OUT="$(run collect --procedure "$LEGACY_PROC" --observation "$LEGACY_OBS" \
+  --package "$LEGACY_PACKAGE" --proposed-name legacy-fixture)"
+LEGACY_ID="$(printf '%s' "$LEGACY_OUT" | python3 -c 'import json,sys; print(json.load(sys.stdin)["lifecycle_id"])')"
+LEGACY_REC="$(record "$LEGACY_ID")"
+run transition "$LEGACY_ID" --to rejected --reason legacy-rejected \
+  --expected-version "$(version_of "$LEGACY_REC")" >/dev/null
+LEGACY_EVIDENCE_ID="$(json_get 'json.load(open(0))["evidence"][0]["evidence_id"]' "$LEGACY_REC")"
+run reopen "$LEGACY_ID" --evidence-id "$LEGACY_EVIDENCE_ID" \
+  --expected-version "$(version_of "$LEGACY_REC")" >/dev/null
+[[ "$(state_of "$LEGACY_REC")" == collecting ]] ||
+  fail "legacy evidence could not reopen through its observed_at timestamp"
+LEGACY_CANDIDATE="$(candidate_of "$LEGACY_REC")"
+LEGACY_PROOF="$DREAMING_DATA_ROOT/candidates/v1/packages/$LEGACY_ID/$LEGACY_CANDIDATE/references/proof.txt"
+cp "$LEGACY_PROOF" "$TMP/legacy-proof.txt"
+chmod u+w "$LEGACY_PROOF"
+printf 'tampered\n' > "$LEGACY_PROOF"
+chmod a-w "$LEGACY_PROOF"
+expect_refusal legacy-package-tamper run validate "$LEGACY_ID"
+chmod u+w "$LEGACY_PROOF"
+cp "$TMP/legacy-proof.txt" "$LEGACY_PROOF"
+chmod a-w "$LEGACY_PROOF"
+run validate "$LEGACY_ID" >/dev/null
+pass "legacy records retain full structural and immutable-package validation"
 
 ABSORB_PROC="$TMP/fixtures/absorbed-procedure.json"
 ABSORB_OBS="$TMP/fixtures/absorbed-observation.json"
