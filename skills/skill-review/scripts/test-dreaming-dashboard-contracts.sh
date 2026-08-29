@@ -696,6 +696,7 @@ check(
         "unverified": 0,
         "distinct_tasks": 2,
         "distinct_sessions": 2,
+        "current_canonical_occurrences": 0,
     }
     and ready_row["freshness"]["fresh_evidence"] is True
     and ready_row["freshness"]["past_expiry"] is False
@@ -719,7 +720,8 @@ check(
     collecting_row["recommendation"]["value"] == "collecting"
     and collecting_row["recommendation"]["reasons"]
     == collecting_stored["evaluation"]["history"][-1]["reasons"]
-    and "fewer-than-two-verified-evidence" in collecting_row["recommendation"]["reasons"]
+    and "legacy-no-current-occurrence-authority"
+    in collecting_row["recommendation"]["reasons"]
     and collecting_row["recommendation"]["authorizes_publication"] is False
     and collecting_row["recommendation"]["authorizes_activation"] is False
     and collecting_row["evaluation"]["status"] == "not_ready",
@@ -727,10 +729,11 @@ check(
 )
 gates = {item["name"]: item for item in ready_row["evaluation"]["gates"]}
 check(
-    ready_row["recommendation"]["value"] == "ready_for_draft"
-    and ready_row["recommendation"]["reasons"] == []
+    ready_row["recommendation"]["value"] == "collecting"
+    and ready_row["recommendation"]["reasons"]
+    == ["legacy-no-current-occurrence-authority"]
     and ready_row["evaluation"]["composite_score"] is None
-    and gates["recurrence"]["status"] == "shadow_ready"
+    and gates["recurrence"]["status"] == "not_ready"
     and gates["routing"]["status"] == "unavailable"
     and gates["task_value"]["status"] == "unavailable"
     and gates["task_value"]["reasons"] == ["no-task-value-evidence-recorded"],
@@ -882,7 +885,7 @@ invalid_rows = {
 }
 expectations = (
     (f"{unknown_state_id}.json", "record_state_not_shadow"),
-    (f"{admitted_id}.json", "record_state_not_shadow"),
+    (f"{admitted_id}.json", "state_history_mismatch"),
     (f"{published_id}.json", "record_publication_not_shadow"),
     (f"{evidence_id}.json", "evidence_identity_mismatch"),
     (f"{recommendation_id}.json", "evaluation_identity_mismatch"),
@@ -911,13 +914,18 @@ check(
     and summary["states"]
     == {
         "absorbed": 1,
+        "admitted": 0,
+        "archived": 0,
         "collecting": 1,
         "evaluating": 1,
         "expired": 1,
+        "legacy_probation": 0,
+        "portfolio_pending": 0,
+        "quarantined": 0,
         "ready_for_draft": 1,
         "rejected": 1,
     }
-    and summary["recommendations"] == {"ready_for_draft": 2, "collecting": 2, "none": 2}
+    and summary["recommendations"] == {"ready_for_draft": 0, "collecting": 4, "none": 2}
     and summary["blocked"] == 1
     and summary["past_expiry"] == 1
     and summary["active"] is False

@@ -211,6 +211,7 @@ function overlayChart(lines) {
 async function renderOverview() {
   const data = await api("/api/v1/overview");
   const runtime = data.runtime.status;
+  const funnel = data.task_opportunities;
   document.getElementById("runtime").innerHTML = `<strong>${esc(runtime)}</strong><br>${data.runtime.halted ? "Mutation halt active" : "Scheduled runtime available"}`;
   const capability = data.evaluations;
   view.innerHTML = `
@@ -222,6 +223,7 @@ async function renderOverview() {
       <article class="card"><div class="label">Enabled estate</div><div class="metric">${number(data.estate.totals?.canonical_capabilities)}</div><div class="submetric"><a class="link" href="#estate">${esc(data.estate.status)} · ${number(data.estate.totals?.physical_instances)} physical instances</a></div></article>
       <article class="card"><div class="label">Unpublished drafts</div><div class="metric">${number(data.candidates.total)}</div><div class="submetric"><a class="link" href="#candidates">${number(data.candidates.valid)} valid · ${number(data.candidates.invalid)} invalid · never active</a></div></article>
       <article class="card"><div class="label">Capability improvement</div><div class="metric">${percent(capability.candidate_percent)}</div><div class="submetric">Control ${percent(capability.control_percent)} · ${capability.comparable_skills} comparable skills</div></article>
+      <article class="card"><div class="label">Task opportunity accounting</div><div class="metric">${badge(funnel.status)}</div><div class="submetric">${number(funnel.profiles.reusable)} reusable · ${number(funnel.profiles.awaiting_catalog_audit)} awaiting audit · ${number(funnel.accounting.receipts)} reconciled passes</div></article>
     </div>
     <div class="grid charts">
       <article class="panel"><div class="panel-head"><h2>Skill count and capability completion</h2></div>
@@ -255,6 +257,24 @@ async function renderOverview() {
           <dt>Preference passes</dt><dd>${number(capability.preference.pass)}</dd>
           <dt>Regressions</dt><dd>${number(capability.preference.regression)}</dd>
           <dt>Inconclusive</dt><dd>${number(capability.preference.inconclusive)}</dd>
+        </dl>
+      </article>
+    </div>
+    <div class="grid split mt">
+      <article class="panel"><div class="panel-head"><h2>Profile funnel</h2></div>
+        <dl class="definition">
+          <dt>Profile receipts / reusable</dt><dd>${number(funnel.profiles.receipts)} / ${number(funnel.profiles.reusable)}</dd>
+          <dt>Catalog audited / awaiting</dt><dd>${number(funnel.profiles.audited)} / ${number(funnel.profiles.awaiting_catalog_audit)}</dd>
+          <dt>Canonical occurrences</dt><dd>${number(funnel.occurrences.canonical_occurrences)}</dd>
+          <dt>Candidate occurrences</dt><dd>${number(funnel.candidates.current_canonical_occurrences)}</dd>
+        </dl>
+      </article>
+      <article class="panel"><div class="panel-head"><h2>Terminal accounting</h2></div>
+        <dl class="definition">
+          <dt>Deferred profile / review backlog</dt><dd>${number(funnel.accounting.deferred_backlog.profiles)} / ${number(funnel.accounting.deferred_backlog.reviews)}</dd>
+          <dt>Profile operation limit</dt><dd>${number(funnel.accounting.capacity_limits.profiles)}</dd>
+          <dt>Review operation limit</dt><dd>${number(funnel.accounting.capacity_limits.reviews)}</dd>
+          <dt>Authority errors</dt><dd>${number(funnel.errors.length)}</dd>
         </dl>
       </article>
     </div>`;
