@@ -31,7 +31,7 @@ from pathlib import Path
 
 root = Path(sys.argv[1])
 work = Path(sys.argv[2])
-sys.argv = [sys.argv[0]]
+sys.argv = [sys.argv[0], *os.environ.get("VENDOR_ADAPTER_TESTS", "").split()]
 adapter = root / "skills/skill-review/scripts/dreaming-vendor-adapter.py"
 harness_path = root / "skills/skill-review/scripts/skill-evaluation-harness.py"
 harness_spec = importlib.util.spec_from_file_location("skill_evaluation_harness", harness_path)
@@ -1691,6 +1691,166 @@ else:
         self.assertEqual(artifact_target.read_text(), "safe\n")
 
 
+    def guard_reader_source(self):
+        return (
+            "#include <stdio.h>\n#include <string.h>\n"
+            "int main(int argc,char **argv){"
+            "for(int i=1;i<argc;i++){"
+            "if(!strcmp(argv[i],\"--version\")){puts(\"copilot 1.0\");return 0;}"
+            "if(!strcmp(argv[i],\"--help\")){puts(\"--plugin-dir --output-format "
+            "--model --json --ignore-user-config --available-tools[=tools...] "
+            "--disable-builtin-mcps --no-custom-instructions --no-ask-user "
+            "--no-remote\");return 0;}}"
+            "if(argc>=3&&!strcmp(argv[1],\"--guard-read\")){"
+            "FILE *f=fopen(argv[2],\"rb\");if(!f){return 1;}"
+            "char b[4096];size_t n;"
+            "while((n=fread(b,1,sizeof b,f))>0){fwrite(b,1,n,stdout);}"
+            "fclose(f);return 0;}"
+            "return 0;}\n"
+        )
+
+    def compile_guard_reader(self, destination):
+        subprocess.run(
+            ["/usr/bin/clang", "-x", "c", "-o", str(destination), "-"],
+            input=self.guard_reader_source(),
+            text=True,
+            check=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        return destination
+
+    def sandboxed_read(self, profile, reader, target):
+        return subprocess.run(
+            [
+                "/usr/bin/sandbox-exec",
+                "-f",
+                str(profile),
+                str(reader),
+                "--guard-read",
+                str(target),
+            ],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+
+    def test_shadow_projected_credentials_are_process_path_confined(self):
+        """CHK-A3 pre-implementation guard.
+
+        Proves by execution, not by policy text, that the adapter's real
+        --shadow-contract Copilot sandbox profile confines reads of the
+        projected authentication files to the exact configured CLI executable
+        path. Uses dummy projected files only: no real credential bytes, no
+        account authentication, no model call, no installed state.
+        """
+        marker = "SHADOWGUARDDUMMY0000"
+        credentials = work / f"{self._testMethodName}-guard-credentials"
+        projected = (
+            ".config/gh/hosts.yml",
+            ".config/gh/config.yml",
+            ".copilot/config.json",
+        )
+        for relative in projected:
+            path = credentials / relative
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(f"{marker}-{relative}\n")
+        reader = self.compile_guard_reader(self.bin / "guard-copilot")
+        relocated = self.compile_guard_reader(self.bin / "guard-copilot-relocated")
+        relocated.write_bytes(reader.read_bytes())
+        relocated.chmod(0o755)
+
+        trial, trial_path = self.trial("copilot", prompt="shadow guard")
+        control = Path(trial["workspace"]) / "control.txt"
+        control.write_text(f"{marker}-control\n")
+
+        command = [
+            sys.executable,
+            str(adapter),
+            "--vendor",
+            "copilot",
+            "--role",
+            "skill-evaluation-executor",
+            "--binary",
+            str(reader),
+            "--credential-root",
+            str(credentials),
+            "--model",
+            "fixture-model",
+            "--timeout",
+            "10",
+            "--token-budget",
+            "100",
+            "--output-bytes",
+            "100000",
+            "--shadow-contract",
+            "--turn-budget",
+            "7",
+            "--tool-budget",
+            "8",
+            "prepare",
+            "--trial",
+            str(trial_path),
+        ]
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {
+                "DREAMING_EXECUTOR_TEST_ALLOW_ROOT",
+                "DREAMING_EXECUTOR_TEST_ALLOW_ROOTS",
+            }
+        }
+        environment["GH_TOKEN"] = "fixture-token"
+        result = subprocess.run(
+            command,
+            env=environment,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        if result.returncode:
+            self.fail(result.stdout + result.stderr)
+
+        home = Path(trial["home"])
+        profile = home / "evaluation.sb"
+        self.assertTrue(profile.is_file())
+        for relative in projected:
+            self.assertTrue(
+                (home / relative).is_file(),
+                f"{relative} was not projected into the synthetic home",
+            )
+
+        for relative in projected:
+            allowed = self.sandboxed_read(profile, reader, home / relative)
+            self.assertEqual(
+                allowed.returncode,
+                0,
+                f"configured CLI path denied its own {relative}: {allowed.stderr}",
+            )
+            self.assertIn(marker, allowed.stdout)
+
+        control_read = self.sandboxed_read(profile, relocated, control)
+        self.assertEqual(
+            control_read.returncode,
+            0,
+            f"workspace control read denied: {control_read.stderr}",
+        )
+        self.assertIn(marker, control_read.stdout)
+
+        for relative in projected:
+            denied = self.sandboxed_read(profile, relocated, home / relative)
+            self.assertNotEqual(
+                denied.returncode,
+                0,
+                "a byte-identical executable at a different process path read "
+                f"the projected credential {relative}; the shadow profile does "
+                "not confine projected authentication to the configured CLI "
+                "path",
+            )
+            self.assertNotIn(marker, denied.stdout)
+
+
 class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
     round2_types = {
         "model.call_finished",
@@ -2496,7 +2656,5 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
         ):
             with self.subTest(label=label):
                 self.assert_usage_refusal(values, reason)
-
-
 unittest.main(verbosity=2)
 PY
