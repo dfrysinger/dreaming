@@ -102,6 +102,22 @@ json.dump({
 PY
 }
 
+make_legacy_observation() {
+  local path="$1" task="$2" session="$3" observed="$4" fingerprint="${5:-a}"
+  python3 - "$path" "$task" "$session" "$observed" "$fingerprint" <<'PY'
+import json, sys
+path, task, session, observed, char = sys.argv[1:]
+json.dump({
+  "task_key": task,
+  "session_id": session,
+  "observed_at": observed,
+  "independence": "verified",
+  "summary": "Historical observation without occurrence authority.",
+  "procedure_fingerprint": "sha256:" + char * 64,
+}, open(path, "w", encoding="utf-8"), sort_keys=True)
+PY
+}
+
 make_package() {
   local root="$1" revision="$2" name="${3:-lifecycle-fixture}"
   mkdir -p "$root/references"
@@ -296,7 +312,23 @@ WITHIN="$(collect_fixture within-30 task-within-a session-within-a 2026-02-01T00
 [[ "$(state_of "$(record "$WITHIN")")" == ready_for_draft ]] || fail "three occurrences in one session did not pass"
 FAR="$(collect_fixture beyond-30 task-far-a session-far-a 2025-12-15T00:00:00Z task-far-b session-far-b 2026-02-04T00:00:00Z)"
 [[ "$(state_of "$(record "$FAR")")" == collecting ]] || fail "old occurrence became current"
-pass "recurrence requires three distinct current canonical occurrences, not sessions"
+EXACT="$(collect_fixture exact-30 task-exact-a session-exact 2026-01-06T00:00:00Z task-exact-b session-exact 2026-02-04T00:00:00Z)"
+[[ "$(state_of "$(record "$EXACT")")" == ready_for_draft ]] ||
+  fail "an occurrence exactly 30 days old was excluded"
+OVER="$(collect_fixture over-30 task-over-a session-over 2026-01-05T23:59:59Z task-over-b session-over 2026-02-04T00:00:00Z)"
+[[ "$(state_of "$(record "$OVER")")" == collecting ]] ||
+  fail "an occurrence 30 days plus one second old was accepted"
+make_legacy_observation "$TMP/fixtures/exact-legacy.json" legacy-task session-exact 2026-02-04T00:00:00Z
+run collect --lifecycle-id "$EXACT" \
+  --expected-version "$(version_of "$(record "$EXACT")")" \
+  --procedure "$TMP/fixtures/exact-30-procedure.json" \
+  --observation "$TMP/fixtures/exact-legacy.json" \
+  --package "$TMP/exact-30-package" --proposed-name exact-30 \
+  --match-outcome same >/dev/null
+run evaluate "$EXACT" --expected-version "$(version_of "$(record "$EXACT")")" >/dev/null
+[[ "$(state_of "$(record "$EXACT")")" == ready_for_draft ]] ||
+  fail "legacy evidence crashed or weakened a current candidate record"
+pass "recurrence requires three current occurrences, allows one session, and enforces the exact 30-day edge"
 
 EXPIRE_PROC="$TMP/fixtures/expire-procedure.json"
 EXPIRE_ONE="$TMP/fixtures/expire-one.json"

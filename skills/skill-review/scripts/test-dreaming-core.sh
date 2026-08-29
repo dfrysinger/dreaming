@@ -2169,7 +2169,7 @@ class RuntimeTest(unittest.TestCase):
             (
                 Path(environment["DREAMING_STATE_DIR"])
                 / "profile-audit-dispositions"
-                / "v1"
+                / "v2"
             ).glob("*.json")
         )
         self.assertEqual(len(dispositions), 52)
@@ -2229,7 +2229,9 @@ class RuntimeTest(unittest.TestCase):
             {
                 "queue_row_id": f"queue-{index}",
                 "outcome": outcome,
-                "profile_operation_id": operation,
+                "profile_operation_ids": (
+                    [operation] if operation is not None else []
+                ),
             }
             for index, (outcome, operation) in enumerate(
                 [
@@ -2385,7 +2387,7 @@ class RuntimeTest(unittest.TestCase):
                 {
                     "queue_row_id": "queue-4",
                     "outcome": "cached-current-receipt",
-                    "profile_operation_id": None,
+                    "profile_operation_ids": [],
                 },
             ],
         )
@@ -3747,6 +3749,7 @@ elif sys.argv[1] == "run":
             "fake", source, "fake:one", "exec", executor
         )
         self.assertEqual(profiled["profile_count"], 1)
+        receipt = json.loads(Path(profiled["receipt"]).read_text())
         lock_environment = {
             **os.environ,
             "SKILLS_STATE_DIR": str(self.paths.state),
@@ -3772,8 +3775,14 @@ elif sys.argv[1] == "run":
         os.environ["SKILLS_LOCK_TOKEN"] = token
         os.environ["SKILLS_STATE_DIR"] = str(self.paths.state)
         try:
-            result = core.review(
-                "fake", source, "fake:one", [("exec", executor)]
+            result = core.review_profile(
+                "fake",
+                source,
+                "fake:one",
+                receipt["source_revision"],
+                "exec",
+                executor,
+                receipt["profiles"][0]["profile_id"],
             )
         finally:
             subprocess.run(
@@ -3809,15 +3818,16 @@ elif sys.argv[1] == "run":
         self.assertIn("canonical_occurrence_id", record if False else shadow)
         self.assertEqual(
             shadow["profile_id"],
-            json.loads(Path(profiled["receipt"]).read_text())["profiles"][0][
-                "profile_id"
-            ],
+            receipt["profiles"][0]["profile_id"],
         )
         record = core._candidate_lifecycle_call(
             "read", shadow["lifecycle_id"]
         )
         self.assertEqual(record["evidence"][0]["canonical_occurrence_id"], shadow["canonical_occurrence_id"])
-        self.assertEqual(record["evidence"][0]["occurred_at"], json.loads(Path(profiled["receipt"]).read_text())["profiles"][0]["occurred_at"])
+        self.assertEqual(
+            record["evidence"][0]["occurred_at"],
+            receipt["profiles"][0]["occurred_at"],
+        )
         self.assertEqual(
             record["procedure"],
             core._candidate_procedure(
@@ -3830,99 +3840,6 @@ elif sys.argv[1] == "run":
                     ),
                 }
             ),
-        )
-
-        second_profile = {
-            **json.loads(Path(profiled["receipt"]).read_text())["profiles"][0],
-            "task_key": "sha256:" + "b" * 64,
-            "abstract_summary": "Apply the same skill to independently worded work.",
-            "procedure": {
-                "trigger": "A differently worded but equivalent task appears.",
-                "outcome": "The equivalent task reaches the same result.",
-                "actions": ["Recognize the equivalent task.", "Apply the shared procedure."],
-                "exclusions": ["Do not merge unrelated work."],
-            },
-        }
-        second_profile["procedure_fingerprint"] = runtime_module.digest(
-            second_profile["procedure"]
-        )
-        lock_environment = {
-            **os.environ,
-            "SKILLS_STATE_DIR": str(self.paths.state),
-            "SKILLS_NOW_EPOCH": str(self.clock),
-        }
-        token = subprocess.run(
-            [
-                sys.executable,
-                str(SCRIPT_DIR / "daemon-lock.py"),
-                "acquire",
-                "--mode",
-                "session",
-                "--owner",
-                "test-profiled-recurrence",
-            ],
-            check=True,
-            text=True,
-            stdout=subprocess.PIPE,
-            env=lock_environment,
-        ).stdout.strip()
-        prior_token = os.environ.get("SKILLS_LOCK_TOKEN")
-        prior_state = os.environ.get("SKILLS_STATE_DIR")
-        os.environ["SKILLS_LOCK_TOKEN"] = token
-        os.environ["SKILLS_STATE_DIR"] = str(self.paths.state)
-        try:
-            second = core._collect_shadow_candidate(
-                {
-                    "summary": "The same reusable skill applies",
-                    "artifact": {
-                        "operation": "create",
-                        "skill_name": "profiled-procedure",
-                        "skill_markdown": (
-                            "---\nname: profiled-procedure\n"
-                            "description: Run the profiled fixture procedure\n---\n"
-                            "# Profiled procedure\n"
-                        ),
-                        "support_files": [],
-                    },
-                },
-                {
-                    "qualified_session_id": "fake:two",
-                    "updated_at": self.clock + 1,
-                },
-                second_profile,
-                "matched",
-            )
-        finally:
-            subprocess.run(
-                [
-                    sys.executable,
-                    str(SCRIPT_DIR / "daemon-lock.py"),
-                    "release",
-                    token,
-                ],
-                check=True,
-                env=lock_environment,
-            )
-            if prior_token is None:
-                os.environ.pop("SKILLS_LOCK_TOKEN", None)
-            else:
-                os.environ["SKILLS_LOCK_TOKEN"] = prior_token
-            if prior_state is None:
-                os.environ.pop("SKILLS_STATE_DIR", None)
-            else:
-                os.environ["SKILLS_STATE_DIR"] = prior_state
-        self.assertEqual(second["lifecycle_id"], shadow["lifecycle_id"])
-        self.assertEqual(second["recommendation"], "collecting")
-        record = core._candidate_lifecycle_call(
-            "read", shadow["lifecycle_id"]
-        )
-        self.assertEqual(
-            len({item["canonical_occurrence_id"] for item in record["evidence"]}),
-            2,
-        )
-        self.assertEqual(
-            len({item["procedure_fingerprint"] for item in record["evidence"]}),
-            1,
         )
 
     def test_profiled_patch_is_shadowed_before_mutation(self) -> None:
@@ -4785,6 +4702,7 @@ elif command == "run":
             {
                 "require_task_profile_context": True,
                 "require_task_profile_id": True,
+                "require_task_occurrence_context": True,
                 "task_profiles": [
                     {
                         "source_event_ids": ["one-event-1"],
@@ -4844,6 +4762,453 @@ elif command == "run":
         attempts = json.loads(self.paths.attempts.read_text())
         self.assertEqual([attempt["profile_id"] for attempt in attempts], profile_ids)
         self.assertFalse(self.paths.ledger.exists())
+
+    def test_profile_audit_persists_new_and_same_occurrence_authority(self) -> None:
+        source_fixture = self.source_fixture(
+            [self.session("one", 10, event_count=3)]
+        )
+        source = self.adapter("session-source", "fake", source_fixture)
+        procedure = {
+            "trigger": "A reusable fixture task is complete.",
+            "outcome": "Retain the fixture procedure.",
+            "actions": ["Retain the ordered procedure."],
+            "exclusions": ["Do not retain source details."],
+        }
+        executor_fixture = self.write(
+            "occurrence-resolution-executor.json",
+            {
+                "require_task_profile_context": True,
+                "require_task_profile_id": True,
+                "require_task_occurrence_context": True,
+                "task_profiles": [
+                    {
+                        "source_event_ids": ["one-event-1"],
+                        "task_type": "primary-view",
+                        "abstract_summary": "The reusable procedure.",
+                        "reuse_value": "reusable-procedure",
+                        "procedure": procedure,
+                    },
+                    {
+                        "source_event_ids": ["one-event-1", "one-event-2"],
+                        "goal_event_id": "one-event-1",
+                        "task_type": "expanded-view",
+                        "abstract_summary": "An expanded view of the same task.",
+                        "reuse_value": "reusable-procedure",
+                        "procedure": procedure,
+                    },
+                ],
+            },
+        )
+        executor = self.adapter("review-executor", "exec", executor_fixture)
+        core = self.core({("fake", "exec")})
+        profiled = core.profile("fake", source, "fake:one", "exec", executor)
+        receipt = json.loads(Path(profiled["receipt"]).read_text())
+        first_profile, second_profile = receipt["profiles"]
+
+        first = core.review_profile(
+            "fake",
+            source,
+            "fake:one",
+            receipt["source_revision"],
+            "exec",
+            executor,
+            first_profile["profile_id"],
+        )
+        first_resolution = json.loads(
+            next(self.paths.task_occurrence_resolutions.glob("*.json")).read_text()
+        )
+        self.assertEqual(first_resolution["boundary_relation"], "new-occurrence")
+        self.assertEqual(
+            first["occurrence_resolution_sha256"],
+            first_resolution["resolution_sha256"],
+        )
+
+        state = json.loads(executor_fixture.read_text())
+        state["occurrence_relation_by_profile"] = {
+            second_profile["profile_id"]: "same-occurrence"
+        }
+        state["occurrence_prior_ids_by_profile"] = {
+            second_profile["profile_id"]: [
+                first_resolution["canonical_occurrence_id"]
+            ]
+        }
+        executor_fixture.write_text(json.dumps(state))
+        second = core.review_profile(
+            "fake",
+            source,
+            "fake:one",
+            receipt["source_revision"],
+            "exec",
+            executor,
+            second_profile["profile_id"],
+        )
+        resolutions = [
+            json.loads(path.read_text())
+            for path in self.paths.task_occurrence_resolutions.glob("*.json")
+        ]
+        aliases = [
+            item
+            for item in resolutions
+            if item["profile_id"] == second_profile["profile_id"]
+        ]
+        self.assertEqual(len(aliases), 1)
+        self.assertEqual(aliases[0]["boundary_relation"], "same-occurrence")
+        self.assertEqual(
+            aliases[0]["canonical_occurrence_id"],
+            first_resolution["canonical_occurrence_id"],
+        )
+        self.assertEqual(
+            second["occurrence_resolution_sha256"],
+            aliases[0]["resolution_sha256"],
+        )
+        dispositions = [
+            json.loads(path.read_text())
+            for path in self.paths.profile_audit_dispositions.glob("*.json")
+        ]
+        self.assertEqual(len(dispositions), 2)
+        self.assertTrue(
+            all(
+                item["profile_audit_contract_version"] == 2
+                and item["occurrence_resolution_sha256"]
+                in {resolution["resolution_sha256"] for resolution in resolutions}
+                for item in dispositions
+            )
+        )
+
+    def test_boundary_conflict_uses_one_bounded_profile_correction(self) -> None:
+        source_fixture = self.source_fixture(
+            [self.session("one", 10, event_count=3)]
+        )
+        source = self.adapter("session-source", "fake", source_fixture)
+        procedure = {
+            "trigger": "A reusable fixture task is complete.",
+            "outcome": "Retain the fixture procedure.",
+            "actions": ["Retain the ordered procedure."],
+            "exclusions": ["Do not retain source details."],
+        }
+        executor_fixture = self.write(
+            "occurrence-correction-executor.json",
+            {
+                "require_task_profile_context": True,
+                "require_task_profile_id": True,
+                "require_task_occurrence_context": True,
+                "task_profiles": [
+                    {
+                        "source_event_ids": ["one-event-1"],
+                        "task_type": "prior-task",
+                        "abstract_summary": "The prior reusable task.",
+                        "reuse_value": "reusable-procedure",
+                        "procedure": procedure,
+                    },
+                    {
+                        "source_event_ids": [
+                            "one-event-1",
+                            "one-event-2",
+                            "one-event-3",
+                        ],
+                        "task_type": "merged-task",
+                        "abstract_summary": "A merged old and new task.",
+                        "reuse_value": "reusable-procedure",
+                        "procedure": procedure,
+                    },
+                ],
+            },
+        )
+        executor = self.adapter("review-executor", "exec", executor_fixture)
+        core = self.core({("fake", "exec")})
+        profiled = core.profile("fake", source, "fake:one", "exec", executor)
+        receipt = runtime_module.TaskProfileReceipt(
+            Path(profiled["receipt"]),
+            json.loads(Path(profiled["receipt"]).read_text()),
+        )
+        prior_profile, conflict_profile = receipt.payload["profiles"]
+        core.review_profile(
+            "fake",
+            source,
+            "fake:one",
+            receipt.payload["source_revision"],
+            "exec",
+            executor,
+            prior_profile["profile_id"],
+        )
+        prior_resolution = core.task_occurrence_resolution_for(
+            runtime_module.ProfileAuditTarget(receipt, prior_profile)
+        )
+        self.assertIsNotNone(prior_resolution)
+        state = json.loads(executor_fixture.read_text())
+        state["terminal_route"] = "discard"
+        state["artifact"] = None
+        state["occurrence_relation_by_profile"] = {
+            conflict_profile["profile_id"]: "boundary-conflict"
+        }
+        state["occurrence_prior_ids_by_profile"] = {
+            conflict_profile["profile_id"]: [
+                prior_resolution["canonical_occurrence_id"]
+            ]
+        }
+        state["task_profile_corrections"] = [
+            {
+                "source_event_ids": ["one-event-1"],
+                "task_type": "corrected-prior-task",
+                "abstract_summary": "The isolated prior task.",
+                "reuse_value": "reusable-procedure",
+                "procedure": procedure,
+            },
+            {
+                "source_event_ids": ["one-event-1", "one-event-3"],
+                "task_type": "corrected-new-task",
+                "abstract_summary": "The isolated new task.",
+                "reuse_value": "reusable-procedure",
+                "procedure": procedure,
+            },
+        ]
+        executor_fixture.write_text(json.dumps(state))
+        conflict_result = core.review_profile(
+            "fake",
+            source,
+            "fake:one",
+            receipt.payload["source_revision"],
+            "exec",
+            executor,
+            conflict_profile["profile_id"],
+        )
+        self.assertEqual(conflict_result["status"], "boundary-conflict")
+        self.assertIn("disposition_sha256", conflict_result)
+        conflict_admission, conflict_disposition = (
+            core.profile_audit_disposition_admission_for(
+                runtime_module.ProfileAuditTarget(receipt, conflict_profile)
+            )
+        )
+        self.assertEqual(conflict_admission, "boundary-conflict")
+        self.assertEqual(
+            conflict_disposition["disposition_sha256"],
+            conflict_result["disposition_sha256"],
+        )
+        conflict_resolution = core.task_occurrence_resolution_for(
+            runtime_module.ProfileAuditTarget(receipt, conflict_profile)
+        )
+        self.assertEqual(
+            conflict_resolution["boundary_relation"], "boundary-conflict"
+        )
+        started = 0
+
+        def record_start() -> None:
+            nonlocal started
+            started += 1
+
+        corrected = core.correct_task_occurrence_conflict(
+            "fake",
+            source,
+            receipt,
+            conflict_resolution,
+            "exec",
+            executor,
+            on_profile_operation_start=record_start,
+        )
+        self.assertEqual(corrected["status"], "replacement-profiled")
+        self.assertEqual(started, 1)
+        replacement = core.indexed_task_profile_receipt_for(
+            "fake:one", receipt.payload["source_revision"], "exec"
+        )
+        self.assertNotEqual(
+            replacement.payload["receipt_sha256"],
+            receipt.payload["receipt_sha256"],
+        )
+        self.assertEqual(len(replacement.payload["profiles"]), 2)
+        replay = core.correct_task_occurrence_conflict(
+            "fake",
+            source,
+            receipt,
+            conflict_resolution,
+            "exec",
+            executor,
+            on_profile_operation_start=record_start,
+        )
+        self.assertTrue(replay["cached"])
+        self.assertEqual(started, 1)
+        self.assertEqual(
+            len(list(self.paths.task_occurrence_corrections.glob("*.json"))),
+            1,
+        )
+
+    def test_scheduled_conflict_correction_fills_profile_and_review_capacity(self) -> None:
+        source_fixture = self.source_fixture(
+            [self.session("one", 10, event_count=3)]
+        )
+        source = self.adapter("session-source", "fake", source_fixture)
+        procedure = {
+            "trigger": "A reusable fixture task is complete.",
+            "outcome": "Retain the fixture procedure.",
+            "actions": ["Retain the ordered procedure."],
+            "exclusions": ["Do not retain source details."],
+        }
+        first_template = {
+            "source_event_ids": ["one-event-1"],
+            "task_type": "prior-task",
+            "abstract_summary": "The prior reusable task.",
+            "reuse_value": "reusable-procedure",
+            "procedure": procedure,
+        }
+        conflict_template = {
+            "source_event_ids": [
+                "one-event-1",
+                "one-event-2",
+                "one-event-3",
+            ],
+            "task_type": "merged-task",
+            "abstract_summary": "A merged old and new task.",
+            "reuse_value": "reusable-procedure",
+            "procedure": procedure,
+        }
+        executor_fixture = self.write(
+            "scheduled-occurrence-correction-executor.json",
+            {
+                "mode": "success",
+                "terminal_route": "discard",
+                "artifact": None,
+                "require_task_profile_context": True,
+                "require_task_profile_id": True,
+                "require_task_occurrence_context": True,
+                "task_profiles": [first_template, conflict_template],
+                "task_profile_corrections": [
+                    first_template,
+                    {
+                        "source_event_ids": [
+                            "one-event-1",
+                            "one-event-3",
+                        ],
+                        "task_type": "corrected-new-task",
+                        "abstract_summary": "The isolated new task.",
+                        "reuse_value": "reusable-procedure",
+                        "procedure": procedure,
+                    },
+                ],
+            },
+        )
+        executor = self.adapter("review-executor", "exec", executor_fixture)
+        core = DreamingRuntime(
+            self.paths,
+            {("fake", "exec")},
+            policy_version=2,
+            now=lambda: self.clock,
+        )
+        core.discover("fake", source, page_size=10)
+        profiled = core.profile("fake", source, "fake:one", "exec", executor)
+        receipt = json.loads(Path(profiled["receipt"]).read_text())
+        first_profile, conflict_profile = receipt["profiles"]
+        first_result = core.review_profile(
+            "fake",
+            source,
+            "fake:one",
+            receipt["source_revision"],
+            "exec",
+            executor,
+            first_profile["profile_id"],
+        )
+        state = json.loads(executor_fixture.read_text())
+        state["occurrence_relation_by_profile"] = {
+            conflict_profile["profile_id"]: "boundary-conflict"
+        }
+        state["occurrence_prior_ids_by_profile"] = {
+            conflict_profile["profile_id"]: [
+                first_result["canonical_occurrence_id"]
+            ]
+        }
+        executor_fixture.write_text(json.dumps(state))
+        config = self.write(
+            "scheduled-occurrence-correction-adapters.json",
+            {
+                "contract_version": 1,
+                "policy_version": 2,
+                "max_profiles_per_run": 3,
+                "max_reviews_per_run": 4,
+                "routes": ["fake>exec"],
+                "executor_order": ["exec"],
+                "sources": {
+                    "fake": {
+                        "argv": [
+                            sys.executable,
+                            str(FAKE),
+                            "--fixture",
+                            str(source_fixture),
+                            "--adapter-id",
+                            "fake",
+                            "--role",
+                            "session-source",
+                        ]
+                    }
+                },
+                "executors": {
+                    "exec": {
+                        "argv": [
+                            sys.executable,
+                            str(FAKE),
+                            "--fixture",
+                            str(executor_fixture),
+                            "--adapter-id",
+                            "exec",
+                            "--role",
+                            "review-executor",
+                        ]
+                    }
+                },
+                "publishers": {},
+            },
+        )
+        completed = subprocess.run(
+            [sys.executable, str(RUNTIME_PATH), "run"],
+            env={
+                **os.environ,
+                "DREAMING_ADAPTER_CONFIG": str(config),
+                "DREAMING_DATA_DIR": str(self.paths.data),
+                "DREAMING_STATE_DIR": str(self.paths.state),
+                "DREAMING_NOW_EPOCH": str(self.clock),
+            },
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            check=True,
+        )
+        report = json.loads(completed.stdout)
+        self.assertEqual(report["profile_budget"]["attempts"], 1)
+        self.assertEqual(report["review_budget"]["started_operations"], 2)
+        self.assertEqual(
+            report["accounting"]["queue_terminal_accounting"][0][
+                "profile_operation_ids"
+            ],
+            [
+                next(
+                    row["operation_id"]
+                    for row in report["accounting"][
+                        "profile_operation_accounting"
+                    ]
+                    if row["terminal"] == "profiled"
+                )
+            ],
+        )
+        self.assertEqual(
+            [
+                row["terminal"]
+                for row in report["accounting"][
+                    "review_operation_accounting"
+                ]
+            ],
+            ["boundary-conflict", "dispositioned"],
+        )
+        self.assertEqual(
+            len(list(self.paths.task_occurrence_corrections.glob("*.json"))),
+            1,
+        )
+        replacement = core.indexed_task_profile_receipt_for(
+            "fake:one", receipt["source_revision"], "exec"
+        )
+        self.assertNotEqual(
+            replacement.payload["receipt_sha256"], receipt["receipt_sha256"]
+        )
+        self.assertEqual(
+            json.loads(self.paths.queue.read_text())[0]["status"],
+            "profile-audited",
+        )
 
     def test_legacy_raw_review_does_not_suppress_profile_audit(self) -> None:
         source_fixture = self.source_fixture([self.session("one", 10)])
@@ -5346,12 +5711,82 @@ elif command == "run":
         with self.assertRaisesRegex(RuntimeFailure, "origin-receipt-shape"):
             core.profile_audit_disposition_for(target)
         origin_receipt_path.write_bytes(origin_receipt_bytes)
+        disposition = core.profile_audit_disposition_for(target)
+        resolution_path = (
+            self.paths.task_occurrence_resolutions
+            / (
+                disposition["occurrence_resolution_sha256"]
+                .removeprefix("sha256:")
+                + ".json"
+            )
+        )
+        resolution_bytes = resolution_path.read_bytes()
+        first_occurrence = json.loads(resolution_bytes)
+        resolution_path.unlink()
+        with self.assertRaisesRegex(
+            RuntimeFailure, "profile-audit-disposition-invalid"
+        ):
+            core.profile_audit_disposition_for(target)
+        resolution_path.write_bytes(resolution_bytes)
+        index_bytes = self.paths.task_occurrence_index.read_bytes()
+        self.paths.task_occurrence_index.write_text("{}")
+        self.assertEqual(
+            core.profile_audit_disposition_for(target),
+            disposition,
+        )
+        self.paths.task_occurrence_index.write_bytes(index_bytes)
         retried = core.review_profile(
             "fake", source, "fake:one", second_receipt["source_revision"],
             "exec", executor, profile_id,
         )
         self.assertEqual(retried["status"], "already-dispositioned")
         self.assertEqual(len(json.loads(self.paths.attempts.read_text())), 1)
+        executor_state = json.loads(executor_fixture.read_text())
+        executor_state["task_profiles"][0]["abstract_summary"] = (
+            "A revised description of the same exact task evidence."
+        )
+        executor_fixture.write_text(json.dumps(executor_state))
+        fixture = json.loads(source_fixture.read_text())
+        fixture["sessions"][0]["events"].append(
+            event("fake", "one", 4, "assistant_message")
+        )
+        fixture["sessions"][0]["updated_at"] = 12
+        source_fixture.write_text(json.dumps(fixture))
+        third = core.profile("fake", source, "fake:one", "exec", executor)
+        third_receipt = json.loads(Path(third["receipt"]).read_text())
+        third_profile = third_receipt["profiles"][0]
+        self.assertEqual(
+            third_profile["task_key"],
+            first_receipt["profiles"][0]["task_key"],
+        )
+        self.assertNotEqual(third_profile["profile_id"], profile_id)
+        reused = core.review_profile(
+            "fake",
+            source,
+            "fake:one",
+            third_receipt["source_revision"],
+            "exec",
+            executor,
+            third_profile["profile_id"],
+        )
+        self.assertEqual(reused["status"], "exact-task-reused")
+        self.assertEqual(
+            reused["canonical_occurrence_id"],
+            first_occurrence["canonical_occurrence_id"],
+        )
+        self.assertEqual(len(json.loads(self.paths.attempts.read_text())), 1)
+        third_target = runtime_module.ProfileAuditTarget(
+            runtime_module.TaskProfileReceipt(
+                Path(third["receipt"]), third_receipt
+            ),
+            third_profile,
+        )
+        alias = core.task_occurrence_resolution_for(third_target)
+        self.assertEqual(alias["boundary_relation"], "same-occurrence")
+        self.assertEqual(
+            alias["profile_receipt_sha256"],
+            third_receipt["receipt_sha256"],
+        )
 
     def test_profile_audit_contract_supersession_and_race_are_auditable(self) -> None:
         source_fixture = self.source_fixture([self.session("one", 10)])

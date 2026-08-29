@@ -178,9 +178,22 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                 )
             snapshot_sha256 = digest(snapshot)
             profiles: list[dict[str, Any]] = []
-            templates = state.get("task_profiles_by_session", {}).get(
-                session_id, state.get("task_profiles", [])
-            )
+            if args.task_profile_correction:
+                templates = state.get(
+                    "task_profile_corrections_by_session", {}
+                ).get(
+                    session_id,
+                    state.get(
+                        "task_profile_corrections",
+                        state.get("task_profiles_by_session", {}).get(
+                            session_id, state.get("task_profiles", [])
+                        ),
+                    ),
+                )
+            else:
+                templates = state.get("task_profiles_by_session", {}).get(
+                    session_id, state.get("task_profiles", [])
+                )
             for template in templates:
                 source_event_ids = template.get(
                     "source_event_ids",
@@ -306,6 +319,22 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                     fail("task-profile-receipt-invalid", args.adapter_id)
             elif state.get("require_task_profile_id"):
                 fail("task-profile-id-required", args.adapter_id)
+            if state.get("require_task_occurrence_context"):
+                if not args.task_occurrence_context:
+                    fail("task-occurrence-context-required", args.adapter_id)
+                occurrence_context = load(
+                    Path(args.task_occurrence_context), {}
+                )
+                if (
+                    occurrence_context.get("selected_profile_id")
+                    != args.task_profile_id
+                    or occurrence_context.get("review_contract")
+                    != "profile-catalog-review-occurrence-v1"
+                    or not isinstance(
+                        occurrence_context.get("prior_overlaps"), list
+                    )
+                ):
+                    fail("task-occurrence-context-invalid", args.adapter_id)
         if state.get("reject_task_profile_receipt") and args.task_profile_receipt:
             fail("unexpected-task-profile-receipt", args.adapter_id)
         mutate_fixture = state.get("mutate_source_fixture")
@@ -359,6 +388,19 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                 default_evidence,
             ),
         }
+        if args.task_profile_id:
+            prior_ids = state.get(
+                "occurrence_prior_ids_by_profile", {}
+            ).get(args.task_profile_id, state.get("occurrence_prior_ids", []))
+            result["occurrence_boundary"] = {
+                "relation": state.get(
+                    "occurrence_relation_by_profile", {}
+                ).get(
+                    args.task_profile_id,
+                    state.get("occurrence_relation", "new-occurrence"),
+                ),
+                "prior_canonical_occurrence_ids": prior_ids,
+            }
         save(Path(args.result), result)
         emit({"ok": True, **result})
     fail("unsupported-command", args.command)
@@ -423,6 +465,8 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--task-profile-receipt")
     run.add_argument("--task-profile-executor")
     run.add_argument("--task-profile-id")
+    run.add_argument("--task-occurrence-context")
+    run.add_argument("--task-profile-correction")
     install = sub.add_parser("install")
     install.add_argument("--bundle", required=True)
     install.add_argument("--bundle-id", required=True)

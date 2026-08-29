@@ -57,10 +57,24 @@ from task_pass_accounting import (
     queue_row_identity,
     validate_task_pass_accounting_receipt,
 )
+from task_occurrence import (
+    TaskOccurrenceError,
+    build_correction_attempt as build_task_occurrence_correction_attempt,
+    build_resolution as build_task_occurrence_resolution,
+    load_all as load_task_occurrence_resolutions,
+    load_correction_attempts as load_task_occurrence_correction_attempts,
+    load_exact as load_exact_task_occurrence,
+    persist as persist_task_occurrence_resolution,
+    persist_correction_attempt as persist_task_occurrence_correction_attempt,
+    resolution_path as task_occurrence_resolution_path,
+    validate_resolution as validate_task_occurrence_resolution,
+)
 
 CONTRACT_VERSION = 1
 TASK_PROFILE_CAPABILITY = "task-profile-v2"
 TASK_PROFILE_SNAPSHOT_CONTRACT_VERSION = 1
+TASK_OCCURRENCE_REVIEW_CONTRACT = "profile-catalog-review-occurrence-v1"
+TASK_OCCURRENCE_CORRECTION_CONTRACT = "profile-boundary-correction-v1"
 ROLES = {
     "session-source": {
         "protocol": "dreaming.session-source",
@@ -535,7 +549,27 @@ class RuntimePaths:
 
     @property
     def profile_audit_dispositions(self) -> Path:
+        return self.state / "profile-audit-dispositions" / "v2"
+
+    @property
+    def legacy_profile_audit_dispositions(self) -> Path:
         return self.state / "profile-audit-dispositions" / "v1"
+
+    @property
+    def task_occurrence_resolutions(self) -> Path:
+        return self.data / "task-occurrences" / "v2"
+
+    @property
+    def task_occurrence_index(self) -> Path:
+        return self.state / "task-occurrence-index.json"
+
+    @property
+    def task_occurrence_contexts(self) -> Path:
+        return self.state / "task-occurrence-contexts"
+
+    @property
+    def task_occurrence_corrections(self) -> Path:
+        return self.data / "task-occurrence-corrections" / "v1"
 
     @property
     def task_pass_accounting_receipts(self) -> Path:
@@ -1443,6 +1477,7 @@ class DreamingRuntime:
         executor: ExecutableAdapter,
         expected_revision: str | None = None,
         on_profile_operation_start: Callable[[], None] | None = None,
+        correction_context: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         if not self._route_allowed(source_name, executor_id):
             raise RuntimeFailure("route-denied", f"{source_name}>{executor_id}")
@@ -1498,7 +1533,12 @@ class DreamingRuntime:
         result_path = (
             self.paths.state
             / "profile-results"
-            / f"{result_name}-{hashlib.sha256(current['source_revision'].encode()).hexdigest()}-{executor_name}.json"
+            / (
+                f"{result_name}-"
+                f"{hashlib.sha256(current['source_revision'].encode()).hexdigest()}-"
+                f"{executor_name}"
+                f"{'-correction' if correction_context is not None else ''}.json"
+            )
         )
         result_path.parent.mkdir(parents=True, exist_ok=True)
         profile_key = self._task_profile_key(
@@ -1515,12 +1555,24 @@ class DreamingRuntime:
         prior_entry = prior_index.get(profile_key)
         if on_profile_operation_start is not None:
             on_profile_operation_start()
-        response = executor.call(
-            "run",
-            snapshot=snapshot_path,
-            result=result_path,
-            mode="profile",
-        )
+        run_arguments: dict[str, Any] = {
+            "snapshot": snapshot_path,
+            "result": result_path,
+            "mode": "profile",
+        }
+        if correction_context is not None:
+            correction_path = (
+                self.paths.task_occurrence_contexts
+                / (
+                    hashlib.sha256(
+                        canonical(correction_context)
+                    ).hexdigest()
+                    + "-correction.json"
+                )
+            )
+            atomic_json(correction_path, correction_context)
+            run_arguments["task_profile_correction"] = correction_path
+        response = executor.call("run", **run_arguments)
         if not result_path.exists():
             raise RuntimeFailure("missing-task-profile-result", executor_id)
         file_result = read_json(result_path, {})
@@ -1826,22 +1878,755 @@ class DreamingRuntime:
             if isinstance(profile, dict)
         ]
 
-    def _profile_audit_disposition_path(self, profile_id: str) -> Path:
+    def _profile_audit_disposition_path(
+        self, profile_id: str, *, contract_version: int = 2
+    ) -> Path:
         if not isinstance(profile_id, str) or not re.fullmatch(
             r"sha256:[0-9a-f]{64}", profile_id
         ):
             raise RuntimeFailure("profile-audit-disposition-invalid", "profile-id")
-        return (
+        root = (
             self.paths.profile_audit_dispositions
+            if contract_version == 2
+            else self.paths.legacy_profile_audit_dispositions
+        )
+        return (
+            root
             / f"{profile_id.removeprefix('sha256:')}.json"
         )
+
+    def _validate_task_occurrence_provenance(
+        self, resolution: dict[str, Any]
+    ) -> dict[str, Any]:
+        try:
+            resolution = validate_task_occurrence_resolution(resolution)
+            receipt_path = (
+                self.paths.task_profile_receipts
+                / (
+                    resolution["profile_receipt_sha256"]
+                    .removeprefix("sha256:")
+                    + ".json"
+                )
+            )
+            snapshot_path = (
+                self.paths.snapshots
+                / (
+                    resolution["snapshot_sha256"].removeprefix("sha256:")
+                    + ".json"
+                )
+            )
+            receipt = read_json(receipt_path, {})
+            snapshot = read_json(snapshot_path, {})
+            context = validate_task_profile_receipt(
+                receipt,
+                snapshot,
+                receipt_path=receipt_path,
+                expected_executor=receipt.get("executor"),
+                expected_executor_identity=receipt.get("executor_identity"),
+            )
+        except (TaskOccurrenceError, TaskProfileReceiptError) as error:
+            reason = getattr(error, "reason", str(error))
+            raise RuntimeFailure(
+                "task-occurrence-resolution-invalid", reason
+            ) from error
+        profile = next(
+            (
+                item
+                for item in context["profiles"]
+                if item.get("profile_id") == resolution["profile_id"]
+            ),
+            None,
+        )
+        expected = {
+            "profile_sha256": digest(profile) if profile is not None else None,
+            "task_key": profile.get("task_key") if profile is not None else None,
+            "source_event_ids": (
+                profile.get("source_event_ids") if profile is not None else None
+            ),
+            "goal_event_id": (
+                profile.get("goal_event_id") if profile is not None else None
+            ),
+            "occurred_at": (
+                profile.get("occurred_at") if profile is not None else None
+            ),
+            "snapshot_sha256": receipt.get("snapshot_sha256"),
+            "source_revision": receipt.get("source_revision"),
+            "qualified_session_id": receipt.get("qualified_session_id"),
+        }
+        if profile is None or any(
+            resolution.get(key) != value for key, value in expected.items()
+        ):
+            raise RuntimeFailure(
+                "task-occurrence-resolution-invalid", "origin-provenance"
+            )
+        return resolution
+
+    def task_occurrence_resolution_for(
+        self, target: ProfileAuditTarget
+    ) -> dict[str, Any] | None:
+        try:
+            bound = [
+                self._validate_task_occurrence_provenance(resolution)
+                for resolution in load_task_occurrence_resolutions(
+                    self.paths.task_occurrence_resolutions
+                )
+                if (
+                    resolution.get("profile_id")
+                    == target.profile["profile_id"]
+                    and resolution.get("profile_receipt_sha256")
+                    == target.receipt.payload["receipt_sha256"]
+                    and resolution.get("task_key")
+                    == target.profile["task_key"]
+                )
+            ]
+        except TaskOccurrenceError as error:
+            raise RuntimeFailure(
+                "task-occurrence-resolution-invalid", error.reason
+            ) from error
+        if len(bound) > 1:
+            raise RuntimeFailure(
+                "task-occurrence-resolution-invalid",
+                "duplicate-profile-resolution",
+            )
+        if bound:
+            return bound[0]
+        try:
+            resolution = load_exact_task_occurrence(
+                self.paths.task_occurrence_resolutions,
+                self.paths.task_occurrence_index,
+                target.profile["task_key"],
+            )
+        except TaskOccurrenceError as error:
+            raise RuntimeFailure(
+                "task-occurrence-index-invalid", error.reason
+            ) from error
+        if resolution is None:
+            return None
+        resolution = self._validate_task_occurrence_provenance(resolution)
+        if (
+            resolution["profile_id"] != target.profile["profile_id"]
+            or resolution["profile_receipt_sha256"]
+            != target.receipt.payload["receipt_sha256"]
+        ):
+            if resolution["boundary_relation"] == "boundary-conflict":
+                correction = self.task_occurrence_correction_attempt_for(
+                    resolution
+                )
+                if (
+                    correction is not None
+                    and correction["terminal_status"] == "replacement-profiled"
+                    and correction["replacement_profile_receipt_sha256"]
+                    == target.receipt.payload["receipt_sha256"]
+                ):
+                    return None
+            raise RuntimeFailure(
+                "task-occurrence-task-key-reused",
+                target.profile["task_key"],
+            )
+        return resolution
+
+    def _reuse_exact_task_occurrence(
+        self,
+        target: ProfileAuditTarget,
+    ) -> tuple[dict[str, Any], dict[str, Any]] | None:
+        try:
+            prior = load_exact_task_occurrence(
+                self.paths.task_occurrence_resolutions,
+                self.paths.task_occurrence_index,
+                target.profile["task_key"],
+            )
+        except TaskOccurrenceError as error:
+            raise RuntimeFailure(
+                "task-occurrence-index-invalid", error.reason
+            ) from error
+        if prior is None:
+            return None
+        prior = self._validate_task_occurrence_provenance(prior)
+        if prior["boundary_relation"] not in {
+            "same-occurrence",
+            "new-occurrence",
+        }:
+            return None
+        if (
+            prior["profile_id"] == target.profile["profile_id"]
+            and prior["profile_receipt_sha256"]
+            == target.receipt.payload["receipt_sha256"]
+        ):
+            return None
+        origin_receipt_path = (
+            self.paths.task_profile_receipts
+            / (
+                prior["profile_receipt_sha256"].removeprefix("sha256:")
+                + ".json"
+            )
+        )
+        origin_receipt = read_json(origin_receipt_path, {})
+        origin_snapshot_path = (
+            self.paths.snapshots
+            / (
+                origin_receipt.get("snapshot_sha256", "")
+                .removeprefix("sha256:")
+                + ".json"
+            )
+        )
+        try:
+            origin_context = validate_task_profile_receipt(
+                origin_receipt,
+                read_json(origin_snapshot_path, {}),
+                receipt_path=origin_receipt_path,
+                expected_executor=origin_receipt.get("executor"),
+                expected_executor_identity=origin_receipt.get(
+                    "executor_identity"
+                ),
+            )
+        except TaskProfileReceiptError as error:
+            raise RuntimeFailure(
+                "task-occurrence-resolution-invalid",
+                f"reuse-origin-{error.reason}",
+            ) from error
+        origin_profile = next(
+            (
+                profile
+                for profile in origin_context["profiles"]
+                if profile["profile_id"] == prior["profile_id"]
+            ),
+            None,
+        )
+        if origin_profile is None:
+            raise RuntimeFailure(
+                "task-occurrence-resolution-invalid",
+                "reuse-origin-profile",
+            )
+        prior_target = ProfileAuditTarget(
+            TaskProfileReceipt(origin_receipt_path, origin_receipt),
+            origin_profile,
+        )
+        prior_disposition = self.profile_audit_disposition_for(prior_target)
+        if (
+            prior_disposition is None
+            or prior_disposition["profile_audit_contract_version"] != 2
+            or prior_disposition["boundary_relation"]
+            not in {"same-occurrence", "new-occurrence"}
+        ):
+            raise RuntimeFailure(
+                "task-occurrence-resolution-invalid",
+                "reuse-origin-disposition",
+            )
+        decision_at = (
+            datetime.fromtimestamp(self.now(), timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        try:
+            alias = build_task_occurrence_resolution(
+                profile=target.profile,
+                receipt=target.receipt.payload,
+                relation="same-occurrence",
+                review_contract="exact-task-key-reuse-v1",
+                review_executor=prior["review_executor"],
+                review_executor_identity=prior[
+                    "review_executor_identity"
+                ],
+                decision_at=decision_at,
+                prior_occurrence_ids=[prior["canonical_occurrence_id"]],
+                overlap_resolution_ids=[prior["resolution_sha256"]],
+            )
+            persist_task_occurrence_resolution(
+                self.paths.task_occurrence_resolutions,
+                self.paths.task_occurrence_index,
+                alias,
+                project=False,
+            )
+        except TaskOccurrenceError as error:
+            raise RuntimeFailure(
+                "task-occurrence-resolution-invalid", error.reason
+            ) from error
+        copied_result = {
+            "terminal_route": prior_disposition["terminal_route"],
+            "summary": prior_disposition["summary"],
+            "routing_reason": (
+                "Reused the exact task occurrence's terminal catalog audit: "
+                + prior_disposition["routing_reason"]
+            ),
+        }
+        disposition = self._record_profile_audit_disposition(
+            target,
+            prior_disposition["review_executor"],
+            prior_disposition["review_executor_identity"],
+            copied_result,
+            alias,
+        )
+        return alias, disposition
+
+    def _task_occurrence_context_for(
+        self, target: ProfileAuditTarget
+    ) -> dict[str, Any]:
+        current_events = set(target.profile["source_event_ids"])
+        try:
+            resolutions = load_task_occurrence_resolutions(
+                self.paths.task_occurrence_resolutions
+            )
+        except TaskOccurrenceError as error:
+            raise RuntimeFailure(
+                "task-occurrence-resolution-invalid", error.reason
+            ) from error
+        overlaps = []
+        for resolution in resolutions:
+            resolution = self._validate_task_occurrence_provenance(resolution)
+            if (
+                resolution["task_key"] == target.profile["task_key"]
+                or resolution["qualified_session_id"]
+                != target.receipt.payload["qualified_session_id"]
+                or resolution["boundary_relation"]
+                not in {"same-occurrence", "new-occurrence"}
+                or not current_events.intersection(resolution["source_event_ids"])
+            ):
+                continue
+            overlaps.append(
+                {
+                    "resolution_sha256": resolution["resolution_sha256"],
+                    "profile_id": resolution["profile_id"],
+                    "task_key": resolution["task_key"],
+                    "source_event_ids": resolution["source_event_ids"],
+                    "goal_event_id": resolution["goal_event_id"],
+                    "occurred_at": resolution["occurred_at"],
+                    "boundary_relation": resolution["boundary_relation"],
+                    "canonical_occurrence_id": resolution[
+                        "canonical_occurrence_id"
+                    ],
+                }
+            )
+        if len(overlaps) > 20:
+            raise RuntimeFailure(
+                "task-occurrence-overlap-limit", target.profile["profile_id"]
+            )
+        return {
+            "review_contract": TASK_OCCURRENCE_REVIEW_CONTRACT,
+            "selected_profile_id": target.profile["profile_id"],
+            "selected_task_key": target.profile["task_key"],
+            "prior_overlaps": sorted(
+                overlaps, key=lambda item: item["resolution_sha256"]
+            ),
+        }
+
+    def _record_task_occurrence_resolution(
+        self,
+        target: ProfileAuditTarget,
+        executor_id: str,
+        executor_identity: dict[str, Any],
+        result: dict[str, Any],
+        context: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        if target.receipt.payload.get("schema_version") != 2:
+            return None
+        boundary = result.get("occurrence_boundary")
+        if not isinstance(boundary, dict):
+            raise RuntimeFailure(
+                "task-occurrence-boundary-invalid", "missing-boundary"
+            )
+        relation = boundary.get("relation")
+        prior_ids = boundary.get("prior_canonical_occurrence_ids")
+        if (
+            relation
+            not in {
+                "same-occurrence",
+                "new-occurrence",
+                "boundary-conflict",
+            }
+            or not isinstance(prior_ids, list)
+            or len(prior_ids) != len(set(prior_ids))
+            or any(
+                not isinstance(item, str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", item)
+                for item in prior_ids
+            )
+        ):
+            raise RuntimeFailure(
+                "task-occurrence-boundary-invalid", "boundary-shape"
+            )
+        overlaps = context["prior_overlaps"]
+        allowed_prior_ids = {
+            item["canonical_occurrence_id"]
+            for item in overlaps
+            if item["canonical_occurrence_id"] is not None
+        }
+        if any(item not in allowed_prior_ids for item in prior_ids):
+            raise RuntimeFailure(
+                "task-occurrence-boundary-invalid", "unknown-prior-occurrence"
+            )
+        if relation == "same-occurrence" and len(prior_ids) != 1:
+            raise RuntimeFailure(
+                "task-occurrence-boundary-invalid", "same-requires-one-prior"
+            )
+        if relation == "new-occurrence" and prior_ids:
+            raise RuntimeFailure(
+                "task-occurrence-boundary-invalid", "new-forbids-prior"
+            )
+        if relation == "boundary-conflict" and not prior_ids:
+            raise RuntimeFailure(
+                "task-occurrence-boundary-invalid", "conflict-requires-prior"
+            )
+        overlap_ids = [
+            item["resolution_sha256"] for item in context["prior_overlaps"]
+        ]
+        correction_attempt_sha256 = None
+        supersedes_resolution_sha256 = None
+        try:
+            prior_exact = load_exact_task_occurrence(
+                self.paths.task_occurrence_resolutions,
+                self.paths.task_occurrence_index,
+                target.profile["task_key"],
+            )
+        except TaskOccurrenceError as error:
+            raise RuntimeFailure(
+                "task-occurrence-index-invalid", error.reason
+            ) from error
+        if prior_exact is not None:
+            prior_exact = self._validate_task_occurrence_provenance(prior_exact)
+            if prior_exact["boundary_relation"] != "boundary-conflict":
+                raise RuntimeFailure(
+                    "task-occurrence-task-key-reused",
+                    target.profile["task_key"],
+                )
+            correction = self.task_occurrence_correction_attempt_for(prior_exact)
+            if (
+                correction is None
+                or correction["terminal_status"] != "replacement-profiled"
+                or correction["replacement_profile_receipt_sha256"]
+                != target.receipt.payload["receipt_sha256"]
+            ):
+                raise RuntimeFailure(
+                    "task-occurrence-correction-invalid",
+                    "replacement-authority",
+                )
+            correction_attempt_sha256 = correction["attempt_sha256"]
+            supersedes_resolution_sha256 = prior_exact["resolution_sha256"]
+        decision_at = (
+            datetime.fromtimestamp(self.now(), timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        try:
+            resolution = build_task_occurrence_resolution(
+                profile=target.profile,
+                receipt=target.receipt.payload,
+                relation=relation,
+                review_contract=TASK_OCCURRENCE_REVIEW_CONTRACT,
+                review_executor=executor_id,
+                review_executor_identity=executor_identity,
+                decision_at=decision_at,
+                prior_occurrence_ids=prior_ids,
+                overlap_resolution_ids=overlap_ids,
+                correction_attempt_sha256=correction_attempt_sha256,
+                supersedes_resolution_sha256=supersedes_resolution_sha256,
+            )
+            return persist_task_occurrence_resolution(
+                self.paths.task_occurrence_resolutions,
+                self.paths.task_occurrence_index,
+                resolution,
+            )
+        except TaskOccurrenceError as error:
+            raise RuntimeFailure(
+                "task-occurrence-resolution-invalid", error.reason
+            ) from error
+
+    def task_occurrence_conflicts_for(
+        self, receipt: TaskProfileReceipt
+    ) -> list[dict[str, Any]]:
+        task_keys = {
+            profile["task_key"] for profile in receipt.payload["profiles"]
+        }
+        try:
+            resolutions = load_task_occurrence_resolutions(
+                self.paths.task_occurrence_resolutions
+            )
+        except TaskOccurrenceError as error:
+            raise RuntimeFailure(
+                "task-occurrence-resolution-invalid", error.reason
+            ) from error
+        conflicts = []
+        for resolution in resolutions:
+            resolution = self._validate_task_occurrence_provenance(resolution)
+            if (
+                resolution["task_key"] in task_keys
+                and resolution["profile_receipt_sha256"]
+                == receipt.payload["receipt_sha256"]
+                and resolution["boundary_relation"] == "boundary-conflict"
+            ):
+                conflicts.append(resolution)
+        return conflicts
+
+    def task_occurrence_correction_attempt_for(
+        self, conflict: dict[str, Any]
+    ) -> dict[str, Any] | None:
+        try:
+            attempts = load_task_occurrence_correction_attempts(
+                self.paths.task_occurrence_corrections
+            )
+        except TaskOccurrenceError as error:
+            raise RuntimeFailure(
+                "task-occurrence-correction-invalid", error.reason
+            ) from error
+        matches = [
+            attempt
+            for attempt in attempts
+            if (
+                attempt["source_revision"] == conflict["source_revision"]
+                and attempt["qualified_session_id"]
+                == conflict["qualified_session_id"]
+                and attempt["correction_contract"]
+                == TASK_OCCURRENCE_CORRECTION_CONTRACT
+            )
+        ]
+        if len(matches) > 1:
+            raise RuntimeFailure(
+                "task-occurrence-correction-invalid", "duplicate-attempt"
+            )
+        return matches[0] if matches else None
+
+    def correct_task_occurrence_conflict(
+        self,
+        source_name: str,
+        source: ExecutableAdapter,
+        receipt: TaskProfileReceipt,
+        conflict: dict[str, Any],
+        executor_id: str,
+        executor: ExecutableAdapter,
+        on_profile_operation_start: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
+        existing = self.task_occurrence_correction_attempt_for(conflict)
+        if existing is not None:
+            return {
+                "status": existing["terminal_status"],
+                "attempt_sha256": existing["attempt_sha256"],
+                "cached": True,
+            }
+        conflicts = self.task_occurrence_conflicts_for(receipt)
+        if (
+            not conflicts
+            or conflict["resolution_sha256"]
+            not in {
+                item["resolution_sha256"] for item in conflicts
+            }
+        ):
+            raise RuntimeFailure(
+                "task-occurrence-correction-invalid",
+                "conflict-set",
+            )
+        correction_context = {
+            "correction_contract": TASK_OCCURRENCE_CORRECTION_CONTRACT,
+            "conflicts": [
+                {
+                    "resolution_sha256": item["resolution_sha256"],
+                    "profile_id": item["profile_id"],
+                    "task_key": item["task_key"],
+                    "source_event_ids": item["source_event_ids"],
+                    "prior_canonical_occurrence_ids": item[
+                        "prior_canonical_occurrence_ids"
+                    ],
+                }
+                for item in conflicts
+            ],
+            "profile_receipt_sha256": receipt.payload["receipt_sha256"],
+            "qualified_session_id": conflict["qualified_session_id"],
+            "source_revision": conflict["source_revision"],
+        }
+        started_at = (
+            datetime.fromtimestamp(self.now(), timezone.utc)
+            .replace(microsecond=0)
+            .isoformat()
+            .replace("+00:00", "Z")
+        )
+        operation_started = False
+
+        def record_start() -> None:
+            nonlocal operation_started
+            if on_profile_operation_start is not None:
+                on_profile_operation_start()
+            operation_started = True
+
+        try:
+            result = self.profile(
+                source_name,
+                source,
+                conflict["qualified_session_id"],
+                executor_id,
+                executor,
+                expected_revision=conflict["source_revision"],
+                on_profile_operation_start=record_start,
+                correction_context=correction_context,
+            )
+            if not operation_started:
+                raise RuntimeFailure(
+                    "task-occurrence-correction-not-started",
+                    result.get("status", "unknown"),
+                )
+            replacement = self.indexed_task_profile_receipt_for(
+                conflict["qualified_session_id"],
+                conflict["source_revision"],
+                executor_id,
+            )
+            if replacement is None:
+                raise RuntimeFailure(
+                    "task-occurrence-correction-invalid",
+                    "replacement-receipt-missing",
+                )
+            replacement_sha256 = replacement.payload["receipt_sha256"]
+            conflict_task_keys = {
+                item["task_key"] for item in conflicts
+            }
+            conflict_still_present = any(
+                profile["task_key"] in conflict_task_keys
+                for profile in replacement.payload["profiles"]
+            )
+            terminal_status = (
+                "boundary-unresolved"
+                if (
+                    replacement_sha256 == receipt.payload["receipt_sha256"]
+                    or conflict_still_present
+                )
+                else "replacement-profiled"
+            )
+            if (
+                terminal_status == "boundary-unresolved"
+                and replacement_sha256 != receipt.payload["receipt_sha256"]
+            ):
+                profile_key = self._task_profile_key(
+                    conflict["qualified_session_id"],
+                    conflict["source_revision"],
+                    executor_id,
+                )
+                index_lock = self.paths.state / "task-profile-index.lock"
+                with index_lock.open("a+") as lock_file:
+                    fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+                    index = self._state(self.paths.task_profile_index, {})
+                    current_entry = index.get(profile_key)
+                    if (
+                        not isinstance(current_entry, dict)
+                        or current_entry.get("receipt_sha256")
+                        != replacement_sha256
+                    ):
+                        raise RuntimeFailure(
+                            "task-profile-concurrent-refresh", profile_key
+                        )
+                    index[profile_key] = {
+                        "qualified_session_id": conflict[
+                            "qualified_session_id"
+                        ],
+                        "source_revision": conflict["source_revision"],
+                        "executor": executor_id,
+                        "receipt_sha256": receipt.payload["receipt_sha256"],
+                        "profile_set_id": receipt.payload["profile_set_id"],
+                    }
+                    self._write(self.paths.task_profile_index, index)
+                replacement_sha256 = receipt.payload["receipt_sha256"]
+        except RuntimeFailure:
+            if not operation_started:
+                raise
+            terminal_status = "failed"
+            replacement_sha256 = None
+            result = {"status": "failed"}
+        try:
+            attempt = build_task_occurrence_correction_attempt(
+                qualified_session_id=conflict["qualified_session_id"],
+                source_revision=conflict["source_revision"],
+                profile_receipt_sha256=receipt.payload["receipt_sha256"],
+                conflict_resolution_sha256s=[
+                    item["resolution_sha256"] for item in conflicts
+                ],
+                correction_contract=TASK_OCCURRENCE_CORRECTION_CONTRACT,
+                profile_executor=executor_id,
+                profile_executor_identity=executor.identity,
+                started_at=started_at,
+                terminal_status=terminal_status,
+                replacement_profile_receipt_sha256=(
+                    replacement_sha256
+                    if terminal_status == "replacement-profiled"
+                    else None
+                ),
+            )
+            persist_task_occurrence_correction_attempt(
+                self.paths.task_occurrence_corrections, attempt
+            )
+            unresolved_resolutions = []
+            if terminal_status == "boundary-unresolved":
+                profiles_by_id = {
+                    profile["profile_id"]: profile
+                    for profile in receipt.payload["profiles"]
+                }
+                for conflict_item in conflicts:
+                    unresolved_resolution = (
+                        build_task_occurrence_resolution(
+                            profile=profiles_by_id[
+                                conflict_item["profile_id"]
+                            ],
+                            receipt=receipt.payload,
+                            relation="boundary-unresolved",
+                            review_contract=conflict_item[
+                                "review_contract"
+                            ],
+                            review_executor=conflict_item[
+                                "review_executor"
+                            ],
+                            review_executor_identity=conflict_item[
+                                "review_executor_identity"
+                            ],
+                            decision_at=started_at,
+                            prior_occurrence_ids=conflict_item[
+                                "prior_canonical_occurrence_ids"
+                            ],
+                            overlap_resolution_ids=conflict_item[
+                                "overlap_resolution_ids"
+                            ],
+                            correction_attempt_sha256=attempt[
+                                "attempt_sha256"
+                            ],
+                            supersedes_resolution_sha256=conflict_item[
+                                "resolution_sha256"
+                            ],
+                        )
+                    )
+                    persist_task_occurrence_resolution(
+                        self.paths.task_occurrence_resolutions,
+                        self.paths.task_occurrence_index,
+                        unresolved_resolution,
+                    )
+                    unresolved_resolutions.append(unresolved_resolution)
+        except TaskOccurrenceError as error:
+            raise RuntimeFailure(
+                "task-occurrence-correction-invalid", error.reason
+            ) from error
+        return {
+            **result,
+            "status": terminal_status,
+            "attempt_sha256": attempt["attempt_sha256"],
+            "cached": False,
+            "occurrence_resolution_sha256s": [
+                resolution["resolution_sha256"]
+                for resolution in unresolved_resolutions
+            ],
+        }
 
     def profile_audit_disposition_for(
         self, target: ProfileAuditTarget
     ) -> dict[str, Any] | None:
-        path = self._profile_audit_disposition_path(target.profile["profile_id"])
-        if not path.exists():
+        current_path = self._profile_audit_disposition_path(
+            target.profile["profile_id"]
+        )
+        legacy_path = self._profile_audit_disposition_path(
+            target.profile["profile_id"], contract_version=1
+        )
+        paths = [path for path in (current_path, legacy_path) if path.exists()]
+        if not paths:
             return None
+        if len(paths) > 1:
+            raise RuntimeFailure(
+                "profile-audit-disposition-invalid",
+                f"{target.profile['profile_id']}: duplicate-versions",
+            )
+        path = paths[0]
         try:
             disposition = validate_profile_audit_disposition(
                 read_json(path, {}),
@@ -1911,6 +2696,57 @@ class DreamingRuntime:
                 "profile-audit-disposition-invalid",
                 f"{origin_path}: origin-profile",
             )
+        if disposition["profile_audit_contract_version"] == 2:
+            try:
+                occurrence_path = task_occurrence_resolution_path(
+                    self.paths.task_occurrence_resolutions,
+                    disposition["occurrence_resolution_sha256"],
+                )
+                occurrence = validate_task_occurrence_resolution(
+                    read_json(occurrence_path, {})
+                )
+            except TaskOccurrenceError as error:
+                raise RuntimeFailure(
+                    "profile-audit-disposition-invalid",
+                    f"occurrence-{error.reason}",
+                ) from error
+            if occurrence is None:
+                raise RuntimeFailure(
+                    "profile-audit-disposition-invalid",
+                    "occurrence-missing",
+                )
+            occurrence = self._validate_task_occurrence_provenance(occurrence)
+            expected_occurrence = {
+                "occurrence_resolution_sha256": occurrence[
+                    "resolution_sha256"
+                ],
+                "canonical_occurrence_id": occurrence[
+                    "canonical_occurrence_id"
+                ],
+                "boundary_relation": occurrence["boundary_relation"],
+                "review_executor": occurrence["review_executor"],
+                "review_executor_identity": occurrence[
+                    "review_executor_identity"
+                ],
+            }
+            disposition_occurrence = {
+                "occurrence_resolution_sha256": disposition.get(
+                    "occurrence_resolution_sha256"
+                ),
+                "canonical_occurrence_id": disposition.get(
+                    "canonical_occurrence_id"
+                ),
+                "boundary_relation": disposition.get("boundary_relation"),
+                "review_executor": disposition.get("review_executor"),
+                "review_executor_identity": disposition.get(
+                    "review_executor_identity"
+                ),
+            }
+            if disposition_occurrence != expected_occurrence:
+                raise RuntimeFailure(
+                    "profile-audit-disposition-invalid",
+                    "occurrence-provenance",
+                )
         return disposition
 
     def profile_audit_disposition_admission_for(
@@ -1920,8 +2756,18 @@ class DreamingRuntime:
         if disposition is None:
             return "undispositioned", None
         version = disposition["profile_audit_contract_version"]
-        if version != CURRENT_PROFILE_AUDIT_CONTRACT_VERSION:
+        required_version = (
+            CURRENT_PROFILE_AUDIT_CONTRACT_VERSION
+            if target.receipt.payload.get("schema_version") == 2
+            else 1
+        )
+        if version != required_version:
             return "superseded-requires-repair-backfill", disposition
+        if disposition.get("boundary_relation") in {
+            "boundary-conflict",
+            "boundary-unresolved",
+        }:
+            return disposition["boundary_relation"], disposition
         return "terminal", disposition
 
     def mark_profile_audit_queue_terminal(
@@ -1946,6 +2792,7 @@ class DreamingRuntime:
         executor_id: str,
         executor_identity: dict[str, Any],
         result: dict[str, Any],
+        occurrence_resolution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         review_result = {
             key: result.get(key)
@@ -1966,8 +2813,15 @@ class DreamingRuntime:
             review_executor_identity=executor_identity,
             review_result=review_result,
             reviewed_at=self.now(),
+            occurrence_resolution=occurrence_resolution,
         )
-        path = self._profile_audit_disposition_path(target.profile["profile_id"])
+        contract_version = (
+            2 if occurrence_resolution is not None else 1
+        )
+        path = self._profile_audit_disposition_path(
+            target.profile["profile_id"],
+            contract_version=contract_version,
+        )
         if path.exists():
             existing = self.profile_audit_disposition_for(target)
             if existing is None:
@@ -2015,6 +2869,35 @@ class DreamingRuntime:
                 "status": "profile-audit-disposition-superseded-requires-repair-backfill",
                 "profile_id": profile_id,
                 "disposition_sha256": existing["disposition_sha256"],
+            }
+        reused = self._reuse_exact_task_occurrence(target)
+        if reused is not None:
+            resolution, disposition = reused
+            return {
+                "status": "exact-task-reused",
+                "profile_id": profile_id,
+                "canonical_occurrence_id": resolution[
+                    "canonical_occurrence_id"
+                ],
+                "occurrence_resolution_sha256": resolution[
+                    "resolution_sha256"
+                ],
+                "disposition_sha256": disposition[
+                    "disposition_sha256"
+                ],
+            }
+        existing_resolution = self.task_occurrence_resolution_for(target)
+        if (
+            existing_resolution is not None
+            and existing_resolution["boundary_relation"]
+            in {"boundary-conflict", "boundary-unresolved"}
+        ):
+            return {
+                "status": existing_resolution["boundary_relation"],
+                "profile_id": profile_id,
+                "occurrence_resolution_sha256": existing_resolution[
+                    "resolution_sha256"
+                ],
             }
         return self.review(
             source_name,
@@ -2122,6 +3005,7 @@ class DreamingRuntime:
         reviewed_identity: dict[str, Any],
         task_profile_receipt: Path | None = None,
         task_profile_evidence_present: bool = False,
+        occurrence_resolution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         artifact = result.get("artifact")
         if not isinstance(artifact, dict):
@@ -2164,6 +3048,7 @@ class DreamingRuntime:
                 reviewed_identity,
                 matched_profile,
                 profile_match,
+                occurrence_resolution,
             )
         deferred = dict(result)
         deferred_context = deferred.get("transcript_context")
@@ -2269,6 +3154,7 @@ class DreamingRuntime:
         reviewed_identity: dict[str, Any],
         task_profile: dict[str, Any] | None = None,
         profile_match: str = "receipt-unavailable",
+        occurrence_resolution: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         artifact = result["artifact"]
         self._assert_candidate_root_isolated()
@@ -2306,17 +3192,40 @@ class DreamingRuntime:
             task_key = task_profile["task_key"]
             independence = "verified"
             summary = task_profile["abstract_summary"]
-        if task_profile is None or not isinstance(task_profile.get("goal_event_id"), str) or not isinstance(task_profile.get("occurred_at"), str):
+        if task_profile is None or occurrence_resolution is None:
             # Preserve historical shadow observations in a v1 record.  V1 is
             # explicitly non-authoritative in candidate-lifecycle recurrence().
             observation = {"task_key": task_key, "session_id": reviewed_identity["qualified_session_id"], "observed_at": observed.astimezone(timezone.utc).isoformat(), "independence": independence, "summary": summary, "procedure_fingerprint": procedure["match_fingerprint"]}
         else:
-            occurred_at = parse_time(task_profile["occurred_at"])
-            decision_at = datetime.fromtimestamp(self.now(), timezone.utc)
+            occurrence_resolution = self._validate_task_occurrence_provenance(
+                occurrence_resolution
+            )
+            if (
+                occurrence_resolution["profile_id"] != task_profile["profile_id"]
+                or occurrence_resolution["boundary_relation"]
+                not in {"same-occurrence", "new-occurrence"}
+                or occurrence_resolution["canonical_occurrence_id"] is None
+            ):
+                raise RuntimeFailure(
+                    "candidate-lifecycle-failed",
+                    "task occurrence resolution is not authoritative",
+                )
+            occurred_at = parse_time(occurrence_resolution["occurred_at"])
+            decision_at = parse_time(occurrence_resolution["decision_at"])
             if occurred_at is None or occurred_at > decision_at:
                 raise RuntimeFailure("candidate-lifecycle-failed", "profile occurrence time is invalid")
-            canonical_occurrence_id = digest({"qualified_session_id": reviewed_identity["qualified_session_id"], "goal_event_id": task_profile["goal_event_id"]})
-            observation = {"task_key": task_key, "source_session_id": reviewed_identity["qualified_session_id"], "canonical_occurrence_id": canonical_occurrence_id, "occurred_at": occurred_at.astimezone(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z"), "decision_at": decision_at.replace(microsecond=0).isoformat().replace("+00:00", "Z"), "resolution_sha256": digest({"task_key": task_key, "canonical_occurrence_id": canonical_occurrence_id, "profile_id": task_profile["profile_id"]}), "summary": summary, "procedure_fingerprint": procedure["match_fingerprint"]}
+            observation = {
+                "task_key": task_key,
+                "source_session_id": reviewed_identity["qualified_session_id"],
+                "canonical_occurrence_id": occurrence_resolution[
+                    "canonical_occurrence_id"
+                ],
+                "occurred_at": occurrence_resolution["occurred_at"],
+                "decision_at": occurrence_resolution["decision_at"],
+                "resolution_sha256": occurrence_resolution["resolution_sha256"],
+                "summary": summary,
+                "procedure_fingerprint": procedure["match_fingerprint"],
+            }
         # Current evidence is source anchored; legacy branch remains v1 history.
 
         lifecycle_id = None
@@ -3183,6 +4092,27 @@ class DreamingRuntime:
                     and task_profile_binding.receipt is not None
                     else None
                 )
+                occurrence_context: dict[str, Any] | None = None
+                occurrence_context_path: Path | None = None
+                existing_occurrence_resolution: dict[str, Any] | None = None
+                if profile_audit_target is not None:
+                    existing_occurrence_resolution = (
+                        self.task_occurrence_resolution_for(
+                            profile_audit_target
+                        )
+                    )
+                    occurrence_context = self._task_occurrence_context_for(
+                        profile_audit_target
+                    )
+                    occurrence_context_path = (
+                        self.paths.task_occurrence_contexts
+                        / (
+                            profile_audit_target.profile["profile_id"]
+                            .removeprefix("sha256:")
+                            + ".json"
+                        )
+                    )
+                    atomic_json(occurrence_context_path, occurrence_context)
                 task_profile_delivery = {
                     "bound": "delivered",
                     "absent": "unavailable",
@@ -3242,6 +4172,9 @@ class DreamingRuntime:
                         run_arguments["task_profile_id"] = (
                             profile_audit_target.profile["profile_id"]
                         )
+                        run_arguments["task_occurrence_context"] = (
+                            occurrence_context_path
+                        )
                     if on_review_operation_start is not None:
                         on_review_operation_start()
                     result = executor.call("run", **run_arguments)
@@ -3265,11 +4198,80 @@ class DreamingRuntime:
                     )
                     raise RuntimeFailure("result-channel-mismatch", executor_id)
                 result = self._validated_review_result(result)
+                occurrence_resolution = existing_occurrence_resolution
+                if (
+                    profile_audit_target is not None
+                    and occurrence_resolution is None
+                ):
+                    occurrence_resolution = (
+                        self._record_task_occurrence_resolution(
+                            profile_audit_target,
+                            executor_id,
+                            executor.identity,
+                            result,
+                            occurrence_context or {},
+                        )
+                    )
                 result["transcript_context"] = self._validated_evidence_context(
                     result,
                     snapshot_path,
                     reviewed_identity,
                 )
+                if (
+                    occurrence_resolution is not None
+                    and occurrence_resolution["boundary_relation"]
+                    == "boundary-conflict"
+                ):
+                    if (
+                        result["terminal_route"] != "discard"
+                        or result.get("artifact") is not None
+                    ):
+                        raise RuntimeFailure(
+                            "task-occurrence-boundary-invalid",
+                            "conflict-must-discard",
+                        )
+                    attempts.append(
+                        {
+                            "session_id": qualified_session_id,
+                            "source": source_name,
+                            "executor": executor_id,
+                            "route": f"{source_name}>{executor_id}",
+                            "policy_version": self.policy_version,
+                            "status": "boundary-conflict",
+                            "terminal_route": "discard",
+                            "mutation_started": False,
+                            "started_at": attempt_started_at,
+                            "task_profile_delivery": task_profile_delivery,
+                            **receipt_fields,
+                            **profile_audit_fields,
+                            "occurrence_resolution_sha256": (
+                                occurrence_resolution["resolution_sha256"]
+                            ),
+                        }
+                    )
+                    self._write(self.paths.attempts, attempts)
+                    disposition = self._record_profile_audit_disposition(
+                        profile_audit_target,
+                        executor_id,
+                        executor.identity,
+                        result,
+                        occurrence_resolution,
+                    )
+                    self._clear_transaction(
+                        qualified_session_id,
+                        reviewed_identity["source_revision"],
+                    )
+                    return {
+                        "status": "boundary-conflict",
+                        "executor": executor_id,
+                        "profile_id": profile_audit_target.profile["profile_id"],
+                        "occurrence_resolution_sha256": (
+                            occurrence_resolution["resolution_sha256"]
+                        ),
+                        "disposition_sha256": disposition[
+                            "disposition_sha256"
+                        ],
+                    }
                 if profile_audit_target is not None and result["terminal_route"] in {
                     "skill",
                     "support_file",
@@ -3289,6 +4291,7 @@ class DreamingRuntime:
                     reviewed_identity,
                     task_profile_receipt,
                     task_profile_evidence_present,
+                    occurrence_resolution,
                 )
                 attempt = {
                     "session_id": qualified_session_id,
@@ -3378,6 +4381,7 @@ class DreamingRuntime:
                             **result,
                             "artifact_commit": artifact_commit,
                         },
+                        occurrence_resolution,
                     )
                 else:
                     ledger = self._state(self.paths.ledger, [])
@@ -3434,6 +4438,22 @@ class DreamingRuntime:
                         {
                             "profile_id": profile_audit_target.profile["profile_id"],
                             "disposition_sha256": disposition["disposition_sha256"],
+                            **(
+                                {
+                                    "occurrence_resolution_sha256": (
+                                        occurrence_resolution[
+                                            "resolution_sha256"
+                                        ]
+                                    ),
+                                    "canonical_occurrence_id": (
+                                        occurrence_resolution[
+                                            "canonical_occurrence_id"
+                                        ]
+                                    ),
+                                }
+                                if occurrence_resolution is not None
+                                else {}
+                            ),
                         }
                         if profile_audit_target is not None
                         else {}
@@ -8341,7 +9361,7 @@ def scheduled_run() -> dict[str, Any]:
         },
         "profile_review_skips": [],
         "accounting": {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "pending",
             "receipt": None,
             "receipt_sha256": None,
@@ -8802,33 +9822,78 @@ def scheduled_run() -> dict[str, Any]:
         item: dict[str, Any], outcome: str, operation_id: str | None = None
     ) -> str:
         row_id = queue_ids[id(item)]
-        queue_accounting.append(
-            {
-                "queue_row_id": row_id,
-                "outcome": outcome,
-                "profile_operation_id": operation_id,
-            }
-        )
+        row = {
+            "queue_row_id": row_id,
+            "outcome": outcome,
+            "profile_operation_ids": (
+                [operation_id] if operation_id is not None else []
+            ),
+        }
+        queue_accounting.append(row)
         return row_id
 
-    def account_profiles(item: dict[str, Any], receipt: TaskProfileReceipt) -> None:
+    def link_profile_operation(
+        item: dict[str, Any], operation_id: str, *, outcome: str
+    ) -> None:
         row_id = queue_ids[id(item)]
+        rows = [
+            row for row in queue_accounting if row["queue_row_id"] == row_id
+        ]
+        if len(rows) != 1:
+            raise RuntimeFailure(
+                "task-pass-accounting-invalid", "queue-row-link"
+            )
+        row = rows[0]
+        if operation_id in row["profile_operation_ids"]:
+            raise RuntimeFailure(
+                "task-pass-accounting-invalid", "duplicate-profile-operation"
+            )
+        row["profile_operation_ids"].append(operation_id)
+        row["outcome"] = outcome
+
+    def mark_queue_outcome(item: dict[str, Any], outcome: str) -> None:
+        row_id = queue_ids[id(item)]
+        rows = [
+            row for row in queue_accounting if row["queue_row_id"] == row_id
+        ]
+        if len(rows) != 1:
+            raise RuntimeFailure(
+                "task-pass-accounting-invalid", "queue-row-outcome"
+            )
+        rows[0]["outcome"] = outcome
+
+    def account_profiles(
+        item: dict[str, Any],
+        receipt: TaskProfileReceipt,
+        *,
+        forced_terminals: dict[str, str] | None = None,
+    ) -> None:
+        row_id = queue_ids[id(item)]
+        existing_profile_ids = {
+            row["profile_id"] for row in profile_accounting
+        }
         for profile in receipt.payload["profiles"]:
+            if profile["profile_id"] in existing_profile_ids:
+                continue
             profile_accounting.append(
                 {
                     "profile_id": profile["profile_id"],
                     "queue_row_id": row_id,
                     "profile_receipt_sha256": receipt.payload["receipt_sha256"],
-                    "terminal": (
+                    "terminal": (forced_terminals or {}).get(
+                        profile["profile_id"]
+                    ) or (
                         "reusable-awaiting-review"
                         if profile["reuse_value"] == "reusable-procedure"
                         else "no-learning"
                     ),
                 }
             )
+            existing_profile_ids.add(profile["profile_id"])
 
     profile_attempts = 0
     profile_failed_sessions: set[str] = set()
+    profile_boundary_terminal_profiles: dict[str, str] = {}
     profile_started_at = time.monotonic()
     for item in queue:
         status = item.get("status")
@@ -8947,6 +10012,151 @@ def scheduled_run() -> dict[str, Any]:
             and existing_receipt.payload.get("executor_identity")
             == executors[executor_name].identity
         ):
+            conflicts = core.task_occurrence_conflicts_for(existing_receipt)
+            if conflicts:
+                prior_correction = core.task_occurrence_correction_attempt_for(
+                    conflicts[0]
+                )
+                if prior_correction is not None:
+                    prior_terminal = (
+                        "boundary-correction-failed"
+                        if prior_correction["terminal_status"] == "failed"
+                        else "boundary-unresolved"
+                    )
+                    account_queue(item, "cached-current-receipt")
+                    account_profiles(
+                        item,
+                        existing_receipt,
+                        forced_terminals={
+                            conflict["profile_id"]: prior_terminal
+                            for conflict in conflicts
+                        },
+                    )
+                    for conflict in conflicts:
+                        profile_boundary_terminal_profiles[
+                            conflict["profile_id"]
+                        ] = prior_terminal
+                    report["profile_skips"].append(
+                        {
+                            "session_id": item["qualified_session_id"],
+                            "code": "boundary-correction-already-terminal",
+                        }
+                    )
+                    continue
+                budget_reason = profile_budget_reason(
+                    profile_attempts, profile_started_at, settings
+                )
+                if budget_reason is not None:
+                    account_queue(item, "eligible-deferred")
+                    report["profile_budget"]["exhausted_reason"] = budget_reason
+                    continue
+                row_id = queue_ids[id(item)]
+                operation_id = f"profile:{accounting_pass_id}:{row_id}"
+                correction_started = False
+
+                def record_correction_start() -> None:
+                    nonlocal profile_attempts, correction_started
+                    bound = profile_budget_reason(
+                        profile_attempts, profile_started_at, settings
+                    )
+                    if bound is not None:
+                        raise RuntimeFailure("profile-operation-bound", bound)
+                    profile_attempts += 1
+                    correction_started = True
+
+                try:
+                    correction = core.correct_task_occurrence_conflict(
+                        source_name,
+                        source,
+                        existing_receipt,
+                        conflicts[0],
+                        executor_name,
+                        executors[executor_name],
+                        on_profile_operation_start=record_correction_start,
+                    )
+                    terminal = (
+                        "profiled"
+                        if correction["status"] == "replacement-profiled"
+                        else "correction-unresolved"
+                        if correction["status"] == "boundary-unresolved"
+                        else "failed"
+                    )
+                    if correction_started:
+                        profile_operations.append(
+                            {
+                                "operation_id": operation_id,
+                                "queue_row_id": row_id,
+                                "terminal": terminal,
+                            }
+                        )
+                    account_queue(
+                        item,
+                        (
+                            "newly-attempted"
+                            if correction_started
+                            else "profile-failed"
+                        ),
+                        operation_id if correction_started else None,
+                    )
+                    replacement = core.indexed_task_profile_receipt_for(
+                        item["qualified_session_id"],
+                        item["source_revision"],
+                        executor_name,
+                    )
+                    if terminal == "profiled" and replacement is not None:
+                        account_profiles(item, replacement)
+                    elif terminal == "correction-unresolved":
+                        account_profiles(
+                            item,
+                            existing_receipt,
+                            forced_terminals={
+                                conflict["profile_id"]:
+                                "boundary-unresolved"
+                                for conflict in conflicts
+                            },
+                        )
+                        for conflict in conflicts:
+                            profile_boundary_terminal_profiles[
+                                conflict["profile_id"]
+                            ] = "boundary-unresolved"
+                    else:
+                        profile_failed_sessions.add(
+                            item["qualified_session_id"]
+                        )
+                    report["profiles"].append(
+                        {
+                            "session_id": item["qualified_session_id"],
+                            "correction": True,
+                            **correction,
+                        }
+                    )
+                except RuntimeFailure as error:
+                    if error.code == "profile-operation-bound":
+                        account_queue(item, "eligible-deferred")
+                        report["profile_budget"]["exhausted_reason"] = error.message
+                        continue
+                    if correction_started:
+                        profile_operations.append(
+                            {
+                                "operation_id": operation_id,
+                                "queue_row_id": row_id,
+                                "terminal": "failed",
+                            }
+                        )
+                    account_queue(
+                        item,
+                        "profile-failed",
+                        operation_id if correction_started else None,
+                    )
+                    profile_failed_sessions.add(item["qualified_session_id"])
+                    report["profile_failures"].append(
+                        {
+                            "session_id": item["qualified_session_id"],
+                            "code": error.code,
+                            "message": error.message,
+                        }
+                    )
+                continue
             account_queue(item, "cached-current-receipt")
             account_profiles(item, existing_receipt)
             report["profile_skips"].append(
@@ -9224,6 +10434,24 @@ def scheduled_run() -> dict[str, Any]:
             (item["qualified_session_id"], item["source_revision"])
         ] = targets
         for target in targets:
+            boundary_terminal = profile_boundary_terminal_profiles.get(
+                target.profile["profile_id"]
+            )
+            if boundary_terminal is not None:
+                account_review(
+                    item,
+                    target.profile["profile_id"],
+                    boundary_terminal,
+                    target.receipt.payload["receipt_sha256"],
+                )
+                report["profile_review_skips"].append(
+                    {
+                        "session_id": item["qualified_session_id"],
+                        "profile_id": target.profile["profile_id"],
+                        "code": "boundary-correction-already-terminal",
+                    }
+                )
+                continue
             try:
                 disposition_admission, disposition = (
                     core.profile_audit_disposition_admission_for(target)
@@ -9283,6 +10511,24 @@ def scheduled_run() -> dict[str, Any]:
                     }
                 )
                 continue
+            if disposition_admission in {
+                "boundary-conflict",
+                "boundary-unresolved",
+            }:
+                account_review(
+                    item,
+                    target.profile["profile_id"],
+                    disposition_admission,
+                    target.receipt.payload["receipt_sha256"],
+                )
+                report["profile_review_skips"].append(
+                    {
+                        "session_id": item["qualified_session_id"],
+                        "profile_id": target.profile["profile_id"],
+                        "code": disposition_admission,
+                    }
+                )
+                continue
             profile_review_candidates.append(
                 (
                     source_name,
@@ -9299,6 +10545,10 @@ def scheduled_run() -> dict[str, Any]:
                     ),
                 )
             )
+    queue_item_by_row_id = {
+        queue_ids[id(item)]: item for item in queue
+    }
+    superseded_profile_receipts: set[str] = set()
     for (
         source_name,
         source,
@@ -9308,6 +10558,19 @@ def scheduled_run() -> dict[str, Any]:
         target,
         review_row,
     ) in profile_review_candidates:
+        if (
+            target.receipt.payload["receipt_sha256"]
+            in superseded_profile_receipts
+        ):
+            review_row["outcome"] = "stale-superseded"
+            report["profile_review_skips"].append(
+                {
+                    "session_id": qualified_session_id,
+                    "profile_id": target.profile["profile_id"],
+                    "code": "profile-receipt-superseded-by-correction",
+                }
+            )
+            continue
         if (
             report["review_budget"]["started_operations"]
             >= settings["max_reviews_per_run"]
@@ -9352,6 +10615,18 @@ def scheduled_run() -> dict[str, Any]:
                         "code": "already-dispositioned",
                     }
                 )
+            elif result["status"] == "exact-task-reused":
+                review_row["outcome"] = "already-dispositioned"
+                for profile_row in profile_accounting:
+                    if profile_row["profile_id"] == target.profile["profile_id"]:
+                        profile_row["terminal"] = "reusable-dispositioned"
+                report["profile_review_skips"].append(
+                    {
+                        "session_id": qualified_session_id,
+                        "profile_id": target.profile["profile_id"],
+                        "code": "exact-task-reused",
+                    }
+                )
             elif result["status"] == "stale-before-review":
                 review_row["outcome"] = "stale-superseded"
                 report["profile_review_skips"].append(
@@ -9380,7 +10655,11 @@ def scheduled_run() -> dict[str, Any]:
                     }
                 )
             else:
-                review_row["outcome"] = "newly-attempted"
+                review_row["outcome"] = (
+                    "boundary-conflict"
+                    if result["status"] == "boundary-conflict"
+                    else "newly-attempted"
+                )
                 if report["review_budget"]["started_operations"] > started_before:
                     operation_id = (
                         f"review:{accounting_pass_id}:{review_row['review_row_id']}"
@@ -9393,12 +10672,48 @@ def scheduled_run() -> dict[str, Any]:
                             "profile_receipt_sha256": target.receipt.payload[
                                 "receipt_sha256"
                             ],
-                            "terminal": "dispositioned",
+                            "terminal": (
+                                "boundary-conflict"
+                                if result["status"] == "boundary-conflict"
+                                else "recurrence-ready"
+                                if (
+                                    isinstance(
+                                        result.get("policy_deferred"), dict
+                                    )
+                                    and isinstance(
+                                        result["policy_deferred"].get(
+                                            "shadow_candidate"
+                                        ),
+                                        dict,
+                                    )
+                                    and result["policy_deferred"][
+                                        "shadow_candidate"
+                                    ].get("recommendation")
+                                    == "ready_for_draft"
+                                )
+                                else "recurrence-waiting"
+                                if (
+                                    isinstance(
+                                        result.get("policy_deferred"), dict
+                                    )
+                                    and isinstance(
+                                        result["policy_deferred"].get(
+                                            "shadow_candidate"
+                                        ),
+                                        dict,
+                                    )
+                                )
+                                else "dispositioned"
+                            ),
                         }
                     )
                     for profile_row in profile_accounting:
                         if profile_row["profile_id"] == target.profile["profile_id"]:
-                            profile_row["terminal"] = "reusable-dispositioned"
+                            profile_row["terminal"] = (
+                                "boundary-conflict"
+                                if result["status"] == "boundary-conflict"
+                                else "reusable-dispositioned"
+                            )
                 report["reviews"].append(
                     {
                         "session_id": qualified_session_id,
@@ -9406,6 +10721,188 @@ def scheduled_run() -> dict[str, Any]:
                         **result,
                     }
                 )
+                if result["status"] == "boundary-conflict":
+                    conflict = core.task_occurrence_resolution_for(target)
+                    if conflict is None:
+                        raise RuntimeFailure(
+                            "task-occurrence-resolution-invalid",
+                            "conflict-resolution-missing",
+                        )
+                    item = queue_item_by_row_id[review_row["queue_row_id"]]
+                    profile_bound = profile_budget_reason(
+                        profile_attempts, profile_started_at, settings
+                    )
+                    if profile_bound is not None:
+                        mark_queue_outcome(item, "eligible-deferred")
+                        report["profile_budget"]["exhausted_reason"] = (
+                            profile_bound
+                        )
+                        continue
+                    correction_operation_id = (
+                        f"profile-correction:{accounting_pass_id}:"
+                        f"{review_row['queue_row_id']}:"
+                        f"{conflict['resolution_sha256'][7:23]}"
+                    )
+                    correction_started = False
+
+                    def record_correction_start() -> None:
+                        nonlocal profile_attempts, correction_started
+                        bound = profile_budget_reason(
+                            profile_attempts, profile_started_at, settings
+                        )
+                        if bound is not None:
+                            raise RuntimeFailure(
+                                "profile-operation-bound", bound
+                            )
+                        profile_attempts += 1
+                        correction_started = True
+
+                    try:
+                        correction = core.correct_task_occurrence_conflict(
+                            source_name,
+                            source,
+                            target.receipt,
+                            conflict,
+                            executor_id,
+                            executor,
+                            on_profile_operation_start=record_correction_start,
+                        )
+                        if correction_started:
+                            correction_terminal = (
+                                "profiled"
+                                if correction["status"]
+                                == "replacement-profiled"
+                                else "correction-unresolved"
+                                if correction["status"]
+                                == "boundary-unresolved"
+                                else "failed"
+                            )
+                            profile_operations.append(
+                                {
+                                    "operation_id": correction_operation_id,
+                                    "queue_row_id": review_row["queue_row_id"],
+                                    "terminal": correction_terminal,
+                                }
+                            )
+                            link_profile_operation(
+                                item,
+                                correction_operation_id,
+                                outcome="newly-attempted",
+                            )
+                        report["profiles"].append(
+                            {
+                                "session_id": qualified_session_id,
+                                "correction": True,
+                                **correction,
+                            }
+                        )
+                        if correction["status"] == "replacement-profiled":
+                            superseded_profile_receipts.add(
+                                target.receipt.payload["receipt_sha256"]
+                            )
+                            replacement = core.indexed_task_profile_receipt_for(
+                                qualified_session_id,
+                                source_revision,
+                                executor_id,
+                            )
+                            if replacement is None:
+                                raise RuntimeFailure(
+                                    "task-occurrence-correction-invalid",
+                                    "replacement-receipt-missing",
+                                )
+                            account_profiles(item, replacement)
+                            replacement_targets = (
+                                core.profile_audit_targets_for(
+                                    source_name,
+                                    source,
+                                    qualified_session_id,
+                                    source_revision,
+                                    executor_id,
+                                    executor,
+                                )
+                            )
+                            profile_audit_revisions[
+                                (qualified_session_id, source_revision)
+                            ] = replacement_targets
+                            existing_candidate_keys = {
+                                (
+                                    candidate[5].profile["profile_id"],
+                                    candidate[5].receipt.payload[
+                                        "receipt_sha256"
+                                    ],
+                                )
+                                for candidate in profile_review_candidates
+                            }
+                            for replacement_target in replacement_targets:
+                                if (
+                                    (
+                                        replacement_target.profile[
+                                            "profile_id"
+                                        ],
+                                        replacement_target.receipt.payload[
+                                            "receipt_sha256"
+                                        ],
+                                    )
+                                    in existing_candidate_keys
+                                ):
+                                    continue
+                                profile_review_candidates.append(
+                                    (
+                                        source_name,
+                                        source,
+                                        qualified_session_id,
+                                        source_revision,
+                                        executor,
+                                        replacement_target,
+                                        account_review(
+                                            item,
+                                            replacement_target.profile[
+                                                "profile_id"
+                                            ],
+                                            "newly-attempted",
+                                            replacement.payload[
+                                                "receipt_sha256"
+                                            ],
+                                        ),
+                                    )
+                                )
+                        elif correction["status"] == "boundary-unresolved":
+                            for profile_row in profile_accounting:
+                                if (
+                                    profile_row["profile_id"]
+                                    == target.profile["profile_id"]
+                                ):
+                                    profile_row["terminal"] = (
+                                        "boundary-unresolved"
+                                    )
+                    except RuntimeFailure as error:
+                        if error.code == "profile-operation-bound":
+                            mark_queue_outcome(item, "eligible-deferred")
+                            report["profile_budget"]["exhausted_reason"] = (
+                                error.message
+                            )
+                            continue
+                        if correction_started:
+                            profile_operations.append(
+                                {
+                                    "operation_id": correction_operation_id,
+                                    "queue_row_id": review_row["queue_row_id"],
+                                    "terminal": "failed",
+                                }
+                            )
+                            link_profile_operation(
+                                item,
+                                correction_operation_id,
+                                outcome="newly-attempted",
+                            )
+                        report["errors"].append(
+                            {
+                                "phase": "profile-correction",
+                                "session_id": qualified_session_id,
+                                "profile_id": target.profile["profile_id"],
+                                "code": error.code,
+                            }
+                        )
         except RuntimeFailure as error:
             started = report["review_budget"]["started_operations"] > started_before
             if started:
@@ -9463,6 +10960,13 @@ def scheduled_run() -> dict[str, Any]:
     report["deferred_reviews"] = sum(
         row["outcome"] == "eligible-deferred" for row in review_accounting
     )
+    report["deferred_profiles"] = sum(
+        row["outcome"] == "eligible-deferred" for row in queue_accounting
+    )
+    report["profile_budget"]["attempts"] = profile_attempts
+    report["profile_budget"]["elapsed_seconds"] = int(
+        time.monotonic() - profile_started_at
+    )
     profile_stop_reason = (
         report["profile_budget"]["exhausted_reason"] or "eligible-exhausted"
     )
@@ -9494,7 +10998,7 @@ def scheduled_run() -> dict[str, Any]:
         else:
             atomic_json(receipt_path, accounting_receipt, mode=0o400)
         report["accounting"] = {
-            "schema_version": 1,
+            "schema_version": 2,
             "status": "reconciled",
             "receipt": str(receipt_path),
             "receipt_sha256": accounting_receipt["receipt_sha256"],

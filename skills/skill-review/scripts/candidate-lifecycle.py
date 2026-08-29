@@ -503,17 +503,36 @@ def validate_record(value: Any, verify_packages: bool = True) -> dict[str, Any]:
         raise LifecycleError("candidate record.evidence must be a list")
     evidence_ids: set[str] = set()
     for index, item in enumerate(evidence):
-        item = require_exact_keys(item, EVIDENCE_KEYS, f"candidate record.evidence[{index}]")
-        expected_id = sha256(
-            canonical({key: item[key] for key in sorted(EVIDENCE_KEYS - {"evidence_id"})})
-        )
-        if item["evidence_id"] != expected_id or item["evidence_id"] in evidence_ids:
+        item_keys = set(item) if isinstance(item, dict) else set()
+        legacy_evidence_keys = {
+                "task_key",
+                "session_id",
+                "observed_at",
+                "independence",
+                "summary",
+                "procedure_fingerprint",
+                "evidence_id",
+            }
+        if (
+            not isinstance(item, dict)
+            or (
+                item_keys != EVIDENCE_KEYS
+                and item_keys != legacy_evidence_keys
+            )
+        ):
+            raise LifecycleError(
+                f"candidate record.evidence[{index}] has an unknown shape"
+            )
+        payload = {
+            key: item[key] for key in item if key != "evidence_id"
+        }
+        validated = validate_observation(payload, procedure)
+        if (
+            item != validated
+            or item["evidence_id"] in evidence_ids
+        ):
             raise LifecycleError(f"candidate record.evidence[{index}] has an invalid identity")
         evidence_ids.add(item["evidence_id"])
-        validate_observation(
-            {key: item[key] for key in EVIDENCE_KEYS - {"evidence_id"}},
-            procedure,
-        )
 
     revisions = record["candidate_revisions"]
     if not isinstance(revisions, list) or not revisions:
@@ -805,7 +824,16 @@ def recurrence(record: dict[str, Any]) -> dict[str, Any]:
     if record["schema_version"] != SCHEMA_VERSION:
         return {"ready": False, "reasons": ["legacy-no-current-occurrence-authority"], "evidence_ids": [], "verified_evidence_count": 0, "distinct_occurrence_count": 0}
     decision_at = now_time()
-    qualified = [item for item in record["evidence"] if parse_time(item["occurred_at"], "evidence.occurred_at") <= decision_at and decision_at - parse_time(item["occurred_at"], "evidence.occurred_at") <= 30 * DAY]
+    qualified = [
+        item
+        for item in record["evidence"]
+        if "canonical_occurrence_id" in item
+        and parse_time(item["occurred_at"], "evidence.occurred_at")
+        <= decision_at
+        and decision_at
+        - parse_time(item["occurred_at"], "evidence.occurred_at")
+        <= 30 * DAY
+    ]
     occurrences = {item["canonical_occurrence_id"] for item in qualified}
     reasons: list[str] = []
     if len(occurrences) < 3:

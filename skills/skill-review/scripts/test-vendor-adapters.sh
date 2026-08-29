@@ -72,6 +72,40 @@ class VendorAdapterTest(unittest.TestCase):
         self._write_sources()
         self._write_fake_clis()
 
+    def test_selected_profile_review_requires_occurrence_boundary(self):
+        snapshot = {
+            "events": [
+                {
+                    "source_event_id": "event-1",
+                    "kind": "user_message",
+                }
+            ]
+        }
+        profile_context = {
+            "profiles": [{"profile_id": "sha256:" + "1" * 64}],
+            "occurrence_context": {
+                "review_contract": "profile-catalog-review-occurrence-v1",
+                "selected_profile_id": "sha256:" + "1" * 64,
+                "selected_task_key": "sha256:" + "2" * 64,
+                "prior_overlaps": [],
+            },
+        }
+        schema = vendor_module.review_result_schema(
+            snapshot, profile_context
+        )
+        self.assertIn("occurrence_boundary", schema["required"])
+        prompt = json.loads(
+            vendor_module.review_prompt(snapshot, profile_context)
+        )
+        self.assertEqual(
+            prompt["task_profile_context"]["occurrence_context"],
+            profile_context["occurrence_context"],
+        )
+        legacy_schema = vendor_module.review_result_schema(
+            snapshot, {"profiles": profile_context["profiles"]}
+        )
+        self.assertNotIn("occurrence_boundary", legacy_schema["required"])
+
     def run_adapter(
         self,
         vendor,
@@ -479,7 +513,7 @@ class VendorAdapterTest(unittest.TestCase):
     def test_review_rejects_invalid_task_profile_receipts_with_reason(self):
         cases = {
             "schema-version": lambda receipt, snapshot: receipt.__setitem__(
-                "schema_version", 2
+                "schema_version", 3
             ),
             "source-revision": lambda receipt, snapshot: receipt.__setitem__(
                 "source_revision", "revision-2"

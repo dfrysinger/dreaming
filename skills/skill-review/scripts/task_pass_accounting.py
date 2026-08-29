@@ -6,7 +6,8 @@ import hashlib
 import json
 from typing import Any, NoReturn
 
-ACCOUNTING_SCHEMA_VERSION = 1
+ACCOUNTING_SCHEMA_VERSION = 2
+KNOWN_ACCOUNTING_SCHEMA_VERSIONS = frozenset({1, 2})
 QUEUE_OUTCOMES = frozenset(
     {
         "cached-current-receipt",
@@ -23,10 +24,24 @@ QUEUE_OUTCOMES = frozenset(
     }
 )
 PROFILE_OPERATION_TERMINALS = frozenset(
-    {"profiled", "malformed", "failed", "deleted", "stale"}
+    {
+        "profiled",
+        "correction-unresolved",
+        "malformed",
+        "failed",
+        "deleted",
+        "stale",
+    }
 )
 PROFILE_TERMINALS = frozenset(
-    {"no-learning", "reusable-awaiting-review", "reusable-dispositioned"}
+    {
+        "no-learning",
+        "reusable-awaiting-review",
+        "reusable-dispositioned",
+        "boundary-conflict",
+        "boundary-unresolved",
+        "boundary-correction-failed",
+    }
 )
 REVIEW_OUTCOMES = frozenset(
     {
@@ -37,12 +52,23 @@ REVIEW_OUTCOMES = frozenset(
         "deleted",
         "invalid-unbound",
         "known-superseded-contract",
+        "boundary-conflict",
+        "boundary-unresolved",
+        "boundary-correction-failed",
         "eligible-deferred",
         "newly-attempted",
     }
 )
 REVIEW_OPERATION_TERMINALS = frozenset(
-    {"dispositioned", "malformed", "failed", "stale"}
+    {
+        "dispositioned",
+        "recurrence-waiting",
+        "recurrence-ready",
+        "boundary-conflict",
+        "malformed",
+        "failed",
+        "stale",
+    }
 )
 
 
@@ -155,7 +181,7 @@ def validate_task_pass_accounting_receipt(receipt: Any) -> dict[str, Any]:
         _reject("accounting-shape")
     body = {key: value for key, value in receipt.items() if key != "receipt_sha256"}
     if (
-        receipt["schema_version"] != ACCOUNTING_SCHEMA_VERSION
+        receipt["schema_version"] not in KNOWN_ACCOUNTING_SCHEMA_VERSIONS
         or receipt["kind"] != "task_opportunity_pass_accounting"
         or not isinstance(receipt["pass_id"], str)
         or not receipt["pass_id"]
@@ -177,16 +203,41 @@ def validate_task_pass_accounting_receipt(receipt: Any) -> dict[str, Any]:
     )
     if review_operation_ids != review_terminal_ids:
         _reject("review-operation-terminal-unmatched")
-    if any(
-        row.get("outcome") not in QUEUE_OUTCOMES
-        or set(row) != {"queue_row_id", "outcome", "profile_operation_id"}
-        or (
-            row["profile_operation_id"] is not None
-            and row["profile_operation_id"] not in profile_operation_ids
-        )
-        for row in receipt["queue_rows"]
-    ):
-        _reject("queue-terminal-invalid")
+    if receipt["schema_version"] == 1:
+        if any(
+            row.get("outcome") not in QUEUE_OUTCOMES
+            or set(row) != {"queue_row_id", "outcome", "profile_operation_id"}
+            or (
+                row["profile_operation_id"] is not None
+                and row["profile_operation_id"] not in profile_operation_ids
+            )
+            for row in receipt["queue_rows"]
+        ):
+            _reject("queue-terminal-invalid")
+        linked_profile_operations = {
+            row["profile_operation_id"]
+            for row in receipt["queue_rows"]
+            if row["profile_operation_id"] is not None
+        }
+    else:
+        if any(
+            row.get("outcome") not in QUEUE_OUTCOMES
+            or set(row) != {"queue_row_id", "outcome", "profile_operation_ids"}
+            or not isinstance(row["profile_operation_ids"], list)
+            or len(row["profile_operation_ids"])
+            != len(set(row["profile_operation_ids"]))
+            or any(
+                operation_id not in profile_operation_ids
+                for operation_id in row["profile_operation_ids"]
+            )
+            for row in receipt["queue_rows"]
+        ):
+            _reject("queue-terminal-invalid")
+        linked_profile_operations = {
+            operation_id
+            for row in receipt["queue_rows"]
+            for operation_id in row["profile_operation_ids"]
+        }
     if any(
         row.get("terminal") not in PROFILE_OPERATION_TERMINALS
         or set(row) != {"operation_id", "queue_row_id", "terminal"}
@@ -194,11 +245,6 @@ def validate_task_pass_accounting_receipt(receipt: Any) -> dict[str, Any]:
         for row in receipt["profile_operations"]
     ):
         _reject("profile-operation-terminal-invalid")
-    linked_profile_operations = {
-        row["profile_operation_id"]
-        for row in receipt["queue_rows"]
-        if row["profile_operation_id"] is not None
-    }
     if linked_profile_operations != profile_operation_ids:
         _reject("profile-operation-unmatched")
     if any(
@@ -243,14 +289,14 @@ def validate_task_pass_accounting_receipt(receipt: Any) -> dict[str, Any]:
             and row["operation_id"] not in review_operation_ids
         )
         or (
-            row["outcome"] == "newly-attempted"
+            row["outcome"] in {"newly-attempted", "boundary-conflict"}
             and (
                 not isinstance(row["profile_id"], str)
                 or not isinstance(row["operation_id"], str)
             )
         )
         or (
-            row["outcome"] != "newly-attempted"
+            row["outcome"] not in {"newly-attempted", "boundary-conflict"}
             and row["operation_id"] is not None
         )
         or (
