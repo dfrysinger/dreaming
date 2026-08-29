@@ -389,16 +389,144 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
             ),
         }
         if args.task_profile_id:
+            audit_receipt = load(Path(args.task_profile_receipt), {})
+            selected = [
+                profile
+                for profile in audit_receipt.get("profiles", [])
+                if isinstance(profile, dict)
+                and profile.get("profile_id") == args.task_profile_id
+            ]
+            if len(selected) != 1:
+                fail("task-profile-receipt-invalid", args.adapter_id)
+            artifact = result["artifact"]
+            operation = (
+                artifact.get("operation") if isinstance(artifact, dict) else None
+            )
+            occurrence_relation = state.get(
+                "occurrence_relation_by_profile", {}
+            ).get(
+                args.task_profile_id,
+                state.get("occurrence_relation", "new-occurrence"),
+            )
+            derived_load_trace = []
+            snapshot_events = snapshot.get("events", [])
+            event_positions = {
+                event.get("source_event_id"): index
+                for index, event in enumerate(snapshot_events)
+                if isinstance(event, dict)
+            }
+            selected_event_ids = selected[0]["source_event_ids"]
+            first = event_positions[selected_event_ids[0]]
+            last = event_positions[selected_event_ids[-1]]
+            for event in snapshot_events[first : last + 1]:
+                if (
+                    not isinstance(event, dict)
+                    or event.get("kind") != "tool_call"
+                    or str(event.get("tool_name", "")).casefold() != "skill"
+                ):
+                    continue
+                raw_input = event.get("text")
+                try:
+                    parsed_input = (
+                        json.loads(raw_input)
+                        if isinstance(raw_input, str)
+                        else raw_input
+                    )
+                except json.JSONDecodeError:
+                    parsed_input = None
+                invoked_name = None
+                if isinstance(parsed_input, dict):
+                    invoked_name = parsed_input.get(
+                        "skill",
+                        parsed_input.get(
+                            "skillName", parsed_input.get("name")
+                        ),
+                    )
+                if not isinstance(invoked_name, str):
+                    continue
+                invoked_name = invoked_name.strip().lstrip("/")
+                derived_load_trace.append(
+                    {
+                        "source_event_id": event["source_event_id"],
+                        "invoked_name": invoked_name,
+                        "catalog_skill_name": invoked_name,
+                        "event_sha256": digest(event),
+                    }
+                )
+            catalog_outcome = state.get("catalog_audit_outcome")
+            if catalog_outcome is None:
+                catalog_outcome = (
+                    "no-covering-skill"
+                    if operation == "create"
+                    else "missed-skill"
+                    if operation == "patch"
+                    else "wrong-or-incomplete-skill"
+                    if operation == "support_file"
+                    else "correct-skill"
+                    if derived_load_trace
+                    else "missed-skill"
+                )
+            if (
+                catalog_outcome == "missed-skill"
+                and artifact is None
+                and occurrence_relation != "boundary-conflict"
+            ):
+                artifact = {
+                    "operation": "patch",
+                    "skill_name": "fixture-skill",
+                    "skill_markdown": (
+                        "---\nname: fixture-skill\n"
+                        "description: Use for reusable fixture tasks.\n---\n"
+                        "# Fixture skill\n"
+                    ),
+                    "support_files": [],
+                }
+                operation = "patch"
+                result["terminal_route"] = "skill"
+                result["artifact"] = artifact
+                result["evidence_event_ids"] = list(
+                    selected[0]["source_event_ids"]
+                )
+            catalog_skill_name = state.get("catalog_skill_name")
+            if (
+                catalog_skill_name is None
+                and catalog_outcome != "no-covering-skill"
+            ):
+                catalog_skill_name = (
+                    artifact.get("skill_name")
+                    if isinstance(artifact, dict)
+                    else "fixture-skill"
+                )
+            catalog_names = sorted(
+                set(
+                    state.get("catalog_skill_names", [])
+                    + (
+                        [catalog_skill_name]
+                        if isinstance(catalog_skill_name, str)
+                        else []
+                    )
+                )
+            )
+            load_trace = state.get("skill_load_trace")
+            if load_trace is None:
+                load_trace = derived_load_trace
+            result["catalog_audit"] = {
+                "outcome": catalog_outcome,
+                "skill_name": catalog_skill_name,
+                "reviewer_contract": "profile-catalog-audit-v1",
+                "catalog_sha256": digest(catalog_names),
+                "catalog_skill_names": catalog_names,
+                "tombstones_sha256": digest(
+                    state.get("catalog_tombstones", [])
+                ),
+                "skill_load_trace": load_trace,
+                "skill_load_trace_sha256": digest(load_trace),
+            }
             prior_ids = state.get(
                 "occurrence_prior_ids_by_profile", {}
             ).get(args.task_profile_id, state.get("occurrence_prior_ids", []))
             result["occurrence_boundary"] = {
-                "relation": state.get(
-                    "occurrence_relation_by_profile", {}
-                ).get(
-                    args.task_profile_id,
-                    state.get("occurrence_relation", "new-occurrence"),
-                ),
+                "relation": occurrence_relation,
                 "prior_canonical_occurrence_ids": prior_ids,
             }
         save(Path(args.result), result)

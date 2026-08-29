@@ -69,6 +69,13 @@ class VendorAdapterTest(unittest.TestCase):
             "CODEX_HOME": str(self.case / "codex-home"),
         }
         (self.case / "skills").mkdir()
+        fixture_skill = self.case / "skills" / "fixture-skill"
+        fixture_skill.mkdir()
+        (fixture_skill / "SKILL.md").write_text(
+            "---\nname: fixture-skill\n"
+            "description: Use for reusable fixture tasks.\n---\n"
+            "# Fixture skill\n"
+        )
         self._write_sources()
         self._write_fake_clis()
 
@@ -105,6 +112,135 @@ class VendorAdapterTest(unittest.TestCase):
             snapshot, {"profiles": profile_context["profiles"]}
         )
         self.assertNotIn("occurrence_boundary", legacy_schema["required"])
+
+    def test_profile_catalog_audit_context_binds_task_range_loads(self):
+        snapshot = {
+            "events": [
+                {
+                    "source_event_id": "event-1",
+                    "kind": "user_message",
+                    "tool_name": None,
+                    "text": "start",
+                },
+                {
+                    "source_event_id": "event-2",
+                    "kind": "tool_call",
+                    "tool_name": "skill",
+                    "text": json.dumps({"skill": "fixture-skill"}),
+                },
+                {
+                    "source_event_id": "event-3",
+                    "kind": "assistant_message",
+                    "tool_name": None,
+                    "text": "done",
+                },
+                {
+                    "source_event_id": "event-4",
+                    "kind": "tool_call",
+                    "tool_name": "skill",
+                    "text": json.dumps({"skill": "outside-task"}),
+                },
+            ]
+        }
+        profile_context = {
+            "profiles": [
+                {
+                    "source_event_ids": ["event-1", "event-3"],
+                }
+            ]
+        }
+        catalog_context = {
+            "skills": [
+                {
+                    "name": "fixture-skill",
+                    "agent_created": False,
+                    "skill_markdown": "fixture",
+                }
+            ],
+            "tombstones": [],
+        }
+        context = vendor_module.task_profile_catalog_audit_context(
+            snapshot, profile_context, catalog_context
+        )
+        self.assertEqual(context["reviewer_contract"], "profile-catalog-audit-v1")
+        self.assertEqual(context["catalog_skill_names"], ["fixture-skill"])
+        self.assertEqual(
+            [
+                (item["source_event_id"], item["catalog_skill_name"])
+                for item in context["skill_load_trace"]
+            ],
+            [("event-2", "fixture-skill")],
+        )
+        self.assertEqual(
+            context["skill_load_trace_sha256"],
+            vendor_module.sha(context["skill_load_trace"]),
+        )
+        audit_profile_context = {
+            **profile_context,
+            "catalog_audit_context": context,
+        }
+        schema = vendor_module.review_result_schema(
+            snapshot, audit_profile_context
+        )
+        self.assertEqual(
+            schema["properties"]["terminal_route"]["enum"],
+            ["discard", "skill", "support_file"],
+        )
+        prompt = json.loads(
+            vendor_module.review_prompt(snapshot, audit_profile_context)
+        )
+        self.assertNotIn(
+            "record a recommendation",
+            prompt["policy"]["reuse_order"],
+        )
+        self.assertFalse(
+            prompt["policy"][
+                "instruction_and_factual_memory_are_recommendation_only"
+            ]
+        )
+
+    def test_task_profile_executor_compatibility_is_narrow(self):
+        original = {
+            "protocol": "dreaming.review-executor",
+            "version": 1,
+            "adapter_id": "copilot",
+            "capabilities": [
+                "source-blind",
+                "mutation-fence",
+                "completion-sentinel",
+                "task-profile-v2",
+            ],
+            "executor_version": "1.0",
+            "model": "fixture-model",
+            "adapter_sha256": "a" * 64,
+        }
+        compatible = {
+            **original,
+            "capabilities": [
+                *original["capabilities"],
+                "new-compatible-capability",
+            ],
+            "adapter_sha256": "b" * 64,
+        }
+        self.assertTrue(
+            vendor_module.compatible_task_profile_executor_identities(
+                original, compatible
+            )
+        )
+        for incompatible in (
+            {**compatible, "model": "other-model"},
+            {**compatible, "executor_version": "2.0"},
+            {**compatible, "adapter_id": "other-adapter"},
+            {
+                **compatible,
+                "capabilities": ["task-profile-v2"],
+            },
+        ):
+            self.assertFalse(
+                vendor_module.compatible_task_profile_executor_identities(
+                    original, incompatible
+                )
+            )
 
     def run_adapter(
         self,
@@ -1042,6 +1178,49 @@ def task_profile_payload(prompt):
       "kind": "llm_task_opportunity_profile",
       "profiles": profiles,
     }
+def review_payload(prompt):
+    if "draft_review" in prompt:
+        return {"decision":"approve","summary":"independent fixture approval"}
+    packet = json.loads(prompt)
+    payload = {
+      "terminal_route":"discard",
+      "summary":"fixture",
+      "routing_reason":"no durable procedure",
+      "artifact":None,
+      "evidence_event_ids":[],
+    }
+    required = packet["result_schema"].get("required", [])
+    if "catalog_audit" in required:
+        skill = packet["context"]["skills"][0]
+        event_ids = packet["result_schema"]["properties"][
+          "evidence_event_ids"
+        ]["items"].get("enum", [])
+        profile_event_ids = packet["task_profile_context"]["profiles"][0][
+          "source_event_ids"
+        ]
+        payload.update({
+          "terminal_route":"skill",
+          "routing_reason":"fixture skill should have loaded",
+          "artifact":{
+            "operation":"patch",
+            "skill_name":skill["name"],
+            "skill_markdown":skill["skill_markdown"],
+            "support_files":[],
+          },
+          "evidence_event_ids":[
+            event_id for event_id in profile_event_ids if event_id in event_ids
+          ],
+          "catalog_audit":{
+            "outcome":"missed-skill",
+            "skill_name":skill["name"],
+          },
+        })
+    if "occurrence_boundary" in required:
+        payload["occurrence_boundary"] = {
+          "relation":"new-occurrence",
+          "prior_canonical_occurrence_ids":[],
+        }
+    return payload
 if "--version" in args:
     print(vendor + " 1.0")
     raise SystemExit()
@@ -1093,23 +1272,7 @@ if vendor == "codex" and "--output-last-message" in args:
     if "llm_task_opportunity_profile" in prompt:
         target.write_text(json.dumps(task_profile_payload(prompt)))
         raise SystemExit()
-    payload = (
-        {"decision":"approve","summary":"independent fixture approval"}
-        if "draft_review" in prompt
-        else {"terminal_route":"discard","summary":"fixture",
-            "routing_reason":"no durable procedure","artifact":None,
-            "evidence_event_ids":[]}
-    )
-    if (
-          isinstance(payload, dict)
-          and "result_schema" in prompt
-          and "occurrence_boundary"
-          in json.loads(prompt)["result_schema"].get("required", [])
-    ):
-          payload["occurrence_boundary"] = {
-            "relation": "new-occurrence",
-            "prior_canonical_occurrence_ids": [],
-          }
+    payload = review_payload(prompt)
     target.write_text(json.dumps(payload))
     raise SystemExit()
 if ("-p" in args or "--print" in args) and "plugin" not in args:
@@ -1160,23 +1323,7 @@ if ("-p" in args or "--print" in args) and "plugin" not in args:
     if "llm_task_opportunity_profile" in prompt:
         print(json.dumps({"result":task_profile_payload(prompt)}))
         raise SystemExit()
-    payload = (
-        {"decision":"approve","summary":"independent fixture approval"}
-        if "draft_review" in prompt
-        else {"terminal_route":"discard","summary":"fixture",
-            "routing_reason":"no durable procedure","artifact":None,
-            "evidence_event_ids":[]}
-    )
-    if (
-        isinstance(payload, dict)
-        and "result_schema" in prompt
-        and "occurrence_boundary"
-        in json.loads(prompt)["result_schema"].get("required", [])
-    ):
-        payload["occurrence_boundary"] = {
-          "relation": "new-occurrence",
-          "prior_canonical_occurrence_ids": [],
-        }
+    payload = review_payload(prompt)
     print(json.dumps({"result":payload}))
     raise SystemExit()
 if "plugin" in args and ("marketplace" in args and "add" in args):
@@ -1336,6 +1483,44 @@ print(json.dumps({"ok": True}))
                 [kind for kind in row if kind != "session_end"],
                 ["user_message", "assistant_message", "tool_call"],
             )
+
+    def test_copilot_skill_invocation_preserves_invoked_name(self):
+        events = self.case / "copilot/session/events.jsonl"
+        rows = [json.loads(line) for line in events.read_text().splitlines()]
+        rows.insert(
+            -1,
+            {
+                "type": "skill.invoked",
+                "data": {
+                    "name": "fixture-skill",
+                    "path": "/ignored/fixture-skill/SKILL.md",
+                    "content": "ignored",
+                },
+                "id": "skill-1",
+                "timestamp": "2026-01-01T00:00:03.500000Z",
+            },
+        )
+        events.write_text(
+            "".join(json.dumps(item) + "\n" for item in rows)
+        )
+        rendered = self.run_adapter(
+            "copilot",
+            "session-source",
+            "render",
+            "--session",
+            "copilot:session",
+        )
+        skill_events = [
+            event
+            for event in rendered["events"]
+            if event["kind"] == "tool_call"
+            and event["tool_name"] == "skill"
+        ]
+        self.assertEqual(len(skill_events), 1)
+        self.assertEqual(
+            json.loads(skill_events[0]["text"]),
+            {"skill": "fixture-skill"},
+        )
 
     def test_source_render_keeps_bounded_latest_evidence(self):
         events = self.case / "copilot/session/events.jsonl"

@@ -29,6 +29,7 @@ if SCRIPT_DIR not in sys.path:
 
 from task_profile_receipt import (
     TaskProfileReceiptError,
+    compatible_task_profile_executor_identities,
     validate_task_profile_receipt,
 )
 
@@ -90,6 +91,13 @@ PROTOCOLS = {
     ),
 }
 MAX_TASK_PROFILE_CONTEXT_BYTES = 64_000
+CATALOG_AUDIT_REVIEW_CONTRACT = "profile-catalog-audit-v1"
+CATALOG_AUDIT_OUTCOMES = {
+    "correct-skill",
+    "missed-skill",
+    "wrong-or-incomplete-skill",
+    "no-covering-skill",
+}
 
 
 def adapter_identity(role: str, vendor: str) -> dict[str, Any]:
@@ -618,6 +626,7 @@ class NativeSource:
             "assistant.message": "assistant_message",
             "tool.execution_start": "tool_call",
             "tool.execution_complete": "tool_result",
+            "skill.invoked": "tool_call",
             "session.task_complete": "summary",
             "session.shutdown": "session_end",
         }
@@ -637,6 +646,10 @@ class NativeSource:
                     raise AdapterError("unsupported-source-schema", str(path))
                 if kind in {"user_message", "assistant_message"}:
                     text = data.get("content", "")
+                elif item.get("type") == "skill.invoked":
+                    text = {
+                        "skill": data.get("skillName", data.get("name"))
+                    }
                 elif kind == "tool_call":
                     text = data.get("arguments", {})
                 elif kind == "tool_result":
@@ -651,7 +664,11 @@ class NativeSource:
                     kind,
                     item.get("id", len(events) + 1),
                     text,
-                    data.get("toolName"),
+                    (
+                        "skill"
+                        if item.get("type") == "skill.invoked"
+                        else data.get("toolName")
+                    ),
                     self.field_limit,
                 )
                 events.append(event)
@@ -1714,6 +1731,101 @@ def review_context() -> dict[str, Any]:
     return context
 
 
+def task_profile_catalog_audit_context(
+    snapshot: dict[str, Any],
+    task_profile_context: dict[str, Any],
+    catalog_context: dict[str, Any],
+) -> dict[str, Any]:
+    profiles = task_profile_context.get("profiles")
+    if not isinstance(profiles, list) or len(profiles) != 1:
+        raise AdapterError("task-profile-receipt-invalid", "selected-profile")
+    source_event_ids = profiles[0].get("source_event_ids")
+    events = snapshot.get("events")
+    if (
+        not isinstance(source_event_ids, list)
+        or not source_event_ids
+        or not isinstance(events, list)
+    ):
+        raise AdapterError("task-profile-load-trace-invalid", "profile-events")
+    positions = {
+        event.get("source_event_id"): index
+        for index, event in enumerate(events)
+        if isinstance(event, dict)
+        and isinstance(event.get("source_event_id"), str)
+    }
+    if any(event_id not in positions for event_id in source_event_ids):
+        raise AdapterError("task-profile-load-trace-invalid", "profile-events")
+    first = positions[source_event_ids[0]]
+    last = positions[source_event_ids[-1]]
+    catalog_skills = catalog_context.get("skills")
+    tombstones = catalog_context.get("tombstones")
+    if (
+        not isinstance(catalog_skills, list)
+        or not isinstance(tombstones, list)
+        or catalog_context.get("skills_truncated") is True
+    ):
+        raise AdapterError("catalog-context-incomplete", "profile audit")
+    catalog_skill_names = sorted(
+        skill["name"]
+        for skill in catalog_skills
+        if isinstance(skill, dict) and isinstance(skill.get("name"), str)
+    )
+    if len(catalog_skill_names) != len(catalog_skills) or len(
+        catalog_skill_names
+    ) != len(set(catalog_skill_names)):
+        raise AdapterError("catalog-context-invalid", "skill identities")
+    load_trace: list[dict[str, Any]] = []
+    for event in events[first : last + 1]:
+        if (
+            not isinstance(event, dict)
+            or event.get("kind") != "tool_call"
+            or str(event.get("tool_name", "")).casefold() != "skill"
+        ):
+            continue
+        raw_input = event.get("text")
+        if isinstance(raw_input, str):
+            try:
+                parsed_input = json.loads(raw_input)
+            except json.JSONDecodeError:
+                parsed_input = None
+        else:
+            parsed_input = raw_input
+        invoked_name = None
+        if isinstance(parsed_input, dict):
+            invoked_name = parsed_input.get(
+                "skill",
+                parsed_input.get("skillName", parsed_input.get("name")),
+            )
+        if not isinstance(invoked_name, str) or not invoked_name.strip():
+            raise AdapterError(
+                "task-profile-load-trace-invalid",
+                str(event.get("source_event_id")),
+            )
+        invoked_name = invoked_name.strip().lstrip("/")
+        projected_name = invoked_name
+        if projected_name not in catalog_skill_names and ":" in projected_name:
+            suffix = projected_name.rsplit(":", 1)[1]
+            projected_name = suffix if suffix in catalog_skill_names else projected_name
+        load_trace.append(
+            {
+                "source_event_id": event["source_event_id"],
+                "invoked_name": invoked_name,
+                "catalog_skill_name": (
+                    projected_name if projected_name in catalog_skill_names else None
+                ),
+                "event_sha256": sha(event),
+            }
+        )
+    return {
+        "reviewer_contract": CATALOG_AUDIT_REVIEW_CONTRACT,
+        "catalog_sha256": sha(catalog_skills),
+        "catalog_skill_names": catalog_skill_names,
+        "tombstones_sha256": sha(tombstones),
+        "skill_load_trace": load_trace,
+        "skill_load_trace_sha256": sha(load_trace),
+    }
+
+
 def review_result_schema(
     snapshot: dict[str, Any] | None = None,
     task_profile_context: dict[str, Any] | None = None,
@@ -1815,6 +1927,25 @@ def review_result_schema(
     ):
         properties["occurrence_boundary"] = occurrence_boundary
         required.append("occurrence_boundary")
+    if (
+        task_profile_context is not None
+        and isinstance(task_profile_context.get("catalog_audit_context"), dict)
+    ):
+        properties["terminal_route"]["enum"] = [
+            "discard",
+            "skill",
+            "support_file",
+        ]
+        properties["catalog_audit"] = {
+            "type": "object",
+            "properties": {
+                "outcome": {"enum": sorted(CATALOG_AUDIT_OUTCOMES)},
+                "skill_name": {"type": ["string", "null"]},
+            },
+            "required": ["outcome", "skill_name"],
+            "additionalProperties": False,
+        }
+        required.append("catalog_audit")
     return {
         "type": "object",
         "properties": properties,
@@ -1965,7 +2096,9 @@ def task_profile_prompt(
 def review_prompt(
     snapshot: dict[str, Any],
     task_profile_context: dict[str, Any] | None = None,
+    catalog_context: dict[str, Any] | None = None,
 ) -> str:
+    active_catalog_context = catalog_context or review_context()
     if snapshot.get("packet_kind") == "draft_review":
         return json.dumps(
             {
@@ -1988,7 +2121,7 @@ def review_prompt(
                     "required": ["decision", "summary"],
                     "additionalProperties": False,
                 },
-                "context": review_context(),
+                "context": active_catalog_context,
                 "draft": snapshot,
             },
             sort_keys=True,
@@ -2011,6 +2144,40 @@ def review_prompt(
         )
     if (
         task_profile_context is not None
+        and isinstance(task_profile_context.get("catalog_audit_context"), dict)
+    ):
+        task += (
+            " Perform the existing-skill audit in this same review. Use the "
+            "exact catalog and tombstones in context plus the owner-derived "
+            "task-range skill_load_trace. Return exactly one catalog_audit "
+            "outcome: correct-skill when the covering skill loaded and handled "
+            "the task; missed-skill when a covering skill exists but did not "
+            "load; wrong-or-incomplete-skill when a loaded skill was wrong or "
+            "needs content repair; or no-covering-skill when no catalog skill "
+            "covers the procedure. Name the covering or repair-target skill for "
+            "the first three outcomes and null for no-covering-skill. Correct "
+            "skill emits no artifact. Missed skill emits a patch to the named "
+            "skill. Wrong or incomplete skill emits a patch or support file for "
+            "the named skill. No covering skill emits a create artifact."
+        )
+        reuse_order = [
+            "patch an existing matching skill",
+            "add a support file to an existing skill",
+            "create a new skill",
+            "discard",
+        ]
+        recommendation_only = False
+    else:
+        reuse_order = [
+            "patch an existing matching skill",
+            "add a support file to an existing skill",
+            "create a new skill",
+            "record a recommendation",
+            "discard",
+        ]
+        recommendation_only = True
+    if (
+        task_profile_context is not None
         and isinstance(task_profile_context.get("occurrence_context"), dict)
     ):
         task += (
@@ -2022,19 +2189,16 @@ def review_prompt(
             "an old task with a new goal. Return the exact known prior canonical "
             "occurrence IDs for same-occurrence or boundary-conflict, and none "
             "for new-occurrence. A conflict must route to discard without an "
-            "artifact."
+            "artifact, while still reporting the truthful catalog_audit outcome "
+            "and skill_name that would otherwise determine routing."
         )
     packet = {
         "task": task,
         "policy": {
-            "reuse_order": [
-                "patch an existing matching skill",
-                "add a support file to an existing skill",
-                "create a new skill",
-                "record a recommendation",
-                "discard",
-            ],
-            "instruction_and_factual_memory_are_recommendation_only": True,
+            "reuse_order": reuse_order,
+            "instruction_and_factual_memory_are_recommendation_only": (
+                recommendation_only
+            ),
             "artifact_required_for": ["skill", "support_file"],
             "artifact_forbidden_for": [
                 "discard",
@@ -2043,7 +2207,7 @@ def review_prompt(
             ],
         },
         "result_schema": review_result_schema(snapshot, task_profile_context),
-        "context": review_context(),
+        "context": active_catalog_context,
         "snapshot": snapshot,
     }
     if task_profile_context is not None:
@@ -2139,13 +2303,25 @@ def executor_run(args: argparse.Namespace) -> None:
             )
         receipt = load_json(receipt_path)
         executor_identity = review_executor_identity(args)
+        receipt_identity = (
+            receipt.get("executor_identity")
+            if isinstance(receipt, dict)
+            else None
+        )
+        if not compatible_task_profile_executor_identities(
+            receipt_identity, executor_identity
+        ):
+            raise AdapterError(
+                "task-profile-receipt-invalid",
+                f"{args.task_profile_receipt}: executor-identity",
+            )
         try:
             validated_context = validate_task_profile_receipt(
                 receipt,
                 snapshot,
                 receipt_path=receipt_path,
                 expected_executor=args.task_profile_executor,
-                expected_executor_identity=executor_identity,
+                expected_executor_identity=receipt_identity,
             )
         except TaskProfileReceiptError as error:
             raise AdapterError(
@@ -2203,10 +2379,20 @@ def executor_run(args: argparse.Namespace) -> None:
                         "task-profile-context-too-large",
                         str(len(canonical(task_profile_context))),
                     )
+    catalog_context = review_context() if not profile_mode else None
+    if task_profile_context is not None and args.task_profile_id:
+        task_profile_context = {
+            **task_profile_context,
+            "catalog_audit_context": task_profile_catalog_audit_context(
+                snapshot,
+                task_profile_context,
+                catalog_context or {},
+            ),
+        }
     prompt = (
         task_profile_prompt(snapshot, correction_context)
         if profile_mode
-        else review_prompt(snapshot, task_profile_context)
+        else review_prompt(snapshot, task_profile_context, catalog_context)
     )
     with tempfile.TemporaryDirectory(prefix=f"dreaming-{args.vendor}-") as work:
         work_path = Path(work).resolve()
@@ -2572,6 +2758,110 @@ def executor_run(args: argparse.Namespace) -> None:
         "artifact": model_result["artifact"],
         "evidence_event_ids": model_result["evidence_event_ids"],
     }
+    if (
+        task_profile_context is not None
+        and isinstance(task_profile_context.get("catalog_audit_context"), dict)
+    ):
+        decision = model_result.get("catalog_audit")
+        if (
+            not isinstance(decision, dict)
+            or set(decision) != {"outcome", "skill_name"}
+            or decision.get("outcome") not in CATALOG_AUDIT_OUTCOMES
+            or (
+                decision.get("skill_name") is not None
+                and (
+                    not isinstance(decision["skill_name"], str)
+                    or not decision["skill_name"].strip()
+                )
+            )
+        ):
+            raise AdapterError("malformed-executor-result", "catalog_audit")
+        audit_context = task_profile_context["catalog_audit_context"]
+        outcome = decision["outcome"]
+        skill_name = decision["skill_name"]
+        catalog_names = audit_context["catalog_skill_names"]
+        loaded_names = {
+            item["catalog_skill_name"]
+            for item in audit_context["skill_load_trace"]
+            if item["catalog_skill_name"] is not None
+        }
+        artifact = model_result["artifact"]
+        operation = artifact.get("operation") if isinstance(artifact, dict) else None
+        artifact_skill = (
+            artifact.get("skill_name") if isinstance(artifact, dict) else None
+        )
+        occurrence_boundary = model_result.get("occurrence_boundary")
+        boundary_conflict = (
+            isinstance(occurrence_boundary, dict)
+            and occurrence_boundary.get("relation") == "boundary-conflict"
+        )
+        valid_semantic_outcome = (
+            outcome == "correct-skill"
+            and isinstance(skill_name, str)
+            and skill_name in catalog_names
+            and skill_name in loaded_names
+        ) or (
+            outcome == "missed-skill"
+            and isinstance(skill_name, str)
+            and skill_name in catalog_names
+            and skill_name not in loaded_names
+        ) or (
+            outcome == "wrong-or-incomplete-skill"
+            and isinstance(skill_name, str)
+            and skill_name in catalog_names
+            and skill_name in loaded_names
+        ) or (
+            outcome == "no-covering-skill"
+            and skill_name is None
+        )
+        valid_route = (
+            boundary_conflict
+            and terminal_route == "discard"
+            and artifact is None
+        ) or (
+            not boundary_conflict
+            and outcome == "correct-skill"
+            and valid_semantic_outcome
+            and terminal_route == "discard"
+            and artifact is None
+        ) or (
+            not boundary_conflict
+            and
+            outcome == "missed-skill"
+            and isinstance(skill_name, str)
+            and skill_name in catalog_names
+            and skill_name not in loaded_names
+            and terminal_route == "skill"
+            and operation == "patch"
+            and artifact_skill == skill_name
+        ) or (
+            not boundary_conflict
+            and
+            outcome == "wrong-or-incomplete-skill"
+            and isinstance(skill_name, str)
+            and skill_name in catalog_names
+            and skill_name in loaded_names
+            and terminal_route in {"skill", "support_file"}
+            and operation in {"patch", "support_file"}
+            and artifact_skill == skill_name
+        ) or (
+            not boundary_conflict
+            and
+            outcome == "no-covering-skill"
+            and skill_name is None
+            and terminal_route == "skill"
+            and operation == "create"
+            and artifact_skill not in catalog_names
+        )
+        if not valid_semantic_outcome or not valid_route:
+            raise AdapterError(
+                "malformed-executor-result",
+                "catalog_audit routing",
+            )
+        final["catalog_audit"] = {
+            **decision,
+            **audit_context,
+        }
     if (
         task_profile_context is not None
         and isinstance(task_profile_context.get("occurrence_context"), dict)

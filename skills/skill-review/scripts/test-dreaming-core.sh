@@ -2169,7 +2169,7 @@ class RuntimeTest(unittest.TestCase):
             (
                 Path(environment["DREAMING_STATE_DIR"])
                 / "profile-audit-dispositions"
-                / "v2"
+                / "v3"
             ).glob("*.json")
         )
         self.assertEqual(len(dispositions), 52)
@@ -2574,9 +2574,36 @@ class RuntimeTest(unittest.TestCase):
             Path(refreshed["receipt"]),
         )
 
-    def test_executor_identity_drift_refreshes_task_profile_receipt(self) -> None:
+    def test_compatible_executor_identity_drift_preserves_task_profile_receipt(
+        self,
+    ) -> None:
         source_fixture = self.source_fixture([self.session("one", 1)])
-        executor_fixture = self.write("profile-identity-refresh.json", {})
+        executor_fixture = self.write(
+            "profile-identity-refresh.json",
+            {
+                "contract_identity_overrides": {
+                    "adapter_sha256": "a" * 64,
+                    "executor_version": "1.0",
+                    "model": "fixture-model",
+                },
+                "task_profiles": [
+                    {
+                        "source_event_ids": ["one-event-1"],
+                        "task_type": "compatible-profile",
+                        "abstract_summary": "A reusable fixture procedure.",
+                        "reuse_value": "reusable-procedure",
+                        "procedure": {
+                            "trigger": "A reusable fixture task is complete.",
+                            "outcome": "Retain the fixture procedure.",
+                            "actions": ["Retain the procedure."],
+                            "exclusions": [
+                                "Do not retain source details."
+                            ],
+                        },
+                    }
+                ],
+            },
+        )
         source = self.adapter("session-source", "fake", source_fixture)
         executor = self.adapter(
             "review-executor", "profile-identity-refresh", executor_fixture
@@ -2594,6 +2621,9 @@ class RuntimeTest(unittest.TestCase):
             *executor.identity["capabilities"],
             "new-compatible-capability",
         ]
+        fixture["contract_identity_overrides"][
+            "adapter_sha256"
+        ] = "b" * 64
         executor_fixture.write_text(json.dumps(fixture))
         upgraded = self.adapter(
             "review-executor", "profile-identity-refresh", executor_fixture
@@ -2611,18 +2641,60 @@ class RuntimeTest(unittest.TestCase):
             snapshot_path,
             upgraded.identity,
         )
-        self.assertEqual(binding.status, "unbound")
-        self.assertEqual(binding.reason, "executor-identity")
-        refreshed = core.profile(
+        self.assertEqual(binding.status, "bound")
+        self.assertEqual(
+            binding.receipt.path if binding.receipt is not None else None,
+            Path(first["receipt"]),
+        )
+        receipt = json.loads(Path(first["receipt"]).read_text())
+        reviewed = core.review_profile(
             "fake",
             source,
             "fake:one",
+            receipt["source_revision"],
             "profile-identity-refresh",
             upgraded,
+            receipt["profiles"][0]["profile_id"],
         )
-        self.assertNotEqual(
-            refreshed["receipt_sha256"], first["receipt_sha256"]
+        self.assertEqual(reviewed["status"], "deferred")
+        self.assertEqual(
+            reviewed["policy_deferred"]["repair_recommendation"][
+                "catalog_outcome"
+            ],
+            "missed-skill",
         )
+        target = runtime_module.ProfileAuditTarget(
+            runtime_module.TaskProfileReceipt(
+                Path(first["receipt"]), receipt
+            ),
+            receipt["profiles"][0],
+        )
+        disposition = core.profile_audit_disposition_for(target)
+        self.assertEqual(
+            disposition["profile_executor_identity"],
+            executor.identity,
+        )
+        self.assertEqual(
+            disposition["review_executor_identity"],
+            upgraded.identity,
+        )
+        incompatible_fixture = json.loads(executor_fixture.read_text())
+        incompatible_fixture["contract_identity_overrides"] = {
+            "adapter_id": "other-profiler"
+        }
+        executor_fixture.write_text(json.dumps(incompatible_fixture))
+        incompatible = self.adapter(
+            "review-executor", "profile-identity-refresh", executor_fixture
+        )
+        incompatible_binding = core.task_profile_binding_for(
+            "fake:one",
+            identity["source_revision"],
+            "profile-identity-refresh",
+            snapshot_path,
+            incompatible.identity,
+        )
+        self.assertEqual(incompatible_binding.status, "unbound")
+        self.assertEqual(incompatible_binding.reason, "executor-identity")
 
     def test_legacy_executor_is_not_given_indexed_profile_receipt(self) -> None:
         source_fixture = self.source_fixture([self.session("one", 1)])
@@ -3842,7 +3914,7 @@ elif sys.argv[1] == "run":
             ),
         )
 
-    def test_profiled_patch_is_shadowed_before_mutation(self) -> None:
+    def test_profiled_patch_is_report_only_before_mutation(self) -> None:
         core = DreamingRuntime(
             self.paths,
             {("fake", "exec")},
@@ -3868,6 +3940,10 @@ elif sys.argv[1] == "run":
                 "snapshot_sha256": "snapshot",
                 "source_revision": "revision",
                 "event_ids": ["one-event-1"],
+            },
+            "catalog_audit": {
+                "outcome": "missed-skill",
+                "skill_name": "existing-procedure",
             },
         }
         reviewed_identity = {
@@ -3898,12 +3974,22 @@ elif sys.argv[1] == "run":
         self.assertIsNone(deferred["artifact"])
         self.assertEqual(
             deferred["policy_deferred"]["reason"],
-            "task-profile-artifact-requires-evaluation",
+            "task-profile-repair-requires-evaluation",
         )
         self.assertEqual(
             deferred["policy_deferred"]["original_operation"], "patch"
         )
-        collect.assert_called_once()
+        self.assertEqual(
+            deferred["policy_deferred"]["repair_recommendation"],
+            {
+                "catalog_outcome": "missed-skill",
+                "operation": "patch",
+                "skill_name": "existing-procedure",
+                "artifact_sha256": runtime_module.digest(result["artifact"]),
+                "report_only": True,
+            },
+        )
+        collect.assert_not_called()
 
     def test_profile_gate_remains_active_without_current_executor_receipt(self) -> None:
         core = DreamingRuntime(
@@ -4763,6 +4849,274 @@ elif command == "run":
         self.assertEqual([attempt["profile_id"] for attempt in attempts], profile_ids)
         self.assertFalse(self.paths.ledger.exists())
 
+    def test_profile_catalog_audit_routes_all_four_outcomes(self) -> None:
+        core = self.core({("fake", "exec")})
+        existing_markdown = (
+            "---\nname: existing-skill\n"
+            "description: Use for the existing reusable task.\n---\n"
+            "# Existing skill\n"
+        )
+        def result(
+            outcome: str,
+            *,
+            skill_name: str | None,
+            terminal_route: str,
+            operation: str | None,
+            loaded: bool,
+        ) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+            artifact = None
+            evidence_event_ids: list[str] = []
+            if operation is not None:
+                artifact_name = (
+                    "new-skill" if operation == "create" else skill_name
+                )
+                artifact = {
+                    "operation": operation,
+                    "skill_name": artifact_name,
+                    "skill_markdown": (
+                        f"---\nname: {artifact_name}\n"
+                        "description: Use for the routed reusable task.\n---\n"
+                        "# Routed skill\n"
+                    ),
+                    "support_files": (
+                        [{"path": "references/task.md", "content": "task\n"}]
+                        if operation == "support_file"
+                        else []
+                    ),
+                }
+                evidence_event_ids = ["event-1"]
+            profile = {"source_event_ids": ["event-1", "event-3"]}
+            snapshot_events = [
+                {
+                    "source_event_id": "event-1",
+                    "kind": "user_message",
+                    "tool_name": None,
+                    "text": "start",
+                },
+                *(
+                    [
+                        {
+                            "source_event_id": "event-2",
+                            "kind": "tool_call",
+                            "tool_name": "skill",
+                            "text": json.dumps(
+                                {"skill": "existing-skill"}
+                            ),
+                        }
+                    ]
+                    if loaded
+                    else []
+                ),
+                {
+                    "source_event_id": "event-3",
+                    "kind": "assistant_message",
+                    "tool_name": None,
+                    "text": "done",
+                },
+            ]
+            snapshot = {"events": snapshot_events}
+            active_trace = (
+                [
+                    {
+                        "source_event_id": "event-2",
+                        "invoked_name": "existing-skill",
+                        "catalog_skill_name": "existing-skill",
+                        "event_sha256": runtime_module.digest(
+                            snapshot_events[1]
+                        ),
+                    }
+                ]
+                if loaded
+                else []
+            )
+            payload = {
+                "status": "ok",
+                "completion_sentinel": "DREAMING_REVIEW_COMPLETE",
+                "terminal_route": terminal_route,
+                "summary": "Catalog outcome fixture",
+                "routing_reason": "Exercise one catalog route.",
+                "artifact": artifact,
+                "evidence_event_ids": evidence_event_ids,
+                "catalog_audit": {
+                    "outcome": outcome,
+                    "skill_name": skill_name,
+                    "reviewer_contract": "profile-catalog-audit-v1",
+                    "catalog_sha256": "sha256:" + "2" * 64,
+                    "catalog_skill_names": ["existing-skill"],
+                    "tombstones_sha256": "sha256:" + "3" * 64,
+                    "skill_load_trace": active_trace,
+                    "skill_load_trace_sha256": runtime_module.digest(
+                        active_trace
+                    ),
+                },
+            }
+            return payload, snapshot, profile
+
+        cases = [
+            result(
+                "correct-skill",
+                skill_name="existing-skill",
+                terminal_route="discard",
+                operation=None,
+                loaded=True,
+            ),
+            result(
+                "missed-skill",
+                skill_name="existing-skill",
+                terminal_route="skill",
+                operation="patch",
+                loaded=False,
+            ),
+            result(
+                "wrong-or-incomplete-skill",
+                skill_name="existing-skill",
+                terminal_route="support_file",
+                operation="support_file",
+                loaded=True,
+            ),
+            result(
+                "no-covering-skill",
+                skill_name=None,
+                terminal_route="skill",
+                operation="create",
+                loaded=False,
+            ),
+        ]
+        self.assertEqual(
+            [
+                core._validated_review_result(
+                    item,
+                    require_catalog_audit=True,
+                    catalog_snapshot=snapshot,
+                    catalog_profile=profile,
+                )["catalog_audit"]["outcome"]
+                for item, snapshot, profile in cases
+            ],
+            [
+                "correct-skill",
+                "missed-skill",
+                "wrong-or-incomplete-skill",
+                "no-covering-skill",
+            ],
+        )
+        invalid, invalid_snapshot, invalid_profile = result(
+            "correct-skill",
+            skill_name="existing-skill",
+            terminal_route="discard",
+            operation=None,
+            loaded=False,
+        )
+        with self.assertRaisesRegex(
+            RuntimeFailure, "catalog_audit route is invalid"
+        ):
+            core._validated_review_result(
+                invalid,
+                require_catalog_audit=True,
+                catalog_snapshot=invalid_snapshot,
+                catalog_profile=invalid_profile,
+            )
+        fabricated, fabricated_snapshot, fabricated_profile = result(
+            "correct-skill",
+            skill_name="existing-skill",
+            terminal_route="discard",
+            operation=None,
+            loaded=False,
+        )
+        fabricated["catalog_audit"]["skill_load_trace"] = [
+            {
+                "source_event_id": fabricated_profile["source_event_ids"][0],
+                "invoked_name": "existing-skill",
+                "catalog_skill_name": "existing-skill",
+                "event_sha256": runtime_module.digest(
+                    fabricated_snapshot["events"][0]
+                ),
+            }
+        ]
+        fabricated["catalog_audit"][
+            "skill_load_trace_sha256"
+        ] = runtime_module.digest(
+            fabricated["catalog_audit"]["skill_load_trace"]
+        )
+        with self.assertRaisesRegex(
+            RuntimeFailure, "catalog_audit is invalid"
+        ):
+            core._validated_review_result(
+                fabricated,
+                require_catalog_audit=True,
+                catalog_snapshot=fabricated_snapshot,
+                catalog_profile=fabricated_profile,
+            )
+        conflict_outcomes = []
+        for outcome, skill_name, loaded in (
+            ("correct-skill", "existing-skill", True),
+            ("missed-skill", "existing-skill", False),
+            ("wrong-or-incomplete-skill", "existing-skill", True),
+            ("no-covering-skill", None, False),
+        ):
+            conflict, conflict_snapshot, conflict_profile = result(
+                outcome,
+                skill_name=skill_name,
+                terminal_route="discard",
+                operation=None,
+                loaded=loaded,
+            )
+            conflict["occurrence_boundary"] = {
+                "relation": "boundary-conflict",
+                "prior_canonical_occurrence_ids": [
+                    "sha256:" + "4" * 64
+                ],
+            }
+            conflict_outcomes.append(
+                core._validated_review_result(
+                    conflict,
+                    require_catalog_audit=True,
+                    catalog_snapshot=conflict_snapshot,
+                    catalog_profile=conflict_profile,
+                )["catalog_audit"]["outcome"]
+            )
+        self.assertEqual(
+            conflict_outcomes,
+            [
+                "correct-skill",
+                "missed-skill",
+                "wrong-or-incomplete-skill",
+                "no-covering-skill",
+            ],
+        )
+        wrong_target, wrong_snapshot, wrong_profile = result(
+            "wrong-or-incomplete-skill",
+            skill_name="existing-skill",
+            terminal_route="skill",
+            operation="patch",
+            loaded=True,
+        )
+        wrong_snapshot["events"][1]["text"] = json.dumps(
+            {"skill": "other-skill"}
+        )
+        wrong_target["catalog_audit"]["skill_load_trace"][0][
+            "invoked_name"
+        ] = "other-skill"
+        wrong_target["catalog_audit"]["skill_load_trace"][0][
+            "catalog_skill_name"
+        ] = None
+        wrong_target["catalog_audit"]["skill_load_trace"][0][
+            "event_sha256"
+        ] = runtime_module.digest(wrong_snapshot["events"][1])
+        wrong_target["catalog_audit"][
+            "skill_load_trace_sha256"
+        ] = runtime_module.digest(
+            wrong_target["catalog_audit"]["skill_load_trace"]
+        )
+        with self.assertRaisesRegex(
+            RuntimeFailure, "catalog_audit route is invalid"
+        ):
+            core._validated_review_result(
+                wrong_target,
+                require_catalog_audit=True,
+                catalog_snapshot=wrong_snapshot,
+                catalog_profile=wrong_profile,
+            )
+
     def test_profile_audit_persists_new_and_same_occurrence_authority(self) -> None:
         source_fixture = self.source_fixture(
             [self.session("one", 10, event_count=3)]
@@ -4868,7 +5222,11 @@ elif command == "run":
         self.assertEqual(len(dispositions), 2)
         self.assertTrue(
             all(
-                item["profile_audit_contract_version"] == 2
+                item["profile_audit_contract_version"] == 3
+                and item["outcome"] == "missed-skill"
+                and item["catalog_skill_name"] == "fixture-skill"
+                and item["reviewer_contract"] == "profile-catalog-audit-v1"
+                and item["skill_load_trace"] == []
                 and item["occurrence_resolution_sha256"]
                 in {resolution["resolution_sha256"] for resolution in resolutions}
                 for item in dispositions
@@ -5411,7 +5769,13 @@ elif command == "run":
             executor,
             receipt["profiles"][0]["profile_id"],
         )
-        self.assertEqual(audited["status"], "accepted")
+        self.assertEqual(audited["status"], "deferred")
+        self.assertEqual(
+            audited["policy_deferred"]["repair_recommendation"][
+                "catalog_outcome"
+            ],
+            "missed-skill",
+        )
         self.assertTrue(self.paths.ledger.exists())
         self.assertEqual(len(list(self.paths.profile_audit_dispositions.glob("*.json"))), 1)
 
@@ -5472,6 +5836,32 @@ elif command == "run":
         mismatch.write_bytes(first_path.read_bytes())
         with self.assertRaisesRegex(RuntimeFailure, "profile-audit-disposition-invalid"):
             core.profile_audit_disposition_for(targets[1])
+        mismatch.unlink()
+        tampered_trace = json.loads(first_path.read_text())
+        tampered_trace["skill_load_trace"] = [
+            {
+                "source_event_id": "one-event-1",
+                "invoked_name": "existing-skill",
+                "catalog_skill_name": "existing-skill",
+                "event_sha256": "sha256:" + "4" * 64,
+            }
+        ]
+        tampered_trace[
+            "skill_load_trace_sha256"
+        ] = runtime_module.digest(tampered_trace["skill_load_trace"])
+        tampered_trace["disposition_sha256"] = runtime_module.digest(
+            {
+                key: value
+                for key, value in tampered_trace.items()
+                if key != "disposition_sha256"
+            }
+        )
+        first_path.chmod(0o600)
+        runtime_module.atomic_json(first_path, tampered_trace, mode=0o400)
+        with self.assertRaisesRegex(
+            RuntimeFailure, "profile-audit-disposition-invalid"
+        ):
+            core.profile_audit_disposition_for(targets[0])
         self.assertIn("disposition_sha256", first)
 
     def test_scheduled_run_derives_reviews_from_eligible_profiles_only(self) -> None:
@@ -5948,6 +6338,19 @@ elif command == "run":
         self.assertEqual(
             alias["profile_receipt_sha256"],
             third_receipt["receipt_sha256"],
+        )
+        reused_disposition = core.profile_audit_disposition_for(
+            third_target
+        )
+        self.assertEqual(
+            reused_disposition["profile_audit_contract_version"], 3
+        )
+        self.assertEqual(
+            reused_disposition["outcome"], disposition["outcome"]
+        )
+        self.assertEqual(
+            core.profile_audit_disposition_admission_for(third_target)[0],
+            "terminal",
         )
 
     def test_profile_audit_contract_supersession_and_race_are_auditable(self) -> None:
