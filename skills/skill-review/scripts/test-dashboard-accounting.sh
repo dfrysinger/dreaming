@@ -234,6 +234,15 @@ lifecycle.persist(lifecycle.new_record(
     candidate_id, candidate_files, "different", "new-procedure-observed",
     None, [], [],
 ))
+second_lifecycle_id = str(uuid.uuid4())
+second_candidate_id, second_candidate_files, _ = lifecycle.make_immutable_package(
+    second_lifecycle_id, candidate_source, "accounting-skill"
+)
+lifecycle.persist(lifecycle.new_record(
+    second_lifecycle_id, "accounting-skill", candidate_procedure, observation,
+    second_candidate_id, second_candidate_files, "different", "new-procedure-observed",
+    None, [], [],
+))
 candidate = dashboard.DashboardData(paths).candidate_detail(lifecycle_id)
 assert (
     candidate["status"] == "shadow"
@@ -242,10 +251,24 @@ assert (
 ), candidate
 print("PASS  current lifecycle source_session_id evidence remains dashboard-readable")
 
-candidate_rows, _ = dashboard.DashboardData(paths).candidate_rows()
+candidate_data = dashboard.DashboardData(paths)
+dream_name_calls = {"count": 0}
+original_dream_names = candidate_data._dream_names
+
+def counted_dream_names():
+    dream_name_calls["count"] += 1
+    return original_dream_names()
+
+candidate_data._dream_names = counted_dream_names
+candidate_rows, _ = candidate_data.candidate_rows()
 assert (
-    candidate_rows[0]["evidence_items"][0]["canonical_occurrence_id"]
-    == resolution["canonical_occurrence_id"]
+    len(candidate_rows) == 2
+    and dream_name_calls["count"] == 1
+    and all("evidence_items" not in row for row in candidate_rows)
+    and all(
+        row["canonical_occurrence_ids"] == [resolution["canonical_occurrence_id"]]
+        for row in candidate_rows
+    )
 ), candidate_rows
 data_with_rows = dashboard.DashboardData(paths)
 data_with_rows.candidate_rows = lambda: (candidate_rows, "fixture")
@@ -265,7 +288,67 @@ assert view["accounting"]["terminal_totals"]["queue"] == {
     "cached-current-receipt": 1, "eligible-deferred": 1, "newly-attempted": 1,
 }, view
 assert view["accounting"]["capacity_limits"] == {"profiles": 100, "reviews": 25}, view
-print("PASS  valid owner receipts reconcile profiles, audit, occurrence, capacity, backlog, and terminals without rereading candidates")
+print("PASS  valid owner receipts reconcile profiles, audit, occurrence, capacity, backlog, and terminals with one dream projection for two candidate rows")
+
+disposition_text = disposition_path.read_text(encoding="utf-8")
+disposition_path.unlink()
+legacy_dispositions = [
+    audits.build_profile_audit_disposition(
+        receipt=receipt,
+        profile=profile,
+        review_executor="fixture-reviewer",
+        review_executor_identity={"adapter_id": "fixture-reviewer"},
+        review_result={
+            "terminal_route": "skill",
+            "summary": "Legacy v1 fixture.",
+            "routing_reason": "fixture-routing",
+        },
+        reviewed_at=1_777_680_120,
+    ),
+    audits.build_profile_audit_disposition(
+        receipt=receipt,
+        profile=profile,
+        review_executor="fixture-reviewer",
+        review_executor_identity={"adapter_id": "fixture-reviewer"},
+        review_result={
+            "terminal_route": "skill",
+            "summary": "Legacy v2 fixture.",
+            "routing_reason": "fixture-routing",
+        },
+        reviewed_at=1_777_680_120,
+        occurrence_resolution=resolution,
+    ),
+]
+legacy_paths = [
+    state / "profile-audit-dispositions/v3" / f"legacy-v{index}.json"
+    for index in (1, 2)
+]
+for path, legacy in zip(legacy_paths, legacy_dispositions):
+    path.write_text(json.dumps(legacy), encoding="utf-8")
+handler = object.__new__(dashboard.DashboardHandler)
+handler.data = dashboard.DashboardData(no_candidate_paths)
+handler._request_guard = lambda _api: None
+responses = []
+handler._json_response = responses.append
+handler.path = "/api/v1/task-opportunities"
+handler._dispatch()
+handler.path = "/api/v1/overview"
+handler._dispatch()
+assert (
+    len(responses) == 2
+    and responses[0]["status"] == "unhealthy"
+    and responses[0]["profiles"]["audited"] == 0
+    and responses[1]["task_opportunities"]["status"] == "unhealthy"
+    and responses[1]["task_opportunities"]["profiles"]["audited"] == 0
+    and sum(
+        "disposition-contract-version" in error
+        for error in responses[0]["errors"]
+    ) == 2
+), responses
+print("PASS  v1 and v2 disposition shapes in v3 remain unhealthy without blocking either API")
+for path in legacy_paths:
+    path.unlink()
+disposition_path.write_text(disposition_text, encoding="utf-8")
 
 (state / "adapters.json").write_text("{}", encoding="utf-8")
 view = dashboard.DashboardData(no_candidate_paths).task_opportunities()

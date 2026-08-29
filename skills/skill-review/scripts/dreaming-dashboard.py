@@ -2614,7 +2614,10 @@ class DashboardData:
         return gates
 
     def _candidate_view(
-        self, record: dict[str, Any], detail: bool = False
+        self,
+        record: dict[str, Any],
+        detail: bool = False,
+        dream_names: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         now = time.time()
         lifecycle = record["lifecycle"]
@@ -2684,20 +2687,6 @@ class DashboardData:
             ),
             key=lambda value: parse_time(value) or 0,
         )
-        names = self._dream_names()
-        evidence_items = [
-            {
-                "evidence_id": item["evidence_id"],
-                "task_key": safe_text(item["task_key"], 512),
-                "session_id": candidate_session_id(item),
-                "dream_name": self._dream_name(candidate_session_id(item), names),
-                "observed_at": candidate_occurrence_time(item),
-                "independence": item.get("independence", "canonical-occurrence"),
-                "canonical_occurrence_id": item.get("canonical_occurrence_id"),
-                "summary": safe_text(item["summary"], 4000),
-            }
-            for item in evidence
-        ]
         view = {
             "lifecycle_id": record["lifecycle_id"],
             "status": "shadow" if shadow_only else "lifecycle",
@@ -2740,7 +2729,7 @@ class DashboardData:
                 ),
                 "current_canonical_occurrences": len(current_occurrences),
             },
-            "evidence_items": evidence_items,
+            "canonical_occurrence_ids": sorted(current_occurrences),
             "freshness": {
                 "created_at": lifecycle["created_at"],
                 "last_supported_at": lifecycle["last_supported_at"],
@@ -2819,6 +2808,7 @@ class DashboardData:
         }
         if not detail:
             return view
+        names = dream_names if dream_names is not None else self._dream_names()
         procedure = record["procedure"]
         return {
             **view,
@@ -2831,6 +2821,22 @@ class DashboardData:
                 ],
                 "match_fingerprint": procedure["match_fingerprint"],
             },
+            "evidence_items": [
+                {
+                    "evidence_id": item["evidence_id"],
+                    "task_key": safe_text(item["task_key"], 512),
+                    "session_id": candidate_session_id(item),
+                    "dream_name": self._dream_name(candidate_session_id(item), names),
+                    "observed_at": candidate_occurrence_time(item),
+                    "independence": item.get(
+                        "independence",
+                        "canonical-occurrence",
+                    ),
+                    "canonical_occurrence_id": item.get("canonical_occurrence_id"),
+                    "summary": safe_text(item["summary"], 4000),
+                }
+                for item in evidence
+            ],
             "candidate_revisions": [
                 {
                     "candidate_id": item["candidate_id"],
@@ -2938,6 +2944,7 @@ class DashboardData:
         fingerprint = self._fingerprint([root, packages])
         if not root.is_dir():
             return [], fingerprint
+        dream_names = self._dream_names()
         rows = []
         try:
             entries = sorted(root.glob("*.json"))
@@ -2950,7 +2957,11 @@ class DashboardData:
             ) from exc
         for path in entries:
             try:
-                rows.append(self._candidate_view(self._candidate_record(path)))
+                rows.append(
+                    self._candidate_view(
+                        self._candidate_record(path), dream_names=dream_names
+                    )
+                )
             except (CandidateInvalid, OSError, UnicodeError, DashboardError) as exc:
                 rows.append(self._candidate_unavailable(path, exc))
         rows.sort(
@@ -3567,6 +3578,13 @@ class DashboardData:
         for path in current_dispositions:
             try:
                 disposition = self._json(path, {}, f"profile disposition:{path.name}")
+                if (
+                    not isinstance(disposition, dict)
+                    or disposition.get("profile_audit_contract_version") != 3
+                ):
+                    raise ProfileAuditDispositionError(
+                        "disposition-contract-version"
+                    )
                 profile_id = disposition.get("profile_id") if isinstance(disposition, dict) else None
                 if profile_id not in profiles:
                     raise ProfileAuditDispositionError("disposition-unbound")
@@ -3576,34 +3594,35 @@ class DashboardData:
                 validated = validate_profile_audit_disposition(
                     disposition, receipt=receipt, profile=profile
                 )
-                if validated["profile_audit_contract_version"] == 3:
-                    resolution_sha256 = validated["occurrence_resolution_sha256"]
-                    resolution = occurrence_by_resolution.get(resolution_sha256)
-                    if resolution is None:
-                        reason = (
-                            "disposition-occurrence-superseded"
-                            if resolution_sha256 in all_occurrence_resolutions
-                            and resolution_sha256 in superseded_resolutions
-                            else "disposition-occurrence-unbound"
-                        )
-                        raise ProfileAuditDispositionError(reason)
-                    if any(
-                        validated[field] != resolution[field]
-                        for field in (
-                            "profile_id",
-                            "profile_sha256",
-                            "task_key",
-                            "profile_receipt_sha256",
-                            "snapshot_sha256",
-                            "source_revision",
-                            "qualified_session_id",
-                            "canonical_occurrence_id",
-                            "boundary_relation",
-                        )
-                    ):
-                        raise ProfileAuditDispositionError(
-                            "disposition-occurrence-mismatch"
-                        )
+                if validated["outcome"] not in audit_outcomes:
+                    raise ProfileAuditDispositionError("disposition-catalog-outcome")
+                resolution_sha256 = validated["occurrence_resolution_sha256"]
+                resolution = occurrence_by_resolution.get(resolution_sha256)
+                if resolution is None:
+                    reason = (
+                        "disposition-occurrence-superseded"
+                        if resolution_sha256 in all_occurrence_resolutions
+                        and resolution_sha256 in superseded_resolutions
+                        else "disposition-occurrence-unbound"
+                    )
+                    raise ProfileAuditDispositionError(reason)
+                if any(
+                    validated[field] != resolution[field]
+                    for field in (
+                        "profile_id",
+                        "profile_sha256",
+                        "task_key",
+                        "profile_receipt_sha256",
+                        "snapshot_sha256",
+                        "source_revision",
+                        "qualified_session_id",
+                        "canonical_occurrence_id",
+                        "boundary_relation",
+                    )
+                ):
+                    raise ProfileAuditDispositionError(
+                        "disposition-occurrence-mismatch"
+                    )
                 if profile_id in audited_profiles:
                     raise ProfileAuditDispositionError("duplicate-profile-disposition")
                 audited_profiles.add(profile_id)
@@ -3734,9 +3753,7 @@ class DashboardData:
                 continue
             candidate_states[row["state"]] += 1
             current_candidate_occurrences.update(
-                item["canonical_occurrence_id"]
-                for item in row["evidence_items"]
-                if isinstance(item.get("canonical_occurrence_id"), str)
+                item for item in row["canonical_occurrence_ids"] if isinstance(item, str)
             )
 
         status = (
