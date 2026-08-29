@@ -24,7 +24,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-SCHEMA_VERSION = 1
+from task_occurrence import (
+    TaskOccurrenceError,
+    load_all as load_task_occurrence_resolutions,
+)
+
+SCHEMA_VERSION = 2
+LEGACY_SCHEMA_VERSION = 1
 DAY = timedelta(days=1)
 SHA256_RE = re.compile(r"^sha256:[0-9a-f]{64}$")
 FILE_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -81,15 +87,7 @@ RECORD_KEYS = {
     "record_version",
 }
 PROCEDURE_KEYS = {"schema_version", "trigger", "outcome", "actions", "exclusions", "match_fingerprint"}
-EVIDENCE_KEYS = {
-    "evidence_id",
-    "task_key",
-    "session_id",
-    "observed_at",
-    "independence",
-    "summary",
-    "procedure_fingerprint",
-}
+EVIDENCE_KEYS = {"evidence_id", "task_key", "source_session_id", "canonical_occurrence_id", "occurred_at", "decision_at", "resolution_sha256", "summary", "procedure_fingerprint"}
 REVISION_KEYS = {"candidate_id", "package_path", "files", "staged_at"}
 FILE_KEYS = {"path", "sha256", "size"}
 LIFECYCLE_KEYS = {"created_at", "last_supported_at", "expires_at", "transition_history"}
@@ -185,6 +183,10 @@ def data_root() -> Path:
             os.environ.get("DREAMING_DATA_DIR", fallback),
         )
     )
+
+
+def task_occurrence_root() -> Path:
+    return data_root() / "task-occurrences" / "v2"
 
 
 def records_root() -> Path:
@@ -295,20 +297,67 @@ def validate_procedure(value: Any) -> dict[str, Any]:
 
 
 def validate_observation(value: Any, procedure: dict[str, Any]) -> dict[str, Any]:
-    allowed = {"task_key", "session_id", "observed_at", "independence", "summary", "procedure_fingerprint"}
-    observation = require_exact_keys(value, allowed, "observation")
-    require_text(observation["task_key"], "observation.task_key", 512)
-    require_text(observation["session_id"], "observation.session_id", 512)
-    parse_time(observation["observed_at"], "observation.observed_at")
-    if observation["independence"] not in {"verified", "unverified"}:
-        raise LifecycleError("observation.independence must be verified or unverified")
-    require_text(observation["summary"], "observation.summary")
-    require_sha256(observation["procedure_fingerprint"], "observation.procedure_fingerprint")
-    if observation["procedure_fingerprint"] != procedure["match_fingerprint"]:
-        raise LifecycleError("observation.procedure_fingerprint must match procedure.match_fingerprint")
-    evidence = dict(observation)
-    evidence["evidence_id"] = sha256(canonical(observation))
-    return {key: evidence[key] for key in sorted(EVIDENCE_KEYS)}
+    # V1 observations stay readable and may be retained in explicit legacy
+    # records, but recurrence() never grants them current authority.
+    legacy_keys = {"task_key", "session_id", "observed_at", "independence", "summary", "procedure_fingerprint"}
+    if isinstance(value, dict) and set(value) == legacy_keys:
+        require_text(value["task_key"], "observation.task_key", 512); require_text(value["session_id"], "observation.session_id", 512)
+        parse_time(value["observed_at"], "observation.observed_at")
+        if value["independence"] not in {"verified", "unverified"}: raise LifecycleError("observation.independence must be verified or unverified")
+        require_text(value["summary"], "observation.summary"); require_sha256(value["procedure_fingerprint"], "observation.procedure_fingerprint")
+        if value["procedure_fingerprint"] != procedure["match_fingerprint"]: raise LifecycleError("observation.procedure_fingerprint must match procedure.match_fingerprint")
+        evidence=dict(value); evidence["evidence_id"]=sha256(canonical(value)); return {key:evidence[key] for key in sorted(legacy_keys | {"evidence_id"})}
+    observation = require_exact_keys(value, EVIDENCE_KEYS - {"evidence_id"}, "observation")
+    require_text(observation["task_key"], "observation.task_key", 512); require_text(observation["source_session_id"], "observation.source_session_id", 512)
+    require_sha256(observation["canonical_occurrence_id"], "observation.canonical_occurrence_id"); require_sha256(observation["resolution_sha256"], "observation.resolution_sha256")
+    occurred = parse_time(observation["occurred_at"], "observation.occurred_at"); decision = parse_time(observation["decision_at"], "observation.decision_at")
+    if occurred > decision: raise LifecycleError("observation.occurred_at may not be after decision_at")
+    require_text(observation["summary"], "observation.summary"); require_sha256(observation["procedure_fingerprint"], "observation.procedure_fingerprint")
+    if observation["procedure_fingerprint"] != procedure["match_fingerprint"]: raise LifecycleError("observation.procedure_fingerprint must match procedure.match_fingerprint")
+    evidence=dict(observation); evidence["evidence_id"]=sha256(canonical(observation)); return {key:evidence[key] for key in sorted(EVIDENCE_KEYS)}
+
+
+def validate_occurrence_authority(evidence: list[dict[str, Any]]) -> None:
+    current = [item for item in evidence if "canonical_occurrence_id" in item]
+    if not current:
+        return
+    try:
+        resolutions = load_task_occurrence_resolutions(task_occurrence_root())
+    except TaskOccurrenceError as error:
+        raise LifecycleError(
+            f"task occurrence authority is invalid: {error.reason}"
+        ) from error
+    by_id = {
+        resolution["resolution_sha256"]: resolution
+        for resolution in resolutions
+    }
+    superseded = {
+        resolution["supersedes_resolution_sha256"]
+        for resolution in resolutions
+        if resolution["supersedes_resolution_sha256"] is not None
+    }
+    for item in current:
+        resolution_id = item["resolution_sha256"]
+        resolution = by_id.get(resolution_id)
+        if resolution is None or resolution_id in superseded:
+            raise LifecycleError(
+                "candidate occurrence evidence lacks current immutable authority"
+            )
+        expected = {
+            "task_key": item["task_key"],
+            "qualified_session_id": item["source_session_id"],
+            "canonical_occurrence_id": item["canonical_occurrence_id"],
+            "occurred_at": item["occurred_at"],
+            "decision_at": item["decision_at"],
+        }
+        if (
+            resolution["boundary_relation"]
+            not in {"same-occurrence", "new-occurrence"}
+            or any(resolution.get(key) != value for key, value in expected.items())
+        ):
+            raise LifecycleError(
+                "candidate occurrence evidence does not match immutable authority"
+            )
 
 
 def validate_files(value: Any, field: str) -> list[dict[str, Any]]:
@@ -487,8 +536,8 @@ def remove_created_package(lifecycle_id: str, candidate: str) -> None:
 
 def validate_record(value: Any, verify_packages: bool = True) -> dict[str, Any]:
     record = require_exact_keys(value, RECORD_KEYS, "candidate record")
-    if record["schema_version"] != SCHEMA_VERSION:
-        raise LifecycleError("candidate record.schema_version must be 1")
+    if record["schema_version"] not in {LEGACY_SCHEMA_VERSION, SCHEMA_VERSION}:
+        raise LifecycleError("candidate record.schema_version must be 1 or 2")
     lifecycle_id = require_uuid(record["lifecycle_id"], "candidate record.lifecycle_id")
     if record["state"] not in STATES:
         raise LifecycleError("candidate record.state is unknown")
@@ -503,17 +552,37 @@ def validate_record(value: Any, verify_packages: bool = True) -> dict[str, Any]:
         raise LifecycleError("candidate record.evidence must be a list")
     evidence_ids: set[str] = set()
     for index, item in enumerate(evidence):
-        item = require_exact_keys(item, EVIDENCE_KEYS, f"candidate record.evidence[{index}]")
-        expected_id = sha256(
-            canonical({key: item[key] for key in sorted(EVIDENCE_KEYS - {"evidence_id"})})
-        )
-        if item["evidence_id"] != expected_id or item["evidence_id"] in evidence_ids:
+        item_keys = set(item) if isinstance(item, dict) else set()
+        legacy_evidence_keys = {
+                "task_key",
+                "session_id",
+                "observed_at",
+                "independence",
+                "summary",
+                "procedure_fingerprint",
+                "evidence_id",
+            }
+        if (
+            not isinstance(item, dict)
+            or (
+                item_keys != EVIDENCE_KEYS
+                and item_keys != legacy_evidence_keys
+            )
+        ):
+            raise LifecycleError(
+                f"candidate record.evidence[{index}] has an unknown shape"
+            )
+        payload = {
+            key: item[key] for key in item if key != "evidence_id"
+        }
+        validated = validate_observation(payload, procedure)
+        if (
+            item != validated
+            or item["evidence_id"] in evidence_ids
+        ):
             raise LifecycleError(f"candidate record.evidence[{index}] has an invalid identity")
         evidence_ids.add(item["evidence_id"])
-        validate_observation(
-            {key: item[key] for key in EVIDENCE_KEYS - {"evidence_id"}},
-            procedure,
-        )
+    validate_occurrence_authority(evidence)
 
     revisions = record["candidate_revisions"]
     if not isinstance(revisions, list) or not revisions:
@@ -802,21 +871,23 @@ def fresh(point: datetime, now: datetime | None = None) -> bool:
 
 
 def recurrence(record: dict[str, Any]) -> dict[str, Any]:
-    qualified = [item for item in record["evidence"] if item["independence"] == "verified"]
-    task_keys = {item["task_key"] for item in qualified}
-    sessions = {item["session_id"] for item in qualified}
-    times = [parse_time(item["observed_at"], "evidence.observed_at") for item in qualified]
+    if record["schema_version"] != SCHEMA_VERSION:
+        return {"ready": False, "reasons": ["legacy-no-current-occurrence-authority"], "evidence_ids": [], "verified_evidence_count": 0, "distinct_occurrence_count": 0}
+    decision_at = now_time()
+    qualified = [
+        item
+        for item in record["evidence"]
+        if "canonical_occurrence_id" in item
+        and parse_time(item["occurred_at"], "evidence.occurred_at")
+        <= decision_at
+        and decision_at
+        - parse_time(item["occurred_at"], "evidence.occurred_at")
+        <= 30 * DAY
+    ]
+    occurrences = {item["canonical_occurrence_id"] for item in qualified}
     reasons: list[str] = []
-    if len(qualified) < 2:
-        reasons.append("fewer-than-two-verified-evidence")
-    if len(task_keys) < 2:
-        reasons.append("fewer-than-two-distinct-task-keys")
-    if len(sessions) < 2:
-        reasons.append("fewer-than-two-distinct-sessions")
-    if not times or not any(fresh(point) for point in times):
-        reasons.append("no-fresh-verified-evidence")
-    if times and max(times) - min(times) > 45 * DAY:
-        reasons.append("verified-evidence-spread-exceeds-45-days")
+    if len(occurrences) < 3:
+        reasons.append("fewer-than-three-current-distinct-occurrences")
     blockers = record["blockers"]
     if blockers["uncertain"]:
         reasons.append("uncertain-match-blocker")
@@ -824,14 +895,7 @@ def recurrence(record: dict[str, Any]) -> dict[str, Any]:
         reasons.append("covering-lifecycle-blocker")
     if blockers["tombstone_ids"]:
         reasons.append("tombstone-blocker")
-    return {
-        "ready": not reasons,
-        "reasons": reasons,
-        "evidence_ids": [item["evidence_id"] for item in qualified],
-        "verified_evidence_count": len(qualified),
-        "distinct_task_count": len(task_keys),
-        "distinct_session_count": len(sessions),
-    }
+    return {"ready": not reasons, "reasons": reasons, "evidence_ids": [item["evidence_id"] for item in qualified], "verified_evidence_count": len(qualified), "distinct_occurrence_count": len(occurrences)}
 
 
 def append_evaluation(record: dict[str, Any], decision: dict[str, Any]) -> None:
@@ -885,9 +949,9 @@ def new_record(
         raise LifecycleError("--proposed-name is invalid")
     require_reason(reason)
     lifecycle_id = require_uuid(lifecycle_id, "lifecycle_id")
-    observed = parse_time(evidence["observed_at"], "observation.observed_at")
+    observed = parse_time(evidence.get("occurred_at", evidence.get("observed_at")), "observation.observed_at")
     record = {
-        "schema_version": SCHEMA_VERSION,
+        "schema_version": LEGACY_SCHEMA_VERSION if "observed_at" in evidence else SCHEMA_VERSION,
         "lifecycle_id": lifecycle_id,
         "state": "collecting",
         "authority": "autonomous",
@@ -907,7 +971,7 @@ def new_record(
         "publication": {"status": "shadow_only"},
         "lifecycle": {
             "created_at": iso(),
-            "last_supported_at": evidence["observed_at"],
+            "last_supported_at": evidence.get("occurred_at", evidence.get("observed_at")),
             "expires_at": iso(observed + 30 * DAY),
             "transition_history": [
                 transition_entry(None, "collecting", "candidate-collected", [evidence["evidence_id"]], [])
@@ -996,12 +1060,13 @@ def collect(args: argparse.Namespace) -> dict[str, Any]:
                 )
             record["current_candidate_id"] = candidate
             supported = parse_time(record["lifecycle"]["last_supported_at"], "last supported")
-            observed = parse_time(evidence["observed_at"], "observation.observed_at")
-            if evidence["independence"] == "verified" and observed > supported:
-                record["lifecycle"]["last_supported_at"] = evidence["observed_at"]
+            observed_value = evidence.get("occurred_at", evidence.get("observed_at"))
+            observed = parse_time(observed_value, "observation.observed_at")
+            if observed > supported:
+                record["lifecycle"]["last_supported_at"] = observed_value
                 record["lifecycle"]["expires_at"] = iso(observed + 30 * DAY)
             append_decision(record, outcome, reason, related, [evidence["evidence_id"]])
-            if existing["state"] == "expired" and evidence["independence"] == "verified" and fresh(observed):
+            if existing["state"] == "expired" and fresh(observed):
                 append_transition(
                     record,
                     "collecting",
@@ -1072,7 +1137,7 @@ def revise(args: argparse.Namespace) -> dict[str, Any]:
                 [
                     item["evidence_id"]
                     for item in record["evidence"]
-                    if item["independence"] == "verified"
+                    if True
                 ],
                 [],
                 internal=True,
@@ -1133,8 +1198,11 @@ def reopen(args: argparse.Namespace) -> dict[str, Any]:
     if record["state"] not in {"expired", "rejected"}:
         raise LifecycleError("only expired or rejected candidates can reopen")
     evidence = next((item for item in record["evidence"] if item["evidence_id"] == args.evidence_id), None)
-    if evidence is None or evidence["independence"] != "verified" or not fresh(
-        parse_time(evidence["observed_at"], "evidence.observed_at")
+    if evidence is None or not fresh(
+        parse_time(
+            evidence.get("occurred_at", evidence.get("observed_at")),
+            "evidence.observed_at",
+        )
     ):
         raise LifecycleError("reopen requires a retained fresh verified evidence identity")
     append_transition(
@@ -1161,8 +1229,11 @@ def expire(args: argparse.Namespace) -> dict[str, Any]:
     supporting = [
         item["evidence_id"]
         for item in record["evidence"]
-        if item["independence"] == "verified"
-        and parse_time(item["observed_at"], "evidence.observed_at") == last_supported
+        if parse_time(
+            item.get("occurred_at", item.get("observed_at")),
+            "evidence.observed_at",
+        )
+        == last_supported
     ]
     append_transition(record, "expired", "recurrence-expired", supporting, [])
     record = persist(record)

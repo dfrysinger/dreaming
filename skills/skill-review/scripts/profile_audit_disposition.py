@@ -6,8 +6,8 @@ import hashlib
 import json
 from typing import Any, NoReturn
 
-CURRENT_PROFILE_AUDIT_CONTRACT_VERSION = 1
-KNOWN_PROFILE_AUDIT_CONTRACT_VERSIONS = frozenset({1})
+CURRENT_PROFILE_AUDIT_CONTRACT_VERSION = 2
+KNOWN_PROFILE_AUDIT_CONTRACT_VERSIONS = frozenset({1, 2})
 
 
 class ProfileAuditDispositionError(ValueError):
@@ -38,11 +38,17 @@ def build_profile_audit_disposition(
     review_executor_identity: dict[str, Any],
     review_result: dict[str, Any],
     reviewed_at: int,
+    occurrence_resolution: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
+    contract_version = (
+        CURRENT_PROFILE_AUDIT_CONTRACT_VERSION
+        if occurrence_resolution is not None
+        else 1
+    )
     disposition = {
-        "schema_version": 1,
+        "schema_version": contract_version,
         "kind": "task_profile_audit_disposition",
-        "profile_audit_contract_version": CURRENT_PROFILE_AUDIT_CONTRACT_VERSION,
+        "profile_audit_contract_version": contract_version,
         "profile_id": profile["profile_id"],
         "task_key": profile["task_key"],
         "profile_sha256": _digest(profile),
@@ -58,12 +64,27 @@ def build_profile_audit_disposition(
         # The four catalog-audit outcomes are deliberately not represented until
         # their reviewer contract exists.  This only claims successful terminal
         # execution of the current full-review contract.
-        "outcome": "reviewed-terminal-v1",
+        "outcome": f"reviewed-terminal-v{contract_version}",
         "terminal_route": review_result["terminal_route"],
         "summary": review_result["summary"],
         "routing_reason": review_result["routing_reason"],
         "review_result_sha256": _digest(review_result),
         "reviewed_at": reviewed_at,
+        **(
+            {
+                "occurrence_resolution_sha256": occurrence_resolution[
+                    "resolution_sha256"
+                ],
+                "canonical_occurrence_id": occurrence_resolution[
+                    "canonical_occurrence_id"
+                ],
+                "boundary_relation": occurrence_resolution[
+                    "boundary_relation"
+                ],
+            }
+            if occurrence_resolution is not None
+            else {}
+        ),
     }
     return {**disposition, "disposition_sha256": _digest(disposition)}
 
@@ -76,7 +97,7 @@ def validate_profile_audit_disposition(
 ) -> dict[str, Any]:
     if not isinstance(disposition, dict):
         _reject("disposition-shape")
-    expected_keys = {
+    common_keys = {
         "schema_version",
         "kind",
         "profile_audit_contract_version",
@@ -98,8 +119,18 @@ def validate_profile_audit_disposition(
         "routing_reason",
         "review_result_sha256",
         "reviewed_at",
-        "disposition_sha256",
     }
+    version = disposition.get("profile_audit_contract_version")
+    versioned_keys = (
+        {
+            "occurrence_resolution_sha256",
+            "canonical_occurrence_id",
+            "boundary_relation",
+        }
+        if version == 2
+        else set()
+    )
+    expected_keys = common_keys | versioned_keys | {"disposition_sha256"}
     if set(disposition) != expected_keys:
         _reject("disposition-shape")
     body = {
@@ -111,11 +142,11 @@ def validate_profile_audit_disposition(
     ):
         _reject("disposition-sha256")
     if (
-        disposition.get("schema_version") != 1
+        disposition.get("schema_version") != version
         or disposition.get("kind") != "task_profile_audit_disposition"
         or disposition.get("profile_audit_contract_version")
         not in KNOWN_PROFILE_AUDIT_CONTRACT_VERSIONS
-        or disposition.get("outcome") != "reviewed-terminal-v1"
+        or disposition.get("outcome") != f"reviewed-terminal-v{version}"
     ):
         _reject("disposition-contract")
     expected = {
@@ -160,4 +191,33 @@ def validate_profile_audit_disposition(
         or not isinstance(disposition.get("reviewed_at"), int)
     ):
         _reject("disposition-metadata")
+    if version == 2:
+        if (
+            disposition.get("boundary_relation")
+            not in {
+                "same-occurrence",
+                "new-occurrence",
+                "boundary-conflict",
+                "boundary-unresolved",
+            }
+            or not isinstance(
+                disposition.get("occurrence_resolution_sha256"), str
+            )
+            or not disposition["occurrence_resolution_sha256"].startswith(
+                "sha256:"
+            )
+        ):
+            _reject("disposition-occurrence")
+        canonical_occurrence_id = disposition.get("canonical_occurrence_id")
+        if disposition["boundary_relation"] in {
+            "same-occurrence",
+            "new-occurrence",
+        }:
+            if (
+                not isinstance(canonical_occurrence_id, str)
+                or not canonical_occurrence_id.startswith("sha256:")
+            ):
+                _reject("disposition-occurrence")
+        elif canonical_occurrence_id is not None:
+            _reject("disposition-occurrence")
     return disposition

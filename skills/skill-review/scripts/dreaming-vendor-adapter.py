@@ -1716,6 +1716,7 @@ def review_context() -> dict[str, Any]:
 
 def review_result_schema(
     snapshot: dict[str, Any] | None = None,
+    task_profile_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     event_id_schema: dict[str, Any] = {"type": "string"}
     if snapshot is not None:
@@ -1763,34 +1764,61 @@ def review_result_schema(
         ],
         "additionalProperties": False,
     }
-    return {
+    occurrence_boundary = {
         "type": "object",
         "properties": {
-            "terminal_route": {
+            "relation": {
                 "enum": [
-                    "discard",
-                    "instruction",
-                    "factual_memory",
-                    "skill",
-                    "support_file",
+                    "same-occurrence",
+                    "new-occurrence",
+                    "boundary-conflict",
                 ]
             },
-            "summary": {"type": "string"},
-            "routing_reason": {"type": "string"},
-            "artifact": artifact,
-            "evidence_event_ids": {
+            "prior_canonical_occurrence_ids": {
                 "type": "array",
-                "items": event_id_schema,
-                "maxItems": 20,
+                "items": {"type": "string", "pattern": "^sha256:[0-9a-f]{64}$"},
+                "uniqueItems": True,
             },
         },
-        "required": [
-            "terminal_route",
-            "summary",
-            "routing_reason",
-            "artifact",
-            "evidence_event_ids",
-        ],
+        "required": ["relation", "prior_canonical_occurrence_ids"],
+        "additionalProperties": False,
+    }
+    required = [
+        "terminal_route",
+        "summary",
+        "routing_reason",
+        "artifact",
+        "evidence_event_ids",
+    ]
+    properties = {
+        "terminal_route": {
+            "enum": [
+                "discard",
+                "instruction",
+                "factual_memory",
+                "skill",
+                "support_file",
+            ]
+        },
+        "summary": {"type": "string"},
+        "routing_reason": {"type": "string"},
+        "artifact": artifact,
+        "evidence_event_ids": {
+            "type": "array",
+            "items": event_id_schema,
+            "maxItems": 20,
+        },
+    }
+    if (
+        task_profile_context is not None
+        and isinstance(task_profile_context.get("occurrence_context"), dict)
+    ):
+        properties["occurrence_boundary"] = occurrence_boundary
+        required.append("occurrence_boundary")
+    return {
+        "type": "object",
+        "properties": properties,
+        "required": required,
         "additionalProperties": False,
     }
 
@@ -1840,6 +1868,7 @@ def task_profile_result_schema(
                 "minItems": 1,
                 "maxItems": 20,
             },
+            "goal_event_id": event_id_schema,
             "task_type": bounded_text,
             "abstract_summary": bounded_text,
             "reuse_value": {
@@ -1863,6 +1892,7 @@ def task_profile_result_schema(
         },
         "required": [
             "source_event_ids",
+            "goal_event_id",
             "task_type",
             "abstract_summary",
             "reuse_value",
@@ -1892,27 +1922,43 @@ def task_profile_result_schema(
     }
 
 
-def task_profile_prompt(snapshot: dict[str, Any]) -> str:
+def task_profile_prompt(
+    snapshot: dict[str, Any],
+    correction_context: dict[str, Any] | None = None,
+) -> str:
+    task = (
+        "Identify the distinct user tasks in this bounded normalized session "
+        "and profile whether each contains a reusable procedure. You are "
+        "candidate-blind: no skill catalog is supplied, so infer task meaning "
+        "only from the snapshot. Use no tools or external knowledge. Abstract "
+        "away private names, repositories, URLs, credentials, host identifiers, "
+        "network addresses, and source-specific paths. Cite exact ordered "
+        "snapshot source_event_id values. Return JSON matching result_schema."
+    )
+    if correction_context is not None:
+        task += (
+            " A prior profile merged or mixed task boundaries. Re-profile the "
+            "same immutable source revision so every returned profile describes "
+            "one semantic task occurrence. Split merged prior tasks and separate "
+            "a repeated old task from a newly requested goal. Do not preserve the "
+            "old grouping merely to match its identifiers."
+        )
     packet: dict[str, Any] = {
-        "task": (
-            "Identify the distinct user tasks in this bounded normalized session "
-            "and profile whether each contains a reusable procedure. You are "
-            "candidate-blind: no skill catalog is supplied, so infer task meaning "
-            "only from the snapshot. Use no tools or external knowledge. Abstract "
-            "away private names, repositories, URLs, credentials, host identifiers, "
-            "network addresses, and source-specific paths. Cite exact ordered "
-            "snapshot source_event_id values. Return JSON matching result_schema."
-        ),
+        "task": task,
         "policy": {
             "procedure_required_for": ["reusable-procedure"],
             "procedure_forbidden_for": ["one-off", "no-durable-learning"],
             "split_distinct_user_outcomes": True,
             "unique_source_event_sets": True,
+            "goal_event_must_be_one_supporting_user_event": True,
+            "model_must_not_supply_occurrence_time_or_identity": True,
             "do_not_infer_completion_without_evidence": True,
         },
         "result_schema": task_profile_result_schema(snapshot),
         "snapshot": snapshot,
     }
+    if correction_context is not None:
+        packet["correction_context"] = correction_context
     return json.dumps(packet, sort_keys=True)
 
 
@@ -1947,8 +1993,7 @@ def review_prompt(
             },
             sort_keys=True,
         )
-    packet = {
-        "task": (
+    task = (
             "Review this bounded normalized session for a durable reusable "
             "artifact. Use only the supplied snapshot and context. Do not use "
             "tools or external knowledge. Return JSON matching result_schema. "
@@ -1961,9 +2006,26 @@ def review_prompt(
             "other outcome, return an empty evidence_event_ids array. When "
             "task_profile_context is present, it is candidate-blind semantic "
             "evidence already validated against this exact snapshot. Use it to "
-            "understand the reusable task and procedure before routing; do not "
-            "require the profile itself to prove independent recurrence."
-        ),
+            "understand the reusable task and procedure before routing. Do not "
+            "require the profile itself to prove recurrence."
+        )
+    if (
+        task_profile_context is not None
+        and isinstance(task_profile_context.get("occurrence_context"), dict)
+    ):
+        task += (
+            " occurrence_context lists prior profiles from this same source "
+            "session whose supporting event sets overlap. Classify this profile "
+            "as same-occurrence when it is another view of exactly one prior "
+            "task, new-occurrence when it is a distinct task despite any "
+            "overlap, or boundary-conflict when it merges prior tasks or mixes "
+            "an old task with a new goal. Return the exact known prior canonical "
+            "occurrence IDs for same-occurrence or boundary-conflict, and none "
+            "for new-occurrence. A conflict must route to discard without an "
+            "artifact."
+        )
+    packet = {
+        "task": task,
         "policy": {
             "reuse_order": [
                 "patch an existing matching skill",
@@ -1980,7 +2042,7 @@ def review_prompt(
                 "factual_memory",
             ],
         },
-        "result_schema": review_result_schema(snapshot),
+        "result_schema": review_result_schema(snapshot, task_profile_context),
         "context": review_context(),
         "snapshot": snapshot,
     }
@@ -2041,6 +2103,28 @@ def executor_run(args: argparse.Namespace) -> None:
         raise AdapterError("snapshot-invalid", args.snapshot)
     binary = selected_executable(args.vendor, args.binary)
     task_profile_context = None
+    correction_context = None
+    if profile_mode and args.task_profile_correction:
+        correction_path = Path(args.task_profile_correction)
+        if correction_path.is_symlink() or not correction_path.is_file():
+            raise AdapterError(
+                "task-profile-correction-invalid",
+                args.task_profile_correction,
+            )
+        correction_context = load_json(correction_path)
+        if (
+            not isinstance(correction_context, dict)
+            or correction_context.get("correction_contract")
+            != "profile-boundary-correction-v1"
+            or correction_context.get("qualified_session_id")
+            != snapshot.get("identity", {}).get("qualified_session_id")
+            or correction_context.get("source_revision")
+            != snapshot.get("identity", {}).get("source_revision")
+        ):
+            raise AdapterError(
+                "task-profile-correction-invalid",
+                args.task_profile_correction,
+            )
     if not profile_mode and args.task_profile_receipt:
         receipt_path = Path(args.task_profile_receipt)
         if not args.task_profile_executor:
@@ -2090,8 +2174,37 @@ def executor_run(args: argparse.Namespace) -> None:
             validated_context = {**validated_context, "profiles": selected}
         if validated_context["profiles"]:
             task_profile_context = validated_context
+            if args.task_occurrence_context:
+                occurrence_path = Path(args.task_occurrence_context)
+                if occurrence_path.is_symlink() or not occurrence_path.is_file():
+                    raise AdapterError(
+                        "task-occurrence-context-invalid",
+                        args.task_occurrence_context,
+                    )
+                occurrence_context = load_json(occurrence_path)
+                if (
+                    not isinstance(occurrence_context, dict)
+                    or occurrence_context.get("selected_profile_id")
+                    != validated_context["profiles"][0].get("profile_id")
+                ):
+                    raise AdapterError(
+                        "task-occurrence-context-invalid",
+                        args.task_occurrence_context,
+                    )
+                task_profile_context = {
+                    **task_profile_context,
+                    "occurrence_context": occurrence_context,
+                }
+                if (
+                    len(canonical(task_profile_context))
+                    > MAX_TASK_PROFILE_CONTEXT_BYTES
+                ):
+                    raise AdapterError(
+                        "task-profile-context-too-large",
+                        str(len(canonical(task_profile_context))),
+                    )
     prompt = (
-        task_profile_prompt(snapshot)
+        task_profile_prompt(snapshot, correction_context)
         if profile_mode
         else review_prompt(snapshot, task_profile_context)
     )
@@ -2113,7 +2226,7 @@ def executor_run(args: argparse.Namespace) -> None:
                 "additionalProperties": False,
             }
             if draft_review
-            else review_result_schema(snapshot)
+            else review_result_schema(snapshot, task_profile_context)
         )
         schema.write_text(json.dumps(active_schema), encoding="utf-8")
         output = work_path / "last-message.json"
@@ -2227,6 +2340,7 @@ def executor_run(args: argparse.Namespace) -> None:
         for profile in model_result["profiles"]:
             expected_profile_keys = {
                 "source_event_ids",
+                "goal_event_id",
                 "task_type",
                 "abstract_summary",
                 "reuse_value",
@@ -2238,6 +2352,7 @@ def executor_run(args: argparse.Namespace) -> None:
             if not isinstance(profile, dict) or set(profile) != expected_profile_keys:
                 raise AdapterError("malformed-executor-result", "task profile")
             event_ids = profile.get("source_event_ids")
+            goal_event_id = profile.get("goal_event_id")
             procedure = profile.get("procedure")
             reuse_value = profile.get("reuse_value")
             if (
@@ -2249,6 +2364,24 @@ def executor_run(args: argparse.Namespace) -> None:
             ):
                 raise AdapterError(
                     "malformed-executor-result", "task profile event IDs"
+                )
+            goal_event = next(
+                (
+                    event
+                    for event in events
+                    if isinstance(event, dict)
+                    and event.get("source_event_id") == goal_event_id
+                ),
+                None,
+            )
+            if (
+                not isinstance(goal_event_id, str)
+                or goal_event_id not in event_ids
+                or not isinstance(goal_event, dict)
+                or goal_event.get("kind") != "user_message"
+            ):
+                raise AdapterError(
+                    "malformed-executor-result", "task profile goal event"
                 )
             if any(value not in available for value in event_ids):
                 raise AdapterError(
@@ -2439,6 +2572,28 @@ def executor_run(args: argparse.Namespace) -> None:
         "artifact": model_result["artifact"],
         "evidence_event_ids": model_result["evidence_event_ids"],
     }
+    if (
+        task_profile_context is not None
+        and isinstance(task_profile_context.get("occurrence_context"), dict)
+    ):
+        boundary = model_result.get("occurrence_boundary")
+        if (
+            not isinstance(boundary, dict)
+            or set(boundary)
+            != {"relation", "prior_canonical_occurrence_ids"}
+            or boundary.get("relation")
+            not in {"same-occurrence", "new-occurrence", "boundary-conflict"}
+            or not isinstance(boundary.get("prior_canonical_occurrence_ids"), list)
+            or len(boundary["prior_canonical_occurrence_ids"])
+            != len(set(boundary["prior_canonical_occurrence_ids"]))
+            or any(
+                not isinstance(item, str)
+                or not re.fullmatch(r"sha256:[0-9a-f]{64}", item)
+                for item in boundary["prior_canonical_occurrence_ids"]
+            )
+        ):
+            raise AdapterError("malformed-executor-result", "occurrence_boundary")
+        final["occurrence_boundary"] = boundary
     atomic_json(Path(args.result), final)
     emit({"ok": True, **final})
 
@@ -6165,6 +6320,8 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--task-profile-receipt")
     run.add_argument("--task-profile-executor")
     run.add_argument("--task-profile-id")
+    run.add_argument("--task-occurrence-context")
+    run.add_argument("--task-profile-correction")
     prepare = sub.add_parser("prepare")
     prepare.add_argument("--trial", required=True)
     normalize = sub.add_parser("normalize")

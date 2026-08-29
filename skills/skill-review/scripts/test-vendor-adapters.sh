@@ -72,6 +72,40 @@ class VendorAdapterTest(unittest.TestCase):
         self._write_sources()
         self._write_fake_clis()
 
+    def test_selected_profile_review_requires_occurrence_boundary(self):
+        snapshot = {
+            "events": [
+                {
+                    "source_event_id": "event-1",
+                    "kind": "user_message",
+                }
+            ]
+        }
+        profile_context = {
+            "profiles": [{"profile_id": "sha256:" + "1" * 64}],
+            "occurrence_context": {
+                "review_contract": "profile-catalog-review-occurrence-v1",
+                "selected_profile_id": "sha256:" + "1" * 64,
+                "selected_task_key": "sha256:" + "2" * 64,
+                "prior_overlaps": [],
+            },
+        }
+        schema = vendor_module.review_result_schema(
+            snapshot, profile_context
+        )
+        self.assertIn("occurrence_boundary", schema["required"])
+        prompt = json.loads(
+            vendor_module.review_prompt(snapshot, profile_context)
+        )
+        self.assertEqual(
+            prompt["task_profile_context"]["occurrence_context"],
+            profile_context["occurrence_context"],
+        )
+        legacy_schema = vendor_module.review_result_schema(
+            snapshot, {"profiles": profile_context["profiles"]}
+        )
+        self.assertNotIn("occurrence_boundary", legacy_schema["required"])
+
     def run_adapter(
         self,
         vendor,
@@ -148,11 +182,15 @@ class VendorAdapterTest(unittest.TestCase):
                     "events": [
                         {
                             "source_event_id": "event-1",
+                            "kind": "user_message",
+                            "timestamp": 1,
                             "role": "user",
                             "content": "make this a reusable procedure",
                         },
                         {
                             "source_event_id": "event-2",
+                            "kind": "assistant_message",
+                            "timestamp": 2,
                             "role": "assistant",
                             "content": "done",
                         },
@@ -175,6 +213,7 @@ class VendorAdapterTest(unittest.TestCase):
         self.assertEqual(result["kind"], "llm_task_opportunity_profile")
         self.assertEqual(result["completion_sentinel"], "DREAMING_TASK_PROFILE_COMPLETE")
         self.assertEqual(result["profiles"][0]["source_event_ids"], ["event-1", "event-2"])
+        self.assertEqual(result["profiles"][0]["goal_event_id"], "event-1")
         self.assertTrue(result["profiles"][0]["task_key"].startswith("sha256:"))
         self.assertTrue(result["profiles"][0]["profile_id"].startswith("sha256:"))
         self.assertTrue(result["profile_set_id"].startswith("sha256:"))
@@ -213,8 +252,16 @@ class VendorAdapterTest(unittest.TestCase):
                         "qualified_session_id": "copilot:profile-fixture",
                     },
                     "events": [
-                        {"source_event_id": "event-1"},
-                        {"source_event_id": "event-2"},
+                        {
+                            "source_event_id": "event-1",
+                            "kind": "user_message",
+                            "timestamp": 1,
+                        },
+                        {
+                            "source_event_id": "event-2",
+                            "kind": "assistant_message",
+                            "timestamp": 2,
+                        },
                     ],
                 }
             )
@@ -247,8 +294,16 @@ class VendorAdapterTest(unittest.TestCase):
                         "qualified_session_id": "copilot:profile-fixture",
                     },
                     "events": [
-                        {"source_event_id": "event-1"},
-                        {"source_event_id": "event-2"},
+                        {
+                            "source_event_id": "event-1",
+                            "kind": "user_message",
+                            "timestamp": 1,
+                        },
+                        {
+                            "source_event_id": "event-2",
+                            "kind": "assistant_message",
+                            "timestamp": 2,
+                        },
                     ],
                 }
             )
@@ -427,6 +482,53 @@ class VendorAdapterTest(unittest.TestCase):
         )
         self.assertEqual(context["profiles"], [reusable_profile])
 
+    def test_review_preserves_occurrence_boundary(self):
+        (
+            snapshot,
+            _snapshot_value,
+            receipt_path,
+            _receipt,
+            reusable_profile,
+        ) = self._task_profile_review_fixture()
+        occurrence_context = self.case / "occurrence-context.json"
+        occurrence_context.write_text(
+            json.dumps(
+                {
+                    "review_contract": "profile-catalog-review-occurrence-v1",
+                    "selected_profile_id": reusable_profile["profile_id"],
+                    "selected_task_key": reusable_profile["task_key"],
+                    "prior_overlaps": [],
+                }
+            )
+        )
+        result_path = self.case / "occurrence-result.json"
+        response = self.run_adapter(
+            "copilot",
+            "review-executor",
+            "run",
+            "--snapshot",
+            snapshot,
+            "--result",
+            result_path,
+            "--task-profile-receipt",
+            receipt_path,
+            "--task-profile-executor",
+            "copilot",
+            "--task-profile-id",
+            reusable_profile["profile_id"],
+            "--task-occurrence-context",
+            occurrence_context,
+        )
+        expected = {
+            "relation": "new-occurrence",
+            "prior_canonical_occurrence_ids": [],
+        }
+        self.assertEqual(response["occurrence_boundary"], expected)
+        self.assertEqual(
+            json.loads(result_path.read_text())["occurrence_boundary"],
+            expected,
+        )
+
     def test_review_omits_context_when_receipt_has_no_reusable_profiles(self):
         (
             snapshot,
@@ -479,7 +581,7 @@ class VendorAdapterTest(unittest.TestCase):
     def test_review_rejects_invalid_task_profile_receipts_with_reason(self):
         cases = {
             "schema-version": lambda receipt, snapshot: receipt.__setitem__(
-                "schema_version", 2
+                "schema_version", 3
             ),
             "source-revision": lambda receipt, snapshot: receipt.__setitem__(
                 "source_revision", "revision-2"
@@ -915,6 +1017,7 @@ def task_profile_payload(prompt):
         event_ids.reverse()
     profiles = [{
       "source_event_ids": event_ids[:2],
+      "goal_event_id": event_ids[0],
       "task_type": "document-reusable-procedure",
       "abstract_summary": "Turn completed work into a reusable procedure.",
       "reuse_value": "reusable-procedure",
@@ -997,6 +1100,16 @@ if vendor == "codex" and "--output-last-message" in args:
             "routing_reason":"no durable procedure","artifact":None,
             "evidence_event_ids":[]}
     )
+    if (
+          isinstance(payload, dict)
+          and "result_schema" in prompt
+          and "occurrence_boundary"
+          in json.loads(prompt)["result_schema"].get("required", [])
+    ):
+          payload["occurrence_boundary"] = {
+            "relation": "new-occurrence",
+            "prior_canonical_occurrence_ids": [],
+          }
     target.write_text(json.dumps(payload))
     raise SystemExit()
 if ("-p" in args or "--print" in args) and "plugin" not in args:
@@ -1054,6 +1167,16 @@ if ("-p" in args or "--print" in args) and "plugin" not in args:
             "routing_reason":"no durable procedure","artifact":None,
             "evidence_event_ids":[]}
     )
+    if (
+        isinstance(payload, dict)
+        and "result_schema" in prompt
+        and "occurrence_boundary"
+        in json.loads(prompt)["result_schema"].get("required", [])
+    ):
+        payload["occurrence_boundary"] = {
+          "relation": "new-occurrence",
+          "prior_canonical_occurrence_ids": [],
+        }
     print(json.dumps({"result":payload}))
     raise SystemExit()
 if "plugin" in args and ("marketplace" in args and "add" in args):

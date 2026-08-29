@@ -178,9 +178,22 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                 )
             snapshot_sha256 = digest(snapshot)
             profiles: list[dict[str, Any]] = []
-            templates = state.get("task_profiles_by_session", {}).get(
-                session_id, state.get("task_profiles", [])
-            )
+            if args.task_profile_correction:
+                templates = state.get(
+                    "task_profile_corrections_by_session", {}
+                ).get(
+                    session_id,
+                    state.get(
+                        "task_profile_corrections",
+                        state.get("task_profiles_by_session", {}).get(
+                            session_id, state.get("task_profiles", [])
+                        ),
+                    ),
+                )
+            else:
+                templates = state.get("task_profiles_by_session", {}).get(
+                    session_id, state.get("task_profiles", [])
+                )
             for template in templates:
                 source_event_ids = template.get(
                     "source_event_ids",
@@ -189,8 +202,10 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                         for event in snapshot.get("events", [])
                     ],
                 )
+                goal_event_id = template.get("goal_event_id", next((event_id for event_id in source_event_ids if next((event for event in snapshot.get("events", []) if event.get("source_event_id") == event_id and event.get("kind") == "user_message"), None) is not None), None))
                 model_profile = {
                     "source_event_ids": source_event_ids,
+                    "goal_event_id": goal_event_id,
                     "task_type": template["task_type"],
                     "abstract_summary": template["abstract_summary"],
                     "reuse_value": template["reuse_value"],
@@ -203,10 +218,13 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                         "task_state", "completed"
                     ),
                 }
+                # The model selects only the event identity.  The owner adds its timestamp.
+                model_profile.pop("goal_event_id")
                 procedure = model_profile["procedure"]
+                selected_profile = {**model_profile, "goal_event_id": goal_event_id}
                 profiles.append(
                     {
-                        **model_profile,
+                        **selected_profile,
                         "task_key": digest(
                             {
                                 "qualified_session_id": session_id,
@@ -216,7 +234,7 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                         "profile_id": digest(
                             {
                                 "qualified_session_id": session_id,
-                                **model_profile,
+                                **selected_profile,
                             }
                         ),
                         "procedure_fingerprint": (
@@ -301,6 +319,22 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                     fail("task-profile-receipt-invalid", args.adapter_id)
             elif state.get("require_task_profile_id"):
                 fail("task-profile-id-required", args.adapter_id)
+            if state.get("require_task_occurrence_context"):
+                if not args.task_occurrence_context:
+                    fail("task-occurrence-context-required", args.adapter_id)
+                occurrence_context = load(
+                    Path(args.task_occurrence_context), {}
+                )
+                if (
+                    occurrence_context.get("selected_profile_id")
+                    != args.task_profile_id
+                    or occurrence_context.get("review_contract")
+                    != "profile-catalog-review-occurrence-v1"
+                    or not isinstance(
+                        occurrence_context.get("prior_overlaps"), list
+                    )
+                ):
+                    fail("task-occurrence-context-invalid", args.adapter_id)
         if state.get("reject_task_profile_receipt") and args.task_profile_receipt:
             fail("unexpected-task-profile-receipt", args.adapter_id)
         mutate_fixture = state.get("mutate_source_fixture")
@@ -354,6 +388,19 @@ def executor_command(args: argparse.Namespace, fixture: Path) -> None:
                 default_evidence,
             ),
         }
+        if args.task_profile_id:
+            prior_ids = state.get(
+                "occurrence_prior_ids_by_profile", {}
+            ).get(args.task_profile_id, state.get("occurrence_prior_ids", []))
+            result["occurrence_boundary"] = {
+                "relation": state.get(
+                    "occurrence_relation_by_profile", {}
+                ).get(
+                    args.task_profile_id,
+                    state.get("occurrence_relation", "new-occurrence"),
+                ),
+                "prior_canonical_occurrence_ids": prior_ids,
+            }
         save(Path(args.result), result)
         emit({"ok": True, **result})
     fail("unsupported-command", args.command)
@@ -418,6 +465,8 @@ def parser() -> argparse.ArgumentParser:
     run.add_argument("--task-profile-receipt")
     run.add_argument("--task-profile-executor")
     run.add_argument("--task-profile-id")
+    run.add_argument("--task-occurrence-context")
+    run.add_argument("--task-profile-correction")
     install = sub.add_parser("install")
     install.add_argument("--bundle", required=True)
     install.add_argument("--bundle-id", required=True)

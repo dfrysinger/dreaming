@@ -54,8 +54,9 @@ def validate_task_profile_receipt(
     }
     if set(receipt) != expected_receipt_keys:
         _reject("receipt-shape")
-    if receipt.get("schema_version") != 1:
+    if receipt.get("schema_version") not in {1, 2}:
         _reject("schema-version")
+    current_contract = receipt["schema_version"] == 2
     if receipt.get("kind") != "task_profile_receipt":
         _reject("receipt-kind")
     receipt_sha256 = receipt.get("receipt_sha256")
@@ -123,6 +124,8 @@ def validate_task_profile_receipt(
         "profile_id",
         "procedure_fingerprint",
     }
+    if current_contract:
+        expected_profile_keys |= {"goal_event_id", "occurred_at"}
     seen_task_keys: set[str] = set()
     seen_profile_ids: set[str] = set()
     for profile in profiles:
@@ -141,6 +144,38 @@ def validate_task_profile_receipt(
             _reject("profile-evidence")
         procedure = profile.get("procedure")
         reuse_value = profile.get("reuse_value")
+        if current_contract:
+            goal_event_id = profile.get("goal_event_id")
+            goal_event = next((event for event in events if isinstance(event, dict) and event.get("source_event_id") == goal_event_id), None)
+            if (
+                not isinstance(goal_event_id, str)
+                or goal_event_id not in event_ids
+                or not isinstance(goal_event, dict)
+                or goal_event.get("kind") != "user_message"
+                or not isinstance(profile.get("occurred_at"), str)
+                or not profile["occurred_at"]
+            ):
+                _reject("profile-goal-event")
+            # occurred_at is owner-derived and must exactly normalize the source event.
+            raw_timestamp = goal_event.get("timestamp")
+            from datetime import datetime, timezone
+            try:
+                if isinstance(raw_timestamp, bool):
+                    raise ValueError
+                if isinstance(raw_timestamp, (int, float)):
+                    normalized = datetime.fromtimestamp(raw_timestamp, timezone.utc)
+                elif isinstance(raw_timestamp, str):
+                    normalized = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+                    if normalized.tzinfo is None:
+                        raise ValueError
+                    normalized = normalized.astimezone(timezone.utc)
+                else:
+                    raise ValueError
+                expected_occurred_at = normalized.replace(microsecond=0).isoformat().replace("+00:00", "Z")
+            except (ValueError, OverflowError, OSError):
+                _reject("profile-goal-timestamp")
+            if profile["occurred_at"] != expected_occurred_at:
+                _reject("profile-occurred-at")
         if (
             reuse_value
             not in {"reusable-procedure", "one-off", "no-durable-learning"}
@@ -192,7 +227,7 @@ def validate_task_profile_receipt(
         model_profile = {
             key: value
             for key, value in profile.items()
-            if key not in {"task_key", "profile_id", "procedure_fingerprint"}
+            if key not in {"task_key", "profile_id", "procedure_fingerprint", "occurred_at"}
         }
         expected_task_key = _digest(
             {
