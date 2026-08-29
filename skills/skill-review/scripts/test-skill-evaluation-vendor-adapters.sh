@@ -22,6 +22,7 @@ import hashlib
 import importlib.util
 import json
 import os
+import pwd
 import shutil
 import socket
 import subprocess
@@ -34,6 +35,7 @@ root = Path(sys.argv[1])
 work = Path(sys.argv[2])
 sys.argv = [sys.argv[0], *os.environ.get("VENDOR_ADAPTER_TESTS", "").split()]
 adapter = root / "skills/skill-review/scripts/dreaming-vendor-adapter.py"
+HARNESS_BASE_COMMIT = "f63f55befa1e4a476ebf450444406ed1606cb750"
 harness_path = root / "skills/skill-review/scripts/skill-evaluation-harness.py"
 harness_spec = importlib.util.spec_from_file_location("skill_evaluation_harness", harness_path)
 harness = importlib.util.module_from_spec(harness_spec)
@@ -58,6 +60,41 @@ def sha(value):
     return sha_bytes(canonical(value))
 
 
+# Layer separation for the fixture executor tests.  The shadow Copilot
+# credential-root authority requires the resolved root to be the invoking
+# account home, which a fixture cannot be without copying real credential
+# bytes into the work tree.  This launcher runs the unmodified adapter and
+# reports the fixture credential root as the account home, so every other
+# production check -- raw symlink refusal, existence, resolved equality,
+# projection completeness, usability -- still executes for real.  The account
+# identity itself is proved separately against the real command surface by
+# the shadow credential authority tests below.
+account_home_launcher = work / "fixture-account-home-launcher.py"
+account_home_launcher.write_text(
+    """import os, pwd, runpy, sys
+
+
+_real_getpwuid = pwd.getpwuid
+_account_home = os.environ["FIXTURE_ACCOUNT_HOME"]
+
+
+class _Record:
+    def __init__(self, record):
+        self._record = record
+        self.pw_dir = _account_home
+
+    def __getattr__(self, name):
+        return getattr(self._record, name)
+
+
+pwd.getpwuid = lambda uid: _Record(_real_getpwuid(uid))
+adapter = sys.argv[1]
+sys.argv = [adapter, *sys.argv[2:]]
+runpy.run_path(adapter, run_name="__main__")
+"""
+)
+
+
 class SkillEvaluationVendorAdapterTest(unittest.TestCase):
     def setUp(self):
         self.root = work / self._testMethodName
@@ -68,6 +105,8 @@ class SkillEvaluationVendorAdapterTest(unittest.TestCase):
         self.credentials.mkdir()
         for relative in (
             ".config/gh/hosts.yml",
+            ".config/gh/config.yml",
+            ".copilot/config.json",
             ".claude/.credentials.json",
             ".codex/auth.json",
         ):
@@ -379,6 +418,7 @@ else:
     def base(self, vendor, timeout=10, token_budget=100):
         return [
             sys.executable,
+            str(account_home_launcher),
             str(adapter),
             "--vendor",
             vendor,
@@ -414,6 +454,7 @@ else:
             env={
                 **os.environ,
                 "DREAMING_EXECUTOR_TEST_ALLOW_ROOT": str(self.root),
+                "FIXTURE_ACCOUNT_HOME": str(self.credentials),
                 "GH_TOKEN": "fixture-token",
                 **(extra_env or {}),
             },
@@ -1564,6 +1605,7 @@ else:
             env={
                 **os.environ,
                 "DREAMING_EXECUTOR_TEST_ALLOW_ROOT": str(self.root),
+                "FIXTURE_ACCOUNT_HOME": str(self.credentials),
                 "GH_TOKEN": "fixture-token",
             },
             text=True,
@@ -1843,6 +1885,341 @@ else:
                 "path",
             )
             self.assertNotIn(marker, denied.stdout)
+
+    def authority_argv(self, credential_root, *args, omit_root=False):
+        argv = [
+            sys.executable,
+            str(adapter),
+            "--vendor",
+            "copilot",
+            "--role",
+            "skill-evaluation-executor",
+            "--binary",
+            str(self.binaries["copilot"]),
+            "--model",
+            "fixture-model",
+            "--timeout",
+            "10",
+            "--token-budget",
+            "100",
+            "--output-bytes",
+            "100000",
+        ]
+        if not omit_root:
+            argv += ["--credential-root", str(credential_root)]
+        return [*argv, *map(str, args)]
+
+    def authority_call(self, credential_root, *args, omit_root=False, env=None):
+        result = subprocess.run(
+            self.authority_argv(credential_root, *args, omit_root=omit_root),
+            env={
+                **os.environ,
+                "DREAMING_EXECUTOR_TEST_ALLOW_ROOT": str(self.root),
+                "GH_TOKEN": "fixture-token",
+                **(env or {}),
+            },
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+        )
+        payload = json.loads((result.stdout or result.stderr).splitlines()[-1])
+        return result, payload
+
+    def test_shadow_credential_root_authority_is_command_boundary_owned(self):
+        """CHK-A2 and CHK-A4.
+
+        The account-home authority runs against the real command surface with
+        the real account identity, which is the layer CHK-A3 deliberately
+        bypasses. Every refusal must happen before any projection, so each
+        negative case asserts the synthetic trial home stayed empty.
+        """
+        account_home = Path(pwd.getpwuid(os.getuid()).pw_dir).resolve()
+        other = work / f"{self._testMethodName}-other"
+        other.mkdir()
+        link = work / f"{self._testMethodName}-link"
+        link.symlink_to(account_home)
+        missing = work / f"{self._testMethodName}-missing"
+        regular = work / f"{self._testMethodName}-file"
+        regular.write_text("not a directory\n")
+
+        cases = [
+            (None, True, "shadow-credential-root-missing"),
+            (link, False, "shadow-credential-root-symlink"),
+            (missing, False, "shadow-credential-root-invalid"),
+            (regular, False, "shadow-credential-root-invalid"),
+            (other, False, "shadow-credential-root-mismatch"),
+        ]
+        for index, (root, omit, code) in enumerate(cases):
+            trial, path = self.trial("copilot", prompt=f"authority {index}")
+            result, payload = self.authority_call(
+                root or account_home,
+                "--shadow-contract",
+                "prepare",
+                "--trial",
+                path,
+                omit_root=omit,
+            )
+            self.assertNotEqual(result.returncode, 0, code)
+            self.assertEqual(payload["error"]["code"], code)
+            self.assertEqual(
+                sorted(p.name for p in Path(trial["home"]).iterdir()),
+                [],
+                f"{code} projected into the trial home before refusing",
+            )
+
+        result, payload = self.authority_call(
+            account_home, "--shadow-contract", "version"
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(payload["adapter_version"], 1)
+        self.assertEqual(payload["real_backend"], True)
+
+        result, payload = self.authority_call(
+            account_home, "version", omit_root=True
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(payload["adapter_version"], 1)
+        self.assertNotIn("real_backend", payload)
+
+    def test_shadow_projection_completeness_fails_closed(self):
+        """CHK-A6."""
+        vendor_adapter = self.load_adapter_module()
+        home = work / f"{self._testMethodName}-home"
+        projected = vendor_adapter.SHADOW_PROJECTED_COPILOT_AUTH
+        self.assertEqual(
+            projected,
+            (".config/gh/hosts.yml", ".config/gh/config.yml", ".copilot/config.json"),
+        )
+
+        def rebuild():
+            if home.exists():
+                shutil.rmtree(home)
+            for relative in projected:
+                path = home / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text("{}\n")
+                path.chmod(0o600)
+
+        rebuild()
+        vendor_adapter.assert_shadow_projection_complete(home)
+
+        def refuses(relative):
+            with self.assertRaises(vendor_adapter.AdapterError) as caught:
+                vendor_adapter.assert_shadow_projection_complete(home)
+            self.assertEqual(
+                caught.exception.code, "shadow-credential-projection-incomplete"
+            )
+            self.assertEqual(caught.exception.message, relative)
+
+        for relative in projected:
+            rebuild()
+            (home / relative).unlink()
+            refuses(relative)
+
+            rebuild()
+            (home / relative).chmod(0o644)
+            refuses(relative)
+
+            rebuild()
+            (home / relative).write_text("")
+            (home / relative).chmod(0o600)
+            refuses(relative)
+
+            rebuild()
+            elsewhere = work / f"{self._testMethodName}-elsewhere"
+            elsewhere.write_text("{}\n")
+            elsewhere.chmod(0o600)
+            (home / relative).unlink()
+            (home / relative).symlink_to(elsewhere)
+            refuses(relative)
+
+    def test_shadow_identity_and_environment_leave_non_shadow_unchanged(self):
+        """CHK-A5, CHK-A8, CHK-A9.
+
+        The non-shadow comparison is made against the reviewed integration
+        base bytes rather than against this build, so an accidental
+        non-shadow change cannot be masked by comparing a file to itself.
+        """
+        base_source = work / f"{self._testMethodName}-base-adapter.py"
+        base_source.write_bytes(
+            subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(root),
+                    "show",
+                    f"{HARNESS_BASE_COMMIT}:skills/skill-review/scripts/"
+                    "dreaming-vendor-adapter.py",
+                ],
+                check=True,
+                stdout=subprocess.PIPE,
+            ).stdout
+        )
+        spec = importlib.util.spec_from_file_location(
+            "dreaming_vendor_adapter_base", base_source
+        )
+        base = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = base
+        spec.loader.exec_module(base)
+        current = self.load_adapter_module()
+
+        def namespace(shadow):
+            return argparse.Namespace(
+                vendor="copilot",
+                binary=str(self.binaries["copilot"]),
+                credential_root=str(self.credentials),
+                deny_root=[],
+                shadow_contract=shadow,
+                model="fixture-model",
+                timeout=10,
+                token_budget=100,
+                output_bytes=100000,
+                turn_budget=7,
+                tool_budget=8,
+            )
+
+        for name in (
+            "DREAMING_EXECUTOR_TEST_ALLOW_ROOT",
+            "DREAMING_EXECUTOR_TEST_ALLOW_ROOTS",
+        ):
+            os.environ.pop(name, None)
+
+        plain_trial, _ = self.trial("copilot", prompt="identity plain")
+        base_trial, _ = self.trial("copilot", prompt="identity base")
+        shadow_trial_spec, _ = self.trial("copilot", prompt="identity shadow")
+
+        plain_environment = current.evaluation_environment(
+            namespace(False), plain_trial
+        )
+        base_environment = base.evaluation_environment(namespace(False), base_trial)
+        self.assertEqual(set(plain_environment), set(base_environment))
+        shadow_environment = current.evaluation_environment(
+            namespace(True), shadow_trial_spec
+        )
+        self.assertEqual(set(shadow_environment), set(plain_environment))
+        for name in ("GH_TOKEN", "GITHUB_TOKEN"):
+            self.assertNotIn(name, shadow_environment)
+            self.assertNotIn(name, plain_environment)
+
+        plain_identity = current.evaluation_identity(namespace(False))
+        base_identity = base.evaluation_identity(namespace(False))
+        volatile = "adapter_executable_sha256"
+        self.assertEqual(
+            {k: v for k, v in plain_identity.items() if k != volatile},
+            {k: v for k, v in base_identity.items() if k != volatile},
+        )
+        self.assertEqual(
+            plain_identity[volatile], sha_bytes(adapter.read_bytes())
+        )
+        self.assertNotEqual(plain_identity[volatile], base_identity[volatile])
+        plain_profile = Path(
+            current.evaluation_sandbox_profile(
+                namespace(False), plain_trial, plain_environment
+            )
+        ).read_bytes()
+        base_profile = Path(
+            base.evaluation_sandbox_profile(
+                namespace(False), base_trial, base_environment
+            )
+        ).read_bytes()
+        self.assertEqual(
+            plain_profile.replace(str(plain_trial["home"]).encode(), b"HOME")
+            .replace(str(Path(plain_trial["home"]).parent).encode(), b"ROOT"),
+            base_profile.replace(str(base_trial["home"]).encode(), b"HOME")
+            .replace(str(Path(base_trial["home"]).parent).encode(), b"ROOT"),
+        )
+
+        shadow_identity = current.evaluation_identity(namespace(True))
+        self.assertEqual(shadow_identity["adapter_version"], 1)
+        self.assertEqual(
+            set(shadow_identity),
+            set(plain_identity) | {"real_backend", "real_backend_source"},
+        )
+        self.assertNotEqual(
+            shadow_identity["sandbox_id"], plain_identity["sandbox_id"]
+        )
+        self.assertEqual(
+            shadow_identity["sandbox_id"],
+            sha(current.evaluation_sandbox_descriptor(namespace(True))),
+        )
+        descriptor = current.evaluation_sandbox_descriptor(namespace(True))
+        self.assertEqual(descriptor["version"], 1)
+        for declared in (
+            "non-cli-projected-credential-reads",
+            "keychains",
+            "provider-token-in-environment",
+        ):
+            self.assertIn(declared, descriptor["denied"])
+        shadow_profile = Path(
+            current.evaluation_sandbox_profile(
+                namespace(True), shadow_trial_spec, shadow_environment
+            )
+        ).read_text()
+        self.assertNotIn("Library/Keychains", shadow_profile)
+
+    def test_shadow_credential_usability_refuses_before_the_model(self):
+        """CHK-A17.
+
+        With projection complete but the projected account unusable, the
+        adapter-owned probe must refuse before any CLI launch. The probe runs
+        for real against the reported account home; only the account identity
+        is supplied by the fixture launcher.
+        """
+        trial, path = self.trial("copilot", prompt="usability")
+        blank = {"GH_TOKEN": "", "GITHUB_TOKEN": ""}
+        for command, extra in (("doctor", []), ("prepare", ["--trial", str(path)])):
+            result = subprocess.run(
+                [*self.base("copilot", 120), "--shadow-contract", command, *extra],
+                env={
+                    **os.environ,
+                    "DREAMING_EXECUTOR_TEST_ALLOW_ROOT": str(self.root),
+                    "FIXTURE_ACCOUNT_HOME": str(self.credentials),
+                    **blank,
+                },
+                text=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+            )
+            payload = json.loads((result.stdout or result.stderr).splitlines()[-1])
+            self.assertNotEqual(result.returncode, 0, command)
+            self.assertEqual(
+                payload["error"]["code"], "shadow-credential-unusable", command
+            )
+            self.assertEqual(
+                sorted(p.name for p in Path(trial["home"]).iterdir()),
+                [],
+                f"{command} projected before refusing an unusable account",
+            )
+
+        healthy = self.call("copilot", "--shadow-contract", "doctor", cwd="/")
+        self.assertTrue(healthy["healthy"])
+
+    def test_shadow_prepare_never_serializes_the_probe_token(self):
+        """CHK-A18."""
+        secret = "fixture-token"
+        trial, path = self.trial("copilot", prompt="no secret")
+        prepared = self.call(
+            "copilot",
+            "--shadow-contract",
+            "--turn-budget",
+            "7",
+            "--tool-budget",
+            "8",
+            "prepare",
+            "--trial",
+            path,
+        )
+        self.assertEqual(prepared["execution"]["adapter_version"], 1)
+        self.assertNotIn(secret, json.dumps(prepared))
+        self.assertNotIn(secret, json.dumps(self.last_call))
+        home = Path(trial["home"])
+        for candidate in sorted(home.rglob("*")):
+            if candidate.is_file() and not candidate.is_symlink():
+                self.assertNotIn(
+                    secret,
+                    candidate.read_bytes().decode("utf-8", "replace"),
+                    f"probe token serialized into {candidate}",
+                )
 
 
 class CopilotNativeEventSchemaGuardTest(unittest.TestCase):

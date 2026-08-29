@@ -4017,6 +4017,43 @@ def evaluation_policy(args: argparse.Namespace) -> dict[str, Any]:
     }
 
 
+def evaluation_sandbox_descriptor(args: argparse.Namespace) -> dict[str, Any]:
+    """Describe the confinement the emitted profile enforces.
+
+    The descriptor is a hash input only.  Shadow Copilot execution confines
+    projected credential reads to the CLI process path, denies both keychain
+    roots, and injects no provider token, so it declares a different
+    confinement and therefore a different sandbox_id.  Every other mode keeps
+    its existing descriptor byte for byte.
+    """
+    denied = [
+        "inherited-home",
+        "native-session-roots",
+        "unrelated-skill-roots",
+        "system-temporary-roots",
+    ]
+    allowed = ["trial-root", "cli-executable", "projected-credentials"]
+    if args.shadow_contract and args.vendor == "copilot":
+        denied = [
+            *denied,
+            "non-cli-projected-credential-reads",
+            "keychains",
+            "provider-token-in-environment",
+        ]
+        allowed = [
+            "trial-root",
+            "cli-executable",
+            "projected-credentials-cli-process-path-only",
+        ]
+    return {
+        "version": 1,
+        "platform": "macos",
+        "default": "allow",
+        "denied": denied,
+        "allowed": allowed,
+    }
+
+
 def evaluation_identity(args: argparse.Namespace) -> dict[str, Any]:
     if args.model == "default":
         raise AdapterError("model-required", args.vendor)
@@ -4050,20 +4087,7 @@ def evaluation_identity(args: argparse.Namespace) -> dict[str, Any]:
         "cli_version": cli_version,
         "tool_policy_id": sha(evaluation_policy(args)),
         "limits": limits,
-        "sandbox_id": sha(
-            {
-                "version": 1,
-                "platform": "macos",
-                "default": "allow",
-                "denied": [
-                    "inherited-home",
-                    "native-session-roots",
-                    "unrelated-skill-roots",
-                    "system-temporary-roots",
-                ],
-                "allowed": ["trial-root", "cli-executable", "projected-credentials"],
-            }
-        ),
+        "sandbox_id": sha(evaluation_sandbox_descriptor(args)),
     }
     if args.shadow_contract:
         identity.update(
@@ -4670,6 +4694,76 @@ def evaluation_credential_root(args: argparse.Namespace) -> Path:
     return Path(args.credential_root).expanduser().resolve() if args.credential_root else Path.home().resolve()
 
 
+SHADOW_PROJECTED_COPILOT_AUTH = (
+    ".config/gh/hosts.yml",
+    ".config/gh/config.yml",
+    ".copilot/config.json",
+)
+
+# Directories under the synthetic trial home that hold nothing but projected
+# authentication, so the whole subpath can be denied.  ``.copilot`` is
+# deliberately excluded: the CLI owns its own session state there and must keep
+# reading it, so its projected file is denied by exact literal instead.
+SHADOW_DENIED_CREDENTIAL_ROOTS = (".config/gh",)
+
+
+def shadow_credential_root_authority(args: argparse.Namespace) -> Path:
+    """Refuse a shadow credential root that is not the invoking account home.
+
+    The raw argument is checked for a symlink before expansion or resolution,
+    which is deliberately stricter than resolving first: resolution follows the
+    link and would accept it silently.  This authority belongs to the command
+    boundary only, so profile construction stays independently testable.
+    """
+    raw = getattr(args, "credential_root", None)
+    if not raw:
+        raise AdapterError("shadow-credential-root-missing", args.vendor)
+    candidate = Path(raw)
+    if candidate.is_symlink():
+        raise AdapterError("shadow-credential-root-symlink", args.vendor)
+    resolved = candidate.expanduser().resolve()
+    if not resolved.is_dir():
+        raise AdapterError("shadow-credential-root-invalid", args.vendor)
+    if resolved != Path(pwd.getpwuid(os.getuid()).pw_dir).resolve():
+        raise AdapterError("shadow-credential-root-mismatch", args.vendor)
+    return resolved
+
+
+def shadow_credential_usable(credential_root: Path) -> bool:
+    """Prove the projected authentication is usable without retaining it.
+
+    Presence, mode, and size prove only that projection happened.  This probe
+    runs as the adapter process outside the trial sandbox and reduces the
+    result to a boolean; the returned secret is discarded here and is never
+    copied, injected, serialized, or logged.
+    """
+    return copilot_auth_token(credential_root) is not None
+
+
+def assert_shadow_projection_complete(home: Path) -> None:
+    for relative in SHADOW_PROJECTED_COPILOT_AUTH:
+        destination = home / relative
+        if destination.is_symlink() or not destination.is_file():
+            raise AdapterError(
+                "shadow-credential-projection-incomplete", relative
+            )
+        status = destination.stat()
+        if status.st_size == 0 or status.st_mode & 0o777 != 0o600:
+            raise AdapterError(
+                "shadow-credential-projection-incomplete", relative
+            )
+
+
+def enforce_shadow_credential_authority(
+    args: argparse.Namespace, usability: bool
+) -> None:
+    if not args.shadow_contract or args.vendor != "copilot":
+        return
+    credential_root = shadow_credential_root_authority(args)
+    if usability and not shadow_credential_usable(credential_root):
+        raise AdapterError("shadow-credential-unusable", args.vendor)
+
+
 def evaluation_environment(args: argparse.Namespace, trial: dict[str, Any]) -> dict[str, str]:
     home = Path(trial["home"]).resolve()
     workspace = Path(trial["workspace"]).resolve()
@@ -4709,12 +4803,10 @@ def evaluation_environment(args: argparse.Namespace, trial: dict[str, Any]) -> d
     }
     credential_root = evaluation_credential_root(args)
     if args.vendor == "copilot":
-        for relative in (
-            ".config/gh/hosts.yml",
-            ".config/gh/config.yml",
-            ".copilot/config.json",
-        ):
+        for relative in SHADOW_PROJECTED_COPILOT_AUTH:
             copy_auth_file(credential_root / relative, home / relative)
+        if args.shadow_contract:
+            assert_shadow_projection_complete(home)
         environment["COPILOT_HOME"] = str(home / ".copilot")
     elif args.vendor == "claude":
         claude_config = home / ".claude"
@@ -4934,8 +5026,9 @@ def evaluation_sandbox_profile(
     root = home.parent.resolve()
     binary = Path(evaluation_binary(args))
     credential_root = evaluation_credential_root(args)
+    shadow_copilot = bool(args.shadow_contract) and args.vendor == "copilot"
     allowed_under_credentials = [root]
-    if args.vendor == "copilot":
+    if args.vendor == "copilot" and not shadow_copilot:
         keychains = credential_root / "Library/Keychains"
         if keychains.is_dir():
             allowed_under_credentials.append(keychains)
@@ -4960,7 +5053,8 @@ def evaluation_sandbox_profile(
             f'(require-all (subpath "{sandbox_quote(credential_root)}") '
             f'(process-path "{sandbox_quote(binary.resolve())}")))'
         )
-        for path in allowed_under_credentials[1:] + [Path("/Library/Keychains")]:
+        keychain_roots = [] if shadow_copilot else [Path("/Library/Keychains")]
+        for path in allowed_under_credentials[1:] + keychain_roots:
             rules.append(
                 f'(allow file-read* (subpath "{sandbox_quote(path)}"))'
             )
@@ -4999,17 +5093,48 @@ def evaluation_sandbox_profile(
         '(allow network-outbound '
         f'(process-path "{sandbox_quote(binary.resolve())}"))'
     )
+    projected_home = Path(environment["HOME"])
+    confined = (
+        {projected_home / relative for relative in SHADOW_PROJECTED_COPILOT_AUTH}
+        if shadow_copilot
+        else set()
+    )
     for path in (
-        Path(environment["HOME"]) / ".config/gh/hosts.yml",
-        Path(environment["HOME"]) / ".config/gh/config.yml",
-        Path(environment["HOME"]) / ".copilot/config.json",
-        Path(environment["HOME"]) / ".claude.json",
-        Path(environment["HOME"]) / ".claude/.credentials.json",
-        Path(environment["HOME"]) / ".codex/auth.json",
+        projected_home / ".config/gh/hosts.yml",
+        projected_home / ".config/gh/config.yml",
+        projected_home / ".copilot/config.json",
+        projected_home / ".claude.json",
+        projected_home / ".claude/.credentials.json",
+        projected_home / ".codex/auth.json",
     ):
         if path.exists():
             rules.append(f'(deny file-write* (literal "{sandbox_quote(path)}"))')
-            rules.append(f'(allow file-read* (literal "{sandbox_quote(path)}"))')
+            if path not in confined:
+                rules.append(
+                    f'(allow file-read* (literal "{sandbox_quote(path)}"))'
+                )
+    if shadow_copilot:
+        for relative in SHADOW_DENIED_CREDENTIAL_ROOTS:
+            rules.append(
+                '(deny file-read* file-read-metadata (subpath '
+                f'"{sandbox_quote(projected_home / relative)}"))'
+            )
+        for path in sorted(confined, key=str):
+            if any(
+                path.is_relative_to(projected_home / relative)
+                for relative in SHADOW_DENIED_CREDENTIAL_ROOTS
+            ):
+                continue
+            rules.append(
+                '(deny file-read* file-read-metadata (literal '
+                f'"{sandbox_quote(path)}"))'
+            )
+        for path in sorted(confined, key=str):
+            rules.append(
+                '(allow file-read* file-read-metadata (require-all '
+                f'(literal "{sandbox_quote(path)}") '
+                f'(process-path "{sandbox_quote(binary.resolve())}")))'
+            )
     candidate_root = trial.get("candidate_root")
     if candidate_root:
         rules.append(
@@ -6045,12 +6170,16 @@ def evaluation_run(args: argparse.Namespace) -> None:
         raise AdapterError("executor-boundary-unavailable", "macOS sandbox-exec is required")
     process_environment = environment
     if args.vendor == "copilot":
-        token = copilot_auth_token(evaluation_credential_root(args))
-        if token is None:
-            raise AdapterError("authentication-required", args.vendor)
-        process_environment = dict(environment)
-        process_environment["GH_TOKEN"] = token
-        process_environment["GITHUB_TOKEN"] = token
+        if args.shadow_contract:
+            if not shadow_credential_usable(evaluation_credential_root(args)):
+                raise AdapterError("shadow-credential-unusable", args.vendor)
+        else:
+            token = copilot_auth_token(evaluation_credential_root(args))
+            if token is None:
+                raise AdapterError("authentication-required", args.vendor)
+            process_environment = dict(environment)
+            process_environment["GH_TOKEN"] = token
+            process_environment["GITHUB_TOKEN"] = token
     result = run_process_bounded(
         [str(sandbox), "-f", str(profile), *expected_command],
         process_environment,
@@ -7201,6 +7330,9 @@ def main() -> None:
                 executor_run(args)
             raise AdapterError("unsupported-command", args.command)
         if args.role == "skill-evaluation-executor":
+            enforce_shadow_credential_authority(
+                args, args.command in {"doctor", "prepare", "run"}
+            )
             if args.command == "doctor":
                 evaluation_doctor(args)
             if args.command == "version":

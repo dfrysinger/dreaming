@@ -167,7 +167,7 @@ ROLE_CONFIG_KEYS = {
 # A shadow evaluation executor must name its exact model and shadow contract in
 # argv, because evaluation_identity refuses model=default and only emits the
 # shadow limit and backend attestation fields under --shadow-contract.
-SHADOW_EXECUTOR_REQUIRED_ARGV = ("--shadow-contract", "--model")
+SHADOW_EXECUTOR_REQUIRED_ARGV = ("--shadow-contract", "--model", "--credential-root")
 REVIEW_DESTINATIONS = {
     "instruction",
     "factual_memory",
@@ -9548,6 +9548,16 @@ def _require_role_argv(role: str, key: str, name: str, argv: list[str]) -> None:
         raise RuntimeFailure(
             "invalid-adapter-config",
             f"{key}.{name}.argv must name an exact model",
+        )
+    credential_root = (
+        argv[argv.index("--credential-root") + 1]
+        if "--credential-root" in argv[:-1]
+        else None
+    )
+    if not credential_root or credential_root.startswith("-"):
+        raise RuntimeFailure(
+            "invalid-adapter-config",
+            f"{key}.{name}.argv must name an account credential root",
         )
 
 

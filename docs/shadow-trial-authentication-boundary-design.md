@@ -404,20 +404,36 @@ not emit those literal read allows for the three Copilot projected paths.
 Instead it emits, at the end of the profile:
 
 ```
-(deny file-read*  (subpath "<home>/.config/gh"))
-(deny file-read*  (subpath "<home>/.copilot"))
+(deny file-read* file-read-metadata (subpath "<home>/.config/gh"))
+(deny file-read* file-read-metadata (literal "<home>/.copilot/config.json"))
 (deny file-write* (literal "<home>/.config/gh/hosts.yml"))
 (deny file-write* (literal "<home>/.config/gh/config.yml"))
 (deny file-write* (literal "<home>/.copilot/config.json"))
-(allow file-read* (require-all (subpath "<home>/.config/gh")
-                               (process-path "<resolved cli binary>")))
-(allow file-read* (require-all (subpath "<home>/.copilot")
-                               (process-path "<resolved cli binary>")))
+(allow file-read* file-read-metadata
+       (require-all (literal "<home>/.config/gh/hosts.yml")
+                    (process-path "<resolved cli binary>")))
+(allow file-read* file-read-metadata
+       (require-all (literal "<home>/.config/gh/config.yml")
+                    (process-path "<resolved cli binary>")))
+(allow file-read* file-read-metadata
+       (require-all (literal "<home>/.copilot/config.json")
+                    (process-path "<resolved cli binary>")))
 ```
 
 The write denials on the three literals are preserved from today's behavior.
-Writes elsewhere under `<home>/.copilot` remain permitted by the trial-root
-grant, because the CLI writes session state there.
+
+**Why `.copilot` is denied by literal, not by subpath.** `<home>/.config/gh`
+holds nothing but projected authentication, so the whole subpath is denied.
+`<home>/.copilot` is different: the CLI owns its session state there. Denying
+that subpath's reads and metadata was implemented first and measured to break a
+real trial — the CLI could create `session-state/<id>/events.jsonl` but could
+not stat it, so the append failed with `File exists (os error 17)` and the run
+never reached the model. The implemented rule therefore denies only the exact
+projected literal under `.copilot`, and reads and writes elsewhere under
+`<home>/.copilot` remain permitted by the trial-root grant. The set of
+directories eligible for whole-subpath denial is named explicitly in
+`SHADOW_DENIED_CREDENTIAL_ROOTS`; adding a projected path outside those roots
+automatically produces a literal denial rather than silently widening one.
 
 **No precedence claim.** This work order does **not** assert any SBPL
 precedence or last-match-wins semantics. It specifies the *generated effective
@@ -560,7 +576,7 @@ adapter subprocess, argv verbatim:  … --credential-root <account home> --shado
 | F6 | Real `HOME` reachable from the trial | Missing deny | Existing deny roots + `prove_boundary` | CHK-A7 |
 | F7 | Keychain reachable from the trial | Existing broad grants | A3 omits them under shadow | CHK-A7 |
 | F8 | Confinement defeated by an earlier unconditional allow | `:4989` literal read allows | A3 suppresses them under shadow | CHK-A3 |
-| F9 | Fixture adapters break | Shared code path | Fixtures already pass `--credential-root` (`test-skill-evaluation-vendor-adapters.sh:325`) | CHK-A10 |
+| F9 | Fixture adapters break | Shared code path | Fixtures already pass `--credential-root`, but a fixture root can never be the account home; their shadow command invocations run through a test-local account-home launcher rather than any production relaxation | CHK-A10 |
 | F10 | Installed host silently becomes authenticated by default | Generated config | `install.sh:702` does not generate `evaluators`; absent entry → unavailable | CHK-A12 |
 | F11 | Process leak or timeout regression | New subprocess in `prepare` | Bounded 10 s; existing cleanup asserts | CHK-A13 |
 | F12 | Removing the authority does not restore fail-closed behavior | Partial rollback | Rollback deletes the evaluator entry | CHK-A12 |
@@ -596,7 +612,7 @@ adapter subprocess, argv verbatim:  … --credential-root <account home> --shado
 | AC-T7 | The trial cannot read the real `HOME`, `~/.copilot` session content, `~/.github` beyond the exact projection, keychains, or the parent environment | CHK-A7 |
 | AC-T8 | No provider token appears in the trial environment | CHK-A5 |
 | AC-T9 | Identity is exactly the existing key set, `adapter_version` is `1`, and the shadow `sandbox_id` equals the expected shadow digest and differs from the non-shadow digest | CHK-A8 |
-| AC-T10 | Non-shadow identity, profile, and fixture behavior unchanged | CHK-A9, CHK-A10 |
+| AC-T10 | Non-shadow identity (apart from the adapter's own digest), non-shadow profile bytes, and non-shadow fixture behavior unchanged | CHK-A9, CHK-A10 |
 | AC-T11 | An evaluator entry lacking the flag is refused by strict config validation | CHK-A19 |
 | AC-T12 | A config with no evaluator entry is valid and leaves the stage unavailable | CHK-A12 |
 | AC-T13 | Process cleanup and output/time bounds unchanged | CHK-A13 |
@@ -679,14 +695,14 @@ also proved composed, not only in isolation.
 | CHK-A6 | Projection completeness | Each of: missing file, mode `0644`, zero size, symlinked destination raises `shadow-credential-projection-incomplete`; a complete projection passes | at + past |
 | CHK-A7 | Sandbox, executed | `prove_boundary` still refuses protected `HOME`, config, and content reads; keychain roots are denied under shadow | past |
 | CHK-A8 | Identity | Shadow attestation response key set is **exactly** `EXECUTOR_IDENTITY_KEYS ∪ {real_backend, real_backend_source}`; `adapter_version == 1`; `sandbox_id` equals the expected shadow digest and differs from the non-shadow digest; `normalize_shadow_executors` accepts it | at |
-| CHK-A9 | Identity, non-shadow | Without `--shadow-contract`, every identity field including `sandbox_id`, and the emitted profile bytes, are identical to base | at |
-| CHK-A10 | Fixtures | The existing fixture vendor-adapter tests pass unchanged | at |
+| CHK-A9 | Identity, non-shadow | Without `--shadow-contract`, every identity field except `adapter_executable_sha256`, including `sandbox_id`, and the emitted profile bytes, are identical to the base adapter loaded from the reviewed integration commit; `adapter_executable_sha256` equals the current file digest and necessarily differs | at |
+| CHK-A10 | Fixtures | The fixture vendor-adapter tests pass with unchanged non-shadow behavior. Their **shadow Copilot command** invocations now require account authority, so they run the unmodified adapter through a test-local launcher that reports the fixture credential root as the account home. Every other production check still executes; the account identity itself is owned by CHK-A4 | at |
 | CHK-A11 | Prepare | `prepared` record shape is unchanged and the drift equality at `:5784` still holds across a prepare/run pair | at |
 | CHK-A12 | Config | With the evaluator entry deleted: config validates, `shadow_execution_authority` reports unavailable, zero durable writes | at |
 | CHK-A13 | Process | Timeout and cleanup asserts unchanged; the added `prepare` probe is bounded and leaves no orphan | at |
 | CHK-A14 | Artifacts | Grep every retained artifact from a real trial for the projected credential's distinguishing markers; zero hits | past |
 | CHK-A15 | Harness | `skill-evaluation-harness.py` digest equals the reviewed integration base, corroborated against an independent copy of the base bytes so the pin cannot be satisfied by the file under test alone | at |
-| CHK-A16 | Sandbox, past boundary | A process whose path is not the resolved CLI attempts each projected path and each denied subpath; all denied | past |
+| CHK-A16 | Sandbox, past boundary | Under a real trial profile, a process whose path is not the resolved CLI attempts each projected path in the synthetic home and each corresponding path in the real account home; all denied, while a workspace control read succeeds | past |
 | CHK-A17 | Usability probe | With the projection complete but the account unusable, `doctor` and `prepare` each raise `shadow-credential-unusable` and launch no CLI; with a usable account both pass | at + past |
 | CHK-A18 | Secret non-serialization | The probe's returned token value appears in no stdout, `prepared.json`, profile, environment dump, or log produced by a full prepare/run pair | past |
 | CHK-A19 | Strict config | An evaluator entry lacking `--credential-root` causes `validate_adapter_config` to fail the whole config, and unrelated roles stop resolving — asserted as the negative fail-closed behavior, not as a rollback | past |
@@ -733,6 +749,36 @@ adapter config — `ROLE_CONFIG_KEYS` covers `sources`, `executors`,
 bundles, and it changes for exactly one reason: the shared adapter byte digest.
 Its argv and every other identity field are unchanged. Revision 1's claim that
 a comparator config group must be regenerated is withdrawn.
+
+## Measured implementation outcome
+
+The implementation slice was proved with a real foreground tracer, not with
+fixtures alone. Retained redacted evidence:
+`~/.copilot/session-state/c7947aa7-3025-4b4e-977d-294626e8e949/files/task-opportunity-profile-funnel-proof/shadow-trial-auth-live/`.
+
+| Observation | Result |
+|---|---|
+| `doctor` under the real account home with the projection complete | healthy |
+| Real Copilot under the adapter-generated profile, environment, and synthetic `HOME`, with no `GH_TOKEN`, no `GITHUB_TOKEN`, and no keychain grant | exit 0, 78 native events including `assistant.message` carrying the candidate-skill marker |
+| Authentication error in the run output | none |
+| Non-CLI process path reading each of the three projected files in the synthetic home | denied, all three |
+| Non-CLI process path reading the same three paths in the real account home | denied, all three |
+| Workspace control read | allowed |
+| Projected credential copies after the run | removed |
+| Credential-marker scan of every retained artifact outside the CLI's own package cache | zero hits |
+
+Two measured corrections to the specified policy are recorded above: the
+`.copilot` subpath denial was replaced by an exact literal denial after it was
+observed to break the CLI's own session-state append, and CHK-A9 excludes
+`adapter_executable_sha256`, which necessarily changes with the adapter bytes.
+
+**Residual blocker, out of scope for this work order.** The adapter's own
+`run` still terminates with `unsupported-native-schema:
+copilot:session.mcp_server_removed`. That is pre-existing CLI-version event
+drift in the native normalizer with no relation to authentication; the same
+invocation reaches the model and returns a real assistant message when only
+that allowlist is bypassed. It blocks the composed PG-7 live stage and needs
+its own reviewed slice.
 
 ## Round 1 and Round 2 finding resolution
 
