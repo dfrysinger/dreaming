@@ -8,7 +8,9 @@ Observed subject: GitHub Copilot CLI `1.0.82-1`.
 
 Round 1 (`f604d49`) proposed a purely additive vocabulary change. The blocking
 guard G1 was executed before implementation and **falsified that premise**. This
-revision is the executable Round-2 work order that the measurement supports.
+revision is the executable Round-2 work order that the measurement supports, and
+it additionally resolves the four paired Round-1 review findings — Terra **T1**
+and Opus **E1**, **E2**, **E3** — recorded in full at the end of the document.
 
 ---
 
@@ -229,7 +231,10 @@ depends on an unnamed, unvalidated, recursion-discovered field.
 | `total == prompt + completion` | G2: true for all 5 measured events across both streams | On any CLI upgrade. |
 | Each transport event has a stable distinct `id` | G2: present and distinct in both streams | If an event without `id` appears — the design refuses rather than guessing. |
 | No independent native token total | G2: `result.usage` has no token field | If the CLI adds one; then it becomes a cross-check, not a second authority. |
-| Legacy Shape A must keep working | fixture `test-skill-evaluation-vendor-adapters.sh:172-201` emits `data.outputTokens`, `data.usage`, and `session.usage_checkpoint.usage` | If those fixtures are retired deliberately. |
+| Legacy Shape A streams must keep succeeding | fixture `test-skill-evaluation-vendor-adapters.sh:172-219` emits `data.outputTokens`, `data.usage`, and `session.usage_checkpoint.usage` | If those fixtures are retired deliberately. Their *numbers* are not a constraint — see A5 and finding E1. |
+| Shape A and Shape B declared paths are disjoint | Shape B lives at `data.responseChunk.usage`, two levels below `data`; G2 measured the only Shape-A-path `usage` dicts on real streams as belonging to `result`, with no token field | If a CLI version places call usage at `data.usage`. |
+| G2 observed only all-success turns | both G2 streams exited 0 with `model.call_start` == `model.model_call_success` (1==1, 4==4) | On the first capture containing a failed, retried, or cancelled model call. Until then the design refuses such streams rather than modelling them (finding E2). |
+| `id` stability is proved for `model.model_call_success` only | G2 recorded `id_present`/`ids_all_distinct` for the 5 success events; it recorded nothing about `model.call_start` ids | If a capture proves a stable id on `model.call_start`; only then may turns be deduplicated rather than counted. |
 
 ### The challenged rules, precisely
 
@@ -260,22 +265,32 @@ which returns nothing for detailed usage on this CLI version.
 Removing or weakening fail-closed validation: no prefix admission, no
 passthrough, no unknown-event tolerance, and no silent `max`/fallback across
 contradictory usage authorities. Also rejected: a registry, a second parser, or
-a version-keyed vocabulary service for a single current caller.
+a version-keyed vocabulary service for a single current caller. Also rejected:
+inventing a name for an unobserved failure event, or tolerating a model call
+whose token cost was never reported.
 
 **4. What is selected?**
 The existing validator plus one explicit current-Copilot usage adapter: grow the
-literal set by 13, add one narrow outer-event iterator, and add one event-scoped
-usage parser that both the run and the comparator consume.
+literal set by 13, add one narrow outer-event iterator, and add **one canonical
+parser per shape** — the current Shape B authority and a canonical Shape A
+authority — behind a single aggregation entry point that both the run and the
+comparator consume. Two parsers, one authority, one entry point, no registry and
+no new module.
 
 **5. What would reopen this?**
 A CLI version where usage is cumulative, where transport events lack stable
 ids, where the usage object appears nested inside another admitted event, or
 where a second independent native token total appears. Each has a check.
 
-**Status is CLEAR.** G2 establishes a deterministic, duplication-safe and
-order-safe aggregation rule — sum per-call `prompt`/`completion`/`total` over
-transport events deduplicated by stable `id` — and no second parser or service
-is required.
+**Status is CLEAR.** G2 establishes a deterministic, order-safe aggregation
+rule — sum per-call `prompt`/`completion`/`total` over transport events
+deduplicated by stable `id`, with a completeness check against outer
+`model.call_start` — and the legacy shape is expressible as one closed canonical
+parser over three declared paths in the same owner. No new subsystem, service,
+registry, version map, or module is required, and no caller outside the existing
+two learns anything new. CLEAR is contingent on exactly that: if the canonical
+Shape A parser could not be expressed inside `dreaming-vendor-adapter.py`
+without a new component, this would return to OPEN.
 
 ---
 
@@ -295,7 +310,7 @@ is required.
 | L10 | Failure message extraction | `native_failure_message:5716-5748` | Copilot branch matches `session.error`/`error`. Scoped to outer events; no measured divergence. |
 | L11 | Raw evidence retention | `evaluation_run` records `:5861-5875`, per-event at `:5870` | Every admitted event retained verbatim; raw output grows. `executor-output-limit` unchanged. |
 | L12 | Sentinel refusal test | `test-skill-evaluation-vendor-adapters.sh:1424-1428`, fixture sentinel at `:128` | Must stay green, unmodified. |
-| L13 | Legacy fixture usage shape | fixture `:172-201` | Shape A must keep producing today's exact numbers. |
+| L13 | Legacy fixture usage shape | fixture `:172-219` | Replaced by one canonical Shape A authority. Every legacy stream that succeeds today still succeeds and `TOKENOVER` still exceeds; the numbers migrate to the exact values tabulated in A5. |
 | L14 | Adapter byte pin | `skill-evaluation.py:88-90`, consumers `:439`, `:5114`, `:5278` | Recompute. |
 | L15 | Pin ratchet | `test-evaluation-input-source-builder.sh:165` | Self-healing; detects a forgotten recomputation. |
 | L16 | Executor identity/attestation | `evaluation_cli_version:3978-3991`; `native_identity:6658` | Unchanged. |
@@ -341,10 +356,13 @@ Justification is measured, not aesthetic: outer-only changes **nothing** on real
 table). It removes the snapshot-duplication and ordering hazard by construction
 rather than by hoping no nested object ever matches.
 
-**Declared-path carve-out for Shape A.** The legacy fixture places usage at
-`<event>.usage`, `<event>.data.usage`, and `<event>.data.outputTokens`. Those
-are exact declared paths inside an outer event, not recursion, and the Shape A
-reader reads exactly those three and nothing else.
+**Declared-path access is not recursion.** Reading a named field inside an outer
+event — `data.model`, `data.toolRequests[].toolCallId`, `data.skills[]`, and the
+three Shape A usage paths `<event>.usage`, `<event>.data.usage`,
+`<event>.data.outputTokens` — is exact declared access, and every reader keeps
+doing it (invariant I6b). What A2 removes is only the recursive descent into
+arbitrary nested bodies, which is what let a snapshot's copy of a message look
+like a top-level event.
 
 ### A3 — Event-scoped Copilot usage parser
 
@@ -372,15 +390,45 @@ Rules, each backed by a G2 measurement:
 6. Sum `prompt_tokens`, `completion_tokens`, `total_tokens` over the deduplicated
    set. Summation over a set keyed by `id` is order-independent and
    duplication-safe by construction.
-7. The number of distinct usage ids must equal the number of outer
-   `model.call_start` events; otherwise `copilot:usage-incomplete`. (G2: 1 == 1
-   and 4 == 4.)
-8. Return `None` only when no outer `model.model_call_success` exists at all —
-   the Shape A path then applies. Malformed or contradictory usage never
-   degrades to Shape A.
+7. **Completeness.** Shape B is *engaged* when at least one outer
+   `model.model_call_success` exists. When engaged, the number of distinct usage
+   ids must equal the number of outer `model.call_start` events; otherwise
+   `copilot:usage-incomplete`. (G2: 1 == 1 and 4 == 4.)
+8. Return `None` only when **no** outer `model.model_call_success` exists at all
+   — the Shape A path then applies. Once engaged, Shape B either proves the
+   complete budget or refuses; it never partially degrades to Shape A, and
+   malformed or contradictory usage never degrades to Shape A.
 
 No new error *code* is introduced: the existing `usage-unproved` code carries an
 exact machine-readable reason string, so no consumer surface widens.
+
+**A started call without a success refuses (Round-1 finding E2).**
+G2 measured **only all-success turns** — 1/1 and 4/4, both runs exiting 0. This
+design therefore makes no claim about failure, retry, or cancellation paths. An
+outer `model.call_start` with no distinct matching `model.model_call_success`
+yields `copilot:usage-incomplete` and refuses the trial *and* the comparator,
+whatever the cause — provider error, silent retry, or cancellation — because the
+system cannot prove the complete token budget it is gating on. This is intended
+fail-closed behaviour, not a compatibility promise, and it is deliberately
+stricter than "the run produced an answer".
+
+Whatever event a failed or cancelled call emits on this CLI version has not been
+observed. It is therefore still outside `COPILOT_EVENT_TYPES` and still raises
+`unsupported-native-schema` before any raw output is written. That explicit
+refusal is the designed signal to return to design with a fresh capture. **No
+failure event name is invented here**, and **no claim of failure-path vocabulary
+coverage is made.**
+
+**Scope of `id` evidence.** G2 recorded stable, distinct, duplication-preserving
+top-level ids on `model.model_call_success` (5 of 5 events across both streams).
+It recorded **nothing** about ids on `model.call_start`. Turns therefore remain a
+positional count of outer `model.call_start` (`:5359`, rule unchanged), and only
+success events are deduplicated. One consequence is stated here rather than
+discovered later: duplicating an entire stream doubles the `model.call_start`
+count while the id-keyed usage set stays deduplicated, so the completeness rule
+refuses. That is fail-closed and correct — a whole-stream duplicate is not
+evidence of one trial — and it bounds the "duplication-safe" property to the
+usage sum itself (AC-11), not to arbitrary stream surgery.
 
 ### A4 — One Copilot usage authority for both callers
 
@@ -402,39 +450,161 @@ that let `evaluation_run` and `evaluation_comparator` reach different verdicts
 on the same stream. Claude and Codex keep their existing implementations
 verbatim.
 
-**Declared semantic change: `max` → `sum`.** Today Copilot totals are
-`max(totals)` (`:5414`, with `max(inputs)` at `:5410`). Per-call usage must be summed to represent a trial.
-On the G2 multi run this is 37467 rather than 9524. This is an intended
-correction of a gate that exists to bound spend, and it is stated as an
-acceptance criterion rather than left to be discovered. Single-call streams and
-every existing fixture are unaffected because sum equals max when there is one
-contributor.
+**Declared semantic change on the Shape B path: `max` → `sum`.** Today Copilot
+totals are `max(totals)` (`:5414`, with `max(inputs)` at `:5410`). Per-call usage
+must be summed to represent a trial: on the G2 multi run that is 37467 rather
+than 9524. This is an intended correction of a gate that exists to bound spend,
+and it is asserted by AC-10 rather than left to be discovered.
 
-### A5 — Closed two-shape compatibility rule
+This paragraph is scoped to Shape B. It says nothing about the legacy fixtures,
+whose numbers change for a different and independent reason set out in A5. The
+Round-1 claim that "every existing fixture is unaffected because sum equals max
+with one contributor" is **withdrawn** and must not be carried forward.
 
-| | Shape A (legacy, fixtures) | Shape B (Copilot 1.0.82-1) |
+### A5 — Canonical Shape A, and the closed two-shape rule
+
+**Withdrawn claim (Round-1 finding E1).** Round 1 promised that legacy Shape A
+streams would keep producing "today's exact numbers, byte-for-byte". That
+promise is impossible, because the two current readers already disagree on every
+legacy fixture stream. Measured by loading the unmodified base adapter at
+`f63f55b` and calling both functions directly:
+
+| legacy fixture stream | today `native_token_usage` | today `native_detailed_usage` |
 |---|---|---|
-| declared paths | `<event>.usage`, `<event>.data.usage`, `<event>.data.outputTokens` | `model.model_call_success.data.responseChunk.usage` |
-| fields | today's `input_tokens`/`inputTokens`, `output_tokens`/`outputTokens`, `total_tokens`/`totalTokens` | `prompt_tokens`, `completion_tokens`, `total_tokens` |
-| aggregation | today's exact behaviour, unchanged | dedupe by `id`, then sum |
+| `CURRENTCOPILOT`/`SHADOWCANDIDATE`/`SHADOWCATALOG`, candidate | **15** | 10 / **30** / **40**, turns 1, tool_calls 1 |
+| the same, no candidate | **15** | 10 / 30 / 40, turns 1, tool_calls 0 |
+| comparator branch | **5** | 10 / 5 / **15**, turns 1, tool_calls 0 |
+| comparator branch, `FIXTURE_COMPARATOR_ZERO_TURN` | **5** | 10 / 5 / 15, turns 1, tool_calls 0 |
+| run branch (no `outputTokens`) | **15** | **None** |
+| `TOKENOVER` run branch | **1000** | **None** |
 
-Precedence and agreement:
+(triples are input / output / total.)
 
-- Shape B present and valid → Shape B is the authority.
-- Shape B absent entirely → Shape A, with today's exact numbers.
-- **Both present** → the two `total_tokens` must be equal; disagreement refuses
-  with `copilot:usage-contradiction`. No `max`, no preference, no silent
-  fallback.
-- Neither present → `usage-unproved`, as today.
+There is no single set of numbers to preserve. `output 30` is a plain double
+count: the fixture's `data.outputTokens` (15) and its `data.usage.output_tokens`
+(15) both append to `outputs`, at `:5364` and `:5406`. And `native_token_usage`
+returns bare output tokens whenever any exist (`:5339-5340`), which is why it
+answers 5 on a stream whose declared total is 15.
 
-A `usage` dict that carries **none** of the recognised token fields is not a
-usage authority and is ignored. This is not a loophole invented for
-convenience: the already-admitted `result` event carries exactly such a dict
-(`codeChanges`, `premiumRequests`, `sessionDurationMs`, `totalApiDurationMs`),
-measured in both G2 streams, and it must not refuse a valid run.
+So Shape A receives the same treatment as Shape B: **one canonical parser, one
+authority, both readers converging on it.** The existing fixtures are
+*compatibility inputs* — every stream that succeeds today must still succeed and
+budget enforcement must still fire — and are **not** a numeric authority.
+
+```
+copilot_legacy_usage(values) -> dict | None      # Shape A authority
+```
+
+**Declared paths, outer events only.** Exactly three, each inside an outer
+event: `<event>.usage`, `<event>.data.usage`, `<event>.data.outputTokens`. No
+recursion, no search, no other path. They are disjoint from Shape B's
+`model.model_call_success.data.responseChunk.usage`, which sits two levels below
+`data` and is therefore invisible to Shape A — checked against the real captured
+events, where the only Shape-A-path `usage` dict belongs to `result`.
+
+**Per-mapping normalization.** For each `usage` mapping found at a declared
+path:
+
+- `input` = `input_tokens` | `inputTokens`, plus `cache_creation_input_tokens`
+  and `cache_read_input_tokens` when present, preserving the existing rule at
+  `:5393-5403`;
+- `output` = `output_tokens` | `outputTokens`;
+- `total` = `total_tokens` | `totalTokens`.
+
+Every field that is present must be a non-bool `int` and `>= 0`, else
+`copilot:usage-malformed`. Then, per mapping:
+
+- `input` **and** `output` present → a **pair authority**. A present `total`
+  must equal `input + output`, else `copilot:usage-malformed`; otherwise
+  `total := input + output`.
+- else `total` present → a **total authority**; components are *unclaimed*.
+- else exactly one of `input`/`output` present → `copilot:usage-incomplete`.
+- else no recognised token field at all → **not an authority; ignored.**
+
+That last rule is not a convenience loophole. The already-admitted real `result`
+event carries a `usage` dict of `codeChanges`, `premiumRequests`,
+`sessionDurationMs`, `totalApiDurationMs`, measured in both G2 streams, and it
+must not refuse a valid run.
+
+**Agreement and dedupe — no silent `max` across mixed sources.**
+
+- All pair authorities must carry an identical `(input, output, total)` triple;
+  otherwise `copilot:usage-ambiguous`.
+- All total authorities must carry an identical `total`; otherwise
+  `copilot:usage-ambiguous`.
+- A pair authority and a total authority must agree on `total`; otherwise
+  `copilot:usage-contradiction`.
+
+**`data.outputTokens`.** Summed over the outer events that declare it, which
+preserves the established Copilot semantic (`copilot_output_tokens +=` at
+`:5324`; `sum(outputs)` at `:5411`), producing one `declared_output`. Zero
+declaring events means *no observation*, which is distinct from an observation
+of `0`.
+
+**Resolution.**
+
+| authorities present | result |
+|---|---|
+| pair | `(input, output, total)`. A present `declared_output` must equal `output`, else `copilot:usage-contradiction`. |
+| total only, `declared_output` present | `output := declared_output`; `input := total - declared_output`, which must be `>= 0` else `copilot:usage-incomplete`. |
+| total only, no `declared_output` | `(None, None, total)` — the total is proved, the components are unclaimed. |
+| none, `declared_output` present | `copilot:usage-incomplete`. An output count is not a token total. |
+| none | `None`. No Shape A authority exists. |
+
+The fourth row is a deliberate behaviour change: today `native_token_usage`
+returns bare output tokens as though they were the whole usage (`:5339-5340`),
+which under-reports the budget. No fixture exercises it.
+
+A record whose components are unclaimed proves a **total** and nothing else.
+`native_token_usage` returns that total; `native_detailed_usage` returns `None`,
+exactly as it does today on the same streams, and the run's existing fallback at
+`:5822-5832` still supplies the total to the budget gate.
+
+**Expected fixture numbers after the migration.**
+
+| legacy fixture stream | canonical Shape A derivation | `native_token_usage` | `native_detailed_usage` |
+|---|---|---|---|
+| `CURRENTCOPILOT` etc., candidate | pair (10, 15, 25); `declared_output` = 15 + 0 = 15 = output ✓ | **25** (was 15) | 10 / **15** / **25**, turns 1, tool_calls 1 (was 10 / 30 / 40) |
+| the same, no candidate | as above | **25** (was 15) | 10 / 15 / 25, turns 1, tool_calls 0 |
+| comparator branch | total 15; `declared_output` 5 → input 10 | **15** (was 5) | 10 / 5 / 15 — unchanged |
+| comparator, `ZERO_TURN` | as above | **15** (was 5) | 10 / 5 / 15 — unchanged; the stream still fails the tool-free gate at `:4308-4316` as designed |
+| run branch | total 15, no `declared_output` | **15** — unchanged | **None** — unchanged |
+| `TOKENOVER` | total 1000, no `declared_output` | **1000** — unchanged | **None** — unchanged |
+
+Every legacy stream that succeeds today still succeeds; `token-limit-exceeded`
+still fires on `TOKENOVER` with the identical number; the double count is gone;
+and the two readers now agree everywhere both produce a value. These migrated
+numbers are the intentional correctness result. They are asserted directly by
+AC-17 and CHK-16 as *new expected values* — not described as preserved, and not
+hidden behind a compatibility claim.
 
 The obsolete `assistant.message.data.outputTokens` dependency is **not removed**.
-It survives inside Shape A, which the fixtures prove still works.
+It survives inside canonical Shape A as an observation that must corroborate, or
+complete, a declared usage mapping.
+
+**Coexistence: full normalized triple equality (Round-1 finding T1).**
+
+| condition | rule |
+|---|---|
+| Shape B absent entirely | Shape A is the authority. |
+| Shape A absent entirely | Shape B is the authority. |
+| both present, Shape A claims components | `(input, output, total)` must be equal **field by field**. Equal totals with unequal components refuse with `copilot:usage-contradiction`. |
+| both present, Shape A is total-only | `total` must be equal, else `copilot:usage-contradiction`. Shape A makes no component claim, so there is no component to contradict. |
+| neither | `None` → existing `usage-unproved`. |
+
+Only **after** equality holds is Shape B selected as the returned authority, for
+its per-call ids and its `model.call_start` relation. Comparing totals alone was
+the T1 hole and is closed: a stream whose two shapes agree on 25 while claiming
+`10 / 15` and `15 / 10` now refuses. The total-only row is recorded as an
+explicit, separately checked sub-rule (CHK-27) rather than left implicit, so
+that it cannot be mistaken for the hole it replaces.
+
+No `max`, no precedence-by-magnitude, no fallback across a refusal. A shape that
+refuses refuses the trial; it never yields to the other shape.
+
+**Not observed in any real stream.** G2 found no Shape A declared path carrying
+a token field on real `1.0.82-1` output. Coexistence is a fixture-and-future
+condition, and it is fail-closed by construction.
 
 ### A6 — Admitted metadata stays inert everywhere else
 
@@ -458,8 +628,10 @@ else. G1 measured the other 12 inert across 12 variants each.
 | Fixtures | existing fixture CLI | new harness |
 | Byte pin | `TRUSTED_AUTHORING_ADAPTER_SHA256` + existing ratchet | new pin |
 
-New code is three things: 13 literal strings, one iterator, one usage parser
-plus its single aggregation entry point.
+New code is four things: 13 literal strings, one outer-event iterator, two
+shape parsers (`copilot_call_usage`, `copilot_legacy_usage`), and the single
+aggregation entry point `copilot_usage` that both readers call. No new module,
+file, class hierarchy, service, or configuration surface.
 
 ---
 
@@ -483,12 +655,18 @@ copilot_outer_events(values)           transport events only           [NEW]
         │                                | skill.invoked | assistant.message
         ├─► normalized_native_events     trace kinds
         ├─► comparator gate (:4289)      event_types, tool_event, call-start count
-        └─► copilot_call_usage           model.model_call_success
-                                          .data.responseChunk.usage      [NEW]
-                                          validate → dedupe by id → sum
+        ├─► copilot_call_usage           Shape B: model.model_call_success
+        │                                 .data.responseChunk.usage      [NEW]
+        │                                 validate → dedupe by id → sum
+        │                                 → completeness vs call_start
+        └─► copilot_legacy_usage         Shape A: <event>.usage,         [NEW]
+                                          <event>.data.usage,
+                                          <event>.data.outputTokens
+                                          normalize → agree → resolve
         │
         ▼
 copilot_usage → { turns, input_tokens, output_tokens, total_tokens, tool_calls }
+        │        A and B coexisting → full normalized triple must be equal
         │                                                                [NEW]
         ├─► native_detailed_usage (copilot branch)
         └─► native_token_usage    (copilot branch) = total_tokens
@@ -518,7 +696,7 @@ Second, independent path, unchanged in behaviour:
 | T3 | Order dependence | readers that take `max`, first, or last | summation over an id-keyed set | CHK-14 |
 | T4 | Silent under-count | one model call missing its usage event | distinct-id count must equal outer `model.call_start` count | CHK-15 |
 | T5 | Malformed usage accepted | partial or non-int fields | exact required fields, non-bool non-negative ints, `total == prompt + completion` | CHK-12 |
-| T6 | Two authorities disagreeing | Shape A and Shape B both present | equality required, else refuse | CHK-17 |
+| T6 | Two authorities disagreeing | Shape A and Shape B both present | full normalized triple equality required, not total alone, else refuse | CHK-17, CHK-27 |
 | T7 | Intra-event contradiction | `data.responseUsage` diverging from `data.responseChunk.usage` | equality required when present | CHK-18 |
 | T8 | Run and comparator disagreeing | separate derivations | both consume `copilot_usage` | CHK-19 |
 | T9 | Phantom model / activation / trace / tool events | nested objects matching type predicates | outer-event iterator plus measured invariance | CHK-7, CHK-8, CHK-9, CHK-10 |
@@ -526,15 +704,24 @@ Second, independent path, unchanged in behaviour:
 | T11 | Unknown type stops refusing | relaxed `not in` | sentinel unchanged and green | CHK-3 |
 | T12 | Malformed envelope admitted | `native_objects` or the `{"events"}` unwrap relaxed | untouched, explicitly tested | CHK-4 |
 | T13 | Transcript boundary silently widened | shared constant | declared and asserted | CHK-5 |
-| T14 | Legacy shape broken | Copilot usage rewritten | Shape A fixtures must produce today's exact numbers | CHK-16 |
+| T14 | Legacy streams broken | Copilot usage rewritten | canonical Shape A: every legacy fixture stream still succeeds, `TOKENOVER` still exceeds, and the migrated numbers are asserted exactly | CHK-16, CHK-30 |
 | T15 | Claude/Codex regression | shared helpers touched | their branches use `recursive_values` unchanged; suites green | CHK-21 |
 | T16 | Evidence bloat | snapshot events are large and retained verbatim | `executor-output-limit` unchanged | CHK-22 |
 | T17 | Stale adapter pin | adapter bytes change | recompute; ratchet | CHK-23 |
 | T18 | Pin collision with the frozen auth candidate | both change adapter bytes and the same pin | sequential integration with recomputation | closure §8 |
+| T19 | Incomplete budget accepted | a model call starts and never reports usage — provider failure, silent retry, or cancellation | Shape B completeness: distinct usage ids must equal outer `model.call_start`; otherwise refuse. Deliberately unconditional on cause | CHK-26 |
+| T20 | Mixed legacy sources silently maxed | several Shape A mappings disagree, or a pair and a total disagree | exact agreement within each authority class, then cross-class total agreement, else refuse. No `max`, no first-wins, no largest-wins | CHK-28 |
+| T21 | An output count read as a total | `data.outputTokens` present with no usage mapping anywhere | refuses `copilot:usage-incomplete` instead of returning the output count | CHK-29 |
+| T22 | Unobserved failure vocabulary pre-admitted | a guess at the event a failed call emits | no failure event name is invented; an unobserved type still raises `unsupported-native-schema` | CHK-3 |
 
 Fail-closed and unchanged: unknown type, malformed JSON, non-object event,
 malformed nested envelope, `exact-model-unproved`, `token-limit-exceeded`,
 `executor-output-limit`.
+
+Fail-closed and **newly stricter**: a model call with no reported usage (T19),
+disagreeing legacy usage sources (T20), and a bare output count offered as a
+total (T21). Each refuses where the base adapter would have produced a number.
+None of the three is exercised by any existing fixture.
 
 ---
 
@@ -549,15 +736,44 @@ malformed nested envelope, `exact-model-unproved`, `token-limit-exceeded`,
   `sandbox_id` inputs, and attestation shapes are unchanged.
 - **I5.** Claude and Codex admission, shape validation, and usage derivation are
   behaviourally unchanged and continue to use `recursive_values`.
-- **I6.** No Copilot semantic reader inspects any object below the transport
-  event, except the exact declared paths named in A3 and A5.
-- **I7.** Copilot usage is a pure function of the deduplicated set of outer
-  `model.model_call_success` events (Shape B) or the declared Shape A paths —
-  invariant under duplication, reordering, and interleaving of any other event.
+- **I6.** *Usage derivation only.* Copilot **usage** is derived exclusively
+  from the declared paths named in A3 and A5 — Shape B's
+  `model.model_call_success.data.responseChunk.usage` and its sibling
+  `data.responseUsage`, and Shape A's `<event>.usage`, `<event>.data.usage`,
+  `<event>.data.outputTokens`. No other object, at any depth, contributes to a
+  token number. This invariant governs usage and nothing else.
+- **I6b.** *Every other Copilot reader keeps its existing exact declared nested
+  paths, and they are not prohibited.* Reading a declared field inside an outer
+  event is the normal, intended mechanism; what A2 removes is only the
+  **recursive descent into arbitrary nested bodies**. Specifically, and
+  unchanged in behaviour:
+
+  | reader | declared paths retained |
+  |---|---|
+  | `native_model` | `data.model` on `model.call_start`, `session.start`, `session.model_change` (`:5284-5285`) |
+  | turns | outer `type == "model.call_start"` only (`:5358-5359`) |
+  | tool calls | `data.toolRequests[].toolCallId` (`:5365-5370`) |
+  | `native_skill_evidence` | `data.skills[]` (`:5524`), `data.toolCallId` and `data.result.content` (`:5544-5546`), `data.skillName`/`data.name` and `data.resolvedPath` (`:5602-5605`), `data.toolRequests[].toolCallId` (`:5610-5623`), tool-name check (`:5692`) |
+  | `normalized_native_events` | the existing text and name fields (`:5943`, `:6001`, `:6015`) |
+  | `native_failure_message` | its existing `session.error`/`error` message extraction (`:5716-5748`) |
+  | comparator gate | outer `type` and its prefix test only (`:4289-4311`) |
+
+  Each of these is applied to the outer event yielded by `copilot_outer_events`
+  instead of to every recursively discovered dict. G1 and G2 measured the
+  results identical on the real streams.
+- **I7.** Copilot usage is a pure function of the id-deduplicated set of outer
+  `model.model_call_success` events (Shape B) or of the declared Shape A paths —
+  invariant under duplication, reordering, and interleaving of any *other*
+  event. Duplicating `model.call_start` is not "any other event": it breaks
+  Shape B completeness and refuses, by design (A3, T19).
 - **I8.** `native_token_usage` and `native_detailed_usage` derive Copilot totals
   from the same authority and can never disagree.
 - **I9.** Malformed, ambiguous, incomplete, or contradictory usage refuses. It
-  never degrades to the other shape and never takes a `max`.
+  never degrades to the other shape, never takes a `max` across sources, and
+  never derives a total from an output count alone.
+- **I9b.** `native_token_usage` and `native_detailed_usage` are permitted to
+  differ in *shape* — an `int` versus a dict, and `None` where components are
+  unclaimed — but never in the value of `total_tokens` when both produce one.
 - **I10.** `turns` counts outer `model.call_start` only; `tool_calls` counts
   outer `data.toolRequests` evidence only.
 - **I11.** No newly admitted type appears in any match set other than the usage
@@ -608,10 +824,15 @@ malformed nested envelope, `exact-model-unproved`, `token-limit-exceeded`,
   refuses with reason `copilot:usage-incomplete`.
 - **AC-16.** `data.responseUsage` disagreeing with `data.responseChunk.usage`
   refuses with reason `copilot:usage-contradiction`.
-- **AC-17.** A legacy Shape A fixture stream produces exactly today's usage
-  numbers, byte-for-byte.
-- **AC-18.** A stream carrying both shapes with equal totals is accepted; with
-  unequal totals it refuses with `copilot:usage-contradiction`.
+- **AC-17.** Each legacy Shape A fixture stream produces exactly the migrated
+  numbers tabulated in A5 — 25 / 25 for the `CURRENTCOPILOT` family, 15 / 15 for
+  the comparator branch, 15 and `None` for the run branch, 1000 and `None` for
+  `TOKENOVER` — and the two readers agree on `total_tokens` wherever both
+  produce one. These are asserted as new expected values.
+- **AC-18.** A stream carrying both shapes accepts only when the **full
+  normalized triple** is equal field by field; a stream whose two shapes agree
+  on `total_tokens` but disagree on `input_tokens` or `output_tokens` refuses
+  with `copilot:usage-contradiction`.
 - **AC-19.** A `usage` dict carrying no recognised token field — the real
   `result.usage` shape — neither contributes nor refuses.
 - **AC-20.** `evaluation_run` and `evaluation_comparator` report the same total
@@ -624,11 +845,35 @@ malformed nested envelope, `exact-model-unproved`, `token-limit-exceeded`,
   result with a real `assistant.message` trace, and a real comparator run
   produces a verdict — neither raising `unsupported-native-schema` nor
   `usage-unproved`.
-- **AC-24.** AC-1 through AC-22 pass with no account authentication, no
+- **AC-24.** Every acceptance criterion except AC-23 — that is, AC-1 through
+  AC-22 and AC-25 through AC-33 — passes with no account authentication, no
   credential projection, and no model call.
 - **AC-25.** The diff contains no prefix, wildcard, regex, or pattern-based
   admission.
 - **AC-26.** The adapter byte pin is recomputed and every pin consumer passes.
+- **AC-27.** When Shape A is a total-only record and Shape B is present, equal
+  totals are accepted and unequal totals refuse with
+  `copilot:usage-contradiction`; the absent component claim is not treated as a
+  match and not treated as a conflict.
+- **AC-28.** An outer `model.call_start` with no distinct matching
+  `model.model_call_success` refuses with `usage-unproved` and reason
+  `copilot:usage-incomplete`, in both `evaluation_run` and
+  `evaluation_comparator`, and no raw output file exists afterwards.
+- **AC-29.** Two Shape A pair authorities carrying different triples refuse with
+  `copilot:usage-ambiguous`; a pair authority and a total authority carrying
+  different totals refuse with `copilot:usage-contradiction`. No result is
+  produced by taking a `max`, the first, or the largest.
+- **AC-30.** A stream carrying `data.outputTokens` and no usage mapping at any
+  declared path refuses with `copilot:usage-incomplete`.
+- **AC-31.** A stream whose only Shape A authority is total-only yields
+  `native_token_usage == total` and `native_detailed_usage is None`, and the
+  run's existing fallback still applies the budget gate to that total.
+- **AC-32.** `TOKENOVER` still raises `token-limit-exceeded` with the identical
+  number, and every legacy fixture stream that produces a trial result today
+  still produces one.
+- **AC-33.** No Copilot reader other than the usage authority changes its result
+  on any fixture or retained real stream; the declared nested paths of I6b
+  continue to be read.
 
 ---
 
@@ -651,13 +896,23 @@ to be red except where noted.
   negative, broken sum, absent `id`, colliding `id`, id-count mismatch,
   `responseUsage` divergence, both-shapes divergence. Each asserts the exact
   refusal reason. Guards AC-13 through AC-16, AC-18.
-- **G-E — legacy fixture compatibility.** The existing Shape A fixture stream
-  must produce today's exact numbers. Green before and after. Guards AC-17,
-  AC-19, T14.
+- **G-E — legacy stream compatibility and migration.** For every legacy fixture
+  stream, assert two separate things. First, *succeeds-today-succeeds-after*:
+  the stream still produces a trial result or a verdict, and `TOKENOVER` still
+  raises `token-limit-exceeded` with the same number — green before and after.
+  Second, the **migrated numeric expectations** of the A5 table — red before,
+  green after, which is what makes the migration visible instead of silent.
+  Guards AC-17, AC-19, AC-31, AC-32, T14.
 - **G-F — comparator and run agreement.** One stream through both entry points;
   assert equal totals and that neither raises. Guards AC-20, T8.
+- **G-G — completeness and coexistence.** A stream with a `model.call_start` and
+  no matching success; a stream with both shapes agreeing on total but not on
+  components; a stream with both shapes fully equal; a total-only Shape A beside
+  Shape B; conflicting Shape A sources; a bare `data.outputTokens`. Each asserts
+  the exact refusal reason or the exact accepted triple. Guards AC-18, AC-27
+  through AC-30, T19, T20, T21.
 
-**G-A through G-F are the pre-implementation guard set.** The already-executed
+**G-A through G-G are the pre-implementation guard set.** The already-executed
 G1 and G2 probes are their evidentiary basis and are not repeated.
 
 ---
@@ -681,7 +936,7 @@ G1 and G2 probes are their evidentiary basis and are not repeated.
 | CHK-13 | L5/L6 | dedup by `id`: duplicating every usage event changes nothing | yes |
 | CHK-14 | L5/L6 | order invariance: reversal and interleaving change nothing | yes |
 | CHK-15 | L5/L6 | id-count versus outer `model.call_start` mismatch refuses | yes |
-| CHK-16 | L13 | Shape A legacy fixtures produce today's exact numbers | yes |
+| CHK-16 | L13 | canonical Shape A: every legacy fixture stream still succeeds, and each produces the exact migrated numbers of the A5 table | yes |
 | CHK-17 | L5/L6 | both shapes present: equal accepted, unequal refuses | yes |
 | CHK-18 | L5/L6 | `responseUsage` divergence refuses | yes |
 | CHK-19 | L5/L9 | run and comparator report the same total | yes |
@@ -691,9 +946,15 @@ G1 and G2 probes are their evidentiary basis and are not repeated.
 | CHK-23 | L14/L15 | pin recomputed; ratchet green; consumers `:439`, `:5114`, `:5278` accept | yes |
 | CHK-24 | L16 | identity and attestation keys byte-identical | yes |
 | CHK-25 | real | real run yields a complete trial result; real comparator yields a verdict | **no** |
+| CHK-26 | L5/L6/L9 | `model.call_start` without a distinct matching success refuses `copilot:usage-incomplete` in run and comparator; no raw file | yes |
+| CHK-27 | L5/L6 | coexistence full-triple equality: equal triple accepted; equal total with unequal components refuses; total-only Shape A compares totals only | yes |
+| CHK-28 | L5/L6 | conflicting Shape A authorities refuse; no `max`, first-wins, or largest-wins across mixed legacy sources | yes |
+| CHK-29 | L5/L6 | bare `data.outputTokens` with no usage mapping refuses `copilot:usage-incomplete` | yes |
+| CHK-30 | L11/L13 | `TOKENOVER` still raises `token-limit-exceeded` with the identical number; the run-branch legacy stream still yields `native_detailed_usage is None` with the total supplied through the existing fallback | yes |
+| CHK-31 | L4-L10 | the declared nested paths of I6b are still read: model identity, turns, tool calls, skill activation, trace, failure message, and the comparator gate produce identical results on every fixture and retained real stream | yes |
 
-CHK-1 through CHK-24 are auth-independent and model-independent. Ordering:
-guards G-A..G-F, then CHK-1..CHK-24, then CHK-25.
+Every check except CHK-25 is auth-independent and model-independent. Ordering:
+guards G-A..G-G, then CHK-1..CHK-24 and CHK-26..CHK-31, then CHK-25.
 
 **Fixture derivation rule.** Usage fixtures reproduce the exact numeric shapes
 measured in G2 — the single-call triple and the four-call sequence — with
@@ -707,8 +968,12 @@ synthetic ids. They are not hand-invented shapes and carry no captured content.
   iterator, and the usage parser, then recompute the adapter pin. The boundary
   returns to explicit refusal with the identical code and message, and Copilot
   usage returns to the generic recursive scan.
-- **Fail-closed direction:** the reverted state refuses *more*, never less.
-  Rollback cannot open a hole.
+- **Fail-closed direction, stated honestly:** on the *admission* boundary the
+  reverted state refuses strictly more — rollback cannot open a hole there. On
+  the *usage* boundary it does not: reverting restores the base adapter's
+  under-counting (`native_token_usage` returning a bare output count) and its
+  two disagreeing readers. Rollback is a return to the known base defect, not a
+  safety improvement, and it is only correct as a whole-slice revert.
 - **Partial rollback is forbidden.** Reverting the usage parser while keeping
   the vocabulary leaves the comparator failing at `usage-unproved` — the
   measured F2 state. The two parts ship and revert together.
@@ -770,8 +1035,9 @@ synthetic ids. They are not hand-invented shapes and carry no captured content.
 This slice is done when, and only when, all of the following hold. It is
 specific to this work order.
 
-1. Guards G-A through G-F exist, were executed before the production edit, and
-   their pre-change red or green signal was recorded.
+1. Guards G-A through G-G exist, were executed before the production edit, and
+   their pre-change red or green signal was recorded — including G-E's split
+   signal, green for stream success and red for the migrated numbers.
 2. `COPILOT_EVENT_TYPES` contains exactly its previous 56 members plus exactly
    the 13 measured types — 69 literal members — and no other vocabulary edit.
 3. `validate_native_schema` is unmodified.
@@ -783,16 +1049,27 @@ specific to this work order.
 6. `copilot_call_usage` implements A3 exactly: exact path, exact required
    fields, non-bool non-negative ints, `total == prompt + completion`,
    `responseUsage` agreement, dedup by `id`, per-call summation, and id-count
-   equality with outer `model.call_start`.
+   equality with outer `model.call_start` whenever Shape B is engaged.
+6b. `copilot_legacy_usage` implements A5 exactly: the three declared paths and
+   nothing else, per-mapping normalization, within-class agreement, cross-class
+   total agreement, the `declared_output` rules, and the resolution table —
+   including refusing a bare output count.
 7. `native_token_usage` and `native_detailed_usage` derive Copilot totals from
    the one authority, and CHK-19 proves the run and the comparator agree.
-8. The two-shape rule of A5 is implemented with explicit precedence and equality
-   checking; no `max` and no silent fallback survives on the Copilot path.
-9. The `max` → `sum` change is asserted by CHK/AC, not left implicit.
-10. CHK-1 through CHK-24 pass; the 13 per-type acceptance assertions exist
-    individually; the sentinel test is green and its source unchanged.
-11. Legacy Shape A fixtures produce today's exact numbers (CHK-16), and the real
-    `result.usage` shape neither contributes nor refuses (AC-19).
+8. The two-shape rule of A5 is implemented with **full normalized triple**
+   equality — not total-only — and explicit precedence; no `max` and no silent
+   fallback survives anywhere on the Copilot path.
+9. Both declared semantic changes are asserted by CHK/AC rather than left
+   implicit: Shape B's `max` → `sum` (AC-10), and the Shape A migration to one
+   canonical authority with the exact numbers of the A5 table (AC-17).
+10. Every check except CHK-25 passes — CHK-1 through CHK-24 and CHK-26 through
+    CHK-31; the 13 per-type acceptance assertions exist individually; the
+    sentinel test is green and its source unchanged.
+11. Every legacy Shape A fixture stream still succeeds, `TOKENOVER` still
+    exceeds with the identical number (CHK-30), each stream produces the exact
+    migrated numbers of the A5 table (CHK-16), and the real `result.usage` shape
+    neither contributes nor refuses (AC-19). No claim that legacy numbers were
+    preserved appears anywhere in the change, its tests, or its commit message.
 12. Claude, Codex, harness, and identity surfaces are byte-unchanged and their
     suites are green.
 13. CHK-25 passes: a real run produces a complete trial result and a real
@@ -805,6 +1082,28 @@ specific to this work order.
     required trailers. Nothing is pushed, published, installed, or merged.
 17. The integration-ordering note (closure §8) is carried to whoever integrates
     this candidate alongside `d26adac`.
+18. The completeness rule is implemented and checked (CHK-26), no failure event
+    name was invented, and the change makes no claim of failure-path vocabulary
+    coverage.
+19. I6b holds: every non-usage Copilot reader still reads its declared nested
+    paths, proved identical by CHK-31.
 
 Shipping the vocabulary without the usage authority is the measured F2 state and
-must not be recorded as done.
+must not be recorded as done. Shipping the Shape B authority while leaving Shape
+A on the two disagreeing readers is the measured E1 state and must not be
+recorded as done either.
+
+---
+
+## Round-1 paired review resolution record — T1, E1, E2, E3
+
+| ID | Reviewer finding | Verified? | Resolution in this revision |
+|---|---|---|---|
+| **T1** | Coexistence compared `total_tokens` only, so a stream whose two shapes agree on the total while disagreeing on components would be accepted. | Yes — the Round-1 A5 rule read "the two `total_tokens` must be equal". | A5 coexistence now requires equality of the **full normalized triple**, field by field. Equal total with unequal components refuses `copilot:usage-contradiction`. Shape B is selected only *after* equality holds. The one asymmetric case — a total-only Shape A record, which makes no component claim — is an explicit sub-rule with its own check rather than an implicit gap. New: AC-18 (rewritten), AC-27, CHK-27, threat T6 updated, G-G. |
+| **E1** | The promise to preserve "today's exact numbers, byte-for-byte" for Shape A is impossible, because the two current readers already disagree. | Yes — measured against the unmodified base adapter: 15 vs 40, 15 vs 40, 5 vs 15, 15 vs `None`, 1000 vs `None`. The 30 is a double count of one 15 through `:5364` and `:5406`. | The promise is **withdrawn in the document**, and Shape A is given the same treatment as Shape B: one canonical parser `copilot_legacy_usage` over three declared outer-event paths, with both readers converging on it. Fixtures become compatibility *inputs*: every stream that succeeds today still succeeds and `TOKENOVER` still exceeds with the same number. The migrated numbers are tabulated exactly and asserted as new expected values. Inconsistent reader outputs are retired deliberately, with no hidden compatibility claim. New: A5 rewritten, AC-17 rewritten, AC-29 through AC-32, CHK-16 rewritten, CHK-28, CHK-29, CHK-30, threats T14/T20/T21, G-E split into a green half and a red half, DoD 6b/8/9/11. |
+| **E2** | G2 measured only all-success turns, so the completeness rule needed to state what happens when a call starts and never succeeds. | Yes — both G2 streams exited 0 with 1==1 and 4==4; no failure, retry, or cancellation was ever captured. | A3 now states it directly: an outer `model.call_start` with no distinct matching `model.model_call_success` yields `copilot:usage-incomplete` and refuses the trial and the comparator, **whatever the cause**, because the complete token budget cannot be proved. Recorded as intended fail-closed behaviour, explicitly not a compatibility promise. Any unobserved failure event type remains outside the vocabulary and still raises `unsupported-native-schema`, which is the designed signal to return to design with a fresh capture; **no failure event name is invented** and no failure-path vocabulary coverage is claimed. The `id` evidence is scoped honestly: proved for `model.model_call_success`, unmeasured for `model.call_start`, so turns stay a positional count and whole-stream duplication refuses rather than being silently deduplicated. New: constraint-provenance rows with revisit conditions, threats T19 and T22, AC-28, CHK-26, G-G, DoD 18, and the bounded restatement of the "duplication-safe" claim. |
+| **E3** | I6 was written broadly enough to read as prohibiting *any* inspection below the transport event, which would outlaw the declared nested paths that turns, tool calls, skill activation, and trace legitimately use. | Yes — the Round-1 I6 said "no Copilot semantic reader inspects any object below the transport event". | I6 is rescoped strictly to **usage derivation**. New I6b states the opposite explicitly for everything else and enumerates the retained declared paths per reader with citations: `data.model`; outer `model.call_start`; `data.toolRequests[].toolCallId`; `data.skills[]`, `data.toolCallId`, `data.result.content`, `data.skillName`/`data.name`, `data.resolvedPath`; the trace text and name fields; the failure-message extraction; and the comparator's outer type prefix test. A2's restriction is clarified as removing *recursive descent into arbitrary nested bodies*, not declared-field access. New: AC-33, CHK-31, DoD 19, architecture and check wording updated. |
+
+**Round-1 findings not requiring change.** The Round-1 R1-a through R1-d entries
+above are unaffected. No reviewer challenged the vocabulary addition itself, the
+outer-event iterator, or the decision to keep admission validating `type` only.
