@@ -178,6 +178,32 @@ if vendor == "copilot":
         events = [
             {"type":"session.start","data":{"model":observed}},
             {"type":"model.call_start","data":{"model":observed,"turn":0}},
+            {"type":"model.messages_snapshot","data":{
+                "messages":[{
+                    "type":"assistant.message",
+                    "content":"nested snapshot answer",
+                    "outputTokens":999999,
+                }],
+                "decoys":[
+                    {"type":"model.call_start","data":{
+                        "model":"nested-model",
+                        "toolRequests":[{"toolCallId":"nested-tool"}],
+                    }},
+                    {"type":"assistant.message","data":{
+                        "content":"nested assistant",
+                        "toolRequests":[{"name":"skill","toolCallId":"nested-skill"}],
+                    }},
+                    {"type":"assistant.turn_end","data":{"content":"nested final"}},
+                    {"type":"session.task_complete","data":{"summary":"nested summary"}},
+                    {"type":"tool.execution_start","data":{"toolCallId":"nested-tool"}},
+                    {"type":"tool.execution_complete","data":{
+                        "toolCallId":"nested-tool","success":True,
+                        "result":{"content":"nested tool result"},
+                    }},
+                    {"type":"skill.invoked","data":{"skillName":"nested-skill"}},
+                    {"type":"session.error","data":{"message":"nested failure"}},
+                ],
+            }},
             {"id":"fixture-v2-call","type":"model.model_call_success","data":{
                 "responseChunk":{"usage":{
                     "prompt_tokens":8349,
@@ -1707,6 +1733,87 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
             "data": data,
         }
 
+    def nested_snapshot(self, skill):
+        return {
+            "type": "model.messages_snapshot",
+            "data": {
+                "messages": [
+                    {
+                        "type": "assistant.message",
+                        "content": "nested snapshot answer",
+                        "outputTokens": 999999,
+                    }
+                ],
+                "decoys": [
+                    {
+                        "type": "model.call_start",
+                        "data": {
+                            "model": "nested-model",
+                            "toolRequests": [{"toolCallId": "nested-tool"}],
+                        },
+                    },
+                    {
+                        "type": "session.skills_loaded",
+                        "data": {
+                            "skills": [
+                                {
+                                    "name": "nested-skill",
+                                    "path": str(skill),
+                                    "enabled": True,
+                                }
+                            ]
+                        },
+                    },
+                    {
+                        "type": "assistant.message",
+                        "data": {
+                            "content": "nested assistant",
+                            "toolRequests": [
+                                {
+                                    "name": "skill",
+                                    "toolCallId": "nested-skill-call",
+                                    "arguments": {"skill": "nested-skill"},
+                                }
+                            ],
+                        },
+                    },
+                    {
+                        "type": "tool.execution_start",
+                        "data": {"toolCallId": "nested-tool"},
+                    },
+                    {
+                        "type": "tool.execution_complete",
+                        "data": {
+                            "toolCallId": "nested-skill-call",
+                            "success": True,
+                            "result": {
+                                "content": 'Skill "nested-skill" loaded successfully.'
+                            },
+                        },
+                    },
+                    {
+                        "type": "skill.invoked",
+                        "data": {
+                            "skillName": "nested-skill",
+                            "resolvedPath": str(skill),
+                        },
+                    },
+                    {
+                        "type": "assistant.turn_end",
+                        "data": {"content": "nested final"},
+                    },
+                    {
+                        "type": "session.task_complete",
+                        "data": {"summary": "nested summary"},
+                    },
+                    {
+                        "type": "session.error",
+                        "data": {"message": "nested failure"},
+                    },
+                ],
+            },
+        }
+
     def assert_usage_refusal(self, values, reason):
         with self.assertRaises(adapter_module.AdapterError) as raised:
             adapter_module.copilot_usage(values)
@@ -1864,15 +1971,9 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
                             "arguments": {"skill": "fixture-skill"},
                         }
                     ],
-                    "snapshot": {
-                        "type": "skill.invoked",
-                        "data": {
-                            "skillName": "nested-skill",
-                            "resolvedPath": str(skill),
-                        },
-                    },
                 },
             },
+            self.nested_snapshot(skill),
             {
                 "type": "tool.execution_complete",
                 "data": {
@@ -1926,6 +2027,42 @@ class CopilotNativeEventSchemaGuardTest(unittest.TestCase):
         )
         self.assertEqual(len(evidence), 1)
         self.assertEqual(evidence[0]["projected_name"], "fixture-skill")
+        comparator_values = [
+            {"type": "session.start", "data": {"model": "fixture-model"}},
+            self.call_start(0),
+            self.nested_snapshot(skill),
+            self.call_success("comparator-usage", 10, 5),
+        ]
+        comparator_events = list(adapter_module.copilot_outer_events(comparator_values))
+        comparator_event_types = [
+            item["type"]
+            for item in comparator_events
+            if isinstance(item.get("type"), str)
+        ]
+        comparator_tool_event = any(
+            item_type.startswith(
+                (
+                    "external_tool.",
+                    "permission.",
+                    "skill.",
+                    "subagent.",
+                    "tool.",
+                )
+            )
+            or item_type == "assistant.tool_call_delta"
+            for item_type in comparator_event_types
+        )
+        comparator_usage = adapter_module.native_detailed_usage(
+            "copilot", comparator_values
+        )
+        self.assertEqual(comparator_event_types.count("model.call_start"), 1)
+        self.assertFalse(comparator_tool_event)
+        self.assertEqual(comparator_usage["tool_calls"], 0)
+        self.assertTrue(
+            comparator_event_types.count("model.call_start") == 1
+            and comparator_usage["tool_calls"] == 0
+            and not comparator_tool_event
+        )
 
     def test_guard_c_shape_b_sums_deduplicates_and_ignores_order(self):
         calls = [
