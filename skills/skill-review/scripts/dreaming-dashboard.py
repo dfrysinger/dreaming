@@ -64,6 +64,9 @@ PREVIEW_DATA_SUBTREES = (
     "snapshots",
     "candidates/v1/packages",
     "bundles",
+    "task-profiles/v1",
+    "task-occurrences/v2",
+    "task-opportunity-accounting/v1",
 )
 PREVIEW_LOCK_RUNTIME_NAMES = (
     "daemon.lock",
