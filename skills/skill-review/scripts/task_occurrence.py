@@ -55,3 +55,57 @@ def build_resolution(*, profile: dict[str,Any], receipt: dict[str,Any], relation
     else: raise TaskOccurrenceError("boundary-relation")
     body={"schema_version":1,"kind":"task_occurrence_resolution","profile_id":profile["profile_id"],"task_key":profile["task_key"],"profile_receipt_sha256":receipt.get("receipt_sha256"),"source_revision":receipt.get("source_revision"),"qualified_session_id":receipt.get("qualified_session_id"),"goal_event_id":profile["goal_event_id"],"occurred_at":profile["occurred_at"],"boundary_relation":relation,"canonical_occurrence_id":occurrence,"prior_canonical_occurrence_id":prior_occurrence_id,"review_contract":review_contract}
     return {**body,"resolution_sha256":digest(body)}
+
+INDEX_SCHEMA_VERSION = 1
+
+def _read(path: Path) -> Any:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise TaskOccurrenceError("index-read") from exc
+
+def validate_index(value: Any) -> dict[str, Any]:
+    if not isinstance(value, dict) or set(value) != {"schema_version", "kind", "entries"}:
+        raise TaskOccurrenceError("index-shape")
+    if value["schema_version"] != INDEX_SCHEMA_VERSION or value["kind"] != "task_occurrence_index" or not isinstance(value["entries"], dict):
+        raise TaskOccurrenceError("index-contract")
+    for task_key, entry in value["entries"].items():
+        _sha(task_key, "index-task-key")
+        if not isinstance(entry, dict) or set(entry) != {"resolution_sha256", "canonical_occurrence_id"}:
+            raise TaskOccurrenceError("index-entry")
+        _sha(entry["resolution_sha256"], "index-resolution")
+        if entry["canonical_occurrence_id"] is not None: _sha(entry["canonical_occurrence_id"], "index-occurrence")
+    return value
+
+def resolution_path(root: Path, resolution_sha256: str) -> Path:
+    return root / f"{_sha(resolution_sha256, 'resolution-sha256').removeprefix('sha256:')}.json"
+
+def load_exact(root: Path, index_path: Path, task_key: str) -> dict[str, Any] | None:
+    _sha(task_key, "task-key")
+    if not index_path.exists(): return None
+    index = validate_index(_read(index_path)); entry=index["entries"].get(task_key)
+    if entry is None: return None
+    path=resolution_path(root, entry["resolution_sha256"])
+    resolution=validate_resolution(_read(path))
+    if resolution["resolution_sha256"] != entry["resolution_sha256"] or resolution["task_key"] != task_key or resolution["canonical_occurrence_id"] != entry["canonical_occurrence_id"]:
+        raise TaskOccurrenceError("index-provenance")
+    return resolution
+
+def persist(root: Path, index_path: Path, resolution: dict[str, Any]) -> dict[str, Any]:
+    resolution=validate_resolution(resolution); path=resolution_path(root,resolution["resolution_sha256"])
+    if path.exists():
+        if _read(path) != resolution: raise TaskOccurrenceError("resolution-collision")
+    else: _write(path,resolution)
+    index={"schema_version": INDEX_SCHEMA_VERSION, "kind":"task_occurrence_index", "entries": {}}
+    if index_path.exists(): index=validate_index(_read(index_path))
+    entries=dict(index["entries"]); prior=entries.get(resolution["task_key"])
+    entry={"resolution_sha256":resolution["resolution_sha256"], "canonical_occurrence_id":resolution["canonical_occurrence_id"]}
+    if prior is not None and prior != entry: raise TaskOccurrenceError("index-task-key-conflict")
+    entries[resolution["task_key"]]=entry
+    # The projection is mutable, but writes are atomic and wholly derived from immutable evidence.
+    temp=index_path.parent / f".{index_path.name}.{uuid.uuid4().hex}"; index_path.parent.mkdir(parents=True,exist_ok=True)
+    try:
+        with temp.open("xb") as f: f.write(canonical({**index,"entries":entries})+b"\n");f.flush();os.fsync(f.fileno())
+        os.chmod(temp,0o600);os.replace(temp,index_path)
+    finally: temp.unlink(missing_ok=True)
+    return resolution
