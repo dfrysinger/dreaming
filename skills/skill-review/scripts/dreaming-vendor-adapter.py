@@ -2340,6 +2340,7 @@ def executor_run(args: argparse.Namespace) -> None:
         for profile in model_result["profiles"]:
             expected_profile_keys = {
                 "source_event_ids",
+                "goal_event_id",
                 "task_type",
                 "abstract_summary",
                 "reuse_value",
@@ -2351,6 +2352,7 @@ def executor_run(args: argparse.Namespace) -> None:
             if not isinstance(profile, dict) or set(profile) != expected_profile_keys:
                 raise AdapterError("malformed-executor-result", "task profile")
             event_ids = profile.get("source_event_ids")
+            goal_event_id = profile.get("goal_event_id")
             procedure = profile.get("procedure")
             reuse_value = profile.get("reuse_value")
             if (
@@ -2362,6 +2364,24 @@ def executor_run(args: argparse.Namespace) -> None:
             ):
                 raise AdapterError(
                     "malformed-executor-result", "task profile event IDs"
+                )
+            goal_event = next(
+                (
+                    event
+                    for event in events
+                    if isinstance(event, dict)
+                    and event.get("source_event_id") == goal_event_id
+                ),
+                None,
+            )
+            if (
+                not isinstance(goal_event_id, str)
+                or goal_event_id not in event_ids
+                or not isinstance(goal_event, dict)
+                or goal_event.get("kind") != "user_message"
+            ):
+                raise AdapterError(
+                    "malformed-executor-result", "task profile goal event"
                 )
             if any(value not in available for value in event_ids):
                 raise AdapterError(

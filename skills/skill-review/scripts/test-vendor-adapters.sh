@@ -182,11 +182,15 @@ class VendorAdapterTest(unittest.TestCase):
                     "events": [
                         {
                             "source_event_id": "event-1",
+                            "kind": "user_message",
+                            "timestamp": 1,
                             "role": "user",
                             "content": "make this a reusable procedure",
                         },
                         {
                             "source_event_id": "event-2",
+                            "kind": "assistant_message",
+                            "timestamp": 2,
                             "role": "assistant",
                             "content": "done",
                         },
@@ -209,6 +213,7 @@ class VendorAdapterTest(unittest.TestCase):
         self.assertEqual(result["kind"], "llm_task_opportunity_profile")
         self.assertEqual(result["completion_sentinel"], "DREAMING_TASK_PROFILE_COMPLETE")
         self.assertEqual(result["profiles"][0]["source_event_ids"], ["event-1", "event-2"])
+        self.assertEqual(result["profiles"][0]["goal_event_id"], "event-1")
         self.assertTrue(result["profiles"][0]["task_key"].startswith("sha256:"))
         self.assertTrue(result["profiles"][0]["profile_id"].startswith("sha256:"))
         self.assertTrue(result["profile_set_id"].startswith("sha256:"))
@@ -247,8 +252,16 @@ class VendorAdapterTest(unittest.TestCase):
                         "qualified_session_id": "copilot:profile-fixture",
                     },
                     "events": [
-                        {"source_event_id": "event-1"},
-                        {"source_event_id": "event-2"},
+                        {
+                            "source_event_id": "event-1",
+                            "kind": "user_message",
+                            "timestamp": 1,
+                        },
+                        {
+                            "source_event_id": "event-2",
+                            "kind": "assistant_message",
+                            "timestamp": 2,
+                        },
                     ],
                 }
             )
@@ -281,8 +294,16 @@ class VendorAdapterTest(unittest.TestCase):
                         "qualified_session_id": "copilot:profile-fixture",
                     },
                     "events": [
-                        {"source_event_id": "event-1"},
-                        {"source_event_id": "event-2"},
+                        {
+                            "source_event_id": "event-1",
+                            "kind": "user_message",
+                            "timestamp": 1,
+                        },
+                        {
+                            "source_event_id": "event-2",
+                            "kind": "assistant_message",
+                            "timestamp": 2,
+                        },
                     ],
                 }
             )
@@ -996,6 +1017,7 @@ def task_profile_payload(prompt):
         event_ids.reverse()
     profiles = [{
       "source_event_ids": event_ids[:2],
+      "goal_event_id": event_ids[0],
       "task_type": "document-reusable-procedure",
       "abstract_summary": "Turn completed work into a reusable procedure.",
       "reuse_value": "reusable-procedure",
