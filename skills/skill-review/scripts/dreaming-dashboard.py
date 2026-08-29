@@ -15,6 +15,7 @@ import re
 import shutil
 import stat
 import subprocess
+import sys
 import tarfile
 import threading
 import time
@@ -28,6 +29,21 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from socketserver import ThreadingMixIn
 from typing import Any
+
+SCRIPT_DIRECTORY = str(Path(__file__).resolve().parent)
+if SCRIPT_DIRECTORY not in sys.path:
+    sys.path.insert(0, SCRIPT_DIRECTORY)
+
+from profile_audit_disposition import (
+    ProfileAuditDispositionError,
+    validate_profile_audit_disposition,
+)
+from task_occurrence import TaskOccurrenceError, load_all as load_task_occurrences
+from task_pass_accounting import (
+    TaskPassAccountingError,
+    validate_task_pass_accounting_receipt,
+)
+from task_profile_receipt import TaskProfileReceiptError, validate_task_profile_receipt
 
 SCHEMA_VERSION = 1
 SKILL_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
@@ -48,6 +64,9 @@ PREVIEW_DATA_SUBTREES = (
     "snapshots",
     "candidates/v1/packages",
     "bundles",
+    "task-profiles/v1",
+    "task-occurrences/v2",
+    "task-opportunity-accounting/v1",
 )
 PREVIEW_LOCK_RUNTIME_NAMES = (
     "daemon.lock",
@@ -60,6 +79,7 @@ PREVIEW_ELIGIBILITY_MARGIN_SECONDS = 10 * 60
 PREVIEW_RELEASE_RESERVE_SECONDS = 2
 DEFAULT_LIMIT = 25
 MAX_LIMIT = 100
+TASK_OPPORTUNITY_CAPACITY_DEFAULTS = {"profiles": 100, "reviews": 25}
 EVALUATION_SIDECARS = {
     ".agent-created",
     ".agent-created.json",
@@ -137,12 +157,23 @@ CANDIDATE_PROCEDURE_KEYS = {
     "exclusions",
     "match_fingerprint",
 }
-CANDIDATE_EVIDENCE_KEYS = {
+CANDIDATE_LEGACY_EVIDENCE_KEYS = {
     "evidence_id",
     "task_key",
     "session_id",
     "observed_at",
     "independence",
+    "summary",
+    "procedure_fingerprint",
+}
+CANDIDATE_EVIDENCE_KEYS = {
+    "evidence_id",
+    "task_key",
+    "source_session_id",
+    "canonical_occurrence_id",
+    "occurred_at",
+    "decision_at",
+    "resolution_sha256",
     "summary",
     "procedure_fingerprint",
 }
@@ -184,20 +215,30 @@ CANDIDATE_DECISION_KEYS = {
 CANDIDATE_BLOCKER_KEYS = {"covering_lifecycle_ids", "tombstone_ids", "uncertain"}
 CANDIDATE_STATE_LABELS = {
     "collecting": "Collecting evidence (shadow-only, not active)",
+    "legacy_probation": "Legacy evidence retained (not current recurrence authority)",
     "ready_for_draft": "Ready for draft (shadow-only, not active)",
     "evaluating": "Evaluating (shadow-only, not active)",
+    "portfolio_pending": "Portfolio decision pending (report-only)",
+    "admitted": "Admitted candidate (not an active skill)",
     "expired": "Expired (shadow-only, not active)",
     "rejected": "Rejected (shadow-only, not active)",
+    "quarantined": "Quarantined candidate (not an active skill)",
     "absorbed": "Absorbed (shadow-only, not active)",
+    "archived": "Archived candidate (not an active skill)",
 }
-CANDIDATE_INITIAL_STATES = {"collecting"}
+CANDIDATE_INITIAL_STATES = {"collecting", "legacy_probation"}
 CANDIDATE_TRANSITIONS = {
     "collecting": {"ready_for_draft", "expired", "rejected", "absorbed"},
     "ready_for_draft": {"collecting", "evaluating", "expired", "rejected", "absorbed"},
     "evaluating": {"collecting", "ready_for_draft", "expired", "rejected", "absorbed"},
+    "legacy_probation": {"ready_for_draft", "evaluating", "quarantined", "archived"},
+    "portfolio_pending": {"admitted", "rejected", "quarantined"},
+    "admitted": {"quarantined", "archived"},
     "expired": {"collecting", "rejected", "absorbed"},
     "rejected": {"collecting", "absorbed"},
+    "quarantined": {"archived"},
     "absorbed": set(),
+    "archived": set(),
 }
 CANDIDATE_MATCH_OUTCOMES = {
     "same",
@@ -294,6 +335,14 @@ def candidate_time(value: Any, reason: str) -> float:
     parsed = parse_time(value) if isinstance(value, str) else None
     candidate_require(parsed is not None, reason)
     return parsed
+
+
+def candidate_session_id(evidence: dict[str, Any]) -> str:
+    return evidence.get("source_session_id", evidence.get("session_id"))
+
+
+def candidate_occurrence_time(evidence: dict[str, Any]) -> str:
+    return evidence.get("occurred_at", evidence.get("observed_at"))
 
 
 def now_iso() -> str:
@@ -2145,7 +2194,7 @@ class DashboardData:
             raise CandidateInvalid("record_unreadable", str(exc)) from exc
         record = candidate_keys(record, CANDIDATE_RECORD_KEYS, "record_schema_unknown")
         candidate_require(
-            record["schema_version"] == 1
+            record["schema_version"] in {1, 2}
             and not isinstance(record["schema_version"], bool),
             "record_schema_version_unsupported",
         )
@@ -2204,9 +2253,14 @@ class DashboardData:
         candidate_require(isinstance(record["evidence"], list), "evidence_invalid")
         evidence_ids: set[str] = set()
         for item in record["evidence"]:
-            item = candidate_keys(item, CANDIDATE_EVIDENCE_KEYS, "evidence_invalid")
+            item_keys = set(item) if isinstance(item, dict) else set()
+            candidate_require(
+                item_keys == CANDIDATE_LEGACY_EVIDENCE_KEYS
+                or item_keys == CANDIDATE_EVIDENCE_KEYS,
+                "evidence_invalid",
+            )
             observation = {
-                key: item[key] for key in CANDIDATE_EVIDENCE_KEYS - {"evidence_id"}
+                key: item[key] for key in item_keys - {"evidence_id"}
             }
             candidate_require(
                 item["evidence_id"] == candidate_sha(observation),
@@ -2217,16 +2271,78 @@ class DashboardData:
             )
             evidence_ids.add(item["evidence_id"])
             candidate_text(item["task_key"], "evidence_invalid", 512)
-            candidate_text(item["session_id"], "evidence_invalid", 512)
             candidate_text(item["summary"], "evidence_invalid")
-            candidate_time(item["observed_at"], "evidence_invalid")
-            candidate_require(
-                item["independence"] in {"verified", "unverified"}, "evidence_invalid"
-            )
+            if item_keys == CANDIDATE_LEGACY_EVIDENCE_KEYS:
+                candidate_text(item["session_id"], "evidence_invalid", 512)
+                candidate_time(item["observed_at"], "evidence_invalid")
+                candidate_require(
+                    item["independence"] in {"verified", "unverified"},
+                    "evidence_invalid",
+                )
+            else:
+                candidate_text(item["source_session_id"], "evidence_invalid", 512)
+                candidate_require(
+                    isinstance(item["canonical_occurrence_id"], str)
+                    and CANDIDATE_ID_RE.fullmatch(item["canonical_occurrence_id"]),
+                    "evidence_invalid",
+                )
+                candidate_time(item["occurred_at"], "evidence_invalid")
+                candidate_time(item["decision_at"], "evidence_invalid")
+                candidate_require(
+                    candidate_time(item["occurred_at"], "evidence_invalid")
+                    <= candidate_time(item["decision_at"], "evidence_invalid"),
+                    "evidence_invalid",
+                )
+                candidate_require(
+                    isinstance(item["resolution_sha256"], str)
+                    and CANDIDATE_ID_RE.fullmatch(item["resolution_sha256"]),
+                    "evidence_invalid",
+                )
             candidate_require(
                 item["procedure_fingerprint"] == procedure["match_fingerprint"],
                 "evidence_procedure_mismatch",
             )
+        current_evidence = [
+            item
+            for item in record["evidence"]
+            if "canonical_occurrence_id" in item
+        ]
+        if current_evidence:
+            try:
+                resolutions = load_task_occurrences(
+                    self.paths.data / "task-occurrences" / "v2"
+                )
+            except TaskOccurrenceError as error:
+                raise CandidateInvalid("occurrence_authority_invalid", error.reason) from error
+            superseded = {
+                item["supersedes_resolution_sha256"]
+                for item in resolutions
+                if item["supersedes_resolution_sha256"] is not None
+            }
+            by_resolution = {
+                item["resolution_sha256"]: item for item in resolutions
+            }
+            for item in current_evidence:
+                resolution = by_resolution.get(item["resolution_sha256"])
+                candidate_require(
+                    resolution is not None
+                    and item["resolution_sha256"] not in superseded
+                    and resolution["boundary_relation"]
+                    in {"same-occurrence", "new-occurrence"}
+                    and all(
+                        resolution.get(key) == value
+                        for key, value in {
+                            "task_key": item["task_key"],
+                            "qualified_session_id": item["source_session_id"],
+                            "canonical_occurrence_id": item[
+                                "canonical_occurrence_id"
+                            ],
+                            "occurred_at": item["occurred_at"],
+                            "decision_at": item["decision_at"],
+                        }.items()
+                    ),
+                    "evidence_occurrence_unbound",
+                )
 
         revisions = record["candidate_revisions"]
         candidate_require(isinstance(revisions, list) and revisions, "revision_invalid")
@@ -2498,20 +2614,35 @@ class DashboardData:
         return gates
 
     def _candidate_view(
-        self, record: dict[str, Any], detail: bool = False
+        self,
+        record: dict[str, Any],
+        detail: bool = False,
+        dream_names: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         now = time.time()
         lifecycle = record["lifecycle"]
         transitions = lifecycle["transition_history"]
         latest_transition = transitions[-1]
         evidence = record["evidence"]
-        verified = [item for item in evidence if item["independence"] == "verified"]
+        verified = [
+            item
+            for item in evidence
+            if (
+                item.get("independence") == "verified"
+                or "canonical_occurrence_id" in item
+            )
+        ]
+        current_occurrences = {
+            item["canonical_occurrence_id"]
+            for item in evidence
+            if isinstance(item.get("canonical_occurrence_id"), str)
+        }
         newest = (
-            max(verified, key=lambda item: parse_time(item["observed_at"]))
+            max(verified, key=lambda item: parse_time(candidate_occurrence_time(item)) or 0)
             if verified
             else None
         )
-        newest_at = parse_time(newest["observed_at"]) if newest else None
+        newest_at = parse_time(candidate_occurrence_time(newest)) if newest else None
         expires_at = parse_time(lifecycle["expires_at"])
         evaluation = record["evaluation"]
         history = evaluation["history"]
@@ -2536,6 +2667,14 @@ class DashboardData:
             for item in record["candidate_revisions"]
             if item["candidate_id"] == record["current_candidate_id"]
         )
+        shadow_only = record["state"] in {
+            "collecting",
+            "ready_for_draft",
+            "evaluating",
+            "expired",
+            "rejected",
+            "absorbed",
+        }
         updated_at = max(
             (
                 value
@@ -2550,17 +2689,21 @@ class DashboardData:
         )
         view = {
             "lifecycle_id": record["lifecycle_id"],
-            "status": "shadow",
+            "status": "shadow" if shadow_only else "lifecycle",
             "state": record["state"],
             "state_label": CANDIDATE_STATE_LABELS[record["state"]],
             "state_reason": latest_transition["reason"],
             "state_changed_at": latest_transition["at"],
             "proposed_name": safe_text(record["proposed_name"], 64),
-            "authority": CANDIDATE_AUTHORITY,
+            "authority": CANDIDATE_AUTHORITY if shadow_only else "lifecycle-record",
             "record_authority": record["authority"],
-            "label": CANDIDATE_LABEL,
+            "label": (
+                CANDIDATE_LABEL
+                if shadow_only
+                else "Candidate lifecycle record — not an active skill"
+            ),
             "notice": CANDIDATE_NOTICE,
-            "shadow_only": True,
+            "shadow_only": shadow_only,
             "active": False,
             "published": False,
             "discoverable": False,
@@ -2581,14 +2724,18 @@ class DashboardData:
                 "verified": len(verified),
                 "unverified": len(evidence) - len(verified),
                 "distinct_tasks": len({item["task_key"] for item in verified}),
-                "distinct_sessions": len({item["session_id"] for item in verified}),
+                "distinct_sessions": len(
+                    {candidate_session_id(item) for item in verified}
+                ),
+                "current_canonical_occurrences": len(current_occurrences),
             },
+            "canonical_occurrence_ids": sorted(current_occurrences),
             "freshness": {
                 "created_at": lifecycle["created_at"],
                 "last_supported_at": lifecycle["last_supported_at"],
                 "expires_at": lifecycle["expires_at"],
                 "newest_verified_evidence_at": (
-                    newest["observed_at"] if newest else None
+                    candidate_occurrence_time(newest) if newest else None
                 ),
                 "fresh_evidence": (
                     newest_at is not None
@@ -2661,8 +2808,8 @@ class DashboardData:
         }
         if not detail:
             return view
+        names = dream_names if dream_names is not None else self._dream_names()
         procedure = record["procedure"]
-        names = self._dream_names()
         return {
             **view,
             "procedure": {
@@ -2678,10 +2825,14 @@ class DashboardData:
                 {
                     "evidence_id": item["evidence_id"],
                     "task_key": safe_text(item["task_key"], 512),
-                    "session_id": item["session_id"],
-                    "dream_name": self._dream_name(item["session_id"], names),
-                    "observed_at": item["observed_at"],
-                    "independence": item["independence"],
+                    "session_id": candidate_session_id(item),
+                    "dream_name": self._dream_name(candidate_session_id(item), names),
+                    "observed_at": candidate_occurrence_time(item),
+                    "independence": item.get(
+                        "independence",
+                        "canonical-occurrence",
+                    ),
+                    "canonical_occurrence_id": item.get("canonical_occurrence_id"),
                     "summary": safe_text(item["summary"], 4000),
                 }
                 for item in evidence
@@ -2793,6 +2944,7 @@ class DashboardData:
         fingerprint = self._fingerprint([root, packages])
         if not root.is_dir():
             return [], fingerprint
+        dream_names = self._dream_names()
         rows = []
         try:
             entries = sorted(root.glob("*.json"))
@@ -2805,7 +2957,11 @@ class DashboardData:
             ) from exc
         for path in entries:
             try:
-                rows.append(self._candidate_view(self._candidate_record(path)))
+                rows.append(
+                    self._candidate_view(
+                        self._candidate_record(path), dream_names=dream_names
+                    )
+                )
             except (CandidateInvalid, OSError, UnicodeError, DashboardError) as exc:
                 rows.append(self._candidate_unavailable(path, exc))
         rows.sort(
@@ -2899,7 +3055,7 @@ class DashboardData:
     def candidate_summary(self) -> dict[str, Any]:
         root = self._candidate_records_root()
         rows, _ = self.candidate_rows()
-        valid = [item for item in rows if item["status"] == "shadow"]
+        valid = [item for item in rows if item["status"] != "invalid"]
         states = {name: 0 for name in sorted(CANDIDATE_STATE_LABELS)}
         recommendations = {"ready_for_draft": 0, "collecting": 0, "none": 0}
         for item in valid:
@@ -2907,7 +3063,7 @@ class DashboardData:
             recommendations[item["recommendation"]["value"]] += 1
         return {
             "authority": CANDIDATE_AUTHORITY,
-            "shadow_only": True,
+            "shadow_only": all(item["shadow_only"] for item in valid),
             "active": False,
             "published": False,
             "discoverable": False,
@@ -3300,6 +3456,338 @@ class DashboardData:
             "preference": preference,
         }
 
+    def task_opportunities(self) -> dict[str, Any]:
+        """Project immutable funnel owners without treating reports as authority."""
+        errors: list[str] = []
+        profiles_root = self.paths.data / "task-profiles" / "v1"
+        dispositions_root = self.paths.state / "profile-audit-dispositions"
+        occurrences_root = self.paths.data / "task-occurrences" / "v2"
+        accounting_root = self.paths.data / "task-opportunity-accounting" / "v1"
+        profiles: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+        all_profiles: dict[str, tuple[dict[str, Any], dict[str, Any]]] = {}
+        profile_counts = {
+            "receipts": 0,
+            "profiles": 0,
+            "reusable": 0,
+            "no_learning": 0,
+            "awaiting_catalog_audit": 0,
+            "audited": 0,
+        }
+
+        def regular_json_paths(root: Path, source: str) -> list[Path]:
+            if not root.exists():
+                return []
+            if root.is_symlink() or not root.is_dir():
+                errors.append(f"{source}-root-invalid")
+                return []
+            try:
+                return sorted(root.glob("*.json"))
+            except OSError:
+                errors.append(f"{source}-root-unreadable")
+                return []
+
+        for path in regular_json_paths(profiles_root, "profile-receipt"):
+            try:
+                receipt = self._json(path, {}, f"profile receipt:{path.name}")
+                snapshot_sha = receipt.get("snapshot_sha256") if isinstance(receipt, dict) else None
+                if not isinstance(snapshot_sha, str) or not snapshot_sha.startswith("sha256:"):
+                    raise TaskProfileReceiptError("snapshot-sha256")
+                snapshot = self._json(
+                    self.paths.data / "snapshots" / f"{snapshot_sha.removeprefix('sha256:')}.json",
+                    {},
+                    f"profile snapshot:{path.name}",
+                )
+                validated = validate_task_profile_receipt(
+                    receipt,
+                    snapshot,
+                    receipt_path=path,
+                    expected_executor=receipt.get("executor"),
+                    expected_executor_identity=receipt.get("executor_identity"),
+                )
+                profile_counts["receipts"] += 1
+                profile_counts["profiles"] += len(receipt["profiles"])
+                profile_counts["reusable"] += len(validated["profiles"])
+                profile_counts["no_learning"] += len(receipt["profiles"]) - len(
+                    validated["profiles"]
+                )
+                for profile in receipt["profiles"]:
+                    profile_id = profile["profile_id"]
+                    if profile_id in all_profiles:
+                        raise TaskProfileReceiptError("duplicate-profile-identity")
+                    all_profiles[profile_id] = (receipt, profile)
+                for profile in validated["profiles"]:
+                    profile_id = profile["profile_id"]
+                    profiles[profile_id] = (receipt, profile)
+            except (DashboardError, TaskProfileReceiptError, TypeError, AttributeError) as error:
+                errors.append(f"profile-receipt-invalid:{path.name}:{getattr(error, 'reason', 'invalid')}")
+
+        audit_outcomes = {
+            "correct-skill": 0,
+            "missed-skill": 0,
+            "wrong-or-incomplete-skill": 0,
+            "no-covering-skill": 0,
+        }
+        occurrence_counts = {
+            "resolutions": 0,
+            "current_resolutions": 0,
+            "canonical_occurrences": 0,
+            "same_occurrence": 0,
+            "new_occurrence": 0,
+            "boundary_conflict": 0,
+            "boundary_unresolved": 0,
+        }
+        occurrence_by_resolution: dict[str, dict[str, Any]] = {}
+        all_occurrence_resolutions: set[str] = set()
+        superseded_resolutions: set[str] = set()
+        try:
+            occurrences = load_task_occurrences(occurrences_root)
+            all_occurrence_resolutions = {
+                item["resolution_sha256"] for item in occurrences
+            }
+            superseded_resolutions = {
+                item["supersedes_resolution_sha256"]
+                for item in occurrences
+                if item["supersedes_resolution_sha256"] is not None
+            }
+            current = [
+                item
+                for item in occurrences
+                if item["resolution_sha256"] not in superseded_resolutions
+            ]
+            occurrence_by_resolution = {
+                item["resolution_sha256"]: item for item in current
+            }
+            occurrence_counts["resolutions"] = len(occurrences)
+            occurrence_counts["current_resolutions"] = len(current)
+            occurrence_counts["canonical_occurrences"] = len(
+                {
+                    item["canonical_occurrence_id"]
+                    for item in current
+                    if item["canonical_occurrence_id"] is not None
+                }
+            )
+            for item in current:
+                occurrence_counts[item["boundary_relation"].replace("-", "_")] += 1
+        except TaskOccurrenceError as error:
+            errors.append(f"task-occurrence-invalid:{error.reason}")
+
+        audited_profiles: set[str] = set()
+        current_dispositions = regular_json_paths(
+            dispositions_root / "v3", "profile-audit-disposition"
+        )
+        for path in current_dispositions:
+            try:
+                disposition = self._json(path, {}, f"profile disposition:{path.name}")
+                if (
+                    not isinstance(disposition, dict)
+                    or disposition.get("profile_audit_contract_version") != 3
+                ):
+                    raise ProfileAuditDispositionError(
+                        "disposition-contract-version"
+                    )
+                profile_id = disposition.get("profile_id") if isinstance(disposition, dict) else None
+                if profile_id not in profiles:
+                    raise ProfileAuditDispositionError("disposition-unbound")
+                if path.name != f"{profile_id.removeprefix('sha256:')}.json":
+                    raise ProfileAuditDispositionError("disposition-filename")
+                receipt, profile = profiles[profile_id]
+                validated = validate_profile_audit_disposition(
+                    disposition, receipt=receipt, profile=profile
+                )
+                if validated["outcome"] not in audit_outcomes:
+                    raise ProfileAuditDispositionError("disposition-catalog-outcome")
+                resolution_sha256 = validated["occurrence_resolution_sha256"]
+                resolution = occurrence_by_resolution.get(resolution_sha256)
+                if resolution is None:
+                    reason = (
+                        "disposition-occurrence-superseded"
+                        if resolution_sha256 in all_occurrence_resolutions
+                        and resolution_sha256 in superseded_resolutions
+                        else "disposition-occurrence-unbound"
+                    )
+                    raise ProfileAuditDispositionError(reason)
+                if any(
+                    validated[field] != resolution[field]
+                    for field in (
+                        "profile_id",
+                        "profile_sha256",
+                        "task_key",
+                        "profile_receipt_sha256",
+                        "snapshot_sha256",
+                        "source_revision",
+                        "qualified_session_id",
+                        "canonical_occurrence_id",
+                        "boundary_relation",
+                    )
+                ):
+                    raise ProfileAuditDispositionError(
+                        "disposition-occurrence-mismatch"
+                    )
+                if profile_id in audited_profiles:
+                    raise ProfileAuditDispositionError("duplicate-profile-disposition")
+                audited_profiles.add(profile_id)
+                audit_outcomes[validated["outcome"]] += 1
+            except (
+                DashboardError,
+                ProfileAuditDispositionError,
+                TypeError,
+                AttributeError,
+            ) as error:
+                errors.append(
+                    f"profile-audit-disposition-invalid:{path.name}:"
+                    f"{getattr(error, 'reason', 'invalid')}"
+                )
+        profile_counts["audited"] = len(audited_profiles)
+        profile_counts["awaiting_catalog_audit"] = (
+            profile_counts["reusable"] - profile_counts["audited"]
+        )
+
+        accounting_totals = {
+            "queue": {},
+            "profile_operations": {},
+            "profiles": {},
+            "review_rows": {},
+            "review_operations": {},
+            "review_terminals": {},
+        }
+        capacity_limits = dict(TASK_OPPORTUNITY_CAPACITY_DEFAULTS)
+        try:
+            config = self._adapter_config()
+            for config_name, projection_name, maximum in (
+                ("max_profiles_per_run", "profiles", 500),
+                ("max_reviews_per_run", "reviews", 25),
+            ):
+                value = config.get(
+                    config_name, TASK_OPPORTUNITY_CAPACITY_DEFAULTS[projection_name]
+                )
+                if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= maximum:
+                    raise ValueError(config_name)
+                capacity_limits[projection_name] = value
+        except (DashboardError, ValueError) as error:
+            errors.append(
+                f"capacity-config-invalid:{getattr(error, 'code', str(error))}"
+            )
+        passes = []
+        for path in regular_json_paths(accounting_root, "accounting"):
+            try:
+                receipt = self._json(path, {}, f"accounting receipt:{path.name}")
+                validated = validate_task_pass_accounting_receipt(receipt)
+                if path.name != f"{validated['receipt_sha256'].removeprefix('sha256:')}.json":
+                    raise TaskPassAccountingError("accounting-filename")
+                for entry in (
+                    validated["profiles"]
+                    + [
+                        item
+                        for item in validated["review_rows"]
+                        if item["profile_id"] is not None
+                    ]
+                    + validated["review_operations"]
+                ):
+                    profile_id = entry["profile_id"]
+                    expected = all_profiles.get(profile_id)
+                    if (
+                        expected is None
+                        or entry["profile_receipt_sha256"]
+                        != expected[0]["receipt_sha256"]
+                    ):
+                        raise TaskPassAccountingError("accounting-profile-unbound")
+                for entry in validated["profiles"]:
+                    if (
+                        entry["terminal"] == "reusable-dispositioned"
+                        and entry["profile_id"] not in audited_profiles
+                    ) or (
+                        entry["terminal"] == "reusable-awaiting-review"
+                        and entry["profile_id"] in audited_profiles
+                    ):
+                        raise TaskPassAccountingError(
+                            "accounting-disposition-unmatched"
+                        )
+                if any(
+                    entry["terminal"]
+                    in {"dispositioned", "recurrence-waiting", "recurrence-ready"}
+                    and entry["profile_id"] not in audited_profiles
+                    for entry in validated["review_operations"]
+                ):
+                    raise TaskPassAccountingError("accounting-review-unmatched")
+                for name, totals in validated["totals"].items():
+                    for outcome, count in totals.items():
+                        accounting_totals[name][outcome] = (
+                            accounting_totals[name].get(outcome, 0) + count
+                        )
+                passes.append(
+                    {
+                        "pass_id": validated["pass_id"],
+                        "receipt_sha256": validated["receipt_sha256"],
+                        "profile_stop_reason": validated["profile_stop_reason"],
+                        "review_stop_reason": validated["review_stop_reason"],
+                        "capacity": {
+                            "profiles": {
+                                "started": len(validated["profile_operations"]),
+                                "limit": capacity_limits["profiles"],
+                                "deferred": validated["totals"]["queue"].get(
+                                    "eligible-deferred", 0
+                                ),
+                            },
+                            "reviews": {
+                                "started": len(validated["review_operations"]),
+                                "limit": capacity_limits["reviews"],
+                                "deferred": validated["totals"]["review_rows"].get(
+                                    "eligible-deferred", 0
+                                ),
+                            },
+                        },
+                        "totals": validated["totals"],
+                    }
+                )
+            except (DashboardError, TaskPassAccountingError) as error:
+                errors.append(
+                    f"accounting-invalid:{path.name}:{getattr(error, 'reason', 'invalid')}"
+                )
+
+        candidate_rows, _ = self.candidate_rows()
+        candidate_states = {name: 0 for name in sorted(CANDIDATE_STATE_LABELS)}
+        current_candidate_occurrences: set[str] = set()
+        for row in candidate_rows:
+            if row["status"] == "invalid":
+                errors.append(f"candidate-invalid:{row['source']}:{row['state_reason']}")
+                continue
+            candidate_states[row["state"]] += 1
+            current_candidate_occurrences.update(
+                item for item in row["canonical_occurrence_ids"] if isinstance(item, str)
+            )
+
+        status = (
+            "unhealthy"
+            if errors
+            else "reconciled"
+            if passes
+            else "unavailable"
+        )
+        return {
+            "status": status,
+            "errors": errors,
+            "profiles": profile_counts,
+            "catalog_audit_outcomes": audit_outcomes,
+            "occurrences": occurrence_counts,
+            "candidates": {
+                "records": len(candidate_rows),
+                "states": candidate_states,
+                "current_canonical_occurrences": len(current_candidate_occurrences),
+            },
+            "accounting": {
+                "receipts": len(passes),
+                "passes": passes,
+                "capacity_limits": capacity_limits,
+                "terminal_totals": accounting_totals,
+                "deferred_backlog": {
+                    "profiles": accounting_totals["queue"].get("eligible-deferred", 0),
+                    "reviews": accounting_totals["review_rows"].get(
+                        "eligible-deferred", 0
+                    ),
+                },
+            },
+        }
+
     def overview(self) -> dict[str, Any]:
         dreams, _ = self.dream_rows()
         skills, _ = self.skill_rows()
@@ -3327,6 +3815,7 @@ class DashboardData:
             },
             "evaluations": self._evaluation_portfolio(),
             "candidates": self.candidate_summary(),
+            "task_opportunities": self.task_opportunities(),
             "estate": self.estate(summary_only=True),
             "activity": activity,
         }
@@ -6741,6 +7230,8 @@ class DashboardHandler(BaseHTTPRequestHandler):
             return self._json_response(self.data.health())
         if path == "/api/v1/overview":
             return self._json_response(self.data.overview())
+        if path == "/api/v1/task-opportunities":
+            return self._json_response(self.data.task_opportunities())
         if path == "/api/v1/estate":
             return self._json_response(self.data.estate())
         if path == "/api/v1/activity":

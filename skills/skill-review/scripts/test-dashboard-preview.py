@@ -76,6 +76,18 @@ with tempfile.TemporaryDirectory(prefix="dashboard-preview-", dir=TEST_ROOT) as 
     snapshots = source["data"] / "snapshots"
     snapshots.mkdir()
     (snapshots / "included.json").write_text("{}", encoding="utf-8")
+    task_authority = {
+        "task-profiles/v1/profile-receipt.json": '{"kind":"task_profile_receipt"}',
+        "task-occurrences/v2/resolution.json": '{"kind":"task_occurrence_resolution"}',
+        "task-opportunity-accounting/v1/pass.json": '{"kind":"task_pass_accounting"}',
+    }
+    for relative, content in task_authority.items():
+        path = source["data"] / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding="utf-8")
+    ignored_task_authority = source["data"] / "task-profiles/v2/ignored.json"
+    ignored_task_authority.parent.mkdir(parents=True)
+    ignored_task_authority.write_text("{}", encoding="utf-8")
     dependency_bundle = source["data"] / "deps" / "bundles" / "fixture"
     dependency_bundle.mkdir(parents=True)
     (dependency_bundle / "ignored.json").write_text("{}", encoding="utf-8")
@@ -187,6 +199,16 @@ with tempfile.TemporaryDirectory(prefix="dashboard-preview-", dir=TEST_ROOT) as 
         and not any(path.startswith("data/deps/") for path in manifest_paths),
         "dependency cache symlink is excluded while dashboard snapshot data is captured",
     )
+    captured_task_authority = {
+        f"data/{relative}" for relative in task_authority
+    }
+    check(
+        all((preview / path).is_file() for path in captured_task_authority)
+        and captured_task_authority <= manifest_paths
+        and not (preview / "data/task-profiles/v2").exists()
+        and not any(path.startswith("data/task-profiles/v2/") for path in manifest_paths),
+        "capture includes only task-opportunity authority trees and excludes adjacent data",
+    )
     lock_runtime_paths = {
         f"control_state/{name}" for name in dashboard.PREVIEW_LOCK_RUNTIME_NAMES
     }
@@ -214,6 +236,16 @@ with tempfile.TemporaryDirectory(prefix="dashboard-preview-", dir=TEST_ROOT) as 
         and not (derived / "control_state" / "daemon.lock").exists(),
         "a lock-free snapshot can be captured again with a separate lease state",
     )
+    derived_paths = dashboard.DashboardPaths.preview(
+        derived, REPO / "skills/skill-review/assets/dashboard"
+    )
+    omitted_authority = derived / "data/task-occurrences/v2/resolution.json"
+    omitted_authority.unlink()
+    try:
+        dashboard.verify_preview_manifest(derived_paths)
+        raise AssertionError("omitted task occurrence authority accepted")
+    except dashboard.DashboardError:
+        check(True, "omitted task-opportunity authority fails manifest verification")
     dashboard.verify_preview_manifest(paths)
     external_config = root / "external-adapters.json"
     external_config.write_text(

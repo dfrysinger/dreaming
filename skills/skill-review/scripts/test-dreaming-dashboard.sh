@@ -1578,7 +1578,7 @@ try:
     check(request(f"/api/v1/transcripts/{oversized_digest}")[0] == 422, "oversized snapshot is rejected")
 
     private_boundary_bodies = [evidence_body, transcript_body]
-    for route in ("/api/v1/overview", "/api/v1/estate", "/api/v1/activity", "/api/v1/system", "/api/v1/health"):
+    for route in ("/api/v1/overview", "/api/v1/task-opportunities", "/api/v1/estate", "/api/v1/activity", "/api/v1/system", "/api/v1/health"):
         route_status, _, route_body = request(route)
         check(route_status == 200, f"{route} returns schema-v1 data")
         private_boundary_bodies.append(route_body)
@@ -2397,7 +2397,7 @@ try:
     check(
         candidate_rows[admitted_candidate]["status"] == "invalid"
         and candidate_rows[admitted_candidate].get("state") is None
-        and candidate_rows[admitted_candidate]["reasons"] == ["record_state_not_shadow"]
+        and candidate_rows[admitted_candidate]["reasons"] == ["record_publication_not_shadow"]
         and candidate_rows[malformed_candidate]["status"] == "invalid"
         and candidate_rows[malformed_candidate]["reasons"] == ["record_unreadable"]
         and candidate_rows[admitted_candidate]["active"] is False
@@ -2413,7 +2413,7 @@ try:
         and detail["active"] is False
         and detail["published"] is False
         and detail["current_candidate_id"].startswith("sha256:")
-        and detail["recommendation"]["value"] == "ready_for_draft"
+        and detail["recommendation"]["value"] == "collecting"
         and detail["evaluation"]["composite_score"] is None
         and {gate["name"] for gate in detail["evaluation"]["gates"]}
         == {"recurrence", "routing", "task_value"},
@@ -2443,9 +2443,14 @@ try:
         and overview_candidates["states"]
         == {
             "absorbed": 0,
+            "admitted": 0,
+            "archived": 0,
             "collecting": 1,
             "evaluating": 1,
             "expired": 0,
+            "legacy_probation": 0,
+            "portfolio_pending": 0,
+            "quarantined": 0,
             "ready_for_draft": 1,
             "rejected": 0,
         }

@@ -530,6 +530,7 @@ Routes:
 | Route | Contract |
 |---|---|
 | `GET /api/v1/overview` | Runtime health, scheduled reliability, backlog totals and burn rate, skill count, latest skills, evaluation coverage, capability macro-averages, skill-history series, and backlog series |
+| `GET /api/v1/task-opportunities` | Read-only projection of validated profile receipts, catalog-audit dispositions, canonical occurrences, candidate recurrence, and immutable pass-accounting terminals, bounds, and deferred backlog |
 | `GET /api/v1/activity?kind=&cursor=&limit=` | Scheduled, on-demand review, and evaluation executions with nested scheduled passes |
 | `GET /api/v1/dreams?status=&source=&result=&sort=&query=&cursor=&limit=` | Bounded dream summaries only |
 | `GET /api/v1/dreams/<qualified-id>` | One dream's revisions and review metadata, without transcript text |
