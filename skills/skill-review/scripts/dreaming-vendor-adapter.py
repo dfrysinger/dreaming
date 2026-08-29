@@ -169,6 +169,16 @@ COPILOT_EVENT_TYPES = {
     "hook.end",
     "hook.start",
     "model.call_start",
+    "model.call_finished",
+    "model.captured_assignment_context",
+    "model.message",
+    "model.messages_snapshot",
+    "model.model_call_started",
+    "model.model_call_success",
+    "model.response",
+    "model.tool_execution",
+    "model.turn_ended",
+    "model.turn_started",
     "permission.completed",
     "permission.requested",
     "result",
@@ -181,7 +191,11 @@ COPILOT_EVENT_TYPES = {
     "session.custom_agents_updated",
     "session.error",
     "session.info",
+    "session.managed_settings_resolved",
     "session.mode_changed",
+    "session.mcp_server_removed",
+    "session.mcp_server_status_changed",
+    "session.mcp_servers_loaded",
     "session.model_change",
     "session.permissions_changed",
     "session.plan_changed",
@@ -4287,9 +4301,8 @@ def evaluation_comparator_compare(args: argparse.Namespace) -> None:
         if usage is None:
             raise AdapterError("usage-unproved", args.vendor)
         event_types = [
-            item.get("type")
-            for value in native_values
-            for item in recursive_values(value)
+            item["type"]
+            for item in copilot_outer_events(native_values)
             if isinstance(item.get("type"), str)
         ]
         tool_event = any(
@@ -5200,6 +5213,239 @@ def recursive_values(value: Any) -> Iterable[dict[str, Any]]:
             yield from recursive_values(nested)
 
 
+def copilot_outer_events(values: list[dict[str, Any]]) -> Iterable[dict[str, Any]]:
+    for value in values:
+        if set(value) == {"events"}:
+            events = value.get("events")
+            if isinstance(events, list):
+                for event in events:
+                    if isinstance(event, dict):
+                        yield event
+            continue
+        yield value
+
+
+def copilot_usage_error(reason: str) -> None:
+    raise AdapterError("usage-unproved", f"copilot:{reason}")
+
+
+def copilot_usage_triple(usage: Any) -> tuple[int, int, int]:
+    if not isinstance(usage, dict):
+        copilot_usage_error("usage-malformed")
+    fields = (
+        usage.get("prompt_tokens"),
+        usage.get("completion_tokens"),
+        usage.get("total_tokens"),
+    )
+    if any(
+        not isinstance(value, int) or isinstance(value, bool) or value < 0
+        for value in fields
+    ):
+        copilot_usage_error("usage-malformed")
+    prompt_tokens, completion_tokens, total_tokens = fields
+    if total_tokens != prompt_tokens + completion_tokens:
+        copilot_usage_error("usage-malformed")
+    return prompt_tokens, completion_tokens, total_tokens
+
+
+def copilot_call_usage(
+    values: list[dict[str, Any]],
+) -> dict[str, int] | None:
+    usages: dict[str, tuple[int, int, int]] = {}
+    engaged = False
+    for event in copilot_outer_events(values):
+        if event.get("type") != "model.model_call_success":
+            continue
+        engaged = True
+        data = event.get("data")
+        if not isinstance(data, dict):
+            copilot_usage_error("usage-malformed")
+        response_chunk = data.get("responseChunk")
+        if not isinstance(response_chunk, dict):
+            copilot_usage_error("usage-malformed")
+        triple = copilot_usage_triple(response_chunk.get("usage"))
+        if "responseUsage" in data:
+            try:
+                response_usage = copilot_usage_triple(data["responseUsage"])
+            except AdapterError:
+                copilot_usage_error("usage-contradiction")
+            if response_usage != triple:
+                copilot_usage_error("usage-contradiction")
+        event_id = event.get("id")
+        if not isinstance(event_id, str) or not event_id:
+            copilot_usage_error("usage-ambiguous")
+        prior = usages.get(event_id)
+        if prior is not None and prior != triple:
+            copilot_usage_error("usage-ambiguous")
+        usages[event_id] = triple
+    if not engaged:
+        return None
+    call_starts = sum(
+        event.get("type") == "model.call_start"
+        for event in copilot_outer_events(values)
+    )
+    if len(usages) != call_starts:
+        copilot_usage_error("usage-incomplete")
+    input_tokens = sum(triple[0] for triple in usages.values())
+    output_tokens = sum(triple[1] for triple in usages.values())
+    total_tokens = sum(triple[2] for triple in usages.values())
+    if total_tokens != input_tokens + output_tokens:
+        copilot_usage_error("usage-malformed")
+    return {
+        "input_tokens": input_tokens,
+        "output_tokens": output_tokens,
+        "total_tokens": total_tokens,
+    }
+
+
+def copilot_legacy_usage(
+    values: list[dict[str, Any]],
+) -> dict[str, int | None] | None:
+    pair: tuple[int, int, int] | None = None
+    total: int | None = None
+    declared_output = 0
+    declared_output_seen = False
+
+    def value(
+        usage: dict[str, Any], snake: str, camel: str
+    ) -> int | None:
+        present = [usage[key] for key in (snake, camel) if key in usage]
+        if not present:
+            return None
+        if any(
+            not isinstance(item, int) or isinstance(item, bool) or item < 0
+            for item in present
+        ):
+            copilot_usage_error("usage-malformed")
+        if len(set(present)) != 1:
+            copilot_usage_error("usage-ambiguous")
+        return present[0]
+
+    def observe(usage: dict[str, Any]) -> None:
+        nonlocal pair, total
+        input_tokens = value(usage, "input_tokens", "inputTokens")
+        output_tokens = value(usage, "output_tokens", "outputTokens")
+        total_tokens = value(usage, "total_tokens", "totalTokens")
+        cache_creation = usage.get("cache_creation_input_tokens")
+        cache_read = usage.get("cache_read_input_tokens")
+        for cache in (cache_creation, cache_read):
+            if cache is not None and (
+                not isinstance(cache, int) or isinstance(cache, bool) or cache < 0
+            ):
+                copilot_usage_error("usage-malformed")
+        if input_tokens is not None:
+            input_tokens += (cache_creation or 0) + (cache_read or 0)
+        if input_tokens is not None and output_tokens is not None:
+            triple = (input_tokens, output_tokens, input_tokens + output_tokens)
+            if total_tokens is not None and total_tokens != triple[2]:
+                copilot_usage_error("usage-malformed")
+            if pair is not None and pair != triple:
+                copilot_usage_error("usage-ambiguous")
+            pair = triple
+        elif total_tokens is not None:
+            if total is not None and total != total_tokens:
+                copilot_usage_error("usage-ambiguous")
+            total = total_tokens
+        elif input_tokens is not None or output_tokens is not None:
+            copilot_usage_error("usage-incomplete")
+
+    for event in copilot_outer_events(values):
+        usage = event.get("usage")
+        if isinstance(usage, dict):
+            observe(usage)
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        usage = data.get("usage")
+        if isinstance(usage, dict):
+            observe(usage)
+        if "outputTokens" in data:
+            output = data["outputTokens"]
+            if (
+                not isinstance(output, int)
+                or isinstance(output, bool)
+                or output < 0
+            ):
+                copilot_usage_error("usage-malformed")
+            declared_output_seen = True
+            declared_output += output
+    if pair is not None and total is not None and pair[2] != total:
+        copilot_usage_error("usage-contradiction")
+    if pair is not None:
+        if declared_output_seen and declared_output != pair[1]:
+            copilot_usage_error("usage-contradiction")
+        return {
+            "input_tokens": pair[0],
+            "output_tokens": pair[1],
+            "total_tokens": pair[2],
+        }
+    if total is not None:
+        if declared_output_seen:
+            input_tokens = total - declared_output
+            if input_tokens < 0:
+                copilot_usage_error("usage-incomplete")
+            return {
+                "input_tokens": input_tokens,
+                "output_tokens": declared_output,
+                "total_tokens": total,
+            }
+        return {
+            "input_tokens": None,
+            "output_tokens": None,
+            "total_tokens": total,
+        }
+    if declared_output_seen:
+        copilot_usage_error("usage-incomplete")
+    return None
+
+
+def copilot_usage(values: list[dict[str, Any]]) -> dict[str, int | None] | None:
+    call_usage = copilot_call_usage(values)
+    legacy_usage = copilot_legacy_usage(values)
+    if call_usage is not None and legacy_usage is not None:
+        legacy_components = (
+            legacy_usage["input_tokens"],
+            legacy_usage["output_tokens"],
+        )
+        if None in legacy_components:
+            if legacy_usage["total_tokens"] != call_usage["total_tokens"]:
+                copilot_usage_error("usage-contradiction")
+        elif (
+            legacy_usage["input_tokens"] != call_usage["input_tokens"]
+            or legacy_usage["output_tokens"] != call_usage["output_tokens"]
+            or legacy_usage["total_tokens"] != call_usage["total_tokens"]
+        ):
+            copilot_usage_error("usage-contradiction")
+    usage = call_usage if call_usage is not None else legacy_usage
+    if usage is None:
+        if any(
+            event.get("type") == "model.call_start"
+            for event in copilot_outer_events(values)
+        ):
+            copilot_usage_error("usage-incomplete")
+        return None
+    turns = 0
+    tool_calls: set[str] = set()
+    for event in copilot_outer_events(values):
+        if event.get("type") == "model.call_start":
+            turns += 1
+        data = event.get("data")
+        if not isinstance(data, dict):
+            continue
+        requests = data.get("toolRequests")
+        if isinstance(requests, list):
+            for request in requests:
+                if isinstance(request, dict):
+                    tool_calls.add(str(request.get("toolCallId") or sha(request)))
+    return {
+        "turns": turns,
+        "input_tokens": usage["input_tokens"],
+        "output_tokens": usage["output_tokens"],
+        "total_tokens": usage["total_tokens"],
+        "tool_calls": len(tool_calls),
+    }
+
+
 def validate_native_schema(vendor: str, values: list[dict[str, Any]]) -> None:
     top_level = {
         "copilot": COPILOT_EVENT_TYPES,
@@ -5274,30 +5520,38 @@ def validate_native_schema(vendor: str, values: list[dict[str, Any]]) -> None:
 
 def native_model(vendor: str, values: list[dict[str, Any]]) -> str | None:
     observed: list[str] = []
-    for value in values:
-        for item in recursive_values(value):
-            if vendor == "copilot" and item.get("type") in {
-                "model.call_start",
-                "session.start",
-                "session.model_change",
-            }:
-                data = item.get("data", {})
-                if isinstance(data, dict) and isinstance(data.get("model"), str):
-                    observed.append(data["model"])
-            if vendor == "claude" and item.get("type") == "system":
-                if isinstance(item.get("model"), str):
-                    observed.append(item["model"])
-            if vendor == "codex" and (
-                item.get("type") == "turn_context"
-                or (
-                    item.get("type") == "event_msg"
-                    and isinstance(item.get("payload"), dict)
-                    and item["payload"].get("type") == "turn_started"
-                )
-            ):
-                payload = item.get("payload", item)
-                if isinstance(payload, dict) and isinstance(payload.get("model"), str):
-                    observed.append(payload["model"])
+    items = (
+        copilot_outer_events(values)
+        if vendor == "copilot"
+        else (
+            item
+            for value in values
+            for item in recursive_values(value)
+        )
+    )
+    for item in items:
+        if vendor == "copilot" and item.get("type") in {
+            "model.call_start",
+            "session.start",
+            "session.model_change",
+        }:
+            data = item.get("data", {})
+            if isinstance(data, dict) and isinstance(data.get("model"), str):
+                observed.append(data["model"])
+        if vendor == "claude" and item.get("type") == "system":
+            if isinstance(item.get("model"), str):
+                observed.append(item["model"])
+        if vendor == "codex" and (
+            item.get("type") == "turn_context"
+            or (
+                item.get("type") == "event_msg"
+                and isinstance(item.get("payload"), dict)
+                and item["payload"].get("type") == "turn_started"
+            )
+        ):
+            payload = item.get("payload", item)
+            if isinstance(payload, dict) and isinstance(payload.get("model"), str):
+                observed.append(payload["model"])
     identities = list(dict.fromkeys(observed))
     if len(identities) > 1:
         raise AdapterError(
@@ -5308,20 +5562,12 @@ def native_model(vendor: str, values: list[dict[str, Any]]) -> str | None:
 
 
 def native_token_usage(vendor: str, values: list[dict[str, Any]]) -> int | None:
+    if vendor == "copilot":
+        usage = copilot_usage(values)
+        return usage["total_tokens"] if usage is not None else None
     totals: list[int] = []
-    copilot_output_tokens = 0
     for value in values:
         for item in recursive_values(value):
-            if (
-                vendor == "copilot"
-                and item.get("type") == "assistant.message"
-                and isinstance(item.get("data"), dict)
-            ):
-                output_tokens = item["data"].get("outputTokens")
-                if isinstance(output_tokens, int) and not isinstance(
-                    output_tokens, bool
-                ):
-                    copilot_output_tokens += output_tokens
             for key in ("usage", "token_usage"):
                 usage = item.get(key)
                 if not isinstance(usage, dict):
@@ -5336,8 +5582,6 @@ def native_token_usage(vendor: str, values: list[dict[str, Any]]) -> int | None:
                 ]
                 if all(isinstance(piece, int) and not isinstance(piece, bool) for piece in pieces):
                     totals.append(sum(pieces))
-    if copilot_output_tokens:
-        return copilot_output_tokens
     return max(totals) if totals else None
 
 
@@ -5345,6 +5589,21 @@ def native_detailed_usage(
     vendor: str,
     values: list[dict[str, Any]],
 ) -> dict[str, int] | None:
+    if vendor == "copilot":
+        usage = copilot_usage(values)
+        if (
+            usage is None
+            or usage["input_tokens"] is None
+            or usage["output_tokens"] is None
+        ):
+            return None
+        return {
+            "turns": usage["turns"],
+            "input_tokens": usage["input_tokens"],
+            "output_tokens": usage["output_tokens"],
+            "total_tokens": usage["total_tokens"],
+            "tool_calls": usage["tool_calls"],
+        }
     inputs: list[int] = []
     outputs: list[int] = []
     totals: list[int] = []
@@ -5354,22 +5613,7 @@ def native_detailed_usage(
         for item in recursive_values(value):
             item_type = item.get("type")
             payload = item.get("payload", item)
-            if vendor == "copilot":
-                if item_type == "model.call_start":
-                    turns += 1
-                data = item.get("data", {})
-                if isinstance(data, dict):
-                    output = data.get("outputTokens")
-                    if isinstance(output, int) and not isinstance(output, bool):
-                        outputs.append(output)
-                    requests = data.get("toolRequests")
-                    if isinstance(requests, list):
-                        for request in requests:
-                            if isinstance(request, dict):
-                                tool_calls.add(
-                                    str(request.get("toolCallId") or sha(request))
-                                )
-            elif vendor == "claude":
+            if vendor == "claude":
                 if item_type == "assistant":
                     turns += 1
                 if item_type == "tool_use":
@@ -5408,9 +5652,7 @@ def native_detailed_usage(
                 if isinstance(total_tokens, int) and not isinstance(total_tokens, bool):
                     totals.append(total_tokens)
     input_tokens = max(inputs) if inputs else None
-    output_tokens = sum(outputs) if vendor == "copilot" and outputs else (
-        max(outputs) if outputs else None
-    )
+    output_tokens = max(outputs) if outputs else None
     total_tokens = max(totals) if totals else None
     if input_tokens is None and total_tokens is not None and output_tokens is not None:
         input_tokens = total_tokens - output_tokens
@@ -5517,43 +5759,39 @@ def native_skill_evidence(
         )
     if vendor == "copilot" and resolved_skills:
         projections: dict[str, set[tuple[str, str]]] = {}
-        for value in values:
-            for item in recursive_values(value):
-                if item.get("type") == "session.skills_loaded":
-                    data = item.get("data", {})
-                    skills = data.get("skills") if isinstance(data, dict) else None
-                    if not isinstance(skills, list):
+        for item in copilot_outer_events(values):
+            if item.get("type") == "session.skills_loaded":
+                data = item.get("data", {})
+                skills = data.get("skills") if isinstance(data, dict) else None
+                if not isinstance(skills, list):
+                    continue
+                for skill in skills:
+                    if not isinstance(skill, dict):
                         continue
-                    for skill in skills:
-                        if not isinstance(skill, dict):
-                            continue
-                        name = skill.get("name")
-                        path = skill.get("path")
-                        if not isinstance(name, str) or not isinstance(path, str):
-                            continue
-                        candidate_path = Path(path)
-                        if (
-                            candidate_path.is_absolute()
-                            and candidate_path.resolve() in resolved_skills.values()
-                        ):
-                            projections.setdefault(name, set()).add((path, sha(item)))
-                elif item.get("type") == "tool.execution_complete":
-                    data = item.get("data", {})
-                    if not isinstance(data, dict) or data.get("success") is not True:
+                    name = skill.get("name")
+                    path = skill.get("path")
+                    if not isinstance(name, str) or not isinstance(path, str):
                         continue
-                    call_id = data.get("toolCallId")
-                    result = data.get("result")
-                    content = result.get("content") if isinstance(result, dict) else None
-                    match = (
-                        re.match(r'^Skill "([^"]+)" loaded successfully\.', content)
-                        if isinstance(content, str)
-                        else None
-                    )
+                    candidate_path = Path(path)
                     if (
-                        isinstance(call_id, str)
-                        and match is not None
+                        candidate_path.is_absolute()
+                        and candidate_path.resolve() in resolved_skills.values()
                     ):
-                        copilot_successful_skill_calls[call_id] = match.group(1)
+                        projections.setdefault(name, set()).add((path, sha(item)))
+            elif item.get("type") == "tool.execution_complete":
+                data = item.get("data", {})
+                if not isinstance(data, dict) or data.get("success") is not True:
+                    continue
+                call_id = data.get("toolCallId")
+                result = data.get("result")
+                content = result.get("content") if isinstance(result, dict) else None
+                match = (
+                    re.match(r'^Skill "([^"]+)" loaded successfully\.', content)
+                    if isinstance(content, str)
+                    else None
+                )
+                if isinstance(call_id, str) and match is not None:
+                    copilot_successful_skill_calls[call_id] = match.group(1)
         copilot_projections = {
             name: next(iter(projected))
             for name, projected in projections.items()
@@ -5590,126 +5828,134 @@ def native_skill_evidence(
             for qualified, projected in projections.items()
             if len(projected) == 1
         }
-    for value in values:
-        for item in recursive_values(value):
-            name: Any = None
-            input_value: Any = None
-            loaded_path: Any = None
-            projection_digest: str | None = None
-            if vendor == "copilot" and item.get("type") == "skill.invoked":
-                data = item.get("data", {})
-                if isinstance(data, dict):
-                    name = data.get("skillName", data.get("name"))
-                    input_value = data
-                    loaded_path = data.get(
-                        "resolvedPath",
-                        data.get("skillPath", data.get("path")),
-                    )
-            elif vendor == "copilot" and item.get("type") == "assistant.message":
-                data = item.get("data", {})
-                requests = data.get("toolRequests") if isinstance(data, dict) else None
-                if isinstance(requests, list):
-                    skill_requests = [
-                        request
-                        for request in requests
-                        if isinstance(request, dict)
-                        and str(request.get("name", "")).lower() == "skill"
-                        and request.get("toolCallId") in copilot_successful_skill_calls
-                    ]
-                    if len(skill_requests) == 1:
-                        input_value = skill_requests[0].get("arguments", {})
-                        if isinstance(input_value, dict):
-                            name = input_value.get("skill", input_value.get("name"))
-                            call_id = skill_requests[0].get("toolCallId")
-                            if (
-                                isinstance(name, str)
-                                and copilot_successful_skill_calls.get(call_id) == name
-                                and name in copilot_projections
-                            ):
-                                loaded_path, projection_digest = copilot_projections[name]
-            elif vendor == "claude" and item.get("type") == "tool_use":
-                if str(item.get("name", "")).lower() == "skill":
-                    input_value = item.get("input", {})
+    items = (
+        copilot_outer_events(values)
+        if vendor == "copilot"
+        else (
+            item
+            for value in values
+            for item in recursive_values(value)
+        )
+    )
+    for item in items:
+        name: Any = None
+        input_value: Any = None
+        loaded_path: Any = None
+        projection_digest: str | None = None
+        if vendor == "copilot" and item.get("type") == "skill.invoked":
+            data = item.get("data", {})
+            if isinstance(data, dict):
+                name = data.get("skillName", data.get("name"))
+                input_value = data
+                loaded_path = data.get(
+                    "resolvedPath",
+                    data.get("skillPath", data.get("path")),
+                )
+        elif vendor == "copilot" and item.get("type") == "assistant.message":
+            data = item.get("data", {})
+            requests = data.get("toolRequests") if isinstance(data, dict) else None
+            if isinstance(requests, list):
+                skill_requests = [
+                    request
+                    for request in requests
+                    if isinstance(request, dict)
+                    and str(request.get("name", "")).lower() == "skill"
+                    and request.get("toolCallId") in copilot_successful_skill_calls
+                ]
+                if len(skill_requests) == 1:
+                    input_value = skill_requests[0].get("arguments", {})
                     if isinstance(input_value, dict):
                         name = input_value.get("skill", input_value.get("name"))
-                        loaded_path = input_value.get(
-                            "resolved_path",
-                            input_value.get("path"),
-                        )
+                        call_id = skill_requests[0].get("toolCallId")
                         if (
                             isinstance(name, str)
-                            and name in claude_projections
-                            and loaded_path is None
+                            and copilot_successful_skill_calls.get(call_id) == name
+                            and name in copilot_projections
                         ):
-                            name, projection_digest = claude_projections[name]
-                            loaded_path = str(resolved_skills[name])
-            elif vendor == "codex":
-                payload = item.get("payload", item)
-                completed_read: str | None = None
-                if (
-                    item.get("type") == "command_execution"
-                    and item.get("status") == "completed"
-                    and item.get("exit_code") == 0
-                    and isinstance(item.get("command"), str)
-                    and isinstance(item.get("aggregated_output"), str)
-                ):
-                    matching_reads = [
-                        projected_name
-                        for projected_name, skill_file in resolved_skills.items()
-                        if codex_completed_read(item, skill_file)
-                    ]
-                    if matching_reads:
-                        for matching_read in matching_reads:
-                            skill_file = resolved_skills[matching_read]
-                            append_evidence(
-                                item,
-                                matching_read,
-                                str(skill_file),
-                                {
-                                    "command": item["command"],
-                                    "path": str(skill_file),
-                                },
-                                projection_digest,
-                            )
-                        continue
-                if completed_read:
-                    name = completed_read
-                    skill_file = resolved_skills[completed_read]
-                    input_value = {
-                        "command": item["command"],
-                        "path": str(skill_file),
-                    }
-                    loaded_path = str(skill_file)
-                native_call = item.get("type") == "response_item" and isinstance(
-                    payload, dict
-                ) and payload.get("type") in {
-                    "function_call",
-                    "custom_tool_call",
-                }
-                native_load = item.get("type") == "skill_load"
-                if not completed_read and (native_call or native_load) and str(
-                    payload.get("name", "skill")
-                ).lower() in {"skill", "skills"}:
-                    input_value = payload.get("arguments", payload.get("input", payload))
-                    if isinstance(input_value, str):
-                        try:
-                            input_value = json.loads(input_value)
-                        except json.JSONDecodeError:
-                            input_value = {"skill": input_value}
-                    if isinstance(input_value, dict):
-                        name = input_value.get("skill", input_value.get("name"))
-                        loaded_path = input_value.get(
-                            "resolved_path",
-                            input_value.get("path"),
+                            loaded_path, projection_digest = copilot_projections[name]
+        elif vendor == "claude" and item.get("type") == "tool_use":
+            if str(item.get("name", "")).lower() == "skill":
+                input_value = item.get("input", {})
+                if isinstance(input_value, dict):
+                    name = input_value.get("skill", input_value.get("name"))
+                    loaded_path = input_value.get(
+                        "resolved_path",
+                        input_value.get("path"),
+                    )
+                    if (
+                        isinstance(name, str)
+                        and name in claude_projections
+                        and loaded_path is None
+                    ):
+                        name, projection_digest = claude_projections[name]
+                        loaded_path = str(resolved_skills[name])
+        elif vendor == "codex":
+            payload = item.get("payload", item)
+            completed_read: str | None = None
+            if (
+                item.get("type") == "command_execution"
+                and item.get("status") == "completed"
+                and item.get("exit_code") == 0
+                and isinstance(item.get("command"), str)
+                and isinstance(item.get("aggregated_output"), str)
+            ):
+                matching_reads = [
+                    projected_name
+                    for projected_name, skill_file in resolved_skills.items()
+                    if codex_completed_read(item, skill_file)
+                ]
+                if matching_reads:
+                    for matching_read in matching_reads:
+                        skill_file = resolved_skills[matching_read]
+                        append_evidence(
+                            item,
+                            matching_read,
+                            str(skill_file),
+                            {
+                                "command": item["command"],
+                                "path": str(skill_file),
+                            },
+                            projection_digest,
                         )
-            if isinstance(name, str):
-                append_evidence(
-                    item,
-                    name,
-                    loaded_path,
-                    input_value,
-                    projection_digest,
-                )
+                    continue
+            if completed_read:
+                name = completed_read
+                skill_file = resolved_skills[completed_read]
+                input_value = {
+                    "command": item["command"],
+                    "path": str(skill_file),
+                }
+                loaded_path = str(skill_file)
+            native_call = item.get("type") == "response_item" and isinstance(
+                payload, dict
+            ) and payload.get("type") in {
+                "function_call",
+                "custom_tool_call",
+            }
+            native_load = item.get("type") == "skill_load"
+            if not completed_read and (native_call or native_load) and str(
+                payload.get("name", "skill")
+            ).lower() in {"skill", "skills"}:
+                input_value = payload.get("arguments", payload.get("input", payload))
+                if isinstance(input_value, str):
+                    try:
+                        input_value = json.loads(input_value)
+                    except json.JSONDecodeError:
+                        input_value = {"skill": input_value}
+                if isinstance(input_value, dict):
+                    name = input_value.get("skill", input_value.get("name"))
+                    loaded_path = input_value.get(
+                        "resolved_path",
+                        input_value.get("path"),
+                    )
+        if isinstance(name, str):
+            append_evidence(
+                item,
+                name,
+                loaded_path,
+                input_value,
+                projection_digest,
+            )
     return evidence
 
 
@@ -5719,31 +5965,39 @@ def native_failure_message(vendor: str, stdout: str, stderr: str) -> str:
     except AdapterError:
         values = []
     messages: list[str] = []
-    for value in values:
-        for item in recursive_values(value):
-            if vendor == "codex" and item.get("type") in {"error", "turn.failed"}:
-                error = item.get("error")
-                message = (
-                    error.get("message")
-                    if isinstance(error, dict)
-                    else item.get("message")
-                )
+    items = (
+        copilot_outer_events(values)
+        if vendor == "copilot"
+        else (
+            item
+            for value in values
+            for item in recursive_values(value)
+        )
+    )
+    for item in items:
+        if vendor == "codex" and item.get("type") in {"error", "turn.failed"}:
+            error = item.get("error")
+            message = (
+                error.get("message")
+                if isinstance(error, dict)
+                else item.get("message")
+            )
+            if isinstance(message, str) and message:
+                messages.append(message)
+        elif vendor == "claude" and item.get("type") == "result":
+            if item.get("is_error") is True:
+                message = item.get("result", item.get("error"))
                 if isinstance(message, str) and message:
                     messages.append(message)
-            elif vendor == "claude" and item.get("type") == "result":
-                if item.get("is_error") is True:
-                    message = item.get("result", item.get("error"))
-                    if isinstance(message, str) and message:
-                        messages.append(message)
-            elif vendor == "copilot" and item.get("type") in {
-                "session.error",
-                "error",
-            }:
-                data = item.get("data", item)
-                if isinstance(data, dict):
-                    message = data.get("message", data.get("error"))
-                    if isinstance(message, str) and message:
-                        messages.append(message)
+        elif vendor == "copilot" and item.get("type") in {
+            "session.error",
+            "error",
+        }:
+            data = item.get("data", item)
+            if isinstance(data, dict):
+                message = data.get("message", data.get("error"))
+                if isinstance(message, str) and message:
+                    messages.append(message)
     fallback = stderr.strip() or stdout.strip() or vendor
     return (messages[-1] if messages else fallback)[-1000:]
 
@@ -5955,7 +6209,12 @@ def event_text(value: Any) -> str:
 
 def normalized_native_events(vendor: str, value: dict[str, Any]) -> list[tuple[str, str, dict[str, Any]]]:
     result: list[tuple[str, str, dict[str, Any]]] = []
-    for item in recursive_values(value):
+    items = (
+        copilot_outer_events([value])
+        if vendor == "copilot"
+        else recursive_values(value)
+    )
+    for item in items:
         item_type = item.get("type")
         payload = item.get("payload", item)
         if not isinstance(payload, dict):
