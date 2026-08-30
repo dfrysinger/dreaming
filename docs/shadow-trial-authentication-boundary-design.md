@@ -31,8 +31,9 @@ declared inputs.
    forwarded.
 4. **Not** an identity schema change. `EVALUATION_ADAPTER_VERSION` stays `1`,
    no top-level executor identity field is added, and no exact-key schema in
-   `skill-evaluation-harness.py` or `skill-evaluation.py` is modified. The only
-   identity value that changes is the shadow-mode `sandbox_id` digest.
+   `skill-evaluation-harness.py` or `skill-evaluation.py` is modified. The
+   policy identity change is the shadow-mode `sandbox_id` digest; the adapter
+   executable digest necessarily changes with the adapter bytes.
    (Revised in this round; see D1, D2, T1.)
 5. **Not** a change to non-shadow behavior. Fixture adapters, unauthenticated
    adapters, the comparator route, and every non-`--shadow-contract` invocation
@@ -347,8 +348,9 @@ the credential is valid or the account is signed in. That is A2b's job. (D4.)
 Before any model launch, the adapter performs one bounded positive probe that
 the projected authentication is actually usable:
 
-- reuse the existing `copilot_auth_token(credential_root)`
-  (`dreaming-vendor-adapter.py:1249`), which locates `gh`, runs
+- use the account-home branch of the existing
+  `copilot_auth_token(credential_root)` implementation while deliberately
+  ignoring ambient `GH_TOKEN` and `GITHUB_TOKEN`. It locates `gh`, runs
   `gh auth token --hostname github.com` under the invoking **account** home with
   its own minimal environment, and is already bounded at 10 s;
 - treat the return value as a **boolean outcome only**. The returned string is
@@ -369,8 +371,8 @@ would be false.
 | Subcommand | Semantics | Decision |
 |---|---|---|
 | `doctor` (`:6192`) | Health/qualification; already asserts an auth predicate at `:6211`, but only `is_file()` | **Owns it.** Replace the `is_file()` predicate with completeness + usability under shadow mode. This is where an unusable credential should surface before the stage claims anything. |
-| `prepare` (`:5127`) | Per-trial; emits the sealed `prepared` record consumed by `run` | **Owns it.** Runs the probe before emitting the command and profile, so no trial can reach the model with an unusable credential. |
-| `run` (`:5792`) | Per-trial execution; today calls `copilot_auth_token` to inject `GH_TOKEN` | **Owns a defensive repeat.** Under shadow mode the injection is removed and replaced by the same boolean probe, so `run` pays no *new* subprocess relative to today. |
+| `prepare` (`:5127`) | Per-trial; emits the sealed `prepared` record consumed by `run` | **Owns it after source completeness and before projection.** Runs one probe before emitting the command and profile, so an unusable account leaves no projected credential copies behind. |
+| `run` (`:5792`) | Per-trial execution; today calls `copilot_auth_token` to inject `GH_TOKEN` | **Owns its one launch-time probe.** Under shadow mode the injection is removed and replaced by the same boolean probe, so `run` pays no *new* subprocess relative to today and does not duplicate the command-boundary check. |
 | `normalize`, `collect` | Post-execution | Do not probe. |
 
 **No new field is added to the `prepared` record.** Adding one would have to be
@@ -504,9 +506,10 @@ The configured argv carries the concrete `--credential-root <account home>`
 path, but the portable identity stays path-free: no host path enters
 `sandbox_id`.
 
-**Net identity effect.** Shadow-mode `sandbox_id` changes; every other identity
-field, and every non-shadow identity value including the non-shadow
-`sandbox_id`, is byte-identical.
+**Net identity effect.** Shadow-mode `sandbox_id` changes, and the adapter
+executable digest changes with the adapter bytes. Every other identity field,
+and every non-shadow identity value including the non-shadow `sandbox_id`, is
+byte-identical.
 
 ### A5 — No token in the trial environment
 
@@ -594,8 +597,8 @@ adapter subprocess, argv verbatim:  … --credential-root <account home> --shado
 - **I6** — Projected credential files are readable **only** by the resolved CLI
   executable's process path.
 - **I7** — Candidate blindness and executor content permissions are unchanged.
-- **I8** — Non-shadow identity, non-shadow sandbox profiles, and fixture
-  behavior are byte-identical.
+- **I8** — Non-shadow identity except the adapter executable digest,
+  non-shadow sandbox profiles, and fixture behavior are byte-identical.
 - **I9** — Every refusal happens before the model is launched.
 - **I10** *(R2)* — `EVALUATION_ADAPTER_VERSION` remains `1` and no exact-key
   identity schema is modified.
@@ -767,20 +770,18 @@ fixtures alone. Retained redacted evidence:
 | Non-CLI process path reading the same three paths in the real account home | denied, all three |
 | Workspace control read | allowed |
 | Projected credential copies after the run | removed |
-| Credential-marker scan of every retained artifact outside the CLI's own package cache | zero hits |
+| Credential-marker scan of every retained artifact after removing the ephemeral CLI package cache | zero hits |
 
 Two measured corrections to the specified policy are recorded above: the
 `.copilot` subpath denial was replaced by an exact literal denial after it was
 observed to break the CLI's own session-state append, and CHK-A9 excludes
 `adapter_executable_sha256`, which necessarily changes with the adapter bytes.
 
-**Residual blocker, out of scope for this work order.** The adapter's own
-`run` still terminates with `unsupported-native-schema:
-copilot:session.mcp_server_removed`. That is pre-existing CLI-version event
-drift in the native normalizer with no relation to authentication; the same
-invocation reaches the model and returns a real assistant message when only
-that allowlist is bypassed. It blocks the composed PG-7 live stage and needs
-its own reviewed slice.
+**Resolved dependency.** The separate native-event compatibility slice admits
+the exact observed Copilot vocabulary, including
+`session.mcp_server_removed`. The complete adapter `prepare`, `run`,
+`normalize`, and `collect` path now succeeds without bypassing native
+validation; the exact current receipt is the acceptance authority.
 
 ## Round 1 and Round 2 finding resolution
 
@@ -789,7 +790,7 @@ its own reviewed slice.
 | D1 | Terra | `adapter_version = 2` and a top-level `credential_authority` field are rejected by exact schemas while the design freezes the harness | A4; Non-goal 4; L15; I10; CHK-A8 | **Accepted.** Version stays `1`; no top-level field. The boundary is sealed in the existing `sandbox_id` hash input. Verified: `skill-evaluation.py:10770` hard-refuses `adapter_version != 1`. |
 | D2 | Terra | Global `EVALUATION_ADAPTER_VERSION` cannot be gated by `--shadow-contract` and would change non-shadow identity, violating the non-goal and I8 | A4; L15; F5; CHK-A9 | **Accepted.** No version gating is attempted. Only the shadow-mode `sandbox_id` input is conditional. |
 | D3 | Opus | Unconditional projected-file literal read allows at `:4989` are emitted after the trial-root grant and would defeat process-path confinement | A3; L13a; F8; CHK-A3 | **Accepted.** Under shadow mode those literal allows are suppressed and replaced by deny-subpath + `require-all(subpath, process-path)`, and the confinement is proved behaviorally rather than by precedence text. |
-| D4 | Opus | Existence/mode/size proves projection completeness, not credential usability; doctor checks only `is_file` | A2 (renamed *completeness*); A2b; L20; F3b; AC-T5b; CHK-A17 | **Accepted.** A bounded adapter-owned `gh auth token` usability probe is added, owned by `doctor` and `prepare` with a defensive repeat in `run`, replacing today's token call rather than adding a new one there. |
+| D4 | Opus | Existence/mode/size proves projection completeness, not credential usability; doctor checks only `is_file` | A2 (renamed *completeness*); A2b; L20; F3b; AC-T5b; CHK-A17 | **Accepted.** A bounded adapter-owned `gh auth token` usability probe is added. `doctor`, `prepare`, and `run` each perform one probe at their own pre-launch boundary; `run` replaces today's token call rather than adding another one. |
 | D5 | Opus | Raw symlink refusal must occur before `expanduser`/`resolve` and is stricter than the cited builder predicate | A1; AC-T4; F4b; CHK-A4 | **Accepted.** Ordering is specified explicitly and the divergence from `build-evaluation-input-source.py:289` (which resolves first, making its `is_symlink()` vacuous) is documented as a deliberate tightening. |
 | D6 | Opus | Removing `--credential-root` makes strict `configured_adapters`/`validate_adapter_config` fail globally, so it is not a valid rollback | Rollback section; AC-T16; AC-T17; L23a; CHK-A19 | **Accepted.** Primary rollback is deleting the evaluator entry. The missing flag is retained only as a negative fail-closed test and is explicitly not a rollback and not "today's behavior". |
 | T1 | Terra | Executor identity is validated against exact key sets in both the harness and the evaluator, so any added identity key is rejected at runtime | A4; L3; L5; L25; I10; CHK-A8 | **Accepted.** No key is added. CHK-A8 asserts the exact existing key set plus the two shadow keys, and asserts the expected `sandbox_id`. |

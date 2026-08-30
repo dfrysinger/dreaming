@@ -164,9 +164,10 @@ ROLE_CONFIG_KEYS = {
     "publishers": "skill-publisher",
     "evaluators": "skill-evaluation-executor",
 }
-# A shadow evaluation executor must name its exact model and shadow contract in
-# argv, because evaluation_identity refuses model=default and only emits the
-# shadow limit and backend attestation fields under --shadow-contract.
+# A shadow evaluation executor must name its exact model, shadow contract, and
+# account credential root. The adapter refuses model=default, emits shadow
+# attestation only under --shadow-contract, and fails closed unless the
+# credential root is the invoking account home.
 SHADOW_EXECUTOR_REQUIRED_ARGV = ("--shadow-contract", "--model", "--credential-root")
 REVIEW_DESTINATIONS = {
     "instruction",

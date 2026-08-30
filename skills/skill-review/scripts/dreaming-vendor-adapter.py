@@ -1267,6 +1267,10 @@ def copilot_auth_token(credential_root: Path) -> str | None:
             character.isspace() for character in token
         ):
             return token
+    return copilot_account_auth_token(credential_root)
+
+
+def copilot_account_auth_token(credential_root: Path) -> str | None:
     account_record = pwd.getpwuid(os.getuid())
     if credential_root != Path(account_record.pw_dir).resolve():
         return None
@@ -4741,7 +4745,16 @@ def shadow_credential_usable(credential_root: Path) -> bool:
     result to a boolean; the returned secret is discarded here and is never
     copied, injected, serialized, or logged.
     """
-    return copilot_auth_token(credential_root) is not None
+    return copilot_account_auth_token(credential_root) is not None
+
+
+def assert_shadow_credential_sources_complete(credential_root: Path) -> None:
+    for relative in SHADOW_PROJECTED_COPILOT_AUTH:
+        source = credential_root / relative
+        if source.is_symlink() or not source.is_file() or source.stat().st_size == 0:
+            raise AdapterError(
+                "shadow-credential-projection-incomplete", relative
+            )
 
 
 def assert_shadow_projection_complete(home: Path) -> None:
@@ -4764,6 +4777,8 @@ def enforce_shadow_credential_authority(
     if not args.shadow_contract or args.vendor != "copilot":
         return
     credential_root = shadow_credential_root_authority(args)
+    if args.command in {"doctor", "prepare", "run"}:
+        assert_shadow_credential_sources_complete(credential_root)
     if usability and not shadow_credential_usable(credential_root):
         raise AdapterError("shadow-credential-unusable", args.vendor)
 
@@ -5118,7 +5133,10 @@ def evaluation_sandbox_profile(
                     f'(allow file-read* (literal "{sandbox_quote(path)}"))'
                 )
     if shadow_copilot:
-        for path in (Path("/Library/Keychains"),):
+        for path in (
+            credential_root / "Library/Keychains",
+            Path("/Library/Keychains"),
+        ):
             rules.append(
                 '(deny file-read* file-read-metadata (subpath '
                 f'"{sandbox_quote(path)}"))'
@@ -6184,7 +6202,9 @@ def evaluation_run(args: argparse.Namespace) -> None:
     process_environment = environment
     if args.vendor == "copilot":
         if args.shadow_contract:
-            if not shadow_credential_usable(evaluation_credential_root(args)):
+            if not shadow_credential_usable(
+                shadow_credential_root_authority(args)
+            ):
                 raise AdapterError("shadow-credential-unusable", args.vendor)
         else:
             token = copilot_auth_token(evaluation_credential_root(args))
@@ -7344,7 +7364,7 @@ def main() -> None:
             raise AdapterError("unsupported-command", args.command)
         if args.role == "skill-evaluation-executor":
             enforce_shadow_credential_authority(
-                args, args.command in {"doctor", "prepare", "run"}
+                args, args.command in {"doctor", "prepare"}
             )
             if args.command == "doctor":
                 evaluation_doctor(args)
