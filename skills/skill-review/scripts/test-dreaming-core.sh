@@ -7828,6 +7828,76 @@ elif sys.argv[1] == "run":
             row["decision_sha256"],
         )
 
+    def test_shadow_evaluator_argv_requires_an_account_credential_root(self) -> None:
+        """CHK-A19 and CHK-A12.
+
+        `--credential-root` is the third required configured flag for the
+        shadow executor role. A missing or malformed value is a strict
+        `invalid-adapter-config` refusal, not a tolerated default; deleting the
+        evaluator entry entirely is the supported rollback and leaves shadow
+        execution merely unavailable.
+        """
+        self.assertEqual(
+            runtime_module.SHADOW_EXECUTOR_REQUIRED_ARGV,
+            ("--shadow-contract", "--model", "--credential-root"),
+        )
+        valid = [
+            "adapter",
+            "--shadow-contract",
+            "--model",
+            "gpt-5-mini",
+            "--credential-root",
+            "/Users/example",
+        ]
+        runtime_module._require_role_argv(
+            "skill-evaluation-executor", "evaluators", "shadow", valid
+        )
+        for argv, fragment in (
+            (
+                ["adapter", "--shadow-contract", "--model", "gpt-5-mini"],
+                "--credential-root",
+            ),
+            (
+                [
+                    "adapter",
+                    "--shadow-contract",
+                    "--model",
+                    "gpt-5-mini",
+                    "--credential-root",
+                ],
+                "account credential root",
+            ),
+            (
+                [
+                    "adapter",
+                    "--shadow-contract",
+                    "--model",
+                    "gpt-5-mini",
+                    "--credential-root",
+                    "--timeout",
+                ],
+                "account credential root",
+            ),
+        ):
+            with self.assertRaises(RuntimeFailure) as caught:
+                runtime_module._require_role_argv(
+                    "skill-evaluation-executor", "evaluators", "shadow", argv
+                )
+            self.assertEqual(caught.exception.code, "invalid-adapter-config")
+            self.assertIn(fragment, str(caught.exception))
+
+        self.assertIsNone(
+            runtime_module._require_role_argv(
+                "review-executor", "executors", "any", ["adapter"]
+            )
+        )
+        self.assertEqual(
+            runtime_module.shadow_execution_authority({}, None)[
+                "evaluator_configured"
+            ],
+            False,
+        )
+
     def test_no_runtime_path_enters_the_evaluating_state(self) -> None:
         self.clock = 1770249600
         for marker, outcome, group in (
