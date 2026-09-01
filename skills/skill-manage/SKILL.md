@@ -65,6 +65,9 @@ An earlier design parked retired skills in a git-tracked `.archive/` directory. 
    "$DREAMING_REPO_ROOT/skills/skill-manage/scripts/validate-skill.sh" \
      "$(scripts/find-skill.sh <name>)/SKILL.md"
    ```
+   The validator parses frontmatter as YAML before applying name, description,
+   size, and file-layout policy, so syntax accepted by text extraction but
+   rejected by Copilot's loader fails here.
 4. Commit with the user's per-clone author config (already set):
    ```bash
    cd ~/code/skills && git add -A && git commit -m "skills/<name>: <change>
