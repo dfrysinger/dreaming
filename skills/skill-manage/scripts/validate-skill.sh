@@ -51,9 +51,55 @@ if [[ -z "$CLOSE_LINE" ]]; then
 else
   FM="$(sed -n "2,$((CLOSE_LINE - 1))p" "$SKILL_MD")"
 
-  # Required: name, description.
-  NAME_FM=$(printf '%s\n' "$FM" | awk -F': *' '/^name:/{print $2; exit}' | tr -d '"'"'")
-  DESC_FM=$(printf '%s\n' "$FM" | awk -F': *' '/^description:/{ $1=""; sub(/^ */,""); print; exit}' | sed -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+  # Parse the frontmatter as YAML before applying policy checks. Text extraction
+  # with awk accepts invalid YAML such as an unquoted "description: ...: ...",
+  # which Copilot's skill loader rejects.
+  FM_JSON="$(
+    printf '%s\n' "$FM" |
+      ruby -ryaml -rjson -e '
+        begin
+          value = YAML.safe_load(
+            STDIN.read,
+            permitted_classes: [],
+            aliases: false
+          )
+          unless value.is_a?(Hash)
+            warn "frontmatter must be a YAML mapping"
+            exit 1
+          end
+          print JSON.generate(value)
+        rescue Psych::SyntaxError => error
+          warn error.message
+          exit 1
+        end
+      ' 2>&1
+  )"
+  FM_STATUS=$?
+  if [[ "$FM_STATUS" -ne 0 ]]; then
+    err "failed to parse YAML frontmatter: $FM_JSON"
+    FM_JSON='{}'
+  fi
+
+  NAME_FM="$(
+    printf '%s' "$FM_JSON" |
+      ruby -rjson -e '
+        value = JSON.parse(STDIN.read)["name"]
+        print value if value.is_a?(String)
+      '
+  )"
+  DESC_FM="$(
+    printf '%s' "$FM_JSON" |
+      ruby -rjson -e '
+        value = JSON.parse(STDIN.read)["description"]
+        print value if value.is_a?(String)
+      '
+  )"
+  DISABLE_MODEL_INVOCATION="$(
+    printf '%s' "$FM_JSON" |
+      ruby -rjson -e '
+        print JSON.parse(STDIN.read)["disable-model-invocation"] == true ? "true" : "false"
+      '
+  )"
 
   if [[ -z "$NAME_FM" ]]; then
     err "frontmatter missing required field: name"
@@ -75,7 +121,7 @@ else
     # Only a model-invoked skill needs triggers. A user-invoked skill
     # (disable-model-invocation: true) is reached by name alone, and its
     # description is human-facing — trigger phrasing there is dead weight.
-    if grep -qE '^disable-model-invocation:[[:space:]]*true[[:space:]]*$' "$SKILL_MD"; then
+    if [[ "$DISABLE_MODEL_INVOCATION" == "true" ]]; then
       if [[ ${#DESC_FM} -gt 200 ]]; then
         printf 'WARN:  user-invoked skill has a %s-char description; only you read it, so one line is enough.\n' "${#DESC_FM}" >&2
       fi
