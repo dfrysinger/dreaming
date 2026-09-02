@@ -28,6 +28,20 @@ pass() { echo "PASS  $*"; passes=$((passes + 1)); }
 fail() { echo "FAIL  $*" >&2; exit 1; }
 assert_eq() { [[ "$1" == "$2" ]] || fail "$3 (expected '$2', got '$1')"; }
 
+OVERRIDE_CONFIG="$TMP/override-config.env"
+printf "DREAMING_RECEIPT_FILE='%s'\n" \
+  "$REPO/scripts/shared-deps-receipt.json" > "$OVERRIDE_CONFIG"
+if (
+  export DREAMING_CONFIG_FILE="$OVERRIDE_CONFIG"
+  # shellcheck source=lib-daemon.sh
+  source "$SCRIPT_DIR/lib-daemon.sh"
+  dreaming_require_roots
+); then
+  pass "explicit dependency receipt survives generated config loading"
+else
+  fail "generated config overrode the explicit dependency receipt"
+fi
+
 FAKE_PASS="$TMP/fake-pass.sh"
 cat > "$FAKE_PASS" <<'SH'
 #!/usr/bin/env bash
@@ -43,6 +57,16 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 echo "$name" >> "$ORDER_FILE"
+echo "${DREAMING_PARENT_RUN_ID:-}" >> "$PARENT_FILE"
+if [[ "$name" == "skills-prune" ]]; then
+  [[ "${SKILLS_LOCK_HELD_BY_PARENT:-0}" != "1" ]]
+  [[ -z "${SKILLS_LOCK_TOKEN:-}" ]]
+  curator_token="$("$LOCK_SCRIPT" acquire --mode session --owner fake-curator)"
+  "$LOCK_SCRIPT" release "$curator_token"
+else
+  [[ "${SKILLS_LOCK_HELD_BY_PARENT:-0}" == "1" ]]
+  [[ -n "${SKILLS_LOCK_TOKEN:-}" ]]
+fi
 echo "DREAM_PASS_RESULT: ok fake=$name" > "$log"
 if [[ "${FAKE_HALT_AFTER:-}" == "$name" ]]; then
   mkdir -p "$SKILLS_STATE_DIR/skill-review"
@@ -63,11 +87,14 @@ new_case() {
   export SKILLS_REPO_ROOT="$CASE/catalog"
   mkdir -p "$SKILLS_REPO_ROOT/skills"
   export DREAMING_PASS_RUNNER="$FAKE_PASS"
+  export LOCK_SCRIPT="$SCRIPT_DIR/daemon-lock.sh"
   export DREAMING_MEMORY_STATE="$CASE/no-memory.json"
   export DREAMING_NOW_EPOCH="$NOW"
   export SKILLS_NOW_EPOCH="$NOW"
   export ORDER_FILE="$CASE/order"
+  export PARENT_FILE="$CASE/parents"
   : > "$ORDER_FILE"
+  : > "$PARENT_FILE"
   unset FAKE_FAIL_PASS FAKE_HALT_AFTER DREAMING_FORCE_DUE
 }
 
@@ -110,7 +137,33 @@ echo "not a sqlite database" > "$SKILLS_LOCK_DIR"
 if "$SCRIPT_DIR/daemon-lock.sh" acquire --mode session --owner contender >/dev/null 2>&1; then
   fail "malformed lock was reclaimed"
 fi
+set +e
+"$SCRIPT_DIR/daemon-lock.sh" release missing-token >/dev/null 2>&1
+release_status=$?
+set -e
+assert_eq "$release_status" "2" "malformed lock release did not fail distinctly"
 pass "malformed lock fails closed"
+
+new_case absent-release
+set +e
+"$SCRIPT_DIR/daemon-lock.sh" release missing-token >/dev/null 2>&1
+release_status=$?
+set -e
+assert_eq "$release_status" "1" "absent lock token did not retain its not-found status"
+pass "release distinguishes absent tokens from lock database failures"
+
+new_case caller-token
+caller_token="12345678-1234-4234-9234-123456789abc"
+token="$("$SCRIPT_DIR/daemon-lock.py" acquire --mode session --owner caller-token --token "$caller_token")"
+assert_eq "$token" "$caller_token" "caller-provided token was not retained"
+"$SCRIPT_DIR/daemon-lock.py" release "$caller_token" --idempotent
+"$SCRIPT_DIR/daemon-lock.py" release "$caller_token" --idempotent
+if "$SCRIPT_DIR/daemon-lock.py" acquire --mode session --owner invalid-token --token "not-a-uuid" >/dev/null 2>&1; then
+  fail "malformed caller token was accepted"
+fi
+token="$("$SCRIPT_DIR/daemon-lock.py" acquire --mode session --owner replacement)"
+"$SCRIPT_DIR/daemon-lock.py" release "$token"
+pass "caller tokens are canonical and idempotent release is token-scoped"
 
 new_case legacy-lock
 mkdir -p "$SKILLS_LOCK_DIR"
@@ -164,8 +217,15 @@ export DREAMING_FORCE_DUE=1
 "$SCRIPT_DIR/dreaming-run.sh"
 assert_eq "$(paste -sd, "$ORDER_FILE")" "skills-consolidate,skills-roll,skills-prune" "successful order"
 assert_eq "$(wc -l < "$DREAMING_STATE_DIR/ledger.jsonl" | tr -d ' ')" "1" "success ledger count"
+run_id="$(/usr/bin/python3 - "$DREAMING_STATE_DIR/runs" <<'PY'
+import json, pathlib, sys
+paths = list(pathlib.Path(sys.argv[1]).glob("*.json"))
+print(json.loads(paths[0].read_text())["run_id"])
+PY
+)"
+assert_eq "$(sort -u "$PARENT_FILE")" "$run_id" "scheduled parent run propagation"
 [[ -f "$DREAMING_MEMORY_STATE" ]] || fail "fresh memory state was not initialized"
-pass "successful pipeline is ordered and ledgered once"
+pass "successful pipeline is ordered, parented, and ledgered once"
 
 new_case daily-consolidate
 current_bucket="$("$SCRIPT_DIR/dreaming-state.py" bucket)"
@@ -212,7 +272,8 @@ assert_eq "$(paste -sd, "$ORDER_FILE")" "compatibility" "single-pass wrapper"
 pass "single-pass compatibility wrapper delegates under its parent lock"
 
 new_case roll-failure
-export DREAMING_FORCE_DUE=1
+"$SCRIPT_DIR/dreaming-state.py" seed \
+  --bucket "$(( NOW / WEEK - 1 ))" --epoch "$((NOW - WEEK))"
 export FAKE_FAIL_PASS=skills-roll
 if "$SCRIPT_DIR/dreaming-run.sh"; then
   fail "roll failure returned success"
@@ -220,7 +281,18 @@ fi
 assert_eq "$(paste -sd, "$ORDER_FILE")" "skills-consolidate,skills-roll" "fail-fast order"
 status="$("$SCRIPT_DIR/dreaming-state.py" latest | /usr/bin/python3 -c 'import json,sys; print(json.load(sys.stdin)["status"])')"
 assert_eq "$status" "aborted" "failed run status"
-pass "roll failure prevents prune"
+unset FAKE_FAIL_PASS
+: > "$ORDER_FILE"
+"$SCRIPT_DIR/dreaming-run.sh"
+assert_eq "$(paste -sd, "$ORDER_FILE")" "skills-consolidate" \
+  "same-day failed weekly retry order"
+export DREAMING_NOW_EPOCH="$((NOW + 86400))"
+: > "$ORDER_FILE"
+"$SCRIPT_DIR/dreaming-run.sh"
+assert_eq "$(paste -sd, "$ORDER_FILE")" \
+  "skills-consolidate,skills-roll,skills-prune" \
+  "next-day weekly retry order"
+pass "roll failure prevents prune and retries no more than once per local day"
 
 new_case halt-between
 export DREAMING_FORCE_DUE=1

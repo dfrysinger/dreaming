@@ -54,3 +54,128 @@ Receipts are content-addressed under
 `~/.copilot/skill-state/skill-review/evaluations/`. They bind the candidate
 inventory, case manifest, exact model, Copilot CLI version, runner, prompt,
 comparator, and flags. Any candidate or case edit makes the gate stale.
+
+## Cross-CLI schema v2
+
+Cross-CLI certification keeps the suite in the local
+`.skill-evaluation-cases.json` file and the executor/comparator policy in local
+`.skill-evaluation-policy.json`; neither file is candidate runtime input.
+
+```json
+{
+  "schema_version": 2,
+  "graders": [
+    {
+      "id": "safe-outcome",
+      "type": "regex",
+      "safety": true,
+      "identity": "sha256:<sealed-deterministic-grader>"
+    }
+  ],
+  "cases": [
+    {
+      "id": "intended-case",
+      "class": "intended",
+      "task_id": "intended:unique-task-id",
+      "prompt": "A capability the skill should improve.",
+      "deterministic_graders": ["safe-outcome"]
+    },
+    {
+      "id": "related-case",
+      "class": "related",
+      "task_id": "related:other-unique-task-id",
+      "prompt": "A related capability that must not regress.",
+      "deterministic_graders": ["safe-outcome"]
+    },
+    {
+      "id": "activation-positive",
+      "class": "activation_positive",
+      "task_id": "activation:positive-unique-task-id",
+      "prompt": "A prompt that should activate the skill.",
+      "deterministic_graders": ["safe-outcome"],
+      "activation": {"expected_load": true}
+    },
+    {
+      "id": "activation-negative",
+      "class": "activation_negative",
+      "task_id": "activation:negative-unique-task-id",
+      "prompt": "A prompt that must not activate the skill.",
+      "deterministic_graders": ["safe-outcome"],
+      "activation": {"expected_load": false}
+    }
+  ]
+}
+```
+
+Each case ID and task ID is unique. Every case references at least one
+declared deterministic safety grader. Unknown fields, duplicate IDs, shared
+task IDs, unsupported grader types, and activation expectations that disagree
+with the case class are refused.
+
+The policy has `schema_version: 2`, `profile` (`gate` or `iterate`),
+`policy_kind` (`capability_uplift` or `encoded_preference`), a non-empty ordered
+`required_executors` selection, an ordered `advisory_executors` selection, and
+an exact comparator configuration. The two executor sets are disjoint and each
+follows `copilot`, `claude`, then `codex` order. A policy may require any
+explicit non-empty subset. Each executor binds its exact model, adapter
+identity/version/executable digest, and CLI executable digest. The comparator
+binds its route, exact model, adapter identity/version/executable digest,
+timeout, token budget, and rubric digest. Gate profiles have three trials per
+arm; iteration profiles have one.
+
+Validate or prepare identities without starting a CLI or writing authority:
+
+```bash
+skill-review/scripts/skill-evaluation.py v2-suite-validate <suite.json>
+skill-review/scripts/skill-evaluation.py v2-policy-validate <policy.json>
+skill-review/scripts/skill-evaluation.py v2-prepare <skill-dir>
+```
+
+Schema-v1 source/sibling manifests remain readable. They compile only to one
+legacy intended and one related case, with `cross_executor_authority: false`;
+they do not create activation cases or M5 authority.
+
+Dreaming compiles these inputs into a sealed run, invokes the replaceable
+harness, independently verifies the retained evidence, and issues one certificate per
+selected executor. Required certificates alone determine authority; advisory
+pass, regression, inconclusive, and unavailable states remain visible in the
+aggregate without granting or blocking it. It stores the ordered aggregate
+receipt and schema-v3 authority only under
+`~/.copilot/skill-state/skill-review/evaluations/v2/`. Authority paths are
+`authority/<skill-path-key>/<candidate-id>.json`; the optional schema-v2
+`.agent-created.json` field `evaluation_v3_sha256` is only an opaque digest.
+`current-gate`, promotion, and consolidation revalidate that authority and its
+bound result evidence. The legacy `gate` command reads only M2 state and cannot
+accept version-2 authority.
+
+The installed default requires only Copilot and selects no advisory provider.
+Set the required and optional advisory sets explicitly when overriding that
+default, then compile, execute, and certify:
+
+```bash
+export DREAMING_EVALUATION_EXECUTORS=copilot
+export DREAMING_ADVISORY_EVALUATION_EXECUTORS=claude,codex
+skill-review/scripts/skill-evaluation.py v2-run-compile <skill-dir> \
+  --run-dir <empty-run-dir> --config <compilation.json> \
+  --routing <routing.json> --nonce <nonce> \
+  --harness skill-review/scripts/skill-evaluation-harness.py
+skill-review/scripts/skill-evaluation.py v2-run-execute \
+  --run-dir <run-dir> --result-dir <empty-result-dir> \
+  --routing <routing.json> --scratch <empty-scratch-dir> \
+  --harness skill-review/scripts/skill-evaluation-harness.py
+skill-review/scripts/skill-evaluation.py v2-result-certify <skill-dir> \
+  --run-dir <run-dir> --result-dir <result-dir> \
+  --routing <routing.json> --scratch <empty-verify-scratch-dir> \
+  --nonce <same-nonce> \
+  --harness skill-review/scripts/skill-evaluation-harness.py
+```
+
+The compilation file binds the exact harness, executor, comparator, tool,
+budget, grader, case-runtime, and retention identities. The routing file maps
+those already-authorized identities to argument arrays; it does not grant
+policy or environment authority.
+
+`v2-waive` and `v2-waiver-validate` require a passing version-2 aggregate,
+exact current candidate, suite, policy, required executor list, restricted
+changed `scripts/` paths, an unchanged test script identity, and a bound JSON
+test-result digest. Legacy M2 receipts cannot anchor these waivers.

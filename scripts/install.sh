@@ -4,12 +4,338 @@
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-DREAMING_REPO_ROOT="${DREAMING_REPO_ROOT:-$(cd "$SCRIPT_DIR/.." && pwd -P)}"
-DREAMING_CONFIG_FILE="${DREAMING_CONFIG_FILE:-$HOME/.copilot/dreaming/config.env}"
-DREAMING_DEPS_DIR="${DREAMING_DEPS_DIR:-$HOME/.copilot/dreaming/deps}"
+DEFAULT_REPO_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
+REQUESTED_REPO_ROOT="${DREAMING_REPO_ROOT:-}"
+DREAMING_REPO_ROOT="${REQUESTED_REPO_ROOT:-$DEFAULT_REPO_ROOT}"
+REQUESTED_DATA_DIR="${DREAMING_DATA_DIR:-}"
+REQUESTED_STATE_DIR="${DREAMING_STATE_DIR:-}"
+REQUESTED_SKILLS_ROOT="${DREAMING_SKILLS_ROOT:-}"
+REQUESTED_DEPS_DIR="${DREAMING_DEPS_DIR:-}"
+REQUESTED_ADAPTER_CONFIG="${DREAMING_ADAPTER_CONFIG:-}"
+if [[ -n "${DREAMING_INSTALLER_CALLER_ADAPTER_CONFIG_EXPLICIT+x}" ]]; then
+  REQUESTED_ADAPTER_CONFIG_EXPLICIT="$DREAMING_INSTALLER_CALLER_ADAPTER_CONFIG_EXPLICIT"
+else
+  REQUESTED_ADAPTER_CONFIG_EXPLICIT=$([[ -n "$REQUESTED_ADAPTER_CONFIG" ]] && echo 1 || echo 0)
+fi
+if [[ "$REQUESTED_ADAPTER_CONFIG_EXPLICIT" == "0" ]]; then
+  REQUESTED_ADAPTER_CONFIG=""
+fi
+REQUESTED_COPILOT_COMPAT="${DREAMING_ENABLE_COPILOT_COMPAT:-}"
+REQUESTED_CONFIG_FILE="${DREAMING_CONFIG_FILE:-}"
+REQUESTED_RECEIPT_FILE="${DREAMING_RECEIPT_FILE:-}"
+REQUESTED_NATIVE_ADAPTERS="${DREAMING_CONFIGURE_NATIVE_ADAPTERS:-}"
+REQUESTED_COPILOT_MIGRATION="${DREAMING_MIGRATE_COPILOT:-0}"
+REQUESTED_SOURCE_SSH_BIN_SET="${DREAMING_SOURCE_SSH_BIN+x}"
+REQUESTED_SOURCE_SSH_BIN="${DREAMING_SOURCE_SSH_BIN-}"
+REQUESTED_COPILOT_SOURCE_SSH_HOST_SET="${DREAMING_COPILOT_SOURCE_SSH_HOST+x}"
+REQUESTED_COPILOT_SOURCE_SSH_HOST="${DREAMING_COPILOT_SOURCE_SSH_HOST-}"
+REQUESTED_COPILOT_SOURCE_SSH_ADDRESS_FAMILY_SET="${DREAMING_COPILOT_SOURCE_SSH_ADDRESS_FAMILY+x}"
+REQUESTED_COPILOT_SOURCE_SSH_ADDRESS_FAMILY="${DREAMING_COPILOT_SOURCE_SSH_ADDRESS_FAMILY-}"
+REQUESTED_COPILOT_SOURCE_SSH_PYTHON_SET="${DREAMING_COPILOT_SOURCE_SSH_PYTHON+x}"
+REQUESTED_COPILOT_SOURCE_SSH_PYTHON="${DREAMING_COPILOT_SOURCE_SSH_PYTHON-}"
+REQUESTED_COPILOT_SOURCE_SSH_SCRIPT_SET="${DREAMING_COPILOT_SOURCE_SSH_SCRIPT+x}"
+REQUESTED_COPILOT_SOURCE_SSH_SCRIPT="${DREAMING_COPILOT_SOURCE_SSH_SCRIPT-}"
+REQUESTED_COPILOT_PUBLISHER_SSH_HOST_SET="${DREAMING_COPILOT_PUBLISHER_SSH_HOST+x}"
+REQUESTED_COPILOT_PUBLISHER_SSH_HOST="${DREAMING_COPILOT_PUBLISHER_SSH_HOST-}"
+REQUESTED_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY_SET="${DREAMING_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY+x}"
+REQUESTED_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY="${DREAMING_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY-}"
+REQUESTED_COPILOT_PUBLISHER_RECEIVER_ID_SET="${DREAMING_COPILOT_PUBLISHER_RECEIVER_ID+x}"
+REQUESTED_COPILOT_PUBLISHER_RECEIVER_ID="${DREAMING_COPILOT_PUBLISHER_RECEIVER_ID-}"
+REQUESTED_REQUIRE_REMOTE_COPILOT_PUBLISHER_SET="${DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER+x}"
+REQUESTED_REQUIRE_REMOTE_COPILOT_PUBLISHER="${DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER-}"
+REQUESTED_BRIDGE_ENV_NAMES=(
+  DREAMING_CONFIGURE_EVALUATION_INPUT_OWNER
+  DREAMING_EVALUATION_INPUT_OWNER_ENABLED
+  DREAMING_EVALUATION_INPUT_AUTHOR_MODEL
+  DREAMING_EVALUATION_INPUT_REVIEWER_A_MODEL
+  DREAMING_EVALUATION_INPUT_REVIEWER_B_MODEL
+  DREAMING_PRESERVE_ESTATE_ADAPTERS
+  DREAMING_PRESERVE_OPERATIONAL_ADAPTERS
+  DREAMING_ESTATE_ADAPTERS_BASELINE_SOURCE
+  DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256
+  DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS
+  DREAMING_REMOTE_EVALUATION_SUBJECTS_ENABLED
+  DREAMING_REMOTE_SUBJECT_SSH_HOST
+  DREAMING_REMOTE_SUBJECT_SSH_ADDRESS_FAMILY
+  DREAMING_REMOTE_SUBJECT_SSH_BIN
+  DREAMING_REMOTE_SUBJECT_SSH_PYTHON
+  DREAMING_REMOTE_SUBJECT_SSH_SCRIPT
+  DREAMING_REMOTE_SUBJECT_ESTATE_SCRIPT
+  DREAMING_REMOTE_SUBJECT_CONTENT_POLICY
+  DREAMING_REMOTE_SUBJECT_KNOWN_HOSTS_SOURCE
+  DREAMING_REMOTE_SUBJECT_ORIGIN_HOST_ID
+  DREAMING_REMOTE_SUBJECT_RECEIVER_ID
+  DREAMING_REMOTE_SUBJECT_RECEIVER_ID_FILE
+  DREAMING_REMOTE_SUBJECT_HOME
+  DREAMING_REMOTE_SUBJECT_COPILOT_BIN
+  DREAMING_REMOTE_SUBJECT_TIMEOUT
+)
+REQUESTED_BRIDGE_ENV_SET=()
+REQUESTED_BRIDGE_ENV_VALUES=()
+for name in "${REQUESTED_BRIDGE_ENV_NAMES[@]}"; do
+  if [[ -n "${!name+x}" ]]; then
+    REQUESTED_BRIDGE_ENV_SET+=(1)
+    REQUESTED_BRIDGE_ENV_VALUES+=("${!name}")
+  else
+    REQUESTED_BRIDGE_ENV_SET+=(0)
+    REQUESTED_BRIDGE_ENV_VALUES+=("")
+  fi
+done
+REQUESTED_CLAUDE_SOURCE_SSH_HOST_SET="${DREAMING_CLAUDE_SOURCE_SSH_HOST+x}"
+REQUESTED_CLAUDE_SOURCE_SSH_HOST="${DREAMING_CLAUDE_SOURCE_SSH_HOST-}"
+REQUESTED_CLAUDE_SOURCE_SSH_ADDRESS_FAMILY_SET="${DREAMING_CLAUDE_SOURCE_SSH_ADDRESS_FAMILY+x}"
+REQUESTED_CLAUDE_SOURCE_SSH_ADDRESS_FAMILY="${DREAMING_CLAUDE_SOURCE_SSH_ADDRESS_FAMILY-}"
+REQUESTED_CLAUDE_SOURCE_SSH_PYTHON_SET="${DREAMING_CLAUDE_SOURCE_SSH_PYTHON+x}"
+REQUESTED_CLAUDE_SOURCE_SSH_PYTHON="${DREAMING_CLAUDE_SOURCE_SSH_PYTHON-}"
+REQUESTED_CLAUDE_SOURCE_SSH_SCRIPT_SET="${DREAMING_CLAUDE_SOURCE_SSH_SCRIPT+x}"
+REQUESTED_CLAUDE_SOURCE_SSH_SCRIPT="${DREAMING_CLAUDE_SOURCE_SSH_SCRIPT-}"
+REQUESTED_CODEX_SOURCE_SSH_HOST_SET="${DREAMING_CODEX_SOURCE_SSH_HOST+x}"
+REQUESTED_CODEX_SOURCE_SSH_HOST="${DREAMING_CODEX_SOURCE_SSH_HOST-}"
+REQUESTED_CODEX_SOURCE_SSH_ADDRESS_FAMILY_SET="${DREAMING_CODEX_SOURCE_SSH_ADDRESS_FAMILY+x}"
+REQUESTED_CODEX_SOURCE_SSH_ADDRESS_FAMILY="${DREAMING_CODEX_SOURCE_SSH_ADDRESS_FAMILY-}"
+REQUESTED_CODEX_SOURCE_SSH_PYTHON_SET="${DREAMING_CODEX_SOURCE_SSH_PYTHON+x}"
+REQUESTED_CODEX_SOURCE_SSH_PYTHON="${DREAMING_CODEX_SOURCE_SSH_PYTHON-}"
+REQUESTED_CODEX_SOURCE_SSH_SCRIPT_SET="${DREAMING_CODEX_SOURCE_SSH_SCRIPT+x}"
+REQUESTED_CODEX_SOURCE_SSH_SCRIPT="${DREAMING_CODEX_SOURCE_SSH_SCRIPT-}"
+if [[ -n "${DREAMING_INSTALLER_CALLER_ADAPTER_DESIRED_STATE+x}" ]]; then
+  REQUESTED_ADAPTER_DESIRED_STATE="$DREAMING_INSTALLER_CALLER_ADAPTER_DESIRED_STATE"
+else
+  REQUESTED_ADAPTER_DESIRED_STATE=0
+  if [[ "$REQUESTED_NATIVE_ADAPTERS" == "1" ||
+        -n "${DREAMING_SESSION_SOURCES+x}" ||
+        -n "${DREAMING_REVIEW_EXECUTORS+x}" ||
+        -n "${DREAMING_SKILL_TARGETS+x}" ||
+        -n "${DREAMING_SOURCE_EXECUTOR_ALLOW+x}" ||
+        -n "${DREAMING_QUIET_SECONDS+x}" ||
+        -n "${DREAMING_COPILOT_SESSION_ROOT+x}" ||
+        -n "${DREAMING_CLAUDE_SESSION_ROOT+x}" ||
+        -n "${DREAMING_CODEX_SESSION_ROOT+x}" ||
+        -n "${DREAMING_COPILOT_SOURCE_SSH_HOST+x}" ||
+        -n "${DREAMING_COPILOT_PUBLISHER_SSH_HOST+x}" ||
+        -n "${DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER+x}" ||
+        -n "${DREAMING_CLAUDE_SOURCE_SSH_HOST+x}" ||
+        -n "${DREAMING_CODEX_SOURCE_SSH_HOST+x}" ||
+        -n "${DREAMING_COPILOT_QUIET_SECONDS+x}" ||
+        -n "${DREAMING_CLAUDE_QUIET_SECONDS+x}" ||
+        -n "${DREAMING_CODEX_QUIET_SECONDS+x}" ||
+        -n "${DREAMING_EXECUTOR_TIMEOUT+x}" ||
+        -n "${DREAMING_COPILOT_EXECUTOR_TIMEOUT+x}" ||
+        -n "${DREAMING_CLAUDE_EXECUTOR_TIMEOUT+x}" ||
+        -n "${DREAMING_CODEX_EXECUTOR_TIMEOUT+x}" ]]; then
+    REQUESTED_ADAPTER_DESIRED_STATE=1
+  fi
+fi
+export DREAMING_INSTALLER_CALLER_ADAPTER_CONFIG_EXPLICIT="$REQUESTED_ADAPTER_CONFIG_EXPLICIT"
+export DREAMING_INSTALLER_CALLER_ADAPTER_DESIRED_STATE="$REQUESTED_ADAPTER_DESIRED_STATE"
+DEFAULT_DATA_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/dreaming"
+DREAMING_CONFIG_POINTER="${DREAMING_CONFIG_POINTER:-${XDG_CONFIG_HOME:-$HOME/.config}/dreaming/active-config}"
+if [[ -n "$REQUESTED_CONFIG_FILE" ]]; then
+  DREAMING_CONFIG_FILE="$REQUESTED_CONFIG_FILE"
+elif [[ -f "$DREAMING_CONFIG_POINTER" ]]; then
+  DREAMING_CONFIG_FILE="$(<"$DREAMING_CONFIG_POINTER")"
+  [[ "$DREAMING_CONFIG_FILE" == /* ]] || {
+    echo "Dreaming config pointer is not absolute: $DREAMING_CONFIG_POINTER" >&2
+    exit 1
+  }
+  [[ -f "$DREAMING_CONFIG_FILE" ]] || {
+    echo "Dreaming config pointer target is missing: $DREAMING_CONFIG_FILE" >&2
+    exit 1
+  }
+else
+  DREAMING_CONFIG_FILE="${REQUESTED_DATA_DIR:-$DEFAULT_DATA_DIR}/config.env"
+fi
+RESOLVED_CONFIG_FILE="$DREAMING_CONFIG_FILE"
+if [[ -f "$DREAMING_CONFIG_FILE" ]]; then
+  # Generated by dreaming-deps.py using shell-quoted scalar assignments.
+  # shellcheck disable=SC1090
+  source "$DREAMING_CONFIG_FILE"
+fi
+for index in "${!REQUESTED_BRIDGE_ENV_NAMES[@]}"; do
+  if [[ "${REQUESTED_BRIDGE_ENV_SET[$index]}" == "1" ]]; then
+    name="${REQUESTED_BRIDGE_ENV_NAMES[$index]}"
+    printf -v "$name" '%s' "${REQUESTED_BRIDGE_ENV_VALUES[$index]}"
+    export "$name"
+  fi
+done
+[[ -n "$REQUESTED_SOURCE_SSH_BIN_SET" ]] &&
+  DREAMING_SOURCE_SSH_BIN="$REQUESTED_SOURCE_SSH_BIN"
+[[ -n "$REQUESTED_COPILOT_SOURCE_SSH_HOST_SET" ]] &&
+  DREAMING_COPILOT_SOURCE_SSH_HOST="$REQUESTED_COPILOT_SOURCE_SSH_HOST"
+[[ -n "$REQUESTED_COPILOT_SOURCE_SSH_ADDRESS_FAMILY_SET" ]] &&
+  DREAMING_COPILOT_SOURCE_SSH_ADDRESS_FAMILY="$REQUESTED_COPILOT_SOURCE_SSH_ADDRESS_FAMILY"
+[[ -n "$REQUESTED_COPILOT_SOURCE_SSH_PYTHON_SET" ]] &&
+  DREAMING_COPILOT_SOURCE_SSH_PYTHON="$REQUESTED_COPILOT_SOURCE_SSH_PYTHON"
+[[ -n "$REQUESTED_COPILOT_SOURCE_SSH_SCRIPT_SET" ]] &&
+  DREAMING_COPILOT_SOURCE_SSH_SCRIPT="$REQUESTED_COPILOT_SOURCE_SSH_SCRIPT"
+[[ -n "$REQUESTED_COPILOT_PUBLISHER_SSH_HOST_SET" ]] &&
+  DREAMING_COPILOT_PUBLISHER_SSH_HOST="$REQUESTED_COPILOT_PUBLISHER_SSH_HOST"
+[[ -n "$REQUESTED_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY_SET" ]] &&
+  DREAMING_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY="$REQUESTED_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY"
+[[ -n "$REQUESTED_COPILOT_PUBLISHER_RECEIVER_ID_SET" ]] &&
+  DREAMING_COPILOT_PUBLISHER_RECEIVER_ID="$REQUESTED_COPILOT_PUBLISHER_RECEIVER_ID"
+[[ -n "$REQUESTED_REQUIRE_REMOTE_COPILOT_PUBLISHER_SET" ]] &&
+  DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER="$REQUESTED_REQUIRE_REMOTE_COPILOT_PUBLISHER"
+[[ -n "$REQUESTED_CLAUDE_SOURCE_SSH_HOST_SET" ]] &&
+  DREAMING_CLAUDE_SOURCE_SSH_HOST="$REQUESTED_CLAUDE_SOURCE_SSH_HOST"
+[[ -n "$REQUESTED_CLAUDE_SOURCE_SSH_ADDRESS_FAMILY_SET" ]] &&
+  DREAMING_CLAUDE_SOURCE_SSH_ADDRESS_FAMILY="$REQUESTED_CLAUDE_SOURCE_SSH_ADDRESS_FAMILY"
+[[ -n "$REQUESTED_CLAUDE_SOURCE_SSH_PYTHON_SET" ]] &&
+  DREAMING_CLAUDE_SOURCE_SSH_PYTHON="$REQUESTED_CLAUDE_SOURCE_SSH_PYTHON"
+[[ -n "$REQUESTED_CLAUDE_SOURCE_SSH_SCRIPT_SET" ]] &&
+  DREAMING_CLAUDE_SOURCE_SSH_SCRIPT="$REQUESTED_CLAUDE_SOURCE_SSH_SCRIPT"
+[[ -n "$REQUESTED_CODEX_SOURCE_SSH_HOST_SET" ]] &&
+  DREAMING_CODEX_SOURCE_SSH_HOST="$REQUESTED_CODEX_SOURCE_SSH_HOST"
+[[ -n "$REQUESTED_CODEX_SOURCE_SSH_ADDRESS_FAMILY_SET" ]] &&
+  DREAMING_CODEX_SOURCE_SSH_ADDRESS_FAMILY="$REQUESTED_CODEX_SOURCE_SSH_ADDRESS_FAMILY"
+[[ -n "$REQUESTED_CODEX_SOURCE_SSH_PYTHON_SET" ]] &&
+  DREAMING_CODEX_SOURCE_SSH_PYTHON="$REQUESTED_CODEX_SOURCE_SSH_PYTHON"
+[[ -n "$REQUESTED_CODEX_SOURCE_SSH_SCRIPT_SET" ]] &&
+  DREAMING_CODEX_SOURCE_SSH_SCRIPT="$REQUESTED_CODEX_SOURCE_SSH_SCRIPT"
+[[ -n "${DREAMING_SOURCE_SSH_BIN+x}" ]] && export DREAMING_SOURCE_SSH_BIN
+[[ -n "${DREAMING_COPILOT_SOURCE_SSH_HOST+x}" ]] &&
+  export DREAMING_COPILOT_SOURCE_SSH_HOST
+[[ -n "${DREAMING_COPILOT_SOURCE_SSH_ADDRESS_FAMILY+x}" ]] &&
+  export DREAMING_COPILOT_SOURCE_SSH_ADDRESS_FAMILY
+[[ -n "${DREAMING_COPILOT_SOURCE_SSH_PYTHON+x}" ]] &&
+  export DREAMING_COPILOT_SOURCE_SSH_PYTHON
+[[ -n "${DREAMING_COPILOT_SOURCE_SSH_SCRIPT+x}" ]] &&
+  export DREAMING_COPILOT_SOURCE_SSH_SCRIPT
+[[ -n "${DREAMING_COPILOT_PUBLISHER_SSH_HOST+x}" ]] &&
+  export DREAMING_COPILOT_PUBLISHER_SSH_HOST
+[[ -n "${DREAMING_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY+x}" ]] &&
+  export DREAMING_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY
+[[ -n "${DREAMING_COPILOT_PUBLISHER_RECEIVER_ID+x}" ]] &&
+  export DREAMING_COPILOT_PUBLISHER_RECEIVER_ID
+[[ -n "${DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER+x}" ]] &&
+  export DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER
+[[ -n "${DREAMING_CLAUDE_SOURCE_SSH_HOST+x}" ]] &&
+  export DREAMING_CLAUDE_SOURCE_SSH_HOST
+[[ -n "${DREAMING_CLAUDE_SOURCE_SSH_ADDRESS_FAMILY+x}" ]] &&
+  export DREAMING_CLAUDE_SOURCE_SSH_ADDRESS_FAMILY
+[[ -n "${DREAMING_CLAUDE_SOURCE_SSH_PYTHON+x}" ]] &&
+  export DREAMING_CLAUDE_SOURCE_SSH_PYTHON
+[[ -n "${DREAMING_CLAUDE_SOURCE_SSH_SCRIPT+x}" ]] &&
+  export DREAMING_CLAUDE_SOURCE_SSH_SCRIPT
+[[ -n "${DREAMING_CODEX_SOURCE_SSH_HOST+x}" ]] &&
+  export DREAMING_CODEX_SOURCE_SSH_HOST
+[[ -n "${DREAMING_CODEX_SOURCE_SSH_ADDRESS_FAMILY+x}" ]] &&
+  export DREAMING_CODEX_SOURCE_SSH_ADDRESS_FAMILY
+[[ -n "${DREAMING_CODEX_SOURCE_SSH_PYTHON+x}" ]] &&
+  export DREAMING_CODEX_SOURCE_SSH_PYTHON
+[[ -n "${DREAMING_CODEX_SOURCE_SSH_SCRIPT+x}" ]] &&
+  export DREAMING_CODEX_SOURCE_SSH_SCRIPT
+DREAMING_CONFIG_FILE="$RESOLVED_CONFIG_FILE"
+DREAMING_DATA_DIR="${REQUESTED_DATA_DIR:-${DREAMING_DATA_DIR:-$DEFAULT_DATA_DIR}}"
+DREAMING_STATE_DIR="${REQUESTED_STATE_DIR:-${DREAMING_STATE_DIR:-${XDG_STATE_HOME:-$HOME/.local/state}/dreaming}}"
+DREAMING_SKILLS_ROOT="${REQUESTED_SKILLS_ROOT:-${DREAMING_SKILLS_ROOT:-$DREAMING_DATA_DIR/skills}}"
+DREAMING_DEPS_DIR="${REQUESTED_DEPS_DIR:-${DREAMING_DEPS_DIR:-$DREAMING_DATA_DIR/deps}}"
+DREAMING_ADAPTER_CONFIG="${REQUESTED_ADAPTER_CONFIG:-${DREAMING_ADAPTER_CONFIG:-}}"
+DREAMING_ADAPTER_CONFIG_MANAGED="${DREAMING_ADAPTER_CONFIG_MANAGED:-}"
+DREAMING_ADAPTER_CONFIG_SHA256=""
+if [[ -n "$REQUESTED_ADAPTER_CONFIG" ]]; then
+  DREAMING_ADAPTER_CONFIG_MANAGED=0
+fi
+[[ -z "$DREAMING_ADAPTER_CONFIG_MANAGED" ||
+   "$DREAMING_ADAPTER_CONFIG_MANAGED" == "0" ||
+   "$DREAMING_ADAPTER_CONFIG_MANAGED" == "1" ]] || {
+  echo "DREAMING_ADAPTER_CONFIG_MANAGED must be 0, 1, or empty" >&2
+  exit 2
+}
+DREAMING_ENABLE_COPILOT_COMPAT="${REQUESTED_COPILOT_COMPAT:-${DREAMING_ENABLE_COPILOT_COMPAT:-1}}"
+DREAMING_REPO_ROOT="${REQUESTED_REPO_ROOT:-${DREAMING_REPO_ROOT:-$DEFAULT_REPO_ROOT}}"
+DREAMING_RECEIPT_FILE="${REQUESTED_RECEIPT_FILE:-${DREAMING_RECEIPT_FILE:-}}"
+DREAMING_DASHBOARD_HOST="${DREAMING_DASHBOARD_HOST:-127.0.0.1}"
+DREAMING_DASHBOARD_PORT="${DREAMING_DASHBOARD_PORT:-47673}"
+DREAMING_DASHBOARD_TAILNET_HOST="${DREAMING_DASHBOARD_TAILNET_HOST:-}"
+[[ "$DREAMING_DASHBOARD_HOST" == "127.0.0.1" ]] || {
+  echo "DREAMING_DASHBOARD_HOST must be 127.0.0.1" >&2
+  exit 2
+}
+[[ "$DREAMING_DASHBOARD_PORT" =~ ^[0-9]+$ ]] &&
+  (( 10#$DREAMING_DASHBOARD_PORT >= 1 &&
+     10#$DREAMING_DASHBOARD_PORT <= 65535 )) || {
+  echo "DREAMING_DASHBOARD_PORT must be an integer from 1 through 65535" >&2
+  exit 2
+}
+if [[ -n "$DREAMING_DASHBOARD_TAILNET_HOST" ]] &&
+   [[ ! "$DREAMING_DASHBOARD_TAILNET_HOST" =~ ^([a-z0-9]([a-z0-9-]*[a-z0-9])?\.)+ts\.net:${DREAMING_DASHBOARD_PORT}$ ]]; then
+  echo "DREAMING_DASHBOARD_TAILNET_HOST must be an exact lowercase .ts.net host with the dashboard port" >&2
+  exit 2
+fi
+if [[ -n "${DREAMING_RECEIPT_FILE:-}" ]]; then
+  export DREAMING_RECEIPT_FILE
+else
+  unset DREAMING_RECEIPT_FILE
+fi
 DEST_DIR="${SKILLS_LAUNCH_AGENTS_DIR:-$HOME/Library/LaunchAgents}"
-STATE_DIR="${SKILLS_STATE_DIR:-$HOME/.copilot/skill-state}"
-LOCAL_ROOT="${SKILLS_LOCAL_ROOT:-$HOME/.copilot/skills}"
+if [[ -n "${SKILLS_STATE_DIR:-}" ]]; then
+  STATE_DIR="$SKILLS_STATE_DIR"
+elif [[ "$DREAMING_ENABLE_COPILOT_COMPAT" == "1" ]]; then
+  STATE_DIR="$HOME/.copilot/skill-state"
+else
+  STATE_DIR="$DREAMING_STATE_DIR"
+fi
+if [[ -n "${SKILLS_LOCAL_ROOT:-}" ]]; then
+  LOCAL_ROOT="$SKILLS_LOCAL_ROOT"
+elif [[ "$DREAMING_ENABLE_COPILOT_COMPAT" == "1" ]]; then
+  LOCAL_ROOT="$HOME/.copilot/skills"
+else
+  LOCAL_ROOT="$DREAMING_SKILLS_ROOT"
+fi
+if [[ "$DREAMING_ENABLE_COPILOT_COMPAT" == "1" ]]; then
+  DREAMING_ORCHESTRATOR_STATE_DIR="${DREAMING_ORCHESTRATOR_STATE_DIR:-$STATE_DIR/dreaming}"
+else
+  DREAMING_ORCHESTRATOR_STATE_DIR="${DREAMING_ORCHESTRATOR_STATE_DIR:-$DREAMING_STATE_DIR/orchestrator}"
+fi
+
+export_runtime_env() {
+  export DREAMING_REPO_ROOT DREAMING_SHARED_SKILLS_ROOT DREAMING_DATA_DIR
+  export DREAMING_STATE_DIR DREAMING_SKILLS_ROOT DREAMING_DEPS_DIR
+  export DREAMING_ADAPTER_CONFIG DREAMING_ADAPTER_CONFIG_MANAGED
+  export DREAMING_ADAPTER_CONFIG_SHA256
+  export DREAMING_ENABLE_COPILOT_COMPAT
+  export DREAMING_CONFIG_FILE DREAMING_CONFIG_POINTER DREAMING_RECEIPT_FILE
+  export DREAMING_SHARED_BUNDLE_ID DREAMING_SHARED_SOURCE_KIND
+  export DREAMING_SHARED_PROTOCOL DREAMING_SHARED_REVISION
+  export DREAMING_ORCHESTRATOR_STATE_DIR
+  export DREAMING_DASHBOARD_HOST DREAMING_DASHBOARD_PORT
+  export DREAMING_DASHBOARD_TAILNET_HOST
+  export SKILLS_REPO_ROOT="${SKILLS_REPO_ROOT:-}"
+  local name
+  for name in \
+    DREAMING_CONFIGURE_EVALUATION_INPUT_OWNER \
+    DREAMING_EVALUATION_INPUT_OWNER_ENABLED \
+    DREAMING_EVALUATION_INPUT_AUTHOR_MODEL \
+    DREAMING_EVALUATION_INPUT_REVIEWER_A_MODEL \
+    DREAMING_EVALUATION_INPUT_REVIEWER_B_MODEL \
+    DREAMING_PRESERVE_ESTATE_ADAPTERS \
+    DREAMING_PRESERVE_OPERATIONAL_ADAPTERS \
+    DREAMING_ESTATE_ADAPTERS_BASELINE_SOURCE \
+    DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256 \
+    DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS \
+    DREAMING_REMOTE_EVALUATION_SUBJECTS_ENABLED \
+    DREAMING_REMOTE_SUBJECT_SSH_HOST \
+    DREAMING_REMOTE_SUBJECT_SSH_ADDRESS_FAMILY \
+    DREAMING_REMOTE_SUBJECT_SSH_BIN \
+    DREAMING_REMOTE_SUBJECT_SSH_PYTHON \
+    DREAMING_REMOTE_SUBJECT_SSH_SCRIPT \
+    DREAMING_REMOTE_SUBJECT_ESTATE_SCRIPT \
+    DREAMING_REMOTE_SUBJECT_CONTENT_POLICY \
+    DREAMING_REMOTE_SUBJECT_KNOWN_HOSTS_SOURCE \
+    DREAMING_REMOTE_SUBJECT_ORIGIN_HOST_ID \
+    DREAMING_REMOTE_SUBJECT_RECEIVER_ID \
+    DREAMING_REMOTE_SUBJECT_RECEIVER_ID_FILE \
+    DREAMING_REMOTE_SUBJECT_HOME \
+    DREAMING_REMOTE_SUBJECT_COPILOT_BIN \
+    DREAMING_REMOTE_SUBJECT_TIMEOUT; do
+    if declare -p "$name" >/dev/null 2>&1; then
+      export "$name"
+    fi
+  done
+}
+
+export_runtime_env
+
 DOMAIN="${SKILLS_LAUNCHD_DOMAIN:-gui/$(id -u)}"
 LAUNCHCTL="${LAUNCHCTL_BIN:-launchctl}"
 COPILOT="${COPILOT_BIN:-$HOME/.local/bin/copilot}"
@@ -23,8 +349,10 @@ GENERATION_FILE="$STATE_DIR/dreaming/activation-generation"
 SELFTEST_GENERATION_FILE="$STATE_DIR/dreaming/selftest-passed-generation"
 SELFTEST_LABEL_FILE="$STATE_DIR/dreaming/active-selftest-label"
 LIFECYCLE_LOCK_FILE="$STATE_DIR/dreaming/lifecycle.lock"
-NEW_KINDS=(dreaming selftest watchdog)
-LEGACY_KINDS=(sweep curator memory selftest watchdog dreaming)
+DASHBOARD_TOKEN_FILE="${DREAMING_DASHBOARD_TOKEN_FILE:-$DREAMING_STATE_DIR/dashboard/access-token}"
+DASHBOARD_ASSETS="$DREAMING_REPO_ROOT/skills/skill-review/assets/dashboard"
+NEW_KINDS=(dreaming selftest watchdog dashboard)
+LEGACY_KINDS=(sweep curator memory selftest watchdog dreaming dashboard)
 
 [[ "$NEW_PREFIX" =~ ^[A-Za-z0-9._-]+$ &&
    "$LEGACY_PREFIX" =~ ^[A-Za-z0-9._-]+$ ]] || {
@@ -50,6 +378,10 @@ atomic_pointer() {
   temporary="$(dirname "$target")/.${target##*/}.$$"
   printf '%s\n' "$value" > "$temporary"
   mv -f "$temporary" "$target"
+}
+
+persist_config_pointer() {
+  atomic_pointer "$DREAMING_CONFIG_FILE" "$DREAMING_CONFIG_POINTER"
 }
 
 activate_halt() {
@@ -90,15 +422,137 @@ cmd_prepare() {
 }
 
 load_config() {
-  [[ -f "$DREAMING_CONFIG_FILE" ]] || {
-    echo "dependency config missing: $DREAMING_CONFIG_FILE" >&2
+  local config_file="$DREAMING_CONFIG_FILE"
+  [[ -f "$config_file" ]] || {
+    echo "dependency config missing: $config_file" >&2
     return 1
   }
   # Generated by dreaming-deps.py using shell-quoted scalar assignments.
   # shellcheck disable=SC1090
-  source "$DREAMING_CONFIG_FILE"
-  export DREAMING_REPO_ROOT DREAMING_SHARED_SKILLS_ROOT
-  export SKILLS_REPO_ROOT="${SKILLS_REPO_ROOT:-}"
+  source "$config_file"
+  DREAMING_CONFIG_FILE="$config_file"
+  export_runtime_env
+}
+
+persist_runtime_config_values() {
+  /usr/bin/python3 - "$DREAMING_CONFIG_FILE" "$DREAMING_DEPS_DIR" \
+    "$DREAMING_CONFIG_FILE" <<'PY'
+import os
+import shlex
+import sys
+import uuid
+from pathlib import Path
+
+path = Path(sys.argv[1])
+updates = {
+    "DREAMING_DEPS_DIR": sys.argv[2],
+    "DREAMING_CONFIG_FILE": sys.argv[3],
+}
+for vendor in ("COPILOT", "CLAUDE", "CODEX"):
+    for suffix in (
+        "SOURCE_SSH_HOST",
+        "SOURCE_SSH_ADDRESS_FAMILY",
+        "SOURCE_SSH_PYTHON",
+        "SOURCE_SSH_SCRIPT",
+    ):
+        name = f"DREAMING_{vendor}_{suffix}"
+        if name in os.environ:
+            updates[name] = os.environ[name]
+for name in (
+    "DREAMING_COPILOT_PUBLISHER_SSH_HOST",
+    "DREAMING_COPILOT_PUBLISHER_SSH_ADDRESS_FAMILY",
+    "DREAMING_COPILOT_PUBLISHER_RECEIVER_ID",
+    "DREAMING_REQUIRE_REMOTE_COPILOT_PUBLISHER",
+    "DREAMING_CONFIGURE_EVALUATION_INPUT_OWNER",
+    "DREAMING_EVALUATION_INPUT_OWNER_ENABLED",
+    "DREAMING_EVALUATION_INPUT_AUTHOR_MODEL",
+    "DREAMING_EVALUATION_INPUT_REVIEWER_A_MODEL",
+    "DREAMING_EVALUATION_INPUT_REVIEWER_B_MODEL",
+    "DREAMING_PRESERVE_ESTATE_ADAPTERS",
+    "DREAMING_PRESERVE_OPERATIONAL_ADAPTERS",
+    "DREAMING_ESTATE_ADAPTERS_BASELINE_SOURCE",
+    "DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256",
+    "DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS",
+    "DREAMING_REMOTE_EVALUATION_SUBJECTS_ENABLED",
+    "DREAMING_REMOTE_SUBJECT_SSH_HOST",
+    "DREAMING_REMOTE_SUBJECT_SSH_ADDRESS_FAMILY",
+    "DREAMING_REMOTE_SUBJECT_SSH_BIN",
+    "DREAMING_REMOTE_SUBJECT_SSH_PYTHON",
+    "DREAMING_REMOTE_SUBJECT_SSH_SCRIPT",
+    "DREAMING_REMOTE_SUBJECT_ESTATE_SCRIPT",
+    "DREAMING_REMOTE_SUBJECT_CONTENT_POLICY",
+    "DREAMING_REMOTE_SUBJECT_KNOWN_HOSTS_SOURCE",
+    "DREAMING_REMOTE_SUBJECT_ORIGIN_HOST_ID",
+    "DREAMING_REMOTE_SUBJECT_RECEIVER_ID",
+    "DREAMING_REMOTE_SUBJECT_RECEIVER_ID_FILE",
+    "DREAMING_REMOTE_SUBJECT_HOME",
+    "DREAMING_REMOTE_SUBJECT_COPILOT_BIN",
+    "DREAMING_REMOTE_SUBJECT_TIMEOUT",
+):
+    if name in os.environ:
+        updates[name] = os.environ[name]
+if "DREAMING_SOURCE_SSH_BIN" in os.environ:
+    updates["DREAMING_SOURCE_SSH_BIN"] = os.environ["DREAMING_SOURCE_SSH_BIN"]
+lines = [
+    line
+    for line in path.read_text(encoding="utf-8").splitlines()
+    if line.partition("=")[0] not in updates
+]
+lines.extend(f"{name}={shlex.quote(value)}" for name, value in updates.items())
+temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}"
+temporary.write_text("\n".join(lines) + "\n", encoding="utf-8")
+os.chmod(temporary, 0o600)
+os.replace(temporary, path)
+PY
+}
+
+ensure_neutral_roots() {
+  mkdir -p "$DREAMING_DATA_DIR" "$DREAMING_STATE_DIR/daemon-logs" \
+    "$DREAMING_SKILLS_ROOT"
+  if [[ ! -d "$DREAMING_SKILLS_ROOT/.git" ]]; then
+    git -C "$DREAMING_SKILLS_ROOT" init -q
+  fi
+  if [[ -n "$(git -C "$DREAMING_SKILLS_ROOT" remote 2>/dev/null)" ]]; then
+    echo "Dreaming canonical skills root must not have a git remote: $DREAMING_SKILLS_ROOT" >&2
+    return 1
+  fi
+}
+
+ensure_dashboard_token() {
+  mkdir -p "$(dirname "$DASHBOARD_TOKEN_FILE")" "$HOME/Library/Logs/Dreaming"
+  chmod 700 "$(dirname "$DASHBOARD_TOKEN_FILE")"
+  if [[ -L "$DASHBOARD_TOKEN_FILE" ]]; then
+    echo "dashboard token must not be a symlink: $DASHBOARD_TOKEN_FILE" >&2
+    return 1
+  fi
+  if [[ ! -e "$DASHBOARD_TOKEN_FILE" ]]; then
+    /usr/bin/python3 - "$DASHBOARD_TOKEN_FILE" <<'PY'
+import os
+import secrets
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+temporary = path.parent / f".{path.name}.{os.getpid()}"
+temporary.write_text(secrets.token_urlsafe(32) + "\n", encoding="ascii")
+os.chmod(temporary, 0o600)
+os.replace(temporary, path)
+PY
+  fi
+  /usr/bin/python3 - "$DASHBOARD_TOKEN_FILE" <<'PY'
+import os
+import re
+import stat
+import sys
+from pathlib import Path
+
+path = Path(sys.argv[1])
+info = path.stat()
+if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) != 0o600:
+    raise SystemExit("dashboard token must be a mode-0600 regular file")
+if not re.fullmatch(r"[A-Za-z0-9_-]{43}\n?", path.read_text(encoding="ascii")):
+    raise SystemExit("dashboard token is malformed")
+PY
 }
 
 render() {
@@ -108,11 +562,43 @@ render() {
   destination="$DEST_DIR/$label.plist"
   /usr/bin/python3 - "$template" "$destination" "$label" "$HOME" \
     "$DREAMING_REPO_ROOT" "$DREAMING_SHARED_SKILLS_ROOT" \
-    "${SKILLS_REPO_ROOT:-}" "$STATE_DIR" "$LOCAL_ROOT" "$COPILOT_ROOT" <<'PY'
+    "${SKILLS_REPO_ROOT:-}" "$STATE_DIR" "$LOCAL_ROOT" "$COPILOT_ROOT" \
+    "$DREAMING_DATA_DIR" "$DREAMING_STATE_DIR" "$DREAMING_SKILLS_ROOT" \
+    "$DREAMING_ADAPTER_CONFIG" "$DREAMING_ADAPTER_CONFIG_MANAGED" \
+    "$DREAMING_ADAPTER_CONFIG_SHA256" "$DREAMING_ENABLE_COPILOT_COMPAT" \
+    "$DREAMING_ORCHESTRATOR_STATE_DIR" "$DREAMING_RECEIPT_FILE" \
+    "$DREAMING_DASHBOARD_HOST" "$DREAMING_DASHBOARD_PORT" \
+    "$DREAMING_DASHBOARD_TAILNET_HOST" \
+    "$DASHBOARD_TOKEN_FILE" "$DASHBOARD_ASSETS" <<'PY'
 import html
 import sys
 
-template, destination, label, home, repo, shared, public, state, local, copilot_home = sys.argv[1:]
+(
+    template,
+    destination,
+    label,
+    home,
+    repo,
+    shared,
+    public,
+    state,
+    local,
+    copilot_home,
+    data,
+    dreaming_state,
+    dreaming_skills,
+    adapter_config,
+    adapter_config_managed,
+    adapter_config_sha256,
+    copilot_compat,
+    orchestrator_state,
+    receipt_file,
+    dashboard_host,
+    dashboard_port,
+    dashboard_tailnet_host,
+    dashboard_token_file,
+    dashboard_assets,
+) = sys.argv[1:]
 text = open(template, encoding="utf-8").read()
 replacements = {
     "__LABEL__": label,
@@ -120,8 +606,19 @@ replacements = {
     "__DREAMING_REPO_ROOT__": repo,
     "__DREAMING_SHARED_SKILLS_ROOT__": shared,
     "__SKILLS_STATE_DIR__": state,
+    "__SKILLS_REVIEW_STATE_DIR__": state + "/skill-review",
     "__SKILLS_LOCAL_ROOT__": local,
     "__COPILOT_HOME__": copilot_home,
+    "__DREAMING_DATA_DIR__": data,
+    "__DREAMING_STATE_DIR__": dreaming_state,
+    "__DREAMING_SKILLS_ROOT__": dreaming_skills,
+    "__DREAMING_ENABLE_COPILOT_COMPAT__": copilot_compat,
+    "__DREAMING_ORCHESTRATOR_STATE_DIR__": orchestrator_state,
+    "__DREAMING_RECEIPT_FILE__": receipt_file,
+    "__DREAMING_DASHBOARD_HOST__": dashboard_host,
+    "__DREAMING_DASHBOARD_PORT__": dashboard_port,
+    "__DREAMING_DASHBOARD_TOKEN_FILE__": dashboard_token_file,
+    "__DREAMING_DASHBOARD_ASSETS__": dashboard_assets,
 }
 for key, value in replacements.items():
     text = text.replace(key, html.escape(value))
@@ -133,6 +630,36 @@ if public:
         + "</string>\n"
     )
 text = text.replace("__SKILLS_REPO_ROOT_ENV__", public_env)
+tailnet_env = ""
+if dashboard_tailnet_host:
+    tailnet_env = (
+        "    <key>DREAMING_DASHBOARD_TAILNET_HOST</key><string>"
+        + html.escape(dashboard_tailnet_host)
+        + "</string>\n"
+    )
+text = text.replace("__DREAMING_DASHBOARD_TAILNET_HOST_ENV__", tailnet_env)
+adapter_env = ""
+if adapter_config:
+    adapter_env = (
+        "    <key>DREAMING_ADAPTER_CONFIG</key><string>"
+        + html.escape(adapter_config)
+        + "</string>\n"
+        + "    <key>DREAMING_ADAPTER_CONFIG_MANAGED</key><string>"
+        + html.escape(adapter_config_managed)
+        + "</string>\n"
+        + "    <key>DREAMING_ADAPTER_CONFIG_SHA256</key><string>"
+        + html.escape(adapter_config_sha256)
+        + "</string>\n"
+    )
+text = text.replace("__DREAMING_ADAPTER_CONFIG_ENV__", adapter_env)
+copilot_env = ""
+if copilot_compat == "1":
+    copilot_env = (
+        "    <key>COPILOT_HOME</key><string>"
+        + html.escape(copilot_home)
+        + "</string>\n"
+    )
+text = text.replace("__COPILOT_HOME_ENV__", copilot_env)
 with open(destination, "w", encoding="utf-8") as handle:
     handle.write(text)
 PY
@@ -140,6 +667,7 @@ PY
 }
 
 sync_plugin() {
+  [[ "$DREAMING_ENABLE_COPILOT_COMPAT" == "1" ]] || return 0
   [[ "${DREAMING_SKIP_PLUGIN_SYNC:-0}" == "1" ]] && return 0
   [[ -x "$COPILOT" ]] || {
     echo "copilot is not executable at $COPILOT" >&2
@@ -149,20 +677,251 @@ sync_plugin() {
     "$COPILOT" plugin install dfrysinger/dreaming
 }
 
+native_adapter_is_managed() {
+  /usr/bin/python3 - "$1" <<'PY'
+import json
+import sys
+
+try:
+    config = json.load(open(sys.argv[1], encoding="utf-8"))
+except (OSError, json.JSONDecodeError) as error:
+    raise SystemExit(f"existing adapter config is invalid: {error}")
+if not isinstance(config, dict):
+    raise SystemExit("existing adapter config must be an object")
+for role, suffix in (
+    ("sources", "/scripts/ssh-session-source.py"),
+    ("publishers", "/scripts/ssh-skill-publisher.py"),
+):
+    entries = config.get(role, {})
+    entry = entries.get("copilot") if isinstance(entries, dict) else None
+    argv = entry.get("argv", []) if isinstance(entry, dict) else []
+    if isinstance(argv, list) and any(
+        isinstance(value, str) and value.endswith(suffix) for value in argv
+    ):
+        raise SystemExit(0)
+for role in ("sources", "executors", "publishers"):
+    entries = config.get(role, {})
+    if not isinstance(entries, dict):
+        continue
+    for entry in entries.values():
+        argv = entry.get("argv", []) if isinstance(entry, dict) else []
+        if isinstance(argv, list) and any(
+            isinstance(value, str)
+            and value.endswith(
+                "/skills/skill-review/scripts/dreaming-vendor-adapter.py"
+            )
+            for value in argv
+        ):
+            raise SystemExit(0)
+for role, suffix in (
+    ("estate_census", "/scripts/ssh-estate-census.py"),
+    ("estate_curator", "/scripts/ssh-estate-curator.py"),
+):
+    entry = config.get(role, {})
+    argv = entry.get("argv", []) if isinstance(entry, dict) else []
+    if isinstance(argv, list) and any(
+        isinstance(value, str) and value.endswith(suffix) for value in argv
+    ):
+        raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+configure_native_adapters() {
+  local generated="$DREAMING_STATE_DIR/adapters.json" candidate status
+  if [[ -n "$REQUESTED_ADAPTER_CONFIG" ]]; then
+    DREAMING_ADAPTER_CONFIG_MANAGED=0
+    DREAMING_ADAPTER_CONFIG_SHA256=
+    return 0
+  fi
+  if [[ "$REQUESTED_ADAPTER_DESIRED_STATE" == "1" ]]; then
+    DREAMING_ADAPTER_CONFIG="$generated"
+    DREAMING_ADAPTER_CONFIG_MANAGED=1
+  elif [[ -n "$DREAMING_ADAPTER_CONFIG" ]]; then
+    if [[ "$DREAMING_ADAPTER_CONFIG_MANAGED" == "0" ]]; then
+      DREAMING_ADAPTER_CONFIG_SHA256=
+      return 0
+    fi
+    if [[ "$DREAMING_ADAPTER_CONFIG_MANAGED" != "1" ]]; then
+      if [[ "$DREAMING_ADAPTER_CONFIG" != "$generated" ]]; then
+        DREAMING_ADAPTER_CONFIG_MANAGED=0
+        DREAMING_ADAPTER_CONFIG_SHA256=
+        return 0
+      fi
+      if native_adapter_is_managed "$DREAMING_ADAPTER_CONFIG"; then
+        DREAMING_ADAPTER_CONFIG_MANAGED=1
+      else
+        status=$?
+        if [[ "$status" == "1" ]]; then
+          DREAMING_ADAPTER_CONFIG_MANAGED=0
+          DREAMING_ADAPTER_CONFIG_SHA256=
+          return 0
+        fi
+        return "$status"
+      fi
+    fi
+  elif [[ "$REQUESTED_NATIVE_ADAPTERS" == "1" ||
+          "$DREAMING_ENABLE_COPILOT_COMPAT" == "0" ]]; then
+    DREAMING_ADAPTER_CONFIG="$generated"
+    DREAMING_ADAPTER_CONFIG_MANAGED=1
+  else
+    return 0
+  fi
+  export_runtime_env
+  if [[ "${DREAMING_PRESERVE_ESTATE_ADAPTERS:-0}" == "1" ]]; then
+    local baseline_source="${DREAMING_ESTATE_ADAPTERS_BASELINE_SOURCE:-}"
+    local baseline_target="$DREAMING_STATE_DIR/estate-adapters-baseline.json"
+    local expected_baseline_sha="${DREAMING_ESTATE_ADAPTERS_BASELINE_SHA256:-}"
+    local observed_baseline_sha
+    [[ -n "$baseline_source" && -f "$baseline_source" &&
+      ! -L "$baseline_source" ]] || {
+      echo "estate adapter baseline source must be a regular file" >&2
+      return 1
+    }
+    [[ "$expected_baseline_sha" =~ ^[0-9a-f]{64}$ ]] || {
+      echo "estate adapter baseline digest must be a sha256 digest" >&2
+      return 1
+    }
+    observed_baseline_sha="$(
+      /usr/bin/shasum -a 256 "$baseline_source" |
+        /usr/bin/awk '{print $1}'
+    )"
+    [[ "$observed_baseline_sha" == "$expected_baseline_sha" ]] || {
+      echo "estate adapter baseline source digest does not match" >&2
+      return 1
+    }
+    mkdir -p "$DREAMING_STATE_DIR"
+    if [[ "$baseline_source" != "$baseline_target" ]]; then
+      cp "$baseline_source" "${baseline_target}.candidate.$$"
+      chmod 600 "${baseline_target}.candidate.$$"
+      mv "${baseline_target}.candidate.$$" "$baseline_target"
+    else
+      chmod 600 "$baseline_target"
+    fi
+  fi
+  if [[ "${DREAMING_CONFIGURE_REMOTE_EVALUATION_SUBJECTS:-0}" == "1" ]]; then
+    local known_hosts_source="${DREAMING_REMOTE_SUBJECT_KNOWN_HOSTS_SOURCE:-}"
+    local known_hosts_target="$DREAMING_STATE_DIR/remote-subject-known-hosts"
+    [[ -n "$known_hosts_source" && -f "$known_hosts_source" &&
+      ! -L "$known_hosts_source" ]] || {
+      echo "remote subject known-hosts source must be a regular file" >&2
+      return 1
+    }
+    mkdir -p "$DREAMING_STATE_DIR"
+    if [[ "$known_hosts_source" != "$known_hosts_target" ]]; then
+      cp "$known_hosts_source" "${known_hosts_target}.candidate.$$"
+      chmod 600 "${known_hosts_target}.candidate.$$"
+      mv "${known_hosts_target}.candidate.$$" "$known_hosts_target"
+    else
+      chmod 600 "$known_hosts_target"
+    fi
+  fi
+  candidate="${DREAMING_ADAPTER_CONFIG}.candidate.$$"
+  rm -f "$candidate"
+  if [[ -f "$DREAMING_ADAPTER_CONFIG" ]]; then
+    cp -p "$DREAMING_ADAPTER_CONFIG" "$candidate"
+  fi
+  if ! "$DREAMING_REPO_ROOT/scripts/configure-adapters.py" \
+    --output "$candidate" \
+    --repo-root "$DREAMING_REPO_ROOT" \
+    --state-dir "$DREAMING_STATE_DIR" >/dev/null; then
+    rm -f "$candidate"
+    return 1
+  fi
+  if ! retire_local_copilot_publisher_for_remote_cutover; then
+    rm -f "$candidate"
+    return 1
+  fi
+  mv "$candidate" "$DREAMING_ADAPTER_CONFIG"
+  DREAMING_ADAPTER_CONFIG_SHA256="$(
+    /usr/bin/shasum -a 256 "$DREAMING_ADAPTER_CONFIG" |
+      /usr/bin/awk '{print $1}'
+  )"
+}
+
+run_core() {
+  export_runtime_env
+  "$DREAMING_REPO_ROOT/skills/skill-review/scripts/dreaming-core.py" "$@"
+}
+
+PUBLICATION_RESIDUAL=0
+attempt_unpublish() {
+  local output
+  [[ -n "$DREAMING_ADAPTER_CONFIG" &&
+     -f "$DREAMING_ADAPTER_CONFIG" ]] || return 0
+  if output="$(run_core unpublish 2>&1)"; then
+    return 0
+  fi
+  PUBLICATION_RESIDUAL=1
+  echo "warning: publication cleanup incomplete; residual registrations may remain" >&2
+  printf '%s\n' "$output" >&2
+  return 0
+}
+
+retire_local_copilot_publisher_for_remote_cutover() {
+  [[ -n "${DREAMING_COPILOT_PUBLISHER_SSH_HOST:-}" &&
+     -n "$DREAMING_ADAPTER_CONFIG" &&
+     -f "$DREAMING_ADAPTER_CONFIG" ]] || return 0
+  /usr/bin/python3 - "$DREAMING_ADAPTER_CONFIG" <<'PY'
+import json
+import subprocess
+import sys
+
+path = sys.argv[1]
+config = json.load(open(path, encoding="utf-8"))
+entry = config.get("publishers", {}).get("copilot")
+if not isinstance(entry, dict):
+    raise SystemExit()
+argv = entry.get("argv")
+if not isinstance(argv, list) or not all(isinstance(value, str) for value in argv):
+    raise SystemExit("existing Copilot publisher argv is invalid")
+if any(value.endswith("/scripts/ssh-skill-publisher.py") for value in argv):
+    raise SystemExit()
+result = subprocess.run(
+    [*argv, "remove"],
+    text=True,
+    capture_output=True,
+    timeout=int(entry.get("timeout", 90)),
+)
+try:
+    payload = json.loads(result.stdout.splitlines()[-1])
+except (IndexError, json.JSONDecodeError) as error:
+    raise SystemExit("local Copilot publisher removal returned malformed output") from error
+if result.returncode != 0 or payload.get("ok") is not True:
+    raise SystemExit("local Copilot publisher removal failed")
+PY
+}
+
 cmd_install() {
   local kind label generation
   cmd_prepare
+  if [[ "$REQUESTED_COPILOT_MIGRATION" == "1" ]]; then
+    "$DREAMING_REPO_ROOT/scripts/migrate-copilot-state.py" apply \
+      --legacy-skills "${DREAMING_LEGACY_COPILOT_SKILLS:-$HOME/.copilot/skills}" \
+      --legacy-state "${DREAMING_LEGACY_COPILOT_STATE:-$HOME/.copilot/skill-state/skill-review}" \
+      --target-skills "$DREAMING_SKILLS_ROOT" \
+      --target-state "$DREAMING_STATE_DIR" \
+      --journal "$DREAMING_STATE_DIR/copilot-migration.json" >/dev/null
+  fi
+  configure_native_adapters
   DREAMING_REPO_ROOT="$DREAMING_REPO_ROOT" \
+    DREAMING_DATA_DIR="$DREAMING_DATA_DIR" \
+    DREAMING_STATE_DIR="$DREAMING_STATE_DIR" \
+    DREAMING_SKILLS_ROOT="$DREAMING_SKILLS_ROOT" \
+    DREAMING_ADAPTER_CONFIG="$DREAMING_ADAPTER_CONFIG" \
+    DREAMING_ENABLE_COPILOT_COMPAT="$DREAMING_ENABLE_COPILOT_COMPAT" \
     DREAMING_DEPS_DIR="$DREAMING_DEPS_DIR" \
     DREAMING_CONFIG_FILE="$DREAMING_CONFIG_FILE" \
     "$DREAMING_REPO_ROOT/scripts/dreaming-deps.py" materialize
+  persist_runtime_config_values
   load_config
+  persist_config_pointer
+  ensure_neutral_roots
+  ensure_dashboard_token
   sync_plugin
-  chmod +x "$DREAMING_REPO_ROOT/scripts/"*.sh \
-    "$DREAMING_REPO_ROOT/scripts/"*.py \
-    "$DREAMING_REPO_ROOT"/skills/*/scripts/*.sh \
-    "$DREAMING_REPO_ROOT"/skills/*/scripts/*.py 2>/dev/null || true
-  "$DREAMING_REPO_ROOT/scripts/manage-instructions.sh" install
+  if [[ "$DREAMING_ENABLE_COPILOT_COMPAT" == "1" ]]; then
+    "$DREAMING_REPO_ROOT/scripts/manage-instructions.sh" install
+  fi
 
   for kind in "${LEGACY_KINDS[@]}"; do
     label="$(label_for "$LEGACY_PREFIX" "$kind")"
@@ -191,7 +950,7 @@ cmd_selftest() {
   }
   label="$(<"$SELFTEST_LABEL_FILE")"
   result="${DREAMING_SELFTEST_RESULT_FILE:-$STATE_DIR/daemon-selftest.out}"
-  wait_secs="${DREAMING_SELFTEST_WAIT_SECS:-300}"
+  wait_secs="${DREAMING_SELFTEST_WAIT_SECS:-21600}"
   [[ -f "$GENERATION_FILE" ]] || {
     echo "no activation generation; run install or rollback first" >&2
     return 1
@@ -221,8 +980,45 @@ cmd_selftest() {
     echo "activation generation changed while selftest was running" >&2
     return 1
   }
+  dashboard_health_check
   atomic_pointer "$expected_generation" "$SELFTEST_GENERATION_FILE"
   echo "selftest passed for activation generation $expected_generation"
+}
+
+dashboard_health_check() {
+  [[ "${DREAMING_SKIP_DASHBOARD_HEALTH_CHECK:-0}" == "1" ]] && return 0
+  [[ -f "$DEST_DIR/$(label_for "$NEW_PREFIX" dashboard).plist" ]] || return 0
+  /usr/bin/python3 - "$DREAMING_DASHBOARD_HOST" "$DREAMING_DASHBOARD_PORT" \
+    "$DASHBOARD_TOKEN_FILE" "${DREAMING_DASHBOARD_HEALTH_WAIT_SECS:-60}" \
+    "$expected_generation" <<'PY'
+import json
+import sys
+import time
+import urllib.request
+
+host, port, token_file, wait_seconds, expected_generation = sys.argv[1:]
+token = open(token_file, encoding="ascii").read().strip()
+deadline = time.monotonic() + float(wait_seconds)
+while True:
+    request = urllib.request.Request(
+        f"http://{host}:{port}/api/v1/health",
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            payload = json.load(response)
+        break
+    except OSError:
+        if time.monotonic() >= deadline:
+            raise
+        time.sleep(0.5)
+if (
+    payload.get("schema_version") != 1
+    or not isinstance(payload.get("data"), dict)
+    or payload["data"].get("activation_generation") != expected_generation
+):
+    raise SystemExit("dashboard health response is invalid")
+PY
 }
 
 cmd_enable() {
@@ -237,6 +1033,9 @@ cmd_enable() {
     echo "selftest belongs to a different activation generation" >&2
     return 1
   }
+  if [[ -n "$DREAMING_ADAPTER_CONFIG" && -f "$DREAMING_ADAPTER_CONFIG" ]]; then
+    run_core publish
+  fi
   rm -f "$HALT_SWITCH"
   rm -f "$ACTIVE_PREPARE_FILE"
   echo "dreaming enabled"
@@ -247,7 +1046,19 @@ cmd_status() {
   echo "halt=$([[ -e "$HALT_SWITCH" ]] && echo active || echo inactive)"
   [[ -f "$BACKUP_POINTER" ]] && echo "rollback_backup=$(<"$BACKUP_POINTER")"
   [[ -f "$GENERATION_FILE" ]] && echo "activation_generation=$(<"$GENERATION_FILE")"
-  "$DREAMING_REPO_ROOT/scripts/manage-instructions.sh" status || true
+  echo "data_root=$DREAMING_DATA_DIR"
+  echo "state_root=$DREAMING_STATE_DIR"
+  echo "skills_root=$DREAMING_SKILLS_ROOT"
+  echo "copilot_compat=$DREAMING_ENABLE_COPILOT_COMPAT"
+  echo "dashboard_url=http://$DREAMING_DASHBOARD_HOST:$DREAMING_DASHBOARD_PORT/"
+  [[ -n "$DREAMING_DASHBOARD_TAILNET_HOST" ]] &&
+    echo "dashboard_tailnet_url=https://$DREAMING_DASHBOARD_TAILNET_HOST/"
+  echo "dashboard_token=$([[ -f "$DASHBOARD_TOKEN_FILE" ]] && echo ready || echo missing)"
+  [[ -n "$DREAMING_ADAPTER_CONFIG" ]] &&
+    echo "adapter_config=$DREAMING_ADAPTER_CONFIG"
+  if [[ "$DREAMING_ENABLE_COPILOT_COMPAT" == "1" ]]; then
+    "$DREAMING_REPO_ROOT/scripts/manage-instructions.sh" status || true
+  fi
   while IFS= read -r label; do
     echo "--- $label ---"
     "$LAUNCHCTL" print "$DOMAIN/$label" 2>/dev/null |
@@ -255,16 +1066,40 @@ cmd_status() {
   done < <(all_labels | awk '!seen[$0]++')
 }
 
+cmd_dashboard_url() {
+  ensure_dashboard_token
+  printf 'http://%s:%s/#access_token=%s\n' \
+    "$DREAMING_DASHBOARD_HOST" "$DREAMING_DASHBOARD_PORT" \
+    "$(<"$DASHBOARD_TOKEN_FILE")"
+}
+
+cmd_dashboard_open() {
+  local url
+  url="$(cmd_dashboard_url)"
+  "${DREAMING_OPEN_BIN:-/usr/bin/open}" "$url"
+}
+
 cmd_uninstall() {
   local label
   cmd_prepare
+  attempt_unpublish
   while IFS= read -r label; do
     bootout_label "$label"
     rm -f "$DEST_DIR/$label.plist"
   done < <(all_labels | awk '!seen[$0]++')
   rm -f "$GENERATION_FILE" "$SELFTEST_GENERATION_FILE" "$SELFTEST_LABEL_FILE"
-  "$DREAMING_REPO_ROOT/scripts/manage-instructions.sh" uninstall
-  echo "uninstalled all known dreaming and legacy agents; halt remains active"
+  if [[ "$DREAMING_ENABLE_COPILOT_COMPAT" == "1" ]]; then
+    "$DREAMING_REPO_ROOT/scripts/manage-instructions.sh" uninstall
+  fi
+  if [[ -f "$DREAMING_CONFIG_POINTER" &&
+        "$(<"$DREAMING_CONFIG_POINTER")" == "$DREAMING_CONFIG_FILE" ]]; then
+    rm -f "$DREAMING_CONFIG_POINTER"
+  fi
+  if [[ "$PUBLICATION_RESIDUAL" == "1" ]]; then
+    echo "uninstalled all known dreaming and legacy agents; publication residuals remain; halt remains active"
+  else
+    echo "uninstalled all known dreaming and legacy agents; halt remains active"
+  fi
 }
 
 verify_backup() {
@@ -325,11 +1160,16 @@ cmd_rollback() {
     echo "rollback backup must contain exactly one selftest LaunchAgent" >&2
     return 1
   }
+  rm -f "$SELFTEST_GENERATION_FILE"
+  attempt_unpublish
 
   while IFS= read -r label; do
     bootout_label "$label"
     rm -f "$DEST_DIR/$label.plist"
   done < <(all_labels | awk '!seen[$0]++')
+  if [[ "$DREAMING_ENABLE_COPILOT_COMPAT" == "1" ]]; then
+    "$DREAMING_REPO_ROOT/scripts/manage-instructions.sh" uninstall
+  fi
   lock_path="$STATE_DIR/daemon.lock"
   if [[ -f "$lock_path" ]]; then
     mv "$lock_path" "$STATE_DIR/dreaming/daemon.lock.sqlite-before-rollback"
@@ -346,11 +1186,33 @@ cmd_rollback() {
     "$LAUNCHCTL" enable "$DOMAIN/$label" >/dev/null 2>&1 || true
     echo "restored $label"
   done
+  if [[ "$DREAMING_ENABLE_COPILOT_COMPAT" == "1" ]]; then
+    "$DREAMING_REPO_ROOT/scripts/manage-instructions.sh" install
+  fi
   generation="$(date -u +%Y%m%dT%H%M%SZ)-rollback-$$"
   atomic_pointer "$generation" "$GENERATION_FILE"
   atomic_pointer "$(basename "$selftest_plist" .plist)" "$SELFTEST_LABEL_FILE"
-  rm -f "$SELFTEST_GENERATION_FILE"
-  echo "rollback loaded behind halt from $backup; run restored selftest, then enable explicitly"
+  if [[ "$PUBLICATION_RESIDUAL" == "1" ]]; then
+    echo "rollback loaded behind halt from $backup; publication residuals remain; run restored selftest, then enable explicitly"
+  else
+    echo "rollback loaded behind halt from $backup; run restored selftest, then enable explicitly"
+  fi
+}
+
+cmd_rollback_migration() {
+  local journal="$DREAMING_STATE_DIR/copilot-migration.json"
+  activate_halt
+  [[ -f "$journal" ]] || {
+    echo "no Copilot migration journal recorded: $journal" >&2
+    return 1
+  }
+  "$DREAMING_REPO_ROOT/scripts/migrate-copilot-state.py" rollback \
+    --legacy-skills "${DREAMING_LEGACY_COPILOT_SKILLS:-$HOME/.copilot/skills}" \
+    --legacy-state "${DREAMING_LEGACY_COPILOT_STATE:-$HOME/.copilot/skill-state/skill-review}" \
+    --target-skills "$DREAMING_SKILLS_ROOT" \
+    --target-state "$DREAMING_STATE_DIR" \
+    --journal "$journal"
+  echo "migration data rolled back; halt remains active"
 }
 
 run_with_lifecycle_lock() {
@@ -373,7 +1235,7 @@ PY
 
 if [[ "${DREAMING_LIFECYCLE_LOCK_HELD:-0}" != "1" ]]; then
   case "${1:-}" in
-    prepare|install|selftest|enable|uninstall|rollback)
+    prepare|install|selftest|enable|uninstall|rollback|rollback-migration)
       run_with_lifecycle_lock "$@"
       ;;
   esac
@@ -385,10 +1247,13 @@ case "${1:-}" in
   selftest) cmd_selftest ;;
   enable) cmd_enable ;;
   status) cmd_status ;;
+  dashboard-url) cmd_dashboard_url ;;
+  dashboard-open) cmd_dashboard_open ;;
   uninstall) cmd_uninstall ;;
   rollback) shift; cmd_rollback "${1:-}" ;;
+  rollback-migration) cmd_rollback_migration ;;
   *)
-    echo "usage: scripts/install.sh {prepare|install|selftest|enable|status|uninstall|rollback [backup]}" >&2
+    echo "usage: scripts/install.sh {prepare|install|selftest|enable|status|dashboard-url|dashboard-open|uninstall|rollback [backup]|rollback-migration}" >&2
     exit 2
     ;;
 esac

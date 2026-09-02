@@ -46,7 +46,9 @@ done
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 CURATOR_RUNNER="${SKILLS_CURATOR_RUNNER:-$SCRIPT_DIR/../../skill-curator/scripts/curator-run.py}"
+DEPENDENCY_SCANNER="${CURATOR_DEPENDENCY_SCANNER:-$SCRIPT_DIR/../../skill-curator/scripts/scheduled-skill-deps.py}"
 CURATOR_OP_ID=""
+ARCHIVE_CONTEXT='{"authority_mode":"manual"}'
 LOCK_SCRIPT="$SCRIPT_DIR/../../skill-review/scripts/daemon-lock.sh"
 LOCK_TOKEN=""
 release_lock() {
@@ -59,6 +61,11 @@ SRC=$("$SCRIPT_DIR/find-skill.sh" "$NAME") || exit 1
 
 if [[ -n "${SKILLS_CURATOR_RUN_ID:-}" ]]; then
   "$CURATOR_RUNNER" renew --run "$SKILLS_CURATOR_RUN_ID"
+  ARCHIVE_CONTEXT="$(
+    "$CURATOR_RUNNER" archive-context \
+      --run "$SKILLS_CURATOR_RUN_ID" \
+      --skill "$NAME"
+  )"
 else
   LOCK_TOKEN="$("$LOCK_SCRIPT" acquire --mode session --owner "archive-skill:$NAME")"
 fi
@@ -73,12 +80,19 @@ fi
 # Installed jobs and durable daemon prompts are implicit pins. Enumeration
 # failures are also refusals: archiving is unsafe when the dependency set is
 # incomplete.
-"$SCRIPT_DIR/../../skill-curator/scripts/scheduled-skill-deps.py" --check "$NAME" \
-  >/dev/null
+"$DEPENDENCY_SCANNER" --check "$NAME" >/dev/null
 
 REPO_ROOT="${SKILLS_REPO_ROOT:-$HOME/code/skills}"
 LOCAL_ROOT="${SKILLS_LOCAL_ROOT:-$HOME/.copilot/skills}"
-STATE_DIR="${SKILLS_STATE_DIR:-$HOME/.copilot/skill-state/skill-review}"
+if [[ -n "${SKILLS_REVIEW_STATE_DIR:-}" ]]; then
+  STATE_DIR="$SKILLS_REVIEW_STATE_DIR"
+elif [[ -n "${SKILLS_STATE_DIR:-}" ]]; then
+  # Compatibility: before SKILLS_REVIEW_STATE_DIR existed, this override
+  # named the review-state directory itself, regardless of its basename.
+  STATE_DIR="$SKILLS_STATE_DIR"
+else
+  STATE_DIR="$HOME/.copilot/skill-state/skill-review"
+fi
 
 # Determine which root SRC lives in, and set the git root + whether to touch the
 # plugin registry.
@@ -114,7 +128,7 @@ if [[ -n "$ABSORBED" ]]; then
       exit 1
     }
   fi
-  "$SCRIPT_DIR/../../skill-review/scripts/skill-evaluation.py" gate "$DESTINATION"
+  "$SCRIPT_DIR/../../skill-review/scripts/skill-evaluation.py" current-gate "$DESTINATION"
 fi
 
 # A retirement is only recoverable if the tree is committed first: the restore
@@ -227,11 +241,12 @@ fi
 # leaves a record pointing at a skill that is still live.
 RETIRED_DIR="$STATE_DIR/retired"
 mkdir -p "$RETIRED_DIR"
-python3 - "$RETIRED_DIR/$NAME.json" "$NAME" "$SRC_REL" "$GIT_ROOT" "$RESTORE_SHA" "$ABSORBED" <<'PY'
-import json, sys
+python3 - "$RETIRED_DIR/$NAME.json" "$NAME" "$SRC_REL" "$GIT_ROOT" "$RESTORE_SHA" "$ABSORBED" "$ARCHIVE_CONTEXT" <<'PY'
+import json, os, sys, tempfile
 from datetime import datetime, timezone
-out, name, rel, git_root, sha, absorbed = sys.argv[1:7]
-json.dump({
+out, name, rel, git_root, sha, absorbed, context_raw = sys.argv[1:8]
+context = json.loads(context_raw)
+record = {
     "skill": name,
     # Where it lived in restore_sha, and where it should land today. These are
     # equal at retirement, but a record migrated from an older layout can point
@@ -243,8 +258,50 @@ json.dump({
     "retired_at": datetime.now(timezone.utc).isoformat(),
     "reason": "consolidated" if absorbed else "pruned",
     "replacement": absorbed or None,
-}, open(out, "w"), indent=2)
-open(out, "a").write("\n")
+    "curator_authority": context["authority_mode"],
+}
+if context["authority_mode"] == "autonomous":
+    record.update({
+        "curator_report": context["report"],
+        "curator_report_sha256": context["report_sha256"],
+        "evidence_refs": context["evidence_refs"],
+    })
+elif context["authority_mode"] == "remote":
+    record.update({
+        "remote_authorization": {
+            "op_id": context["op_id"],
+            "request_sha256": context["request_sha256"],
+            "target_identity_sha256": context["target_identity_sha256"],
+            "provenance_authority_sha256": context[
+                "provenance_authority_sha256"
+            ],
+            "census_snapshot_sha256": context["census_snapshot_sha256"],
+            "dependency_inventory_sha256": context[
+                "dependency_inventory_sha256"
+            ],
+        },
+        "evidence_refs": context["evidence_refs"],
+    })
+descriptor, temporary = tempfile.mkstemp(
+    prefix=f".{os.path.basename(out)}.",
+    dir=os.path.dirname(out),
+)
+try:
+    with os.fdopen(descriptor, "w") as handle:
+        json.dump(record, handle, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, out)
+    directory = os.open(os.path.dirname(out), os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
 PY
 echo "retirement record: $RETIRED_DIR/$NAME.json"
 
@@ -255,18 +312,37 @@ if [[ "$AGENT_CREATED" -eq 1 ]]; then
   TOMB_DIR="$STATE_DIR/tombstones"
   mkdir -p "$TOMB_DIR"
   python3 - "$TOMB_DIR/$NAME.json" "$NAME" "$SRC_REL" "$ABSORBED" <<'PY'
-import json, sys
+import json, os, sys, tempfile
 from datetime import datetime, timezone
 out, name, rel, absorbed = sys.argv[1:5]
-json.dump({
+record = {
     "skill": name,
     "archived_rel": rel,
     "archived_at": datetime.now(timezone.utc).isoformat(),
     "reason": "consolidated" if absorbed else "pruned",
     "replacement": absorbed or None,
     "tombstoned_by": "skill-curator",
-}, open(out, "w"), indent=2)
-open(out, "a").write("\n")
+}
+descriptor, temporary = tempfile.mkstemp(
+    prefix=f".{os.path.basename(out)}.",
+    dir=os.path.dirname(out),
+)
+try:
+    with os.fdopen(descriptor, "w") as handle:
+        json.dump(record, handle, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, out)
+    directory = os.open(os.path.dirname(out), os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
 PY
   echo "tombstone written: $TOMB_DIR/$NAME.json"
 fi

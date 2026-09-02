@@ -99,8 +99,11 @@ def connect() -> sqlite3.Connection:
     path.parent.mkdir(parents=True, exist_ok=True)
     if not migrate_legacy_directory(path):
         raise BlockingIOError
-    connection = sqlite3.connect(path, timeout=5, isolation_level=None)
-    connection.execute("PRAGMA busy_timeout=5000")
+    nonblocking = os.environ.get("SKILLS_LOCK_NONBLOCKING") == "1"
+    connection = sqlite3.connect(
+        path, timeout=0 if nonblocking else 5, isolation_level=None
+    )
+    connection.execute(f"PRAGMA busy_timeout={0 if nonblocking else 5000}")
     connection.execute(
         """
         CREATE TABLE IF NOT EXISTS writer_lock (
@@ -137,7 +140,15 @@ def acquire(args: argparse.Namespace) -> int:
         return 2
     if args.mode == "process" and (not args.pid or not args.process_identity):
         return 2
-    token = str(uuid.uuid4())
+    if args.token is not None:
+        try:
+            token = str(uuid.UUID(args.token))
+        except (ValueError, AttributeError):
+            return 2
+        if token != args.token:
+            return 2
+    else:
+        token = str(uuid.uuid4())
     current = now()
     try:
         con = connect()
@@ -215,8 +226,11 @@ def assert_or_renew(args: argparse.Namespace, renew: bool) -> int:
 def release(args: argparse.Namespace) -> int:
     try:
         con = connect()
-    except (BlockingIOError, sqlite3.DatabaseError):
+    except BlockingIOError:
         return 1
+    except sqlite3.DatabaseError as error:
+        print(f"lock database invalid: {error}", file=sys.stderr)
+        return 2
     try:
         con.execute("BEGIN IMMEDIATE")
         cursor = con.execute(
@@ -224,7 +238,10 @@ def release(args: argparse.Namespace) -> int:
             (args.token,),
         )
         con.commit()
-        return 0 if cursor.rowcount == 1 else 1
+        return 0 if cursor.rowcount == 1 or args.idempotent else 1
+    except sqlite3.DatabaseError as error:
+        print(f"lock database invalid: {error}", file=sys.stderr)
+        return 2
     finally:
         con.close()
 
@@ -267,6 +284,7 @@ def parser() -> argparse.ArgumentParser:
     acquire_parser.add_argument("--owner", required=True)
     acquire_parser.add_argument("--pid", type=int)
     acquire_parser.add_argument("--process-identity")
+    acquire_parser.add_argument("--token")
     acquire_parser.set_defaults(func=acquire)
 
     for name, func in (("assert", lambda a: assert_or_renew(a, False)), ("renew", lambda a: assert_or_renew(a, True))):
@@ -278,6 +296,7 @@ def parser() -> argparse.ArgumentParser:
 
     release_parser = sub.add_parser("release")
     release_parser.add_argument("token")
+    release_parser.add_argument("--idempotent", action="store_true")
     release_parser.set_defaults(func=release)
 
     seed_parser = sub.add_parser("seed")

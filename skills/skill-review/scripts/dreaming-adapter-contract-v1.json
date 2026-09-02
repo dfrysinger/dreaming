@@ -1,0 +1,59 @@
+{
+  "contract_version": 1,
+  "transport": {
+    "argv": "UTF-8 command arguments",
+    "stdout": "one JSON object per line; no non-JSON output",
+    "stderr": "diagnostics only",
+    "failure": "nonzero exit plus a final {\"ok\":false,\"error\":{\"code\":...,\"message\":...}} object"
+  },
+  "handshake": {
+    "command": ["contract", "--role", "<session-source|review-executor|skill-evaluation-executor|skill-publisher>"],
+    "required_response": {
+      "ok": true,
+      "protocol": "dreaming.<role>",
+      "version": 1,
+      "adapter_id": "stable opaque adapter identifier",
+      "capabilities": ["role-specific capability names"]
+    }
+  },
+  "session-source": {
+    "commands": {
+      "watermark": "returns {watermark}",
+      "list": "accepts --floor, --ceiling, --cursor, --page-size; returns {items,next_cursor,exhausted}",
+      "inspect": "accepts --session; returns {session}",
+      "render": "accepts --session; returns {events,truncated}",
+      "doctor": "returns {healthy:true}"
+    },
+    "required_capabilities": ["stable-pagination", "qualified-identity", "bounded-render", "revision-inspect"]
+  },
+  "review-executor": {
+    "commands": {
+      "version": "returns {executor_version}",
+      "doctor": "returns {healthy:true,boundary_ready:true}",
+      "run": "accepts --snapshot and --result; executors advertising task-profile-v2 also accept optional --mode review|profile and paired --task-profile-receipt/--task-profile-executor arguments for same-revision review context; writes a structured result and emits the same result"
+    },
+    "required_capabilities": ["source-blind", "mutation-fence", "completion-sentinel"],
+    "optional_capabilities": ["task-profile-v2"]
+  },
+  "skill-evaluation-executor": {
+    "commands": {
+      "doctor": "verifies native CLI identity, authentication, isolation prerequisites, and skill-load observability",
+      "version": "returns exact adapter, CLI, model, tool-policy, limits, and sandbox identity",
+      "prepare": "accepts --trial; creates only trial-local projection files and returns the sealed execution",
+      "run": "accepts --trial, --prepared, and --output; executes the exact prepared native command",
+      "normalize": "accepts --raw and --trace; emits the common trace vocabulary with digest linkage",
+      "collect": "accepts --trial and --artifacts; exports only task-declared workspace artifacts"
+    },
+    "required_capabilities": ["isolated-control", "isolated-candidate", "skill-load-proof", "bounded-tools", "normalized-trace", "artifact-export", "exact-execution-identity"]
+  },
+  "skill-publisher": {
+    "commands": {
+      "doctor": "returns {healthy:true}",
+      "inventory": "returns {owned_bundle_ids:[...]}",
+      "install": "accepts --bundle and --bundle-id",
+      "verify": "accepts --bundle-id; returns {verified:true,bundle_id:<same id>}",
+      "remove": "removes only registrations owned by this adapter"
+    },
+    "required_capabilities": ["content-addressed-bundle", "ownership-safe-remove", "exact-inventory"]
+  }
+}

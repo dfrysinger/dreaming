@@ -347,14 +347,33 @@ def discover_catalog(source_kind: str, source: Path) -> tuple[Path | None, str]:
 def materialize() -> dict[str, Any]:
     receipt = load_receipt()
     root = repo_root()
+    data_dir = canonical(
+        Path(
+            os.environ.get(
+                "DREAMING_DATA_DIR",
+                Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
+                / "dreaming",
+            )
+        )
+    )
+    state_dir = canonical(
+        Path(
+            os.environ.get(
+                "DREAMING_STATE_DIR",
+                Path(os.environ.get("XDG_STATE_HOME", Path.home() / ".local/state"))
+                / "dreaming",
+            )
+        )
+    )
+    skills_root = canonical(
+        Path(os.environ.get("DREAMING_SKILLS_ROOT", data_dir / "skills"))
+    )
     deps_dir = canonical(
-        Path(os.environ.get("DREAMING_DEPS_DIR", Path.home() / ".copilot/dreaming/deps"))
+        Path(os.environ.get("DREAMING_DEPS_DIR", data_dir / "deps"))
     )
     config = canonical(
         Path(
-            os.environ.get(
-                "DREAMING_CONFIG_FILE", Path.home() / ".copilot/dreaming/config.env"
-            )
+            os.environ.get("DREAMING_CONFIG_FILE", data_dir / "config.env")
         )
     )
     deps_dir.mkdir(parents=True, exist_ok=True)
@@ -411,13 +430,32 @@ def materialize() -> dict[str, Any]:
 
         lines = [
             f"DREAMING_REPO_ROOT={shell_quote(str(root))}",
+            f"DREAMING_RECEIPT_FILE={shell_quote(str(receipt_path()))}",
+            f"DREAMING_DATA_DIR={shell_quote(str(data_dir))}",
+            f"DREAMING_STATE_DIR={shell_quote(str(state_dir))}",
+            f"DREAMING_SKILLS_ROOT={shell_quote(str(skills_root))}",
             f"DREAMING_SHARED_SKILLS_ROOT={shell_quote(str(selected))}",
             f"DREAMING_SHARED_BUNDLE_ID={shell_quote(identity)}",
             f"DREAMING_SHARED_SOURCE_KIND={shell_quote(source_kind)}",
             f"DREAMING_SHARED_PROTOCOL={shell_quote(str(PROTOCOL_VERSION))}",
             f"DREAMING_SHARED_REVISION={shell_quote(receipt['pinned_revision'])}",
             f"SKILLS_CATALOG_MODE={shell_quote(catalog_mode)}",
+            "DREAMING_ENABLE_COPILOT_COMPAT="
+            + shell_quote(os.environ.get("DREAMING_ENABLE_COPILOT_COMPAT", "1")),
         ]
+        adapter_config = os.environ.get("DREAMING_ADAPTER_CONFIG")
+        if adapter_config:
+            lines.append(
+                f"DREAMING_ADAPTER_CONFIG={shell_quote(str(canonical(Path(adapter_config))))}"
+            )
+            managed = os.environ.get("DREAMING_ADAPTER_CONFIG_MANAGED", "")
+            if managed not in {"0", "1"}:
+                raise DependencyError(
+                    "DREAMING_ADAPTER_CONFIG_MANAGED must be 0 or 1"
+                )
+            lines.append(
+                f"DREAMING_ADAPTER_CONFIG_MANAGED={shell_quote(managed)}"
+            )
         if public is not None:
             lines.append(f"SKILLS_REPO_ROOT={shell_quote(str(public))}")
         atomic_write(config, "\n".join(lines) + "\n")

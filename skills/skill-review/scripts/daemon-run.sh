@@ -40,5 +40,7 @@ if ! LOCK_TOKEN="$(skills_lock_acquire process "single-pass:$SESSION_NAME")"; th
 fi
 trap 'skills_lock_release "$LOCK_TOKEN" >/dev/null 2>&1 || true' EXIT INT TERM
 
-SKILLS_LOCK_HELD_BY_PARENT=1 \
+SKILLS_LOCK_HELD_BY_PARENT=1 SKILLS_LOCK_TOKEN="$LOCK_TOKEN" \
+  SKILLS_LOCK_OWNER_PID="$$" \
+  SKILLS_LOCK_OWNER_IDENTITY="$(skills_process_identity "$$")" \
   "$PASS_RUNNER" --prompt "$PROMPT_FILE" --name "$SESSION_NAME" --log "$LOG"

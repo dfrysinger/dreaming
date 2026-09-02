@@ -4,6 +4,7 @@
 set -euo pipefail
 export PATH="$HOME/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
 STATE_BASE="${SKILLS_STATE_DIR:-$HOME/.copilot/skill-state}"
+ORCHESTRATOR_STATE_DIR="${DREAMING_ORCHESTRATOR_STATE_DIR:-$STATE_BASE/dreaming}"
 LOG_DIR="$STATE_BASE/daemon-logs"
 HALT_SWITCH="$STATE_BASE/skill-review/disable-daemon"
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -15,12 +16,12 @@ source "$SCRIPT_DIR/lib-daemon.sh"
 dreaming_require_roots || exit 1
 REPO="$DREAMING_REPO_ROOT"
 
-mkdir -p "$LOG_DIR" "$STATE_BASE/dreaming"
+mkdir -p "$LOG_DIR" "$ORCHESTRATOR_STATE_DIR"
 START_EPOCH="${DREAMING_NOW_EPOCH:-$(date +%s)}"
 START_ISO="$(date -u -r "$START_EPOCH" +%Y-%m-%dT%H:%M:%S+00:00)"
 RUN_ID="$(date -u -r "$START_EPOCH" +%Y%m%dT%H%M%SZ)-$$"
 RUN_LOG="$LOG_DIR/${RUN_ID}-dreaming.log"
-PASSES_FILE="$STATE_BASE/dreaming/.passes-${RUN_ID}.tsv"
+PASSES_FILE="$ORCHESTRATOR_STATE_DIR/.passes-${RUN_ID}.tsv"
 : > "$PASSES_FILE"
 exec > >(/usr/bin/tee -a "$RUN_LOG") 2>&1
 
@@ -132,27 +133,37 @@ NAMES=(skills-consolidate skills-roll skills-prune)
 
 for index in 0 1 2; do
   pass="${PASSES[$index]}"
-  if ! skills_lock_renew "$LOCK_TOKEN"; then
-    log "lost writer lock before $pass"
-    append_pass "$pass" "not_started" "" "" "" "lock-lost"
-    if (( index < 2 )); then
-      mark_remaining "upstream-lock-lost" "${PASSES[@]:$((index + 1))}"
+  if (( index == 2 )); then
+    if ! skills_lock_release "$LOCK_TOKEN"; then
+      log "could not release scheduler writer lock before curator handoff"
+      append_pass "$pass" "not_started" "" "" "" "lock-handoff-failed"
+      record_terminal aborted "lock-handoff-before-$pass"
+      exit 1
     fi
-    record_terminal aborted "lock-lost-before-$pass"
-    exit 1
+    LOCK_TOKEN=""
+  else
+    if ! skills_lock_renew "$LOCK_TOKEN"; then
+      log "lost writer lock before $pass"
+      append_pass "$pass" "not_started" "" "" "" "lock-lost"
+      if (( index < 2 )); then
+        mark_remaining "upstream-lock-lost" "${PASSES[@]:$((index + 1))}"
+      fi
+      record_terminal aborted "lock-lost-before-$pass"
+      exit 1
+    fi
   fi
 
   if (( index == 1 )) && [[ "${DREAMING_FORCE_DUE:-0}" != "1" ]]; then
     set +e
-    "$STATE_TOOL" due --epoch "$START_EPOCH"
+    "$STATE_TOOL" claim-weekly --epoch "$START_EPOCH"
     due_rc=$?
     set -e
     if (( due_rc == 1 )); then
-      log "weekly bucket already completed; roll and prune are not scheduled"
+      log "weekly bucket already completed or attempted today; roll and prune are not scheduled"
       append_pass "roll" "not_scheduled" "" "" "" "weekly-not-due"
       append_pass "prune" "not_scheduled" "" "" "" "weekly-not-due"
       record_cadence_neutral_success
-      log "daily consolidation completed"
+      log "scheduled consolidation completed"
       exit 0
     elif (( due_rc != 0 )); then
       append_pass "roll" "not_started" "" "" "" "cadence-eval-failed"
@@ -175,8 +186,26 @@ for index in 0 1 2; do
   pass_started="$(date -u -r "$pass_started_epoch" +%Y-%m-%dT%H:%M:%S+00:00)"
   pass_log="$LOG_DIR/${RUN_ID}-${pass}.log"
   log "starting $pass"
-  if DREAMING_ORCHESTRATED=1 SKILLS_LOCK_HELD_BY_PARENT=1 "$PASS_RUNNER" \
-      --prompt "${PROMPTS[$index]}" --name "${NAMES[$index]}" --log "$pass_log"; then
+  if (( index == 2 )); then
+    if DREAMING_ORCHESTRATED=1 DREAMING_PARENT_RUN_ID="$RUN_ID" \
+        "$PASS_RUNNER" \
+        --prompt "${PROMPTS[$index]}" --name "${NAMES[$index]}" --log "$pass_log"; then
+      pass_rc=0
+    else
+      pass_rc=$?
+    fi
+  else
+    if DREAMING_ORCHESTRATED=1 DREAMING_PARENT_RUN_ID="$RUN_ID" \
+        SKILLS_LOCK_HELD_BY_PARENT=1 SKILLS_LOCK_TOKEN="$LOCK_TOKEN" \
+        SKILLS_LOCK_OWNER_PID="$$" \
+        SKILLS_LOCK_OWNER_IDENTITY="$(skills_process_identity "$$")" "$PASS_RUNNER" \
+        --prompt "${PROMPTS[$index]}" --name "${NAMES[$index]}" --log "$pass_log"; then
+      pass_rc=0
+    else
+      pass_rc=$?
+    fi
+  fi
+  if (( pass_rc == 0 )); then
     pass_ended_epoch="${DREAMING_NOW_EPOCH:-$(date +%s)}"
     pass_ended="$(date -u -r "$pass_ended_epoch" +%Y-%m-%dT%H:%M:%S+00:00)"
     append_pass "$pass" "ok" "$pass_started" "$pass_ended" "$pass_log" ""

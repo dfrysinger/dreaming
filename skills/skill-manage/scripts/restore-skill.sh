@@ -25,8 +25,23 @@ REPO_ROOT="${SKILLS_REPO_ROOT:-$HOME/code/skills}"
 LOCAL_ROOT="${SKILLS_LOCAL_ROOT:-$HOME/.copilot/skills}"
 REPO_ROOT="$(cd "$REPO_ROOT" && pwd -P)"
 LOCAL_ROOT="$(cd "$LOCAL_ROOT" && pwd -P)"
-STATE_DIR="${SKILLS_STATE_DIR:-$HOME/.copilot/skill-state/skill-review}"
+if [[ -n "${SKILLS_REVIEW_STATE_DIR:-}" ]]; then
+  STATE_DIR="$SKILLS_REVIEW_STATE_DIR"
+elif [[ -n "${SKILLS_STATE_DIR:-}" ]]; then
+  # Compatibility: before SKILLS_REVIEW_STATE_DIR existed, this override
+  # named the review-state directory itself, regardless of its basename.
+  STATE_DIR="$SKILLS_STATE_DIR"
+else
+  STATE_DIR="$HOME/.copilot/skill-state/skill-review"
+fi
+LEGACY_STATE_DIR=""
+if [[ -n "${SKILLS_REVIEW_STATE_DIR:-}" &&
+      -n "${SKILLS_STATE_DIR:-}" &&
+      "$SKILLS_STATE_DIR" != "$STATE_DIR" ]]; then
+  LEGACY_STATE_DIR="$SKILLS_STATE_DIR"
+fi
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+CURATOR_RUNNER="${SKILLS_CURATOR_RUNNER:-$SCRIPT_DIR/../../skill-curator/scripts/curator-run.py}"
 LOCK_SCRIPT="$SCRIPT_DIR/../../skill-review/scripts/daemon-lock.sh"
 LOCK_TOKEN=""
 release_lock() {
@@ -40,8 +55,11 @@ GIT_ROOT=""
 SRC_REL=""
 DEST_REL=""
 RESTORE_SHA=""
+DELETE_SHA=""
+RECORD=""
+RECORD_STATE_DIR=""
+RECORD_SOURCE="history"
 
-RECORD="$STATE_DIR/retired/$NAME.json"
 if [[ -n "${SKILLS_RESTORE_GIT_ROOT:-}" ||
       -n "${SKILLS_RESTORE_SRC_REL:-}" ||
       -n "${SKILLS_RESTORE_SHA:-}" ]]; then
@@ -71,35 +89,96 @@ if [[ -n "${SKILLS_RESTORE_GIT_ROOT:-}" ||
       exit 1
     }
   fi
-elif [[ -f "$RECORD" ]]; then
-  GIT_ROOT=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["git_root"])' "$RECORD")
-  SRC_REL=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["path"])' "$RECORD")
-  DEST_REL=$(python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(d.get("dest") or d["path"])' "$RECORD")
-  RESTORE_SHA=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["restore_sha"])' "$RECORD")
+  RECORD="$STATE_DIR/retired/$NAME.json"
+  RECORD_STATE_DIR="$STATE_DIR"
+  RECORD_SOURCE="record"
 else
-  # No record: search each root's history for the commit that deleted the skill.
-  # The restore point is that commit's parent.
-  for ROOT in "$REPO_ROOT" "$LOCAL_ROOT"; do
-    [[ -d "$ROOT/.git" ]] || continue
-    for CANDIDATE in "skills/$NAME" "$NAME"; do
-      # --no-renames is required: git's default rename detection reports a
-      # move as R, not D, so the delete commit would never be found.
-      SHA=$(git -C "$ROOT" log -1 --no-renames --format=%H --diff-filter=D \
-        -- "$CANDIDATE/SKILL.md" 2>/dev/null || true)
-      [[ -n "$SHA" ]] || continue
-      if [[ -n "$GIT_ROOT" ]]; then
-        echo "ambiguous: '$NAME' was deleted in more than one root; restore by hand." >&2
-        exit 1
-      fi
-      GIT_ROOT="$ROOT"
-      SRC_REL="$CANDIDATE"
-      RESTORE_SHA="$SHA^"
+  CANONICAL_RECORD="$STATE_DIR/retired/$NAME.json"
+  LEGACY_RECORD=""
+  [[ -n "$LEGACY_STATE_DIR" ]] &&
+    LEGACY_RECORD="$LEGACY_STATE_DIR/retired/$NAME.json"
+
+  [[ ! -L "$CANONICAL_RECORD" ]] || {
+    echo "REFUSED: retirement record is a symlink: $CANONICAL_RECORD" >&2
+    exit 1
+  }
+  if [[ -n "$LEGACY_RECORD" ]]; then
+    [[ ! -L "$LEGACY_RECORD" ]] || {
+      echo "REFUSED: legacy retirement record is a symlink: $LEGACY_RECORD" >&2
+      exit 1
+    }
+  fi
+
+  if [[ -f "$CANONICAL_RECORD" &&
+        -n "$LEGACY_RECORD" &&
+        -f "$LEGACY_RECORD" ]]; then
+    echo "REFUSED: retirement state is ambiguous; records exist at both:" >&2
+    echo "         $CANONICAL_RECORD" >&2
+    echo "         $LEGACY_RECORD" >&2
+    echo "         Migrate or remove the duplicate explicitly before restoring." >&2
+    exit 1
+  elif [[ -f "$CANONICAL_RECORD" ]]; then
+    RECORD="$CANONICAL_RECORD"
+    RECORD_STATE_DIR="$STATE_DIR"
+    RECORD_SOURCE="record"
+  elif [[ -n "$LEGACY_RECORD" && -f "$LEGACY_RECORD" ]]; then
+    RECORD="$LEGACY_RECORD"
+    RECORD_STATE_DIR="$LEGACY_STATE_DIR"
+    RECORD_SOURCE="legacy-record"
+    echo "legacy retirement record: $RECORD" >&2
+  fi
+
+  if [[ -n "$RECORD" ]]; then
+    if ! RECORD_VALUES=$(python3 - "$RECORD" <<'PY'
+import json
+import sys
+
+record = json.load(open(sys.argv[1]))
+required = ("git_root", "path", "restore_sha")
+missing = [key for key in required if not isinstance(record.get(key), str) or not record[key]]
+if missing:
+    raise ValueError("missing or invalid fields: " + ", ".join(missing))
+values = (
+    record["git_root"],
+    record["path"],
+    record.get("dest") or record["path"],
+    record["restore_sha"],
+)
+if any("\t" in value or "\n" in value for value in values):
+    raise ValueError("record identity contains unsupported whitespace")
+print("\t".join(values))
+PY
+    ); then
+      echo "REFUSED: invalid retirement record: $RECORD" >&2
+      exit 1
+    fi
+    IFS=$'\t' read -r GIT_ROOT SRC_REL DEST_REL RESTORE_SHA <<<"$RECORD_VALUES"
+  else
+    # No record: search each root's history for the commit that deleted the
+    # skill. The restore point is that commit's parent.
+    for ROOT in "$REPO_ROOT" "$LOCAL_ROOT"; do
+      [[ -d "$ROOT/.git" ]] || continue
+      for CANDIDATE in "skills/$NAME" "$NAME"; do
+        # --no-renames is required: git's default rename detection reports a
+        # move as R, not D, so the delete commit would never be found.
+        SHA=$(git -C "$ROOT" log -1 --no-renames --format=%H --diff-filter=D \
+          -- "$CANDIDATE/SKILL.md" 2>/dev/null || true)
+        [[ -n "$SHA" ]] || continue
+        if [[ -n "$GIT_ROOT" ]]; then
+          echo "ambiguous: '$NAME' was deleted in more than one root; restore by hand." >&2
+          exit 1
+        fi
+        GIT_ROOT="$ROOT"
+        SRC_REL="$CANDIDATE"
+        RESTORE_SHA="$SHA^"
+        DELETE_SHA="$SHA"
+      done
     done
-  done
+  fi
 fi
 
 if [[ -z "$GIT_ROOT" ]]; then
-  echo "no retired skill named '$NAME': no record at $RECORD and no delete commit in either root." >&2
+  echo "no retired skill named '$NAME': no retirement record and no delete commit in either root." >&2
   exit 1
 fi
 GIT_ROOT="$(cd "$GIT_ROOT" && pwd -P)"
@@ -118,12 +197,34 @@ if [[ -e "$DEST" ]]; then
   exit 1
 fi
 
-if [[ -z "${SKILLS_CURATOR_ROLLBACK:-}" ]]; then
+if [[ -n "${SKILLS_CURATOR_RUN_ID:-}" ]]; then
+  "$CURATOR_RUNNER" renew --run "$SKILLS_CURATOR_RUN_ID"
+elif [[ -z "${SKILLS_CURATOR_ROLLBACK:-}" ]]; then
   LOCK_TOKEN="$("$LOCK_SCRIPT" acquire --mode session --owner "restore-skill:$NAME")"
 fi
 
 USE_REGISTRY=0
 [[ "$GIT_ROOT" == "$REPO_ROOT" ]] && USE_REGISTRY=1
+
+HISTORY_DIR=""
+if [[ -z "${SKILLS_CURATOR_ROLLBACK:-}" ]]; then
+  HISTORY_STATE_DIR="${RECORD_STATE_DIR:-$STATE_DIR}"
+  HISTORY_DIR="$HISTORY_STATE_DIR/retirement-history"
+  mkdir -p "$HISTORY_DIR"
+  if [[ -n "$RECORD" ]]; then
+    python3 - "$RECORD" "$HISTORY_DIR" <<'PY'
+import os
+import sys
+
+source, destination_dir = sys.argv[1:]
+if os.stat(os.path.dirname(source)).st_dev != os.stat(destination_dir).st_dev:
+    raise SystemExit(
+        "REFUSED: retirement record and history directory are on different "
+        "filesystems; migrate the legacy state directory before restoring."
+    )
+PY
+  fi
+fi
 
 cd "$GIT_ROOT"
 git checkout "$RESTORE_SHA" -- "$SRC_REL"
@@ -142,11 +243,16 @@ fi
 
 # Clear any curator tombstone — a deliberate restore means the skill is wanted
 # again, so skill-review should no longer be blocked from touching it.
-TOMB="$STATE_DIR/tombstones/$NAME.json"
-if [[ -f "$TOMB" ]]; then
-  rm -f "$TOMB"
-  echo "tombstone cleared: $TOMB"
+TOMBS=("$STATE_DIR/tombstones/$NAME.json")
+if [[ -n "$LEGACY_STATE_DIR" ]]; then
+  TOMBS+=("$LEGACY_STATE_DIR/tombstones/$NAME.json")
 fi
+for TOMB in "${TOMBS[@]}"; do
+  if [[ -f "$TOMB" || -L "$TOMB" ]]; then
+    rm -f "$TOMB"
+    echo "tombstone cleared: $TOMB"
+  fi
+done
 
 # Re-register in the plugin allowlist (public repo only).
 if [[ "$USE_REGISTRY" -eq 1 ]]; then
@@ -181,5 +287,135 @@ ${TRAILER}" -- "${STAGE[@]}"; then
   exit 1
 fi
 
-rm -f "$RECORD"
+if [[ -z "${SKILLS_CURATOR_ROLLBACK:-}" ]]; then
+  RESTORE_COMMIT="$(git rev-parse HEAD)"
+  HISTORY="$HISTORY_DIR/$NAME-$RESTORE_COMMIT.json"
+  if [[ -n "$RECORD" ]]; then
+    # Moving the active record into history is the state transition. rename(2)
+    # keeps one durable evidence file visible at all times; enrichment happens
+    # only after the move and can never destroy the original record contents.
+    python3 - "$RECORD" "$HISTORY" "$RESTORE_COMMIT" "$RECORD_SOURCE" \
+      "${SKILLS_RESTORE_CONTEXT:-}" <<'PY'
+import json, os, sys, tempfile
+from datetime import datetime, timezone
+
+source, destination, restore_commit, record_source, context_raw = sys.argv[1:]
+if os.path.exists(destination):
+    raise SystemExit(f"REFUSED: retirement history already exists: {destination}")
+
+source_dir = os.path.dirname(source)
+destination_dir = os.path.dirname(destination)
+os.replace(source, destination)
+for directory_path in dict.fromkeys((source_dir, destination_dir)):
+    directory = os.open(directory_path, os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+
+try:
+    record = json.load(open(destination))
+    record["restored_at"] = datetime.now(timezone.utc).isoformat()
+    record["restore_commit"] = restore_commit
+    record["record_source"] = record_source
+    if context_raw:
+        context = json.loads(context_raw)
+        required = {
+            "authority_mode",
+            "op_id",
+            "request_sha256",
+            "census_snapshot_sha256",
+            "dependency_inventory_sha256",
+            "restore_source_head",
+        }
+        if set(context) != required or context["authority_mode"] != "remote":
+            raise ValueError("remote restore context is malformed")
+        if context["restore_source_head"] != record["restore_sha"]:
+            raise ValueError("remote restore source differs from retirement record")
+        record["restore_authorization"] = {
+            key: context[key]
+            for key in (
+                "op_id",
+                "request_sha256",
+                "census_snapshot_sha256",
+                "dependency_inventory_sha256",
+            )
+        }
+    descriptor, temporary = tempfile.mkstemp(
+        prefix=f".{os.path.basename(destination)}.",
+        dir=destination_dir,
+    )
+    try:
+        with os.fdopen(descriptor, "w") as handle:
+            json.dump(record, handle, indent=2)
+            handle.write("\n")
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(temporary, 0o600)
+        os.replace(temporary, destination)
+        directory = os.open(destination_dir, os.O_RDONLY)
+        try:
+            os.fsync(directory)
+        finally:
+            os.close(directory)
+    finally:
+        if os.path.exists(temporary):
+            os.unlink(temporary)
+except Exception as error:
+    raise SystemExit(
+        f"retirement evidence moved safely to {destination}, "
+        f"but history metadata enrichment failed: {error}"
+    )
+PY
+  else
+    python3 - "$HISTORY" "$NAME" "$SRC_REL" "$DEST_REL" "$GIT_ROOT" \
+      "$RESTORE_SHA" "$DELETE_SHA" "$RESTORE_COMMIT" <<'PY'
+import json, os, sys, tempfile
+from datetime import datetime, timezone
+
+(destination, name, source_rel, dest_rel, git_root, restore_sha,
+ delete_sha, restore_commit) = sys.argv[1:]
+record = {
+    "skill": name,
+    "path": source_rel,
+    "dest": dest_rel,
+    "git_root": git_root,
+    "restore_sha": restore_sha,
+    "delete_commit": delete_sha or None,
+    "retired_at": None,
+    "reason": "unknown",
+    "replacement": None,
+    "record_source": "git-history",
+    "restored_at": datetime.now(timezone.utc).isoformat(),
+    "restore_commit": restore_commit,
+}
+if os.path.exists(destination):
+    raise SystemExit(f"REFUSED: retirement history already exists: {destination}")
+descriptor, temporary = tempfile.mkstemp(
+    prefix=f".{os.path.basename(destination)}.",
+    dir=os.path.dirname(destination),
+)
+try:
+    with os.fdopen(descriptor, "w") as handle:
+        json.dump(record, handle, indent=2)
+        handle.write("\n")
+        handle.flush()
+        os.fsync(handle.fileno())
+    os.chmod(temporary, 0o600)
+    os.replace(temporary, destination)
+    directory = os.open(os.path.dirname(destination), os.O_RDONLY)
+    try:
+        os.fsync(directory)
+    finally:
+        os.close(directory)
+finally:
+    if os.path.exists(temporary):
+        os.unlink(temporary)
+PY
+  fi
+  echo "retirement history: $HISTORY"
+elif [[ -n "$RECORD" ]]; then
+  rm -f "$RECORD"
+fi
+
 echo "restored: $DEST_REL from $RESTORE_SHA (root: $GIT_ROOT)"

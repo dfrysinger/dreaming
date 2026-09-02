@@ -18,7 +18,12 @@ WEEK_SECONDS = 7 * 24 * 60 * 60
 
 def state_root() -> Path:
     base = Path(os.environ.get("SKILLS_STATE_DIR", Path.home() / ".copilot/skill-state"))
-    return Path(os.environ.get("DREAMING_STATE_DIR", base / "dreaming"))
+    return Path(
+        os.environ.get(
+            "DREAMING_ORCHESTRATOR_STATE_DIR",
+            os.environ.get("DREAMING_STATE_DIR", base / "dreaming"),
+        )
+    )
 
 
 def now_epoch() -> int:
@@ -31,6 +36,10 @@ def iso(epoch: int | None = None) -> str:
 
 def bucket(epoch: int | None = None) -> int:
     return (epoch or now_epoch()) // WEEK_SECONDS
+
+
+def local_day(epoch: int | None = None) -> str:
+    return datetime.fromtimestamp(epoch or now_epoch()).date().isoformat()
 
 
 def atomic_json(path: Path, value: dict) -> None:
@@ -87,6 +96,8 @@ def ensure_seed(args: argparse.Namespace) -> None:
     value = {
         "last_success_bucket": bucket(latest),
         "last_success_at": iso(latest),
+        "last_attempt_day": None,
+        "last_attempt_at": None,
         "committing_run_id": None,
         "seeded_at": iso(),
     }
@@ -98,6 +109,8 @@ def seed(args: argparse.Namespace) -> None:
     value = {
         "last_success_bucket": args.bucket,
         "last_success_at": iso(args.epoch),
+        "last_attempt_day": None,
+        "last_attempt_at": None,
         "committing_run_id": args.run_id,
         "seeded_at": iso(),
     }
@@ -114,6 +127,23 @@ def due(args: argparse.Namespace) -> None:
         print(f"cadence state invalid: {error}", file=sys.stderr)
         raise SystemExit(3)
     raise SystemExit(0 if bucket(args.epoch) > last_bucket else 1)
+
+
+def claim_weekly(args: argparse.Namespace) -> None:
+    try:
+        cadence = read_json(cadence_path(), {"last_success_bucket": -1})
+        if not isinstance(cadence, dict):
+            raise TypeError("cadence state must be a JSON object")
+        last_bucket = int(cadence.get("last_success_bucket", -1))
+        day = local_day(args.epoch)
+        if bucket(args.epoch) <= last_bucket or cadence.get("last_attempt_day") == day:
+            raise SystemExit(1)
+        cadence["last_attempt_day"] = day
+        cadence["last_attempt_at"] = iso(args.epoch)
+        atomic_json(cadence_path(), cadence)
+    except (OSError, json.JSONDecodeError, TypeError, ValueError) as error:
+        print(f"cadence state invalid: {error}", file=sys.stderr)
+        raise SystemExit(3)
 
 
 def parse_passes(path: str | None) -> list[dict]:
@@ -189,6 +219,8 @@ def commit_success(args: argparse.Namespace) -> None:
     cadence = {
         "last_success_bucket": int(value.get("bucket_at_start", bucket(args.completed_epoch))),
         "last_success_at": iso(args.completed_epoch),
+        "last_attempt_day": read_json(cadence_path()).get("last_attempt_day"),
+        "last_attempt_at": read_json(cadence_path()).get("last_attempt_at"),
         "committing_run_id": args.run_id,
         "seeded_at": read_json(cadence_path()).get("seeded_at"),
     }
@@ -239,6 +271,10 @@ def build_parser() -> argparse.ArgumentParser:
     due_parser = sub.add_parser("due")
     due_parser.add_argument("--epoch", type=int, default=now_epoch())
     due_parser.set_defaults(func=due)
+
+    claim_parser = sub.add_parser("claim-weekly")
+    claim_parser.add_argument("--epoch", type=int, default=now_epoch())
+    claim_parser.set_defaults(func=claim_weekly)
 
     record_parser = sub.add_parser("record")
     record_parser.add_argument("--run-id", required=True)

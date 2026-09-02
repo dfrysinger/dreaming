@@ -36,6 +36,7 @@ EVALUATION_STATES = {
 WAIVER_CLASSES = {"documentation-only", "reference-only", "deterministic-helper"}
 VERIFICATIONS = {"current-source", "deterministic-check", "session-evidence", "owner-policy"}
 TASK_KEY_RE = re.compile(r"^(?:task|platform):[A-Za-z0-9._:-]{8,}$")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
 
 class EnvelopeError(ValueError):
@@ -95,6 +96,82 @@ def validate_envelope(data: Any) -> dict[str, Any]:
         if item.get("evidence_kind") not in EVIDENCE_KINDS:
             raise EnvelopeError(f"evidence[{index}].evidence_kind is invalid")
         require_text(item.get("summary"), f"evidence[{index}].summary")
+        context = item.get("transcript_context")
+        if context is not None:
+            if not isinstance(context, dict) or set(context) != {
+                "schema_version",
+                "snapshot_sha256",
+                "source_revision",
+                "event_ids",
+            }:
+                raise EnvelopeError(
+                    f"evidence[{index}].transcript_context is invalid"
+                )
+            if context.get("schema_version") != 1:
+                raise EnvelopeError(
+                    f"evidence[{index}].transcript_context schema is invalid"
+                )
+            snapshot_sha = context.get("snapshot_sha256")
+            if not isinstance(snapshot_sha, str) or not SHA256_RE.fullmatch(
+                snapshot_sha
+            ):
+                raise EnvelopeError(
+                    f"evidence[{index}].transcript_context snapshot is invalid"
+                )
+            require_text(
+                context.get("source_revision"),
+                f"evidence[{index}].transcript_context.source_revision",
+            )
+            event_ids = context.get("event_ids")
+            if (
+                not isinstance(event_ids, list)
+                or not 1 <= len(event_ids) <= 20
+                or len(event_ids) != len(set(event_ids))
+                or any(not isinstance(value, str) or not value for value in event_ids)
+            ):
+                raise EnvelopeError(
+                    f"evidence[{index}].transcript_context event_ids are invalid"
+                )
+        route_fields = {
+            "source",
+            "source_revision",
+            "review_executor",
+            "transfer_route",
+            "policy_version",
+            "destination",
+            "routing_reason",
+        }
+        present = route_fields & set(item)
+        if present:
+            if present != route_fields:
+                raise EnvelopeError(
+                    f"evidence[{index}] source routing metadata is incomplete"
+                )
+            require_text(item.get("source"), f"evidence[{index}].source")
+            require_text(
+                item.get("source_revision"),
+                f"evidence[{index}].source_revision",
+            )
+            require_text(
+                item.get("review_executor"),
+                f"evidence[{index}].review_executor",
+            )
+            require_text(
+                item.get("transfer_route"),
+                f"evidence[{index}].transfer_route",
+            )
+            if not isinstance(item.get("policy_version"), int):
+                raise EnvelopeError(
+                    f"evidence[{index}].policy_version must be an integer"
+                )
+            if item.get("destination") not in DESTINATIONS:
+                raise EnvelopeError(
+                    f"evidence[{index}].destination is invalid"
+                )
+            require_text(
+                item.get("routing_reason"),
+                f"evidence[{index}].routing_reason",
+            )
 
     if data["source_session_id"] != evidence[0]["session_id"]:
         raise EnvelopeError("source_session_id must mirror the first evidence session_id")
@@ -134,6 +211,11 @@ def validate_envelope(data: Any) -> dict[str, Any]:
         if evaluation.get("waiver_class") not in WAIVER_CLASSES:
             raise EnvelopeError("evaluation.waiver_class is invalid")
         require_text(evaluation.get("waiver_reason"), "evaluation.waiver_reason")
+    if "evaluation_v3_sha256" in data and (
+        not isinstance(data["evaluation_v3_sha256"], str)
+        or not SHA256_RE.fullmatch(data["evaluation_v3_sha256"])
+    ):
+        raise EnvelopeError("evaluation_v3_sha256 must be an opaque SHA-256 digest")
     return data
 
 
@@ -241,6 +323,36 @@ def upsert(args: argparse.Namespace) -> dict[str, Any]:
         "evidence_kind": args.evidence_kind,
         "summary": args.summary,
     }
+    if args.source is not None:
+        item.update(
+            {
+                "source": args.source,
+                "source_revision": args.source_revision,
+                "review_executor": args.review_executor,
+                "transfer_route": args.transfer_route,
+                "policy_version": args.policy_version,
+                "destination": args.destination,
+                "routing_reason": args.reason,
+            }
+        )
+    anchor_values = (
+        args.snapshot_sha256,
+        args.anchor_source_revision,
+        args.event_id,
+    )
+    if any(value not in (None, []) for value in anchor_values):
+        if (
+            args.snapshot_sha256 is None
+            or args.anchor_source_revision is None
+            or not args.event_id
+        ):
+            raise EnvelopeError("transcript context fields are incomplete")
+        item["transcript_context"] = {
+            "schema_version": 1,
+            "snapshot_sha256": args.snapshot_sha256,
+            "source_revision": args.anchor_source_revision,
+            "event_ids": args.event_id,
+        }
     path.parent.mkdir(parents=True, exist_ok=True)
     directory_fd = os.open(path.parent, os.O_RDONLY)
     try:
@@ -332,6 +444,23 @@ def set_evaluation(args: argparse.Namespace) -> dict[str, Any]:
         os.close(directory_fd)
 
 
+def set_evaluation_v3(args: argparse.Namespace) -> dict[str, Any]:
+    """Store only an opaque pointer; cross-CLI authority stays outside the skill root."""
+    if not SHA256_RE.fullmatch(args.authority_sha256):
+        raise EnvelopeError("authority SHA-256 digest is invalid")
+    path = Path(args.file)
+    directory_fd = os.open(path.parent, os.O_RDONLY)
+    try:
+        fcntl.flock(directory_fd, fcntl.LOCK_EX)
+        data = legacy_to_v2(load_json(path))
+        data["evaluation_v3_sha256"] = args.authority_sha256
+        validate_envelope(data)
+        atomic_write(path, data, directory_fd)
+        return data
+    finally:
+        os.close(directory_fd)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser()
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -352,10 +481,21 @@ def build_parser() -> argparse.ArgumentParser:
     upsert_parser.add_argument("--summary", required=True)
     upsert_parser.add_argument("--destination", choices=sorted(DESTINATIONS), required=True)
     upsert_parser.add_argument("--reason", required=True)
+    upsert_parser.add_argument("--source")
+    upsert_parser.add_argument("--source-revision")
+    upsert_parser.add_argument("--review-executor")
+    upsert_parser.add_argument("--transfer-route")
+    upsert_parser.add_argument("--policy-version", type=int)
     upsert_parser.add_argument("--observed-at")
+    upsert_parser.add_argument("--snapshot-sha256")
+    upsert_parser.add_argument("--anchor-source-revision")
+    upsert_parser.add_argument("--event-id", action="append", default=[])
     evaluation_parser = subparsers.add_parser("set-evaluation")
     evaluation_parser.add_argument("file")
     evaluation_parser.add_argument("receipt")
+    evaluation_v3_parser = subparsers.add_parser("set-evaluation-v3")
+    evaluation_v3_parser.add_argument("file")
+    evaluation_v3_parser.add_argument("authority_sha256")
     return parser
 
 
@@ -366,8 +506,10 @@ def main() -> int:
             data = validate_envelope(legacy_to_v2(load_json(Path(args.file))))
         elif args.command == "upsert":
             data = upsert(args)
-        else:
+        elif args.command == "set-evaluation":
             data = set_evaluation(args)
+        else:
+            data = set_evaluation_v3(args)
         verified = {
             entry["task_key"]
             for entry in data["evidence"]

@@ -49,6 +49,9 @@ This skill does NOT touch:
 
 # Live consolidation pass (mutates skill files + git commits)
 /skill-curator --live
+
+# Unattended Mac mini review of the governed MacBook estate
+/skill-curator scheduled-live
 ```
 
 ## Procedure
@@ -131,15 +134,19 @@ orchestrator bypasses it because one shared cadence governs all three passes.
 2. Honour the shared halt switch
    `~/.copilot/skill-state/skill-review/disable-daemon` before any mutation.
    It is the global stop for autonomous and live maintenance paths.
-3. Re-read the most recent dry-run report. If none exists or it's >7 days old, abort and tell the user to run dry-run first. Live consolidation is **only** valid as the execution of a freshly-approved dry-run.
-4. Ask the user to confirm: show the consolidations + prunings YAML, ask for "approve" / "abort" / "edit". Do not proceed on silence.
-5. Re-check the shared halt switch immediately before applying the first
-   archive or patch. Abort without mutation if it appeared after approval.
+3. Re-read the most recent dry-run report. If none exists or it's >7 days old,
+   abort and tell the user to run dry-run first.
+4. Separate autonomous entries from manual-only recommendations. Agent-created,
+   unpinned sources and agent-created destinations may proceed without
+   confirmation. Any hand-made, plugin-provided, pinned, malformed, or
+   uncertain entry remains report-only.
+5. Re-check the shared halt switch and curator pause immediately before
+   transaction creation and every mutation intent.
 6. Build the complete ordered transaction plan described in
    `references/live-run-transactions.md`, then call `scripts/curator-run.py
-   begin` **before the first edit**. This freezes dependency decisions for
-   every planned archive, records both root identities and unrelated dirty
-   paths, and acquires the shared writer lease for the run.
+   begin --autonomous` **before the first edit**. This writes an immutable
+   authorization receipt, freezes dependency decisions, records both root
+   identities and unrelated dirty paths, and acquires the shared writer lease.
 7. For each destination patch or umbrella create, call `curator-run.py intent`
    before editing. Then:
    - Use `/skill-manage patch` to add the absorbed content as a labeled section in `<into>/SKILL.md` (or as a `references/<from>.md` file if it's session-specific detail).
@@ -167,12 +174,48 @@ orchestrator bypasses it because one shared cadence governs all three passes.
 
    Co-authored-by: Copilot <223556219+Copilot@users.noreply.github.com>
    ```
-10. Call `curator-run.py finish` only when every planned operation is complete.
-    On any failure, call `curator-run.py rollback`; do not hand-repair one root.
-11. Push the PUBLIC repo only after `finish`: `git -C ~/code/skills push origin
-    main`. The
-   LOCAL repo `~/.copilot/skills` has no remote — its commits stay local.
+10. If the transaction changed the PUBLIC root, call `curator-run.py publish`
+    while the writer lease is still held. A rejected or mismatched push leaves
+    the run in `publish_failed` for rollback or supervised recovery.
+11. Call `curator-run.py finish` only when every planned operation is complete
+    and any public publication is verified. On any failure, call
+    `curator-run.py rollback`; do not hand-repair one root. Rollback of a
+    published run pushes a normal revert rather than rewriting history.
 12. Update curator state: `last_run_at`, `run_count++`, `last_run_summary` = "consolidated N, pruned M".
+
+### Mode: `scheduled-live`
+
+This is the unattended Mac mini estate-governance path. The user's standing
+authorization applies only to machine-authorized targets that pass every
+current evidence gate. It removes any interactive confirmation; it does not
+weaken provenance, dependency, evaluation, halt, recovery, or restore
+requirements.
+
+1. Refresh the receiver-bound MacBook census with `dreaming-core.py census`.
+   Require complete bounded scope and zero unresolved mappings.
+   Before refreshing, acquire the scheduled review lease with
+   `curator-run.py estate-session-begin`. Use `estate-session-renew` during
+   long reviews and always release it with `estate-session-finish`; do not
+   create a personal-skill transaction solely to hold this lease.
+2. Run `scheduled-skill-deps.py --inventory`; any ambiguity aborts the pass.
+3. Review every current personal capability and plugin package under
+   `docs/unified-skill-estate-governance-design.md`.
+4. Save the full report before mutation. Persist every keep, protected,
+   unknown, or recommendation-only result with
+   `scripts/estate-recommendation.py` so the dashboard shows the whole review,
+   not only executed actions.
+5. For eligible `legacy_machine` personal skills, dispatch the sealed
+   `personal_archive` or `personal_restore` estate action to the MacBook.
+   Never mutate the mini's mirror as a substitute for the receiver action.
+6. For eligible plugins, evaluate the complete package capability gate and
+   dispatch only a source-qualified `plugin_disable` or receipt-bound
+   `plugin_restore` action. Never edit or uninstall plugin contents.
+7. Use only `curator-run.py estate-authorize`, `estate-verify`, and
+   `estate-dispatch` for remote estate mutations. Recollect the census after
+   each commit and stop on stale, ambiguous, rolled-back, or recovery-required
+   state.
+8. Protected and unknown-provenance targets remain recommendation-only
+   regardless of the report's prose.
 
 ## Hard rules (non-negotiable)
 
@@ -191,8 +234,8 @@ orchestrator bypasses it because one shared cadence governs all three passes.
 6. **Pairwise distinctness is not the bar.** The bar is: "would a human maintainer write this as N separate skills, or as one skill with N labeled subsections?" Lean toward umbrella.
 7. **`keep` is legitimate only when the skill is already a class-level umbrella.** "Narrow but distinct" is a reason to demote, not a reason to keep.
 8. **Tiered authority by provenance.** A skill is *agent-created* when its directory contains a `.agent-created` marker (written by skill-review). Authority differs by tier:
-   - **Agent-created skills** are within the curator's autonomous authority. Dry-run may place them in `consolidations:` / `prunings:`, and `--live` may archive/absorb them after the standard approve gate. Archiving an agent-created skill writes a tombstone (via `archive-skill.sh`) so skill-review will not recreate it.
-   - **Hand-made skills** (no `.agent-created` marker) are **recommend-only**. The curator may SURFACE them in a separate `manual_review:` list with a rationale, but MUST NOT put them in `consolidations:` / `prunings:` and MUST NOT archive or otherwise mutate them — not even in `--live`. A hand-made skill may still serve as an absorption *target* (`into:`): patching a hand-made umbrella to absorb an agent-created sibling enriches it and is allowed. The restriction is only on archiving/pruning hand-made skills.
+   - **Agent-created skills** are within the curator's autonomous authority. Dry-run may place them in `consolidations:` / `prunings:`, and `--live` or `scheduled-live` may archive or absorb them when machine authorization passes. Archiving an agent-created skill writes a tombstone (via `archive-skill.sh`) so skill-review will not recreate it.
+   - **Hand-made skills** (no `.agent-created` marker) are **recommend-only**. The curator may surface them in a separate `manual_review:` list with a rationale, but MUST NOT put them in `consolidations:` / `prunings:` or mutate them automatically. A hand-made destination also remains manual.
 
 
 9. **A merged umbrella is a new draft.** Whenever `--live` absorbs one skill
@@ -207,7 +250,9 @@ orchestrator bypasses it because one shared cadence governs all three passes.
 
 - **Skipping the dry-run banner.** The banner is what gates mutation. If you start the curator prompt without printing the banner, the model may interpret instructions like "use `skill_manage(action=patch)`" as live ops. Always print the banner first in dry-run mode.
 - **Producing a "report" with no structured YAML.** Downstream `--live` mode parses the YAML to know what to execute. A free-text-only report is unusable.
-- **Live mode without an approved dry-run.** Always refuse: the only sanctioned path to a mutation is a fresh dry-run plus explicit human approval.
+- **Live mode without an authorized dry-run.** Always refuse: the only
+  sanctioned autonomous path is a fresh content-addressed report plus
+  machine-verified provenance, roots, pins, dependencies, halt, and pause.
 - **Forgetting Package integrity.** If you flatten `<from>/SKILL.md` into a references file but leave `<from>/scripts/foo.sh` behind, the absorbed content has dangling links. Re-home support files OR archive `<from>` whole.
 
 ## References
@@ -242,4 +287,5 @@ After `--live`:
 - Each mutation has its own commit in its owning root.
 - The curator run manifest is `status=complete`; failed runs are
   `status=rolled_back` with every operation reversed.
-- `git -C ~/code/skills push` succeeded for any public-repo commits (local-repo commits stay local — no remote).
+- Public commits were published by the transaction before completion, with
+  exact prior/new/remote identities recorded. Local commits stay local.

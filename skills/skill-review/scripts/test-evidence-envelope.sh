@@ -129,6 +129,51 @@ assert_eq "$(json_get 'json.load(open(0))["future_field"]["preserve"]' "$SKILLS_
   "True" "unknown field preservation"
 pass "schema v1 migrates lazily without losing reader fields"
 
+ROUTED="$TMP/routed.json"
+"$SCRIPT_DIR/evidence-envelope.py" upsert "$ROUTED" \
+  --skill routed --session-id copilot:routed --source-mode sweep \
+  --task-key task:abababab-abab-abab-abab-abababababab \
+  --independence unverified --evidence-kind successful-procedure \
+  --summary "Source-neutral routing fixture" --destination skill \
+  --reason "Reusable procedure crossed an explicit route" \
+  --source copilot --source-revision sha256:fixture \
+  --review-executor claude --transfer-route 'copilot>claude' \
+  --policy-version 1 --observed-at 2026-01-01T00:00:00Z >/dev/null
+"$SCRIPT_DIR/evidence-envelope.py" validate "$ROUTED" >/dev/null
+python3 - "$ROUTED" <<'PY'
+import json
+import sys
+
+item = json.load(open(sys.argv[1], encoding="utf-8"))["evidence"][0]
+expected = {
+    "source": "copilot",
+    "source_revision": "sha256:fixture",
+    "review_executor": "claude",
+    "transfer_route": "copilot>claude",
+    "policy_version": 1,
+    "destination": "skill",
+    "routing_reason": "Reusable procedure crossed an explicit route",
+}
+for key, value in expected.items():
+    if item.get(key) != value:
+        raise SystemExit(f"source routing metadata mismatch: {item!r}")
+PY
+cp "$ROUTED" "$TMP/incomplete-routing.json"
+python3 - "$TMP/incomplete-routing.json" <<'PY'
+import json
+import sys
+
+path = sys.argv[1]
+data = json.load(open(path, encoding="utf-8"))
+del data["evidence"][0]["review_executor"]
+json.dump(data, open(path, "w", encoding="utf-8"))
+PY
+if "$SCRIPT_DIR/evidence-envelope.py" validate \
+    "$TMP/incomplete-routing.json" >/dev/null 2>&1; then
+  fail "incomplete source routing metadata passed validation"
+fi
+pass "source and executor routing metadata round-trips atomically"
+
 cp "$SKILLS_LOCAL_ROOT/sample/.agent-created.json" "$TMP/malformed.json"
 python3 - "$TMP/malformed.json" <<'PY'
 import json, sys
